@@ -1,0 +1,42 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:v2.tauri.app)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:crates.io)",
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:xtermjs.org)",
+      "Bash(dir:*)",
+      "mcp__chat-recall__search_conversations",
+      "WebFetch(domain:deepwiki.com)",
+      "Bash(pnpm create:*)",
+      "Bash(where:*)",
+      "Bash(npm root:*)",
+      "Bash(npm install:*)",
+      "Bash(\"C:\\\\Users\\\\ericm\\\\AppData\\\\Roaming\\\\npm\\\\pnpm.cmd\" create tauri-app@latest . --template react-ts --manager pnpm)",
+      "Bash(\"C:\\\\Users\\\\ericm\\\\AppData\\\\Roaming\\\\npm\\\\pnpm.cmd\" install)",
+      "Bash(curl:*)",
+      "Bash(\"C:\\\\Users\\\\ericm\\\\AppData\\\\Roaming\\\\npm\\\\pnpm.cmd\" approve-builds)",
+      "Bash(npx --yes pnpm approve-builds esbuild)",
+      "Bash(\"C:\\\\Users\\\\ericm\\\\AppData\\\\Roaming\\\\npm\\\\pnpm.cmd\" rebuild esbuild)",
+      "Bash(npx tsc:*)",
+      "Bash(cargo check:*)",
+      "Bash(powershell:*)",
+      "Bash(\"C:\\\\Users\\\\ericm\\\\Downloads\\\\rustup-init.exe\" -y --default-toolchain stable)",
+      "Bash(\"C:\\\\Users\\\\ericm\\\\.cargo\\\\bin\\\\cargo.exe\" check)",
+      "Bash(\"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\Installer\\\\vswhere.exe\" -latest -property installationPath)",
+      "Bash(cmd /c:*)",
+      "Bash(findstr:*)",
+      "Bash(powershell.exe:*)",
+      "Bash(\"C:\\\\Users\\\\ericm\\\\.cargo\\\\bin\\\\rustup.exe\" default stable-x86_64-pc-windows-msvc)",
+      "Bash(\"C:\\\\Users\\\\ericm\\\\.cargo\\\\bin\\\\rustup.exe\" default stable-x86_64-pc-windows-msvc --force-non-host)",
+      "Bash(ls:*)",
+      "Bash(python:*)",
+      "Bash(git status:*)",
+      "Bash(git init:*)",
+      "Bash(git remote add:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}

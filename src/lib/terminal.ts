@@ -1,0 +1,147 @@
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
+
+const THEME = {
+  background: "#0C0C0E",
+  foreground: "#E4E4E7",
+  cursor: "#A78BFA",
+  cursorAccent: "#0C0C0E",
+  selectionBackground: "rgba(167, 139, 250, 0.3)",
+  selectionForeground: "#E4E4E7",
+  black: "#18181B",
+  red: "#EF4444",
+  green: "#34D399",
+  yellow: "#F59E0B",
+  blue: "#60A5FA",
+  magenta: "#A78BFA",
+  cyan: "#22D3EE",
+  white: "#E4E4E7",
+  brightBlack: "#52525B",
+  brightRed: "#FCA5A5",
+  brightGreen: "#6EE7B7",
+  brightYellow: "#FCD34D",
+  brightBlue: "#93C5FD",
+  brightMagenta: "#C4B5FD",
+  brightCyan: "#67E8F9",
+  brightWhite: "#FAFAFA",
+};
+
+export interface TerminalInstance {
+  terminal: Terminal;
+  fitAddon: FitAddon;
+  webglAddon: WebglAddon | null;
+}
+
+// Module-level map: keeps terminal instances alive across React renders
+const terminalMap = new Map<string, TerminalInstance>();
+
+export function createTerminal(sessionId: string): TerminalInstance {
+  // Return existing if already created
+  const existing = terminalMap.get(sessionId);
+  if (existing) return existing;
+
+  const terminal = new Terminal({
+    fontFamily: "'JetBrains Mono', 'Cascadia Code', 'SF Mono', monospace",
+    fontSize: 13,
+    lineHeight: 1.3,
+    theme: THEME,
+    cursorBlink: true,
+    cursorStyle: "bar",
+    scrollback: 10000,
+    allowProposedApi: true,
+    convertEol: true,
+  });
+
+  const fitAddon = new FitAddon();
+  terminal.loadAddon(fitAddon);
+
+  const instance: TerminalInstance = {
+    terminal,
+    fitAddon,
+    webglAddon: null,
+  };
+
+  terminalMap.set(sessionId, instance);
+  return instance;
+}
+
+export function attachToDOM(sessionId: string, container: HTMLElement): void {
+  const instance = terminalMap.get(sessionId);
+  if (!instance) return;
+
+  const { terminal, fitAddon } = instance;
+
+  // Open terminal into the container
+  if (!terminal.element) {
+    terminal.open(container);
+  } else {
+    container.appendChild(terminal.element);
+  }
+
+  // Load WebGL addon
+  try {
+    const webglAddon = new WebglAddon();
+    webglAddon.onContextLoss(() => {
+      webglAddon.dispose();
+      instance.webglAddon = null;
+    });
+    terminal.loadAddon(webglAddon);
+    instance.webglAddon = webglAddon;
+  } catch {
+    // WebGL not available, fall back to canvas renderer
+    instance.webglAddon = null;
+  }
+
+  // Fit to container
+  requestAnimationFrame(() => {
+    fitAddon.fit();
+  });
+}
+
+export function detachFromDOM(sessionId: string): void {
+  const instance = terminalMap.get(sessionId);
+  if (!instance) return;
+
+  // Dispose WebGL to free the context
+  if (instance.webglAddon) {
+    instance.webglAddon.dispose();
+    instance.webglAddon = null;
+  }
+
+  // Remove the terminal element from DOM without disposing the terminal
+  const el = instance.terminal.element;
+  if (el && el.parentElement) {
+    el.parentElement.removeChild(el);
+  }
+}
+
+export function getTerminal(sessionId: string): TerminalInstance | undefined {
+  return terminalMap.get(sessionId);
+}
+
+export function disposeTerminal(sessionId: string): void {
+  const instance = terminalMap.get(sessionId);
+  if (!instance) return;
+
+  if (instance.webglAddon) {
+    instance.webglAddon.dispose();
+  }
+  instance.terminal.dispose();
+  terminalMap.delete(sessionId);
+}
+
+export function fitTerminal(sessionId: string): { cols: number; rows: number } | null {
+  const instance = terminalMap.get(sessionId);
+  if (!instance) return null;
+
+  try {
+    instance.fitAddon.fit();
+    return {
+      cols: instance.terminal.cols,
+      rows: instance.terminal.rows,
+    };
+  } catch {
+    return null;
+  }
+}
