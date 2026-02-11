@@ -8,6 +8,7 @@ interface ShortcutActions {
   onPrevTab: () => void;
   onNextTab: () => void;
   onSwitchToIndex: (index: number) => void;
+  onToggleSidebar: () => void;
 }
 
 // Keys we intercept from xterm.js
@@ -19,6 +20,7 @@ function isOurShortcut(e: KeyboardEvent): boolean {
     key === "w" ||
     key === "[" ||
     key === "]" ||
+    key === "b" ||
     (key >= "1" && key <= "9")
   );
 }
@@ -79,6 +81,10 @@ export function useKeyboardShortcuts(
         case "]":
           e.preventDefault();
           a.onNextTab();
+          break;
+        case "b":
+          e.preventDefault();
+          a.onToggleSidebar();
           break;
         default:
           if (key >= "1" && key <= "9") {

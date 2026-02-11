@@ -28,6 +28,15 @@ export function useSessions() {
     [activeSessionId]
   );
 
+  const renameSession = useCallback(
+    (sessionId: string, newName: string) => {
+      setSessions((prev) =>
+        prev.map((s) => (s.id === sessionId ? { ...s, name: newName } : s))
+      );
+    },
+    []
+  );
+
   const updateSessionStatus = useCallback(
     (sessionId: string, status: Session["status"]) => {
       setSessions((prev) =>
@@ -68,13 +77,16 @@ export function useSessions() {
   );
 
   const activeSession = sessions.find((s) => s.id === activeSessionId) ?? null;
+  const waitingCount = sessions.filter((s) => s.status === "waiting").length;
 
   return {
     sessions,
     activeSessionId,
     activeSession,
+    waitingCount,
     addSession,
     removeSession,
+    renameSession,
     updateSessionStatus,
     switchToSession,
     switchByIndex,

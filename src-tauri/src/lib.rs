@@ -80,6 +80,15 @@ async fn list_sessions(state: State<'_, Arc<AppState>>) -> Result<Vec<SessionInf
 }
 
 #[tauri::command]
+async fn rename_session(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    new_name: String,
+) -> Result<(), String> {
+    state.pty_manager.rename_session(&session_id, new_name)
+}
+
+#[tauri::command]
 async fn get_config() -> Result<Config, String> {
     Ok(load_config())
 }
@@ -98,6 +107,7 @@ pub fn run() {
             close_session,
             write_to_session,
             resize_session,
+            rename_session,
             list_sessions,
             get_config,
         ])

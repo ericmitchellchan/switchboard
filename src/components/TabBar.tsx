@@ -1,22 +1,29 @@
 import { useRef, useState, useEffect } from "react";
 import type { Session } from "../types";
 import { PulsingDot } from "./PulsingDot";
+import { STATUS_CONFIGS } from "../lib/statusConfig";
 
 interface TabBarProps {
   sessions: Session[];
   activeId: string | null;
   onSelect: (id: string) => void;
+  onRename: (id: string, newName: string) => void;
+  waitingCount: number;
 }
 
-const STATUS_COLORS: Record<string, string> = {
-  running: "#3B82F6",
-  exited: "#6B7280",
-};
-
-export function TabBar({ sessions, activeId, onSelect }: TabBarProps) {
+export function TabBar({
+  sessions,
+  activeId,
+  onSelect,
+  onRename,
+  waitingCount,
+}: TabBarProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
 
   const checkScroll = () => {
     const el = scrollRef.current;
@@ -55,9 +62,28 @@ export function TabBar({ sessions, activeId, onSelect }: TabBarProps) {
     }
   }, [activeId]);
 
+  // Focus input when editing starts
+  useEffect(() => {
+    if (editingId && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [editingId]);
+
   const scroll = (dir: number) => {
     const el = scrollRef.current;
     if (el) el.scrollBy({ left: dir * 160, behavior: "smooth" });
+  };
+
+  const commitRename = () => {
+    if (editingId && editValue.trim()) {
+      onRename(editingId, editValue.trim());
+    }
+    setEditingId(null);
+  };
+
+  const cancelRename = () => {
+    setEditingId(null);
   };
 
   // Group sessions by repo for dividers
@@ -112,6 +138,21 @@ export function TabBar({ sessions, activeId, onSelect }: TabBarProps) {
             {sessions.length}
           </span>
         )}
+        {waitingCount > 0 && (
+          <span
+            style={{
+              fontSize: 10,
+              fontWeight: 700,
+              color: "#0A0A0B",
+              backgroundColor: "#F59E0B",
+              borderRadius: 4,
+              padding: "1px 5px",
+              fontFamily: "var(--font-mono)",
+            }}
+          >
+            {waitingCount}
+          </span>
+        )}
       </div>
 
       {/* Scrollable tab area */}
@@ -163,7 +204,7 @@ export function TabBar({ sessions, activeId, onSelect }: TabBarProps) {
         >
           {sessions.map((session, idx) => {
             const isActive = session.id === activeId;
-            const statusColor = STATUS_COLORS[session.status] || "#6B7280";
+            const cfg = STATUS_CONFIGS[session.status] || STATUS_CONFIGS.running;
             const showDivider = session.repo !== lastRepo && idx > 0;
             lastRepo = session.repo;
 
@@ -195,7 +236,7 @@ export function TabBar({ sessions, activeId, onSelect }: TabBarProps) {
                     padding: "0 14px",
                     border: "none",
                     borderTop: isActive
-                      ? `2px solid ${statusColor}`
+                      ? `2px solid ${cfg.color}`
                       : "2px solid transparent",
                     borderBottom: "none",
                     backgroundColor: isActive ? "#151518" : "transparent",
@@ -210,13 +251,47 @@ export function TabBar({ sessions, activeId, onSelect }: TabBarProps) {
                   }}
                 >
                   <PulsingDot
-                    color={statusColor}
-                    pulse={session.status === "running"}
+                    color={cfg.color}
+                    pulse={cfg.pulse}
                     size={6}
                   />
-                  <span style={{ fontWeight: isActive ? 600 : 400 }}>
-                    {session.name}
-                  </span>
+                  {editingId === session.id ? (
+                    <input
+                      ref={inputRef}
+                      value={editValue}
+                      onChange={(e) => setEditValue(e.target.value)}
+                      onBlur={commitRename}
+                      onKeyDown={(e) => {
+                        e.stopPropagation();
+                        if (e.key === "Enter") commitRename();
+                        if (e.key === "Escape") cancelRename();
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                      style={{
+                        fontFamily: "var(--font-mono)",
+                        fontSize: 11.5,
+                        fontWeight: isActive ? 600 : 400,
+                        color: "#E4E4E7",
+                        backgroundColor: "#27272A",
+                        border: "1px solid #3F3F46",
+                        borderRadius: 3,
+                        padding: "1px 4px",
+                        outline: "none",
+                        width: Math.max(60, editValue.length * 7.5),
+                      }}
+                    />
+                  ) : (
+                    <span
+                      style={{ fontWeight: isActive ? 600 : 400 }}
+                      onDoubleClick={(e) => {
+                        e.stopPropagation();
+                        setEditingId(session.id);
+                        setEditValue(session.name);
+                      }}
+                    >
+                      {session.name}
+                    </span>
+                  )}
                   {session.repo && (
                     <span
                       style={{

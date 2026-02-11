@@ -82,6 +82,18 @@ impl PtyManager {
         session.resize(cols, rows)
     }
 
+    pub fn rename_session(&self, id: &str, new_name: String) -> Result<(), String> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        let session = sessions
+            .get_mut(id)
+            .ok_or_else(|| format!("Session not found: {}", id))?;
+        session.name = new_name;
+        Ok(())
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<SessionInfo>, String> {
         let sessions = self
             .sessions

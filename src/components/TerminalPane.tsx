@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback } from "react";
-import type { Session } from "../types";
+import type { Session, AgentStatus } from "../types";
 import {
   createTerminal,
   attachToDOM,
@@ -13,53 +13,69 @@ import {
   onSessionOutput,
   onSessionExited,
 } from "../lib/ipc";
+import {
+  initDetector,
+  processOutput,
+  markExited,
+} from "../lib/statusDetector";
 
 interface TerminalPaneProps {
   session: Session;
   onExited: (sessionId: string) => void;
+  onStatusChange: (sessionId: string, status: AgentStatus) => void;
 }
 
-export function TerminalPane({ session, onExited }: TerminalPaneProps) {
+export function TerminalPane({
+  session,
+  onExited,
+  onStatusChange,
+}: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const setupDone = useRef(new Set<string>());
+  const onStatusChangeRef = useRef(onStatusChange);
+  onStatusChangeRef.current = onStatusChange;
+  const onExitedRef = useRef(onExited);
+  onExitedRef.current = onExited;
 
   // Set up terminal data wiring (once per session)
-  const wireSession = useCallback(
-    (sessionId: string) => {
-      if (setupDone.current.has(sessionId)) return;
-      setupDone.current.add(sessionId);
+  const wireSession = useCallback((sessionId: string) => {
+    if (setupDone.current.has(sessionId)) return;
+    setupDone.current.add(sessionId);
 
-      const instance = getTerminal(sessionId);
-      if (!instance) return;
+    const instance = getTerminal(sessionId);
+    if (!instance) return;
 
-      // User input -> PTY
-      instance.terminal.onData((data: string) => {
-        writeToSession(sessionId, data).catch(console.error);
-      });
+    // Init status detector
+    initDetector(sessionId);
 
-      // PTY output -> terminal
-      onSessionOutput(sessionId, (b64data: string) => {
-        try {
-          const bytes = atob(b64data);
-          instance.terminal.write(bytes);
-        } catch {
-          // ignore decode errors
-        }
-      });
+    // User input -> PTY
+    instance.terminal.onData((data: string) => {
+      writeToSession(sessionId, data).catch(console.error);
+    });
 
-      // Session exit
-      onSessionExited(sessionId, () => {
-        instance.terminal.write("\r\n\x1b[90m[Process exited]\x1b[0m\r\n");
-        onExited(sessionId);
-      });
+    // PTY output -> terminal + status detector
+    onSessionOutput(sessionId, (b64data: string) => {
+      try {
+        const bytes = atob(b64data);
+        instance.terminal.write(bytes);
+        processOutput(sessionId, bytes, onStatusChangeRef.current);
+      } catch {
+        // ignore decode errors
+      }
+    });
 
-      // Resize -> PTY
-      instance.terminal.onResize(({ cols, rows }) => {
-        resizeSession(sessionId, cols, rows).catch(console.error);
-      });
-    },
-    [onExited]
-  );
+    // Session exit
+    onSessionExited(sessionId, () => {
+      instance.terminal.write("\r\n\x1b[90m[Process exited]\x1b[0m\r\n");
+      markExited(sessionId, onStatusChangeRef.current);
+      onExitedRef.current(sessionId);
+    });
+
+    // Resize -> PTY
+    instance.terminal.onResize(({ cols, rows }) => {
+      resizeSession(sessionId, cols, rows).catch(console.error);
+    });
+  }, []);
 
   // Attach/detach terminal when session changes
   useEffect(() => {

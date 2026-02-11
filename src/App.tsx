@@ -1,11 +1,17 @@
 import { useCallback, useEffect, useRef } from "react";
+import type { AgentStatus } from "./types";
 import { TabBar } from "./components/TabBar";
 import { SessionHeader } from "./components/SessionHeader";
 import { TerminalPane } from "./components/TerminalPane";
 import { StatusBar } from "./components/StatusBar";
+import { ToastStack } from "./components/Toast";
+import { TaskSidebar } from "./components/TaskSidebar";
 import { useSessions } from "./hooks/useSessions";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
-import { createSession, closeSession } from "./lib/ipc";
+import { useToasts } from "./hooks/useToasts";
+import { useTasks } from "./hooks/useTasks";
+import { useSidebarState } from "./hooks/useSidebarState";
+import { createSession, closeSession, renameSession } from "./lib/ipc";
 import { disposeTerminal } from "./lib/terminal";
 import "@xterm/xterm/css/xterm.css";
 
@@ -20,13 +26,19 @@ export default function App() {
     sessions,
     activeSessionId,
     activeSession,
+    waitingCount,
     addSession,
     removeSession,
+    renameSession: renameSessionLocal,
     updateSessionStatus,
     switchToSession,
     switchByIndex,
     switchRelative,
   } = useSessions();
+
+  const { toasts, addToast, dismissToast } = useToasts();
+  const { activeTasks, completedTasks, addTask, toggleTask, removeTask } = useTasks();
+  const { sidebarState, cycleSidebar } = useSidebarState();
 
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
@@ -67,6 +79,29 @@ export default function App() {
     [updateSessionStatus]
   );
 
+  const handleStatusChange = useCallback(
+    (sessionId: string, status: AgentStatus) => {
+      updateSessionStatus(sessionId, status);
+
+      // Fire toast when a background tab enters "waiting"
+      if (status === "waiting" && sessionId !== activeIdRef.current) {
+        const session = sessionsRef.current.find((s) => s.id === sessionId);
+        if (session) {
+          addToast(sessionId, session.name, "Needs your input");
+        }
+      }
+    },
+    [updateSessionStatus, addToast]
+  );
+
+  const handleRenameTab = useCallback(
+    (id: string, newName: string) => {
+      renameSessionLocal(id, newName);
+      renameSession(id, newName).catch(console.error);
+    },
+    [renameSessionLocal]
+  );
+
   useKeyboardShortcuts(
     {
       onNewTab: handleNewTab,
@@ -74,6 +109,7 @@ export default function App() {
       onPrevTab: () => switchRelative(-1),
       onNextTab: () => switchRelative(1),
       onSwitchToIndex: switchByIndex,
+      onToggleSidebar: cycleSidebar,
     },
     activeSessionId
   );
@@ -102,6 +138,8 @@ export default function App() {
         sessions={sessions}
         activeId={activeSessionId}
         onSelect={switchToSession}
+        onRename={handleRenameTab}
+        waitingCount={waitingCount}
       />
 
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
@@ -118,6 +156,7 @@ export default function App() {
             <TerminalPane
               session={activeSession}
               onExited={handleSessionExited}
+              onStatusChange={handleStatusChange}
             />
           </div>
         ) : (
@@ -151,9 +190,29 @@ export default function App() {
             </span>
           </div>
         )}
+
+        <TaskSidebar
+          state={sidebarState}
+          activeTasks={activeTasks}
+          completedTasks={completedTasks}
+          onToggle={toggleTask}
+          onRemove={removeTask}
+          onAdd={addTask}
+          onExpand={cycleSidebar}
+        />
       </div>
 
-      <StatusBar sessions={sessions} />
+      <ToastStack
+        toasts={toasts}
+        onDismiss={dismissToast}
+        onClickToast={(sessionId) => switchToSession(sessionId)}
+      />
+
+      <StatusBar
+        sessions={sessions}
+        taskCount={activeTasks.length}
+        onToggleSidebar={cycleSidebar}
+      />
     </div>
   );
 }

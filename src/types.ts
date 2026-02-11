@@ -1,3 +1,5 @@
+export type AgentStatus = "running" | "waiting" | "idle" | "error" | "exited";
+
 export interface SessionInfo {
   id: string;
   name: string;
@@ -6,7 +8,7 @@ export interface SessionInfo {
 }
 
 export interface Session extends SessionInfo {
-  status: "running" | "exited";
+  status: AgentStatus;
 }
 
 export interface RepoConfig {
@@ -20,4 +22,16 @@ export interface Config {
   font_size: number;
   shell: string;
   repos: RepoConfig[];
+}
+
+export type SidebarState = "full" | "collapsed" | "hidden";
+
+export interface Task {
+  id: string;
+  text: string;
+  done: boolean;
+  priority: "high" | "med" | "low";
+  source: "manual" | "claude";
+  repo?: string;
+  createdAt: number;
 }

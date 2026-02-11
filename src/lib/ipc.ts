@@ -31,6 +31,13 @@ export async function resizeSession(
   return invoke("resize_session", { sessionId, cols, rows });
 }
 
+export async function renameSession(
+  sessionId: string,
+  newName: string
+): Promise<void> {
+  return invoke("rename_session", { sessionId, newName });
+}
+
 export async function listSessions(): Promise<SessionInfo[]> {
   return invoke("list_sessions");
 }

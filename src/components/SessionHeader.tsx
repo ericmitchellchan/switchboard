@@ -1,19 +1,12 @@
 import type { Session } from "../types";
+import { STATUS_CONFIGS } from "../lib/statusConfig";
 
 interface SessionHeaderProps {
   session: Session;
 }
 
-const STATUS_CONFIG: Record<
-  string,
-  { color: string; label: string; icon: string }
-> = {
-  running: { color: "#3B82F6", label: "RUNNING", icon: "\u27F3" },
-  exited: { color: "#6B7280", label: "EXITED", icon: "\u25CB" },
-};
-
 export function SessionHeader({ session }: SessionHeaderProps) {
-  const cfg = STATUS_CONFIG[session.status] || STATUS_CONFIG.running;
+  const cfg = STATUS_CONFIGS[session.status] || STATUS_CONFIGS.running;
 
   return (
     <div
