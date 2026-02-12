@@ -53,6 +53,7 @@ export function createTerminal(sessionId: string): TerminalInstance {
     scrollback: 10000,
     allowProposedApi: true,
     convertEol: true,
+    screenReaderMode: false,
   });
 
   const fitAddon = new FitAddon();

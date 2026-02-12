@@ -14,8 +14,9 @@ import { useTasks } from "./hooks/useTasks";
 import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
+import { listen } from "@tauri-apps/api/event";
 import { createSession, closeSession, renameSession } from "./lib/ipc";
-import { disposeTerminal } from "./lib/terminal";
+import { disposeTerminal, getTerminal } from "./lib/terminal";
 import { initTaskDetector, destroyTaskDetector } from "./lib/taskDetector";
 import "@xterm/xterm/css/xterm.css";
 
@@ -53,6 +54,8 @@ export default function App() {
   const activeIdRef = useRef(activeSessionId);
   activeIdRef.current = activeSessionId;
 
+  const effectiveActiveIdRef = useRef<string | null>(null);
+
   // When active session changes via tab bar, sync with pane layout
   const switchToSession = useCallback(
     (sessionId: string) => {
@@ -68,6 +71,8 @@ export default function App() {
   const effectiveActiveSessionId = paneLayout.isSplit
     ? paneLayout.focusedSessionId ?? activeSessionId
     : activeSessionId;
+
+  effectiveActiveIdRef.current = effectiveActiveSessionId;
 
   const effectiveActiveSession = sessions.find((s) => s.id === effectiveActiveSessionId) ?? null;
 
@@ -221,6 +226,40 @@ export default function App() {
     },
     effectiveActiveSessionId
   );
+
+  // Listen for native clipboard-paste events (from hidden menu accelerator).
+  // This handles Ctrl+V at the OS level, which catches simulated keystrokes
+  // from tools like Wispr Flow that don't propagate through the webview.
+  useEffect(() => {
+    const unlisten = listen<string>("clipboard-paste", (event) => {
+      const text = event.payload;
+      if (!text) return;
+
+      // If a non-terminal input is focused (e.g., dialog), paste into it
+      const active = document.activeElement;
+      const isTerminalTextarea = active?.classList.contains("xterm-helper-textarea");
+      const isFormInput =
+        active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement;
+
+      if (isFormInput && !isTerminalTextarea) {
+        document.execCommand("insertText", false, text);
+        return;
+      }
+
+      // Paste into the focused terminal session (respects bracketed paste mode)
+      const sessionId = effectiveActiveIdRef.current;
+      if (sessionId) {
+        const instance = getTerminal(sessionId);
+        if (instance) {
+          instance.terminal.paste(text);
+        }
+      }
+    });
+
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
 
   // Auto-create first session on mount
   const didInit = useRef(false);

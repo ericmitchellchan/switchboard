@@ -4,7 +4,9 @@ mod pty;
 use config::{load_config, Config};
 use pty::{PtyManager, SessionInfo};
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Emitter, Manager, State};
+use tauri_plugin_clipboard_manager::ClipboardExt;
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use uuid::Uuid;
 
 struct AppState {
@@ -99,9 +101,44 @@ pub fn run() {
         pty_manager: PtyManager::new(),
     });
 
+    let ctrl_v = Shortcut::new(Some(Modifiers::CONTROL), Code::KeyV);
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        if let Ok(text) = app.clipboard().read_text() {
+                            if !text.is_empty() {
+                                let _ = app.emit("clipboard-paste", text);
+                            }
+                        }
+                    }
+                })
+                .build(),
+        )
         .manage(app_state)
+        .setup(move |app| {
+            // Register Ctrl+V as a global shortcut so it fires at the OS
+            // level, catching both real keystrokes and simulated ones from
+            // tools like Wispr Flow (which don't reach the webview).
+            app.global_shortcut().register(ctrl_v)?;
+            Ok(())
+        })
+        .on_window_event(move |window, event| {
+            // Register the global shortcut only while our window is focused
+            // so we don't steal Ctrl+V from other applications.
+            if let tauri::WindowEvent::Focused(focused) = event {
+                let app = window.app_handle();
+                if *focused {
+                    let _ = app.global_shortcut().register(ctrl_v);
+                } else {
+                    let _ = app.global_shortcut().unregister(ctrl_v);
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             create_session,
             close_session,
