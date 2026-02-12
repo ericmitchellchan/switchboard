@@ -9,6 +9,8 @@ export interface SessionInfo {
 
 export interface Session extends SessionInfo {
   status: AgentStatus;
+  repoColor?: string;
+  group?: string;
 }
 
 export interface RepoConfig {
@@ -26,12 +28,18 @@ export interface Config {
 
 export type SidebarState = "full" | "collapsed" | "hidden";
 
+export type TaskCategory = "build" | "test" | "git" | "runtime" | "note";
+
 export interface Task {
   id: string;
   text: string;
   done: boolean;
   priority: "high" | "med" | "low";
-  source: "manual" | "claude";
+  source: "manual" | "auto";
   repo?: string;
   createdAt: number;
+  sessionId?: string;
+  category?: TaskCategory;
+  fingerprint?: string;
+  autoResolved?: boolean;
 }

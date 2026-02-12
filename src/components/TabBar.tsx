@@ -239,6 +239,9 @@ export function TabBar({
                       ? `2px solid ${cfg.color}`
                       : "2px solid transparent",
                     borderBottom: "none",
+                    borderLeft: session.repoColor
+                      ? `3px solid ${session.repoColor}`
+                      : "none",
                     backgroundColor: isActive ? "#151518" : "transparent",
                     cursor: "pointer",
                     fontFamily: "var(--font-mono)",

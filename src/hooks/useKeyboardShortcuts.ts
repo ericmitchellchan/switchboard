@@ -2,27 +2,49 @@ import { useEffect, useRef } from "react";
 import type { TerminalInstance } from "../lib/terminal";
 import { getTerminal } from "../lib/terminal";
 
-interface ShortcutActions {
+export interface ShortcutActions {
   onNewTab: () => void;
   onCloseTab: () => void;
   onPrevTab: () => void;
   onNextTab: () => void;
   onSwitchToIndex: (index: number) => void;
   onToggleSidebar: () => void;
+  onSearch?: () => void;
+  onSplitHorizontal?: () => void;
+  onSplitVertical?: () => void;
+  onClosePane?: () => void;
+  onMoveFocus?: (direction: "up" | "down" | "left" | "right") => void;
 }
 
 // Keys we intercept from xterm.js
 function isOurShortcut(e: KeyboardEvent): boolean {
   if (!e.ctrlKey) return false;
   const key = e.key.toLowerCase();
-  return (
+
+  // Ctrl+key
+  if (
     key === "t" ||
     key === "w" ||
     key === "[" ||
     key === "]" ||
     key === "b" ||
+    key === "f" ||
+    key === "\\" ||
+    key === "-" ||
     (key >= "1" && key <= "9")
-  );
+  ) {
+    return true;
+  }
+
+  // Ctrl+Shift+W (close pane)
+  if (e.shiftKey && key === "w") return true;
+
+  // Ctrl+Alt+Arrow (move focus between panes)
+  if (e.altKey && (key === "arrowup" || key === "arrowdown" || key === "arrowleft" || key === "arrowright")) {
+    return true;
+  }
+
+  return false;
 }
 
 export function useKeyboardShortcuts(
@@ -65,6 +87,36 @@ export function useKeyboardShortcuts(
       const key = e.key.toLowerCase();
       const a = actionsRef.current;
 
+      // Ctrl+Alt+Arrow — move focus between panes
+      if (e.altKey) {
+        switch (key) {
+          case "arrowup":
+            e.preventDefault();
+            a.onMoveFocus?.("up");
+            return;
+          case "arrowdown":
+            e.preventDefault();
+            a.onMoveFocus?.("down");
+            return;
+          case "arrowleft":
+            e.preventDefault();
+            a.onMoveFocus?.("left");
+            return;
+          case "arrowright":
+            e.preventDefault();
+            a.onMoveFocus?.("right");
+            return;
+        }
+        return;
+      }
+
+      // Ctrl+Shift+W — close pane only
+      if (e.shiftKey && key === "w") {
+        e.preventDefault();
+        a.onClosePane?.();
+        return;
+      }
+
       switch (key) {
         case "t":
           e.preventDefault();
@@ -85,6 +137,18 @@ export function useKeyboardShortcuts(
         case "b":
           e.preventDefault();
           a.onToggleSidebar();
+          break;
+        case "f":
+          e.preventDefault();
+          a.onSearch?.();
+          break;
+        case "\\":
+          e.preventDefault();
+          a.onSplitHorizontal?.();
+          break;
+        case "-":
+          e.preventDefault();
+          a.onSplitVertical?.();
           break;
         default:
           if (key >= "1" && key <= "9") {

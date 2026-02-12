@@ -36,7 +36,16 @@
       "Bash(git status:*)",
       "Bash(git init:*)",
       "Bash(git remote add:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nPhase 1: Core terminal manager with tabbed PTY sessions\n\nTauri v2 + React 18 + TypeScript app that manages multiple terminal\nsessions in a single tabbed window. Features:\n\n- PTY backend using portable-pty 0.8.1 \\(ConPTY on Windows\\)\n- Base64-encoded PTY output over per-session Tauri events\n- xterm.js v5 with WebGL rendering and JetBrains Mono font\n- Tab bar with status dots, group dividers, and scroll arrows\n- Keyboard shortcuts: Ctrl+T/W/[/]/1-9 for tab management\n- Session header with status, repo name, and working directory\n- Terminal attach/detach strategy preserving scrollback across tab switches\n- Config module with load/save from %APPDATA%/switchboard/config.json\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git branch:*)",
+      "Bash(git push:*)",
+      "Bash(gh repo create:*)",
+      "Bash(gh auth:*)",
+      "Bash(git remote set-url:*)",
+      "Bash(C:UsersericmAppDataRoamingnpmpnpm.cmd install)",
+      "Bash(cmd.exe /c \"pnpm install\")",
+      "Bash(grep:*)"
     ]
   }
 }

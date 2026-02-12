@@ -18,17 +18,28 @@ import {
   processOutput,
   markExited,
 } from "../lib/statusDetector";
+import { SearchBar } from "./SearchBar";
 
 interface TerminalPaneProps {
   session: Session;
+  searchOpen?: boolean;
+  onCloseSearch?: () => void;
   onExited: (sessionId: string) => void;
   onStatusChange: (sessionId: string, status: AgentStatus) => void;
+  onAutoTask?: (task: { text: string; fingerprint: string; priority: "high" | "med" | "low"; category: string }, sessionId: string) => void;
+  onResolveTask?: (fingerprintPrefix: string) => void;
+  isFocused?: boolean;
 }
 
 export function TerminalPane({
   session,
+  searchOpen,
+  onCloseSearch,
   onExited,
   onStatusChange,
+  onAutoTask,
+  onResolveTask,
+  isFocused = true,
 }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const setupDone = useRef(new Set<string>());
@@ -36,6 +47,10 @@ export function TerminalPane({
   onStatusChangeRef.current = onStatusChange;
   const onExitedRef = useRef(onExited);
   onExitedRef.current = onExited;
+  const onAutoTaskRef = useRef(onAutoTask);
+  onAutoTaskRef.current = onAutoTask;
+  const onResolveTaskRef = useRef(onResolveTask);
+  onResolveTaskRef.current = onResolveTask;
 
   // Set up terminal data wiring (once per session)
   const wireSession = useCallback((sessionId: string) => {
@@ -53,12 +68,30 @@ export function TerminalPane({
       writeToSession(sessionId, data).catch(console.error);
     });
 
-    // PTY output -> terminal + status detector
+    // PTY output -> terminal + status detector + task detector
     onSessionOutput(sessionId, (b64data: string) => {
       try {
         const bytes = atob(b64data);
         instance.terminal.write(bytes);
         processOutput(sessionId, bytes, onStatusChangeRef.current);
+
+        // Task detection (lazy import to avoid circular deps)
+        if (onAutoTaskRef.current || onResolveTaskRef.current) {
+          import("../lib/taskDetector").then(({ detectTasks, detectResolutions }) => {
+            if (onAutoTaskRef.current) {
+              const detected = detectTasks(sessionId, bytes);
+              for (const task of detected) {
+                onAutoTaskRef.current!(task, sessionId);
+              }
+            }
+            if (onResolveTaskRef.current) {
+              const resolved = detectResolutions(sessionId, bytes);
+              for (const prefix of resolved) {
+                onResolveTaskRef.current!(prefix);
+              }
+            }
+          });
+        }
       } catch {
         // ignore decode errors
       }
@@ -129,14 +162,46 @@ export function TerminalPane({
     };
   }, [session.id]);
 
+  // Focus management for split panes
+  useEffect(() => {
+    if (!isFocused) return;
+    const instance = getTerminal(session.id);
+    if (instance) {
+      instance.terminal.focus();
+    }
+  }, [isFocused, session.id]);
+
+  // Close search refocuses terminal
+  const handleCloseSearch = useCallback(() => {
+    onCloseSearch?.();
+    const instance = getTerminal(session.id);
+    if (instance) {
+      instance.terminal.focus();
+    }
+  }, [session.id, onCloseSearch]);
+
+  const searchAddon = getTerminal(session.id)?.searchAddon;
+
   return (
     <div
-      ref={containerRef}
       style={{
         flex: 1,
-        backgroundColor: "#0C0C0E",
+        position: "relative",
         overflow: "hidden",
       }}
-    />
+    >
+      {searchOpen && searchAddon && (
+        <SearchBar searchAddon={searchAddon} onClose={handleCloseSearch} />
+      )}
+      <div
+        ref={containerRef}
+        style={{
+          width: "100%",
+          height: "100%",
+          backgroundColor: "#0C0C0E",
+          overflow: "hidden",
+        }}
+      />
+    </div>
   );
 }

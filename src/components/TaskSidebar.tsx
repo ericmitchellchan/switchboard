@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { Task, SidebarState } from "../types";
+import type { Task, SidebarState, TaskCategory } from "../types";
 
 interface TaskSidebarProps {
   state: SidebarState;
@@ -9,12 +9,29 @@ interface TaskSidebarProps {
   onRemove: (id: string) => void;
   onAdd: (text: string, priority: Task["priority"], source: Task["source"]) => void;
   onExpand: () => void;
+  onSwitchToSession?: (sessionId: string) => void;
 }
 
 const PRIORITY_COLORS: Record<Task["priority"], string> = {
   high: "#F59E0B",
   med: "#6B7280",
   low: "#3F3F46",
+};
+
+const CATEGORY_COLORS: Record<TaskCategory, string> = {
+  build: "#EF4444",
+  test: "#F59E0B",
+  git: "#3B82F6",
+  runtime: "#A78BFA",
+  note: "#6B7280",
+};
+
+const CATEGORY_ICONS: Record<TaskCategory, string> = {
+  build: "\u2692",   // hammer and pick
+  test: "\u26A0",    // warning
+  git: "\u2387",     // branch
+  runtime: "\u26A1", // lightning
+  note: "\u2709",    // envelope
 };
 
 export function TaskSidebar({
@@ -25,10 +42,14 @@ export function TaskSidebar({
   onRemove,
   onAdd,
   onExpand,
+  onSwitchToSession,
 }: TaskSidebarProps) {
   const [inputValue, setInputValue] = useState("");
 
   if (state === "hidden") return null;
+
+  const autoTasks = activeTasks.filter((t) => t.source === "auto");
+  const manualTasks = activeTasks.filter((t) => t.source === "manual");
 
   // Collapsed mode
   if (state === "collapsed") {
@@ -85,7 +106,9 @@ export function TaskSidebar({
                 width: 5,
                 height: 5,
                 borderRadius: "50%",
-                backgroundColor: PRIORITY_COLORS[t.priority],
+                backgroundColor: t.source === "auto" && t.category
+                  ? CATEGORY_COLORS[t.category]
+                  : PRIORITY_COLORS[t.priority],
               }}
             />
           ))}
@@ -177,9 +200,47 @@ export function TaskSidebar({
           padding: "8px 0",
         }}
       >
-        {/* Active tasks */}
-        {activeTasks.map((task) => (
-          <TaskRow
+        {/* Auto-detected section */}
+        {autoTasks.length > 0 && (
+          <>
+            <div
+              style={{
+                padding: "4px 12px 4px",
+                fontFamily: "var(--font-mono)",
+                fontSize: 9,
+                fontWeight: 600,
+                color: "#52525B",
+                letterSpacing: "0.05em",
+              }}
+            >
+              AUTO-DETECTED
+            </div>
+            {autoTasks.map((task) => (
+              <AutoTaskRow
+                key={task.id}
+                task={task}
+                onRemove={onRemove}
+                onSwitchToSession={onSwitchToSession}
+              />
+            ))}
+          </>
+        )}
+
+        {/* Manual/notes section */}
+        <div
+          style={{
+            padding: `${autoTasks.length > 0 ? 8 : 4}px 12px 4px`,
+            fontFamily: "var(--font-mono)",
+            fontSize: 9,
+            fontWeight: 600,
+            color: "#52525B",
+            letterSpacing: "0.05em",
+          }}
+        >
+          NOTES
+        </div>
+        {manualTasks.map((task) => (
+          <ManualTaskRow
             key={task.id}
             task={task}
             onToggle={onToggle}
@@ -187,17 +248,17 @@ export function TaskSidebar({
           />
         ))}
 
-        {activeTasks.length === 0 && (
+        {manualTasks.length === 0 && (
           <div
             style={{
-              padding: "16px 12px",
+              padding: "12px 12px",
               fontFamily: "var(--font-mono)",
               fontSize: 10,
               color: "#3F3F46",
               textAlign: "center",
             }}
           >
-            No active tasks
+            No notes
           </div>
         )}
 
@@ -217,7 +278,7 @@ export function TaskSidebar({
               COMPLETED ({completedTasks.length})
             </div>
             {completedTasks.map((task) => (
-              <TaskRow
+              <ManualTaskRow
                 key={task.id}
                 task={task}
                 onToggle={onToggle}
@@ -242,7 +303,7 @@ export function TaskSidebar({
           onKeyDown={(e) => {
             if (e.key === "Enter") handleSubmit();
           }}
-          placeholder="Add task..."
+          placeholder="Add note..."
           style={{
             width: "100%",
             fontFamily: "var(--font-mono)",
@@ -260,7 +321,96 @@ export function TaskSidebar({
   );
 }
 
-function TaskRow({
+function AutoTaskRow({
+  task,
+  onRemove,
+  onSwitchToSession,
+}: {
+  task: Task;
+  onRemove: (id: string) => void;
+  onSwitchToSession?: (sessionId: string) => void;
+}) {
+  const catColor = task.category ? CATEGORY_COLORS[task.category] : "#6B7280";
+  const catIcon = task.category ? CATEGORY_ICONS[task.category] : "\u2022";
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 6,
+        padding: "5px 12px",
+        borderLeft: `3px solid ${catColor}`,
+        marginLeft: 0,
+      }}
+    >
+      {/* Category icon */}
+      <span
+        style={{
+          fontSize: 10,
+          color: catColor,
+          flexShrink: 0,
+          marginTop: 1,
+          width: 12,
+          textAlign: "center",
+        }}
+      >
+        {catIcon}
+      </span>
+      {/* Text */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <span
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontSize: 10.5,
+            color: "#A1A1AA",
+            lineHeight: "15px",
+            wordBreak: "break-word",
+            display: "block",
+          }}
+        >
+          {task.text}
+        </span>
+        {task.sessionId && onSwitchToSession && (
+          <button
+            onClick={() => onSwitchToSession(task.sessionId!)}
+            style={{
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              fontFamily: "var(--font-mono)",
+              fontSize: 9,
+              color: "#52525B",
+              padding: 0,
+              marginTop: 1,
+            }}
+          >
+            {"\u2192"} go to session
+          </button>
+        )}
+      </div>
+      {/* Remove */}
+      <button
+        onClick={() => onRemove(task.id)}
+        style={{
+          background: "none",
+          border: "none",
+          cursor: "pointer",
+          fontFamily: "var(--font-mono)",
+          fontSize: 10,
+          color: "#27272A",
+          padding: 0,
+          flexShrink: 0,
+          marginTop: 1,
+        }}
+      >
+        {"\u2715"}
+      </button>
+    </div>
+  );
+}
+
+function ManualTaskRow({
   task,
   onToggle,
   onRemove,
@@ -314,22 +464,12 @@ function TaskRow({
         }}
       >
         {task.text}
+        {task.autoResolved && (
+          <span style={{ color: "#3F3F46", fontSize: 9, marginLeft: 4 }}>
+            (auto-resolved)
+          </span>
+        )}
       </span>
-      {/* Source badge */}
-      {task.source === "claude" && !task.done && (
-        <span
-          style={{
-            fontSize: 8,
-            fontWeight: 700,
-            color: "#A78BFA",
-            fontFamily: "var(--font-mono)",
-            flexShrink: 0,
-            marginTop: 2,
-          }}
-        >
-          AI
-        </span>
-      )}
       {/* Remove */}
       <button
         onClick={(e) => {

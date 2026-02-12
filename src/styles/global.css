@@ -119,3 +119,13 @@ html, body, #root {
   background: #27272A;
   border-radius: 3px;
 }
+
+/* Search result highlighting */
+.xterm-find-result-decoration {
+  background-color: rgba(245, 158, 11, 0.25) !important;
+}
+
+.xterm-find-active-result-decoration {
+  background-color: rgba(245, 158, 11, 0.5) !important;
+  outline: 1px solid rgba(245, 158, 11, 0.6);
+}

@@ -1,6 +1,7 @@
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { SearchAddon } from "@xterm/addon-search";
 
 const THEME = {
   background: "#0C0C0E",
@@ -31,6 +32,7 @@ export interface TerminalInstance {
   terminal: Terminal;
   fitAddon: FitAddon;
   webglAddon: WebglAddon | null;
+  searchAddon: SearchAddon;
 }
 
 // Module-level map: keeps terminal instances alive across React renders
@@ -56,17 +58,21 @@ export function createTerminal(sessionId: string): TerminalInstance {
   const fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
 
+  const searchAddon = new SearchAddon();
+  terminal.loadAddon(searchAddon);
+
   const instance: TerminalInstance = {
     terminal,
     fitAddon,
     webglAddon: null,
+    searchAddon,
   };
 
   terminalMap.set(sessionId, instance);
   return instance;
 }
 
-export function attachToDOM(sessionId: string, container: HTMLElement): void {
+export function attachToDOM(sessionId: string, container: HTMLElement, withWebGL = true): void {
   const instance = terminalMap.get(sessionId);
   if (!instance) return;
 
@@ -80,23 +86,39 @@ export function attachToDOM(sessionId: string, container: HTMLElement): void {
   }
 
   // Load WebGL addon
-  try {
-    const webglAddon = new WebglAddon();
-    webglAddon.onContextLoss(() => {
-      webglAddon.dispose();
-      instance.webglAddon = null;
-    });
-    terminal.loadAddon(webglAddon);
-    instance.webglAddon = webglAddon;
-  } catch {
-    // WebGL not available, fall back to canvas renderer
-    instance.webglAddon = null;
+  if (withWebGL) {
+    enableWebGL(sessionId);
   }
 
   // Fit to container
   requestAnimationFrame(() => {
     fitAddon.fit();
   });
+}
+
+export function enableWebGL(sessionId: string): void {
+  const instance = terminalMap.get(sessionId);
+  if (!instance || instance.webglAddon) return;
+
+  try {
+    const webglAddon = new WebglAddon();
+    webglAddon.onContextLoss(() => {
+      webglAddon.dispose();
+      instance.webglAddon = null;
+    });
+    instance.terminal.loadAddon(webglAddon);
+    instance.webglAddon = webglAddon;
+  } catch {
+    instance.webglAddon = null;
+  }
+}
+
+export function disableWebGL(sessionId: string): void {
+  const instance = terminalMap.get(sessionId);
+  if (!instance || !instance.webglAddon) return;
+
+  instance.webglAddon.dispose();
+  instance.webglAddon = null;
 }
 
 export function detachFromDOM(sessionId: string): void {
