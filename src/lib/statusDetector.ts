@@ -127,10 +127,17 @@ export function processOutput(
 }
 
 /** Clear sticky waiting state when the user sends input (they responded to the prompt) */
-export function clearWaiting(sessionId: string): void {
+export function clearWaiting(
+  sessionId: string,
+  onStatusChange?: (sessionId: string, status: AgentStatus) => void
+): void {
   const state = detectors.get(sessionId);
   if (state) {
     state.stickyWaiting = false;
+    if (state.currentStatus === "waiting" && onStatusChange) {
+      state.currentStatus = "running";
+      onStatusChange(sessionId, "running");
+    }
   }
 }
 

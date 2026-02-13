@@ -27,13 +27,13 @@ export function destroyTaskDetector(sessionId: string): void {
   detectors.delete(sessionId);
 }
 
-// Detection patterns
-const RUST_ERROR = /error\[E(\d+)\].*?(?:-->|at)\s*([^\s:]+):(\d+)/;
-const RUST_ERROR_SIMPLE = /error\[E(\d+)\]/;
-const TS_ERROR = /error TS(\d+).*?([^\s(]+)\((\d+),/;
-const TS_ERROR_SIMPLE = /error TS(\d+)/;
-const TEST_FAIL = /(?:FAILED|FAIL)\s+(.+)/;
-const GIT_CONFLICT = /CONFLICT \(content\): Merge conflict in (.+)/;
+// Detection patterns (global flag for matchAll — find every occurrence in the buffer)
+const RUST_ERROR = /error\[E(\d+)\].*?(?:-->|at)\s*([^\s:]+):(\d+)/g;
+const RUST_ERROR_SIMPLE = /error\[E(\d+)\]/g;
+const TS_ERROR = /error TS(\d+).*?([^\s(]+)\((\d+),/g;
+const TS_ERROR_SIMPLE = /error TS(\d+)/g;
+const TEST_FAIL = /(?:FAILED|FAIL)\s+(.+)/g;
+const GIT_CONFLICT = /CONFLICT \(content\): Merge conflict in (.+)/g;
 
 // Resolution patterns
 const RUST_BUILD_SUCCESS = /Compiling.*finished|Finished/;
@@ -63,10 +63,11 @@ export function detectTasks(sessionId: string, text: string): DetectedTask[] {
 
   const combined = state.lineBuffer.join("\n");
 
-  // Rust errors
-  let match = RUST_ERROR.exec(combined);
-  if (match) {
-    const [, code, file, line] = match;
+  // Rust errors — try detailed first, fall back to simple for unmatched codes
+  let hasDetailedRust = false;
+  for (const m of combined.matchAll(RUST_ERROR)) {
+    hasDetailedRust = true;
+    const [, code, file, line] = m;
     const fp = `rust:${file}:${line}:E${code}`;
     if (!state.knownFingerprints.has(fp)) {
       state.knownFingerprints.add(fp);
@@ -78,10 +79,10 @@ export function detectTasks(sessionId: string, text: string): DetectedTask[] {
         category: "build",
       });
     }
-  } else {
-    match = RUST_ERROR_SIMPLE.exec(combined);
-    if (match) {
-      const [, code] = match;
+  }
+  if (!hasDetailedRust) {
+    for (const m of combined.matchAll(RUST_ERROR_SIMPLE)) {
+      const [, code] = m;
       const fp = `rust:E${code}`;
       if (!state.knownFingerprints.has(fp)) {
         state.knownFingerprints.add(fp);
@@ -96,10 +97,11 @@ export function detectTasks(sessionId: string, text: string): DetectedTask[] {
     }
   }
 
-  // TypeScript errors
-  match = TS_ERROR.exec(combined);
-  if (match) {
-    const [, code, file] = match;
+  // TypeScript errors — same detailed-then-simple pattern
+  let hasDetailedTs = false;
+  for (const m of combined.matchAll(TS_ERROR)) {
+    hasDetailedTs = true;
+    const [, code, file] = m;
     const fp = `ts:${file}:TS${code}`;
     if (!state.knownFingerprints.has(fp)) {
       state.knownFingerprints.add(fp);
@@ -111,10 +113,10 @@ export function detectTasks(sessionId: string, text: string): DetectedTask[] {
         category: "build",
       });
     }
-  } else {
-    match = TS_ERROR_SIMPLE.exec(combined);
-    if (match) {
-      const [, code] = match;
+  }
+  if (!hasDetailedTs) {
+    for (const m of combined.matchAll(TS_ERROR_SIMPLE)) {
+      const [, code] = m;
       const fp = `ts:TS${code}`;
       if (!state.knownFingerprints.has(fp)) {
         state.knownFingerprints.add(fp);
@@ -130,9 +132,8 @@ export function detectTasks(sessionId: string, text: string): DetectedTask[] {
   }
 
   // Test failures
-  match = TEST_FAIL.exec(combined);
-  if (match) {
-    const testName = match[1].trim().substring(0, 80);
+  for (const m of combined.matchAll(TEST_FAIL)) {
+    const testName = m[1].trim().substring(0, 80);
     const fp = `test:${testName}`;
     if (!state.knownFingerprints.has(fp)) {
       state.knownFingerprints.add(fp);
@@ -147,9 +148,8 @@ export function detectTasks(sessionId: string, text: string): DetectedTask[] {
   }
 
   // Git conflicts
-  match = GIT_CONFLICT.exec(combined);
-  if (match) {
-    const file = match[1].trim();
+  for (const m of combined.matchAll(GIT_CONFLICT)) {
+    const file = m[1].trim();
     const fp = `git:conflict:${file}`;
     if (!state.knownFingerprints.has(fp)) {
       state.knownFingerprints.add(fp);

@@ -35,6 +35,8 @@ const DEFAULT_CWD = "C:\\Users\\ericm";
 let sessionCounter = 0;
 
 export default function App() {
+  const sessionCounterRef = useRef(0);
+
   const config = useConfig();
 
   // Apply config font settings to terminal module
@@ -110,6 +112,7 @@ export default function App() {
       return;
     }
     sessionCounter++;
+    sessionCounterRef.current = sessionCounter;
     const name = `Shell ${sessionCounter}`;
     try {
       const info = await doCreateSession(name, "", DEFAULT_CWD);
@@ -199,6 +202,7 @@ export default function App() {
   const handleSplitHorizontal = useCallback(async () => {
     if (!paneLayout.root) return;
     sessionCounter++;
+    sessionCounterRef.current = sessionCounter;
     const name = `Shell ${sessionCounter}`;
     try {
       const info = await doCreateSession(name, "", DEFAULT_CWD);
@@ -211,6 +215,7 @@ export default function App() {
   const handleSplitVertical = useCallback(async () => {
     if (!paneLayout.root) return;
     sessionCounter++;
+    sessionCounterRef.current = sessionCounter;
     const name = `Shell ${sessionCounter}`;
     try {
       const info = await doCreateSession(name, "", DEFAULT_CWD);
@@ -357,6 +362,7 @@ export default function App() {
         if (newSessions.length === 0) {
           // All restores failed — fall back to fresh session
           sessionCounter++;
+          sessionCounterRef.current = sessionCounter;
           const name = `Shell ${sessionCounter}`;
           try {
             const info = await createSession(name, "", DEFAULT_CWD);
@@ -371,6 +377,7 @@ export default function App() {
 
         // Remap pane layout IDs
         sessionCounter = restoredCounter;
+        sessionCounterRef.current = sessionCounter;
         const savedPaneLayout = savedWorkspace.paneLayout as PaneNode | null;
         let restoredRoot: PaneNode | null = null;
         let restoredFocusedPaneId: string | null = null;
@@ -402,6 +409,7 @@ export default function App() {
     } else {
       // Fresh start
       sessionCounter++;
+      sessionCounterRef.current = sessionCounter;
       const name = `Shell ${sessionCounter}`;
       createSession(name, "", DEFAULT_CWD)
         .then((info) => {
@@ -421,7 +429,7 @@ export default function App() {
       activeSessionId: activeIdRef2.current,
       paneLayout: paneLayoutRef.current.root,
       focusedPaneId: paneLayoutRef.current.focusedPaneId,
-      sessionCounter,
+      sessionCounter: sessionCounterRef.current,
     }));
 
     const handleBeforeUnload = () => {
@@ -430,7 +438,7 @@ export default function App() {
         activeSessionId: activeIdRef2.current,
         paneLayout: paneLayoutRef.current.root,
         focusedPaneId: paneLayoutRef.current.focusedPaneId,
-        sessionCounter,
+        sessionCounter: sessionCounterRef.current,
       };
       if (state.sessions.length > 0) {
         const workspace = buildSavedWorkspace(

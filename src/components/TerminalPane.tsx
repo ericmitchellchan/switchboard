@@ -21,13 +21,14 @@ import {
   markExited,
   clearWaiting,
 } from "../lib/statusDetector";
+import { detectTasks, detectResolutions } from "../lib/taskDetector";
 import { SearchBar } from "./SearchBar";
 
 // Module-level map for event listener cleanup functions
 const listenerCleanups = new Map<string, (() => void)[]>();
 
-// Reusable UTF-8 decoder (avoids per-chunk allocation)
-const utf8Decoder = new TextDecoder();
+// Per-session streaming UTF-8 decoders (handles multi-byte chars split across chunks)
+const sessionDecoders = new Map<string, TextDecoder>();
 
 export function cleanupSessionListeners(sessionId: string) {
   const fns = listenerCleanups.get(sessionId);
@@ -35,6 +36,7 @@ export function cleanupSessionListeners(sessionId: string) {
     fns.forEach((fn) => fn());
     listenerCleanups.delete(sessionId);
   }
+  sessionDecoders.delete(sessionId);
 }
 
 interface TerminalPaneProps {
@@ -77,12 +79,13 @@ export function TerminalPane({
     const instance = getTerminal(sessionId);
     if (!instance) return;
 
-    // Init status detector
+    // Init status detector and per-session UTF-8 decoder
     initDetector(sessionId);
+    sessionDecoders.set(sessionId, new TextDecoder("utf-8"));
 
     // User input -> PTY
     instance.terminal.onData((data: string) => {
-      clearWaiting(sessionId);
+      clearWaiting(sessionId, onStatusChangeRef.current);
       writeToSession(sessionId, data).catch(console.error);
     });
 
@@ -104,25 +107,24 @@ export function TerminalPane({
         instance.terminal.write(bytes);
 
         // Decode as UTF-8 for text-based detection (regex needs proper unicode)
-        const text = utf8Decoder.decode(bytes);
+        const decoder = sessionDecoders.get(sessionId);
+        const text = decoder ? decoder.decode(bytes, { stream: true }) : new TextDecoder().decode(bytes);
         processOutput(sessionId, text, onStatusChangeRef.current);
 
-        // Task detection (lazy import to avoid circular deps)
+        // Task detection
         if (onAutoTaskRef.current || onResolveTaskRef.current) {
-          import("../lib/taskDetector").then(({ detectTasks, detectResolutions }) => {
-            if (onAutoTaskRef.current) {
-              const detected = detectTasks(sessionId, text);
-              for (const task of detected) {
-                onAutoTaskRef.current!(task, sessionId);
-              }
+          if (onAutoTaskRef.current) {
+            const detected = detectTasks(sessionId, text);
+            for (const task of detected) {
+              onAutoTaskRef.current!(task, sessionId);
             }
-            if (onResolveTaskRef.current) {
-              const resolved = detectResolutions(sessionId, text);
-              for (const prefix of resolved) {
-                onResolveTaskRef.current!(prefix);
-              }
+          }
+          if (onResolveTaskRef.current) {
+            const resolved = detectResolutions(sessionId, text);
+            for (const prefix of resolved) {
+              onResolveTaskRef.current!(prefix);
             }
-          });
+          }
         }
       } catch {
         // ignore decode errors
@@ -179,16 +181,21 @@ export function TerminalPane({
     };
   }, [session.id, wireSession]);
 
-  // Handle window resize
+  // Handle window resize (debounced to avoid excessive IPC during pane drag)
   useEffect(() => {
     let mounted = true;
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
 
     const handleResize = () => {
       if (!mounted) return;
-      const dims = fitTerminal(session.id);
-      if (dims) {
-        resizeSession(session.id, dims.cols, dims.rows).catch(console.error);
-      }
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        if (!mounted) return;
+        const dims = fitTerminal(session.id);
+        if (dims) {
+          resizeSession(session.id, dims.cols, dims.rows).catch(console.error);
+        }
+      }, 100);
     };
 
     window.addEventListener("resize", handleResize);
@@ -203,6 +210,7 @@ export function TerminalPane({
 
     return () => {
       mounted = false;
+      if (resizeTimer) clearTimeout(resizeTimer);
       window.removeEventListener("resize", handleResize);
       if (ro) ro.disconnect();
     };
