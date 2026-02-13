@@ -33,6 +33,8 @@ impl PtySession {
             SetConsoleOutputCP(65001);
         }
 
+        log::info!("Spawning PTY shell={:?} working_dir={:?} cols={} rows={}", shell, working_dir, cols, rows);
+
         let pty_system = native_pty_system();
 
         let pair = pty_system
@@ -42,7 +44,10 @@ impl PtySession {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|e| format!("Failed to open PTY: {}", e))?;
+            .map_err(|e| {
+                log::error!("Failed to open PTY: {}", e);
+                format!("Failed to open PTY: {}", e)
+            })?;
 
         let shell_cmd = shell.unwrap_or_else(|| "powershell.exe".to_string());
         let mut cmd = CommandBuilder::new(&shell_cmd);
@@ -62,18 +67,27 @@ impl PtySession {
 
         let child = pair.slave
             .spawn_command(cmd)
-            .map_err(|e| format!("Failed to spawn shell: {}", e))?;
+            .map_err(|e| {
+                log::error!("Failed to spawn shell {:?}: {}", shell_cmd, e);
+                format!("Failed to spawn shell: {}", e)
+            })?;
         let killer = child.clone_killer();
 
         let reader = pair
             .master
             .try_clone_reader()
-            .map_err(|e| format!("Failed to clone PTY reader: {}", e))?;
+            .map_err(|e| {
+                log::error!("Failed to clone PTY reader: {}", e);
+                format!("Failed to clone PTY reader: {}", e)
+            })?;
 
         let writer = pair
             .master
             .take_writer()
-            .map_err(|e| format!("Failed to take PTY writer: {}", e))?;
+            .map_err(|e| {
+                log::error!("Failed to take PTY writer: {}", e);
+                format!("Failed to take PTY writer: {}", e)
+            })?;
 
         let session = PtySession {
             writer: Arc::new(Mutex::new(writer)),
@@ -88,11 +102,20 @@ impl PtySession {
     }
 
     pub fn write_data(&self, data: &[u8]) -> Result<(), String> {
-        let mut writer = self.writer.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let mut writer = self.writer.lock().map_err(|e| {
+            log::error!("PTY writer lock error: {}", e);
+            format!("Lock error: {}", e)
+        })?;
         writer
             .write_all(data)
-            .map_err(|e| format!("Write error: {}", e))?;
-        writer.flush().map_err(|e| format!("Flush error: {}", e))?;
+            .map_err(|e| {
+                log::error!("PTY write error: {}", e);
+                format!("Write error: {}", e)
+            })?;
+        writer.flush().map_err(|e| {
+            log::error!("PTY flush error: {}", e);
+            format!("Flush error: {}", e)
+        })?;
         Ok(())
     }
 
@@ -104,10 +127,14 @@ impl PtySession {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|e| format!("Resize error: {}", e))
+            .map_err(|e| {
+                log::error!("PTY resize error: {}", e);
+                format!("Resize error: {}", e)
+            })
     }
 
     pub fn kill(&mut self) {
+        log::debug!("Killing PTY session");
         let _ = self.killer.kill();
     }
 }

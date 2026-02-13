@@ -1,6 +1,6 @@
 import type { Session, SavedSession, SavedWorkspace } from "../types";
 import type { PaneNode } from "./paneLayout";
-import { serializeTerminal } from "./terminal";
+import { serializeTerminal, getTerminal } from "./terminal";
 import { saveScrollback } from "./ipc";
 
 const STORAGE_KEY = "switchboard:workspace";
@@ -15,14 +15,19 @@ export function buildSavedWorkspace(
   focusedPaneId: string | null,
   sessionCounter: number
 ): SavedWorkspace {
-  const savedSessions: SavedSession[] = sessions.map((s) => ({
-    id: s.id,
-    name: s.name,
-    repo: s.repo,
-    working_dir: s.working_dir,
-    repoColor: s.repoColor,
-    group: s.group,
-  }));
+  const savedSessions: SavedSession[] = sessions.map((s) => {
+    const inst = getTerminal(s.id);
+    return {
+      id: s.id,
+      name: s.name,
+      repo: s.repo,
+      working_dir: s.working_dir,
+      repoColor: s.repoColor,
+      group: s.group,
+      cols: inst?.terminal.cols,
+      rows: inst?.terminal.rows,
+    };
+  });
 
   return {
     version: 1,

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tauri::{image::Image, Emitter, Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use log;
 use uuid::Uuid;
 
 struct AppState {
@@ -28,6 +29,8 @@ async fn create_session(
     let r = rows.unwrap_or(30);
     let cfg = load_config();
 
+    log::info!("Creating session id={} name={:?} repo={:?} working_dir={:?} cols={} rows={}", id, name, repo, working_dir, c, r);
+
     state.pty_manager.create_session(
         id.clone(),
         name.clone(),
@@ -37,7 +40,10 @@ async fn create_session(
         r,
         Some(cfg.shell),
         app_handle,
-    )?;
+    ).map_err(|e| {
+        log::error!("Failed to create session id={}: {}", id, e);
+        e
+    })?;
 
     Ok(SessionInfo {
         id,
@@ -52,6 +58,7 @@ async fn close_session(
     state: State<'_, Arc<AppState>>,
     session_id: String,
 ) -> Result<(), String> {
+    log::info!("Closing session id={}", session_id);
     state.pty_manager.close_session(&session_id)
 }
 
@@ -73,6 +80,7 @@ async fn resize_session(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
+    log::debug!("Resizing session id={} cols={} rows={}", session_id, cols, rows);
     state.pty_manager.resize_session(&session_id, cols, rows)
 }
 
@@ -92,6 +100,7 @@ async fn rename_session(
 
 #[tauri::command]
 async fn get_config() -> Result<Config, String> {
+    log::debug!("Loading config");
     Ok(load_config())
 }
 
@@ -109,20 +118,28 @@ fn scrollback_dir() -> Result<std::path::PathBuf, String> {
 
 #[tauri::command]
 async fn save_scrollback(session_id: String, data: String) -> Result<(), String> {
+    log::debug!("Saving scrollback for session id={}", session_id);
     let dir = scrollback_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join(format!("{}.txt", session_id));
-    std::fs::write(&path, data.as_bytes()).map_err(|e| e.to_string())
+    std::fs::write(&path, data.as_bytes()).map_err(|e| {
+        log::error!("Failed to save scrollback for session id={}: {}", session_id, e);
+        e.to_string()
+    })
 }
 
 #[tauri::command]
 async fn load_scrollback(session_id: String) -> Result<String, String> {
+    log::debug!("Loading scrollback for session id={}", session_id);
     let dir = scrollback_dir()?;
     let path = dir.join(format!("{}.txt", session_id));
     match std::fs::read_to_string(&path) {
         Ok(content) => Ok(content),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(e.to_string()),
+        Err(e) => {
+            log::error!("Failed to load scrollback for session id={}: {}", session_id, e);
+            Err(e.to_string())
+        }
     }
 }
 
@@ -159,6 +176,8 @@ pub fn run() {
     let ctrl_v = Shortcut::new(Some(Modifiers::CONTROL), Code::KeyV);
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_log::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -168,6 +187,7 @@ pub fn run() {
                     if event.state() == ShortcutState::Pressed {
                         if let Ok(text) = app.clipboard().read_text() {
                             if !text.is_empty() {
+                                log::debug!("Clipboard paste triggered, content length={}", text.len());
                                 let _ = app.emit("clipboard-paste", text);
                             }
                         }
@@ -197,8 +217,10 @@ pub fn run() {
                 tauri::WindowEvent::Focused(focused) => {
                     let app = window.app_handle();
                     if *focused {
+                        log::debug!("Window focused, registering Ctrl+V shortcut");
                         let _ = app.global_shortcut().register(ctrl_v);
                     } else {
+                        log::debug!("Window unfocused, unregistering Ctrl+V shortcut");
                         let _ = app.global_shortcut().unregister(ctrl_v);
                     }
                 }

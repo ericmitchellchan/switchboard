@@ -37,9 +37,14 @@ impl PtyManager {
             let mut sessions = self
                 .sessions
                 .lock()
-                .map_err(|e| format!("Lock error: {}", e))?;
+                .map_err(|e| {
+                    log::error!("Session lock error on create: {}", e);
+                    format!("Lock error: {}", e)
+                })?;
             sessions.insert(id.clone(), session);
         }
+
+        log::info!("Session created id={}, spawning reader thread", id);
 
         // Spawn background reader thread
         let session_id = id.clone();
@@ -55,9 +60,13 @@ impl PtyManager {
         let mut sessions = self
             .sessions
             .lock()
-            .map_err(|e| format!("Lock error: {}", e))?;
+            .map_err(|e| {
+                log::error!("Session lock error on close: {}", e);
+                format!("Lock error: {}", e)
+            })?;
         if let Some(mut session) = sessions.remove(id) {
             session.kill();
+            log::info!("Session removed id={}", id);
         }
         Ok(())
     }
@@ -123,6 +132,7 @@ fn read_pty_output(mut reader: Box<dyn Read + Send>, session_id: String, app_han
         match reader.read(&mut buf) {
             Ok(0) => {
                 // EOF — process exited
+                log::debug!("PTY reader EOF for session id={}", session_id);
                 let _ = app_handle.emit(&exited_event, ());
                 break;
             }
@@ -130,7 +140,8 @@ fn read_pty_output(mut reader: Box<dyn Read + Send>, session_id: String, app_han
                 let encoded = BASE64.encode(&buf[..n]);
                 let _ = app_handle.emit(&output_event, encoded);
             }
-            Err(_) => {
+            Err(e) => {
+                log::error!("PTY read error for session id={}: {}", session_id, e);
                 let _ = app_handle.emit(&exited_event, ());
                 break;
             }

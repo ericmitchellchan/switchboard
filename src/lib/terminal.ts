@@ -5,6 +5,7 @@ import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { open } from "@tauri-apps/plugin-shell";
+import { log } from "./logger";
 
 const THEME = {
   background: "#0C0C0E",
@@ -54,10 +55,15 @@ export function setTerminalConfig(cfg: { fontSize?: number; fontFamily?: string 
   if (cfg.fontFamily !== undefined) terminalConfig.fontFamily = `'${cfg.fontFamily}', 'Cascadia Code', 'SF Mono', monospace`;
 }
 
-export function createTerminal(sessionId: string): TerminalInstance {
+export function createTerminal(
+  sessionId: string,
+  opts?: { cols?: number; rows?: number }
+): TerminalInstance {
   // Return existing if already created
   const existing = terminalMap.get(sessionId);
   if (existing) return existing;
+
+  log.debug(`Creating terminal for session id=${sessionId} cols=${opts?.cols} rows=${opts?.rows}`);
 
   const terminal = new Terminal({
     fontFamily: terminalConfig.fontFamily,
@@ -70,6 +76,8 @@ export function createTerminal(sessionId: string): TerminalInstance {
     allowProposedApi: true,
     convertEol: true,
     screenReaderMode: false,
+    ...(opts?.cols ? { cols: opts.cols } : {}),
+    ...(opts?.rows ? { rows: opts.rows } : {}),
   });
 
   const fitAddon = new FitAddon();
@@ -103,7 +111,9 @@ export function attachToDOM(sessionId: string, container: HTMLElement, withWebGL
   const instance = terminalMap.get(sessionId);
   if (!instance) return;
 
-  const { terminal, fitAddon } = instance;
+  log.debug(`Attaching terminal to DOM id=${sessionId} withWebGL=${withWebGL}`);
+
+  const { terminal } = instance;
 
   // Open terminal into the container
   if (!terminal.element) {
@@ -117,11 +127,11 @@ export function attachToDOM(sessionId: string, container: HTMLElement, withWebGL
     enableWebGL(sessionId);
   }
 
-  // Fit to container and scroll to bottom (reattach can leave viewport mid-scrollback)
-  requestAnimationFrame(() => {
-    fitAddon.fit();
-    terminal.scrollToBottom();
-  });
+  // NOTE: Do NOT call fit()/scrollToBottom() here.  TerminalPane owns
+  // all fit timing via a double-RAF to ensure the container layout has
+  // fully settled before measuring.  A competing fit() here would read
+  // stale dimensions and cause xterm to reflow its buffer with the
+  // wrong column count, producing garbled text and broken scroll.
 }
 
 export function enableWebGL(sessionId: string): void {
@@ -131,12 +141,15 @@ export function enableWebGL(sessionId: string): void {
   try {
     const webglAddon = new WebglAddon();
     webglAddon.onContextLoss(() => {
+      log.warn(`WebGL context lost for session id=${sessionId}`);
       webglAddon.dispose();
       instance.webglAddon = null;
     });
     instance.terminal.loadAddon(webglAddon);
     instance.webglAddon = webglAddon;
-  } catch {
+    log.debug(`WebGL enabled for session id=${sessionId}`);
+  } catch (e) {
+    log.warn(`Failed to enable WebGL for session id=${sessionId}: ${e}`);
     instance.webglAddon = null;
   }
 }
@@ -145,6 +158,7 @@ export function disableWebGL(sessionId: string): void {
   const instance = terminalMap.get(sessionId);
   if (!instance || !instance.webglAddon) return;
 
+  log.debug(`Disabling WebGL for session id=${sessionId}`);
   instance.webglAddon.dispose();
   instance.webglAddon = null;
 }
@@ -174,6 +188,7 @@ export function disposeTerminal(sessionId: string): void {
   const instance = terminalMap.get(sessionId);
   if (!instance) return;
 
+  log.debug(`Disposing terminal for session id=${sessionId}`);
   if (instance.webglAddon) {
     instance.webglAddon.dispose();
   }
@@ -186,7 +201,8 @@ export function serializeTerminal(sessionId: string): string | null {
   if (!instance) return null;
   try {
     return instance.serializeAddon.serialize();
-  } catch {
+  } catch (e) {
+    log.warn(`Failed to serialize terminal for session id=${sessionId}: ${e}`);
     return null;
   }
 }
@@ -209,7 +225,8 @@ export function fitTerminal(sessionId: string): { cols: number; rows: number } |
       cols: instance.terminal.cols,
       rows: instance.terminal.rows,
     };
-  } catch {
+  } catch (e) {
+    log.warn(`Failed to fit terminal for session id=${sessionId}: ${e}`);
     return null;
   }
 }

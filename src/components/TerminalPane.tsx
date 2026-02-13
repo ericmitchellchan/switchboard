@@ -22,6 +22,7 @@ import {
   clearWaiting,
 } from "../lib/statusDetector";
 import { detectTasks, detectResolutions } from "../lib/taskDetector";
+import { log } from "../lib/logger";
 import { SearchBar } from "./SearchBar";
 
 // Module-level map for event listener cleanup functions
@@ -76,6 +77,8 @@ export function TerminalPane({
     if (setupDone.current.has(sessionId)) return;
     setupDone.current.add(sessionId);
 
+    log.debug(`Wiring session id=${sessionId}`);
+
     const instance = getTerminal(sessionId);
     if (!instance) return;
 
@@ -129,8 +132,8 @@ export function TerminalPane({
           return;
         }
         processPtyChunk(bytes);
-      } catch {
-        // ignore decode errors
+      } catch (e) {
+        log.warn(`Base64 decode error for session id=${sessionId}: ${e}`);
       }
     }).then(pushCleanup);
 
@@ -148,13 +151,16 @@ export function TerminalPane({
 
     // Restore scrollback for sessions restored from a saved workspace (once, gated by setupDone)
     if (restoredFromId) {
+      log.debug(`Restoring scrollback for session id=${sessionId} from=${restoredFromId}`);
       loadScrollback(restoredFromId).then((content) => {
         if (content) writeRestoreContent(sessionId, content);
+        log.debug(`Scrollback restored for session id=${sessionId}`);
         // Flush any PTY output that arrived during restore
         const buffered = pendingOutput;
         pendingOutput = null;
         if (buffered) for (const chunk of buffered) processPtyChunk(chunk);
-      }).catch(() => {
+      }).catch((e) => {
+        log.warn(`Failed to restore scrollback for session id=${sessionId}: ${e}`);
         // On error, flush buffer anyway so output isn't lost
         const buffered = pendingOutput;
         pendingOutput = null;
@@ -170,22 +176,31 @@ export function TerminalPane({
 
     const sessionId = session.id;
 
-    // Create terminal if it doesn't exist
-    createTerminal(sessionId);
+    // Create terminal if it doesn't exist (pass saved dims for restored sessions)
+    createTerminal(sessionId, { cols: session.cols, rows: session.rows });
     wireSession(sessionId, session.restoredFromId);
+
+    // Hide until fit completes to prevent 2-frame flash at wrong size
+    container.style.opacity = "0";
 
     // Attach to DOM
     attachToDOM(sessionId, container);
 
-    // Do an initial resize to sync terminal size with PTY
+    // Use a double-RAF so the browser fully computes layout before we
+    // measure the container.  A single RAF fires before layout settles,
+    // causing fit() to read a stale clientHeight → wrong row count →
+    // max-scroll too small → user can't scroll to the real bottom.
     requestAnimationFrame(() => {
-      const dims = fitTerminal(sessionId);
-      if (dims) {
-        resizeSession(sessionId, dims.cols, dims.rows).catch(console.error);
-      }
-      // Ensure viewport is at the bottom after reattach
-      const inst = getTerminal(sessionId);
-      if (inst) inst.terminal.scrollToBottom();
+      requestAnimationFrame(() => {
+        const dims = fitTerminal(sessionId);
+        if (dims) {
+          resizeSession(sessionId, dims.cols, dims.rows).catch(console.error);
+        }
+        const inst = getTerminal(sessionId);
+        if (inst) inst.terminal.scrollToBottom();
+        // Reveal after fit — GPU-composited transition avoids layout thrash
+        container.style.opacity = "1";
+      });
     });
 
     return () => {
@@ -203,9 +218,18 @@ export function TerminalPane({
       if (resizeTimer) clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
         if (!mounted) return;
+        // Check if user is at the bottom before reflow changes line count
+        const inst = getTerminal(session.id);
+        const wasAtBottom = inst
+          ? inst.terminal.buffer.active.baseY + inst.terminal.rows >= inst.terminal.buffer.active.length
+          : false;
         const dims = fitTerminal(session.id);
         if (dims) {
           resizeSession(session.id, dims.cols, dims.rows).catch(console.error);
+        }
+        // Preserve scroll position: if user was at bottom, stay there
+        if (wasAtBottom && inst) {
+          inst.terminal.scrollToBottom();
         }
       }, 100);
     };
@@ -266,6 +290,7 @@ export function TerminalPane({
           height: "100%",
           backgroundColor: "#0C0C0E",
           overflow: "hidden",
+          transition: "opacity 0.05s",
         }}
       />
     </div>

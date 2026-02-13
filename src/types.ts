@@ -12,6 +12,8 @@ export interface Session extends SessionInfo {
   repoColor?: string;
   group?: string;
   restoredFromId?: string;
+  cols?: number;
+  rows?: number;
 }
 
 export interface RepoConfig {
@@ -52,6 +54,8 @@ export interface SavedSession {
   working_dir: string;
   repoColor?: string;
   group?: string;
+  cols?: number;
+  rows?: number;
 }
 
 export interface SavedWorkspace {

@@ -19,6 +19,11 @@ export interface ShortcutActions {
 
 // Keys we intercept from xterm.js
 function isOurShortcut(e: KeyboardEvent): boolean {
+  // F5 reload (no modifier needed)
+  if (e.key === "F5") return true;
+  // Ctrl+Shift+R reload
+  if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "r") return true;
+
   if (!e.ctrlKey) return false;
   const key = e.key.toLowerCase();
 
@@ -93,6 +98,13 @@ export function useKeyboardShortcuts(
   // Global keyboard listener
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // F5 or Ctrl+Shift+R — reload page (Tauri WebView2 doesn't handle F5)
+      if (e.key === "F5" || (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "r")) {
+        e.preventDefault();
+        window.location.reload();
+        return;
+      }
+
       if (!e.ctrlKey) return;
 
       const key = e.key.toLowerCase();

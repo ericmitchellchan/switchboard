@@ -1,6 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import type { SessionInfo, Config } from "../types";
+import { log } from "./logger";
 
 export async function createSession(
   name: string,
@@ -9,10 +16,12 @@ export async function createSession(
   cols?: number,
   rows?: number
 ): Promise<SessionInfo> {
+  log.debug(`IPC createSession name=${name} repo=${repo} working_dir=${working_dir}`);
   return invoke("create_session", { name, repo, workingDir: working_dir, cols, rows });
 }
 
 export async function closeSession(sessionId: string): Promise<void> {
+  log.debug(`IPC closeSession id=${sessionId}`);
   return invoke("close_session", { sessionId });
 }
 
@@ -20,6 +29,7 @@ export async function writeToSession(
   sessionId: string,
   data: string
 ): Promise<void> {
+  log.debug(`IPC writeToSession id=${sessionId}`);
   return invoke("write_to_session", { sessionId, data });
 }
 
@@ -28,6 +38,7 @@ export async function resizeSession(
   cols: number,
   rows: number
 ): Promise<void> {
+  log.debug(`IPC resizeSession id=${sessionId} cols=${cols} rows=${rows}`);
   return invoke("resize_session", { sessionId, cols, rows });
 }
 
@@ -86,4 +97,19 @@ export function onSessionExited(
   return listen(`session:exited:${sessionId}`, () => {
     callback();
   });
+}
+
+export function flashTaskbar() {
+  // 2 = Informational (non-critical flash), 1 = Critical (continuous flash)
+  getCurrentWindow().requestUserAttention(2).catch(() => {});
+}
+
+export async function notify(title: string, body: string) {
+  try {
+    let granted = await isPermissionGranted();
+    if (!granted) granted = (await requestPermission()) === "granted";
+    if (granted) sendNotification({ title, body });
+  } catch {
+    // Notification API unavailable — silently ignore
+  }
 }

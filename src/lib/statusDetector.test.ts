@@ -89,6 +89,25 @@ describe("pattern matching — waiting", () => {
     processOutput(SID, "\x1b[1;33m(y/n)\x1b[0m", cb);
     expect(cb).toHaveBeenCalledWith(SID, "waiting");
   });
+
+  it("'Confirmed' does NOT trigger waiting (word-boundary check)", () => {
+    const cb = vi.fn();
+    processOutput(SID, "Confirmed: package installed", cb);
+    expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
+  });
+
+  it("'Confirmation' does NOT trigger waiting", () => {
+    const cb = vi.fn();
+    processOutput(SID, "Confirmation complete", cb);
+    expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
+  });
+
+  it("pattern inside terminal title (OSC) does NOT trigger waiting", () => {
+    const cb = vi.fn();
+    processOutput(SID, "\x1b]0;Confirm updates\x07", cb);
+    // OSC is stripped before matching, and the remaining text is non-meaningful
+    expect(cb).not.toHaveBeenCalled();
+  });
 });
 
 // ── Pattern matching — error ────────────────────────────────────
@@ -185,14 +204,44 @@ describe("state machine transitions", () => {
     expect(cb).toHaveBeenCalledWith(SID, "waiting");
   });
 
-  it("waiting → more output (no pattern) → stays 'waiting' (sticky)", () => {
+  it("waiting → 1-2 output chunks (no pattern) → stays 'waiting' (sticky)", () => {
     const cb = vi.fn();
     processOutput(SID, "(y/n)", cb);
     expect(cb).toHaveBeenCalledWith(SID, "waiting");
     cb.mockClear();
     processOutput(SID, "some normal output", cb);
-    // Should NOT transition away from waiting
     expect(cb).not.toHaveBeenCalled();
+    processOutput(SID, "more output", cb);
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it("waiting → 3 output chunks without re-match → sticky auto-expires → 'running'", () => {
+    const cb = vi.fn();
+    processOutput(SID, "(y/n)", cb);
+    expect(cb).toHaveBeenCalledWith(SID, "waiting");
+    cb.mockClear();
+    processOutput(SID, "chunk 1", cb);
+    processOutput(SID, "chunk 2", cb);
+    expect(cb).not.toHaveBeenCalled(); // still waiting
+    processOutput(SID, "chunk 3", cb);
+    expect(cb).toHaveBeenCalledWith(SID, "running"); // auto-expired
+  });
+
+  it("waiting pattern re-appearing resets the auto-expiry counter", () => {
+    const cb = vi.fn();
+    processOutput(SID, "(y/n)", cb);
+    cb.mockClear();
+    processOutput(SID, "chunk 1", cb);
+    processOutput(SID, "chunk 2", cb);
+    // Pattern appears again — counter resets
+    processOutput(SID, "(y/n)", cb);
+    expect(cb).not.toHaveBeenCalled(); // still waiting, no transition
+    // Need 3 MORE chunks to auto-expire
+    processOutput(SID, "chunk A", cb);
+    processOutput(SID, "chunk B", cb);
+    expect(cb).not.toHaveBeenCalled();
+    processOutput(SID, "chunk C", cb);
+    expect(cb).toHaveBeenCalledWith(SID, "running");
   });
 
   it("waiting → clearWaiting(id, callback) → 'running'", () => {

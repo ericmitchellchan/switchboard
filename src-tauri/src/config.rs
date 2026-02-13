@@ -52,12 +52,23 @@ fn config_path() -> PathBuf {
 
 pub fn load_config() -> Config {
     let path = config_path();
+    log::info!("Loading config from {:?}", path);
     if path.exists() {
         match fs::read_to_string(&path) {
-            Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
-            Err(_) => Config::default(),
+            Ok(contents) => match serde_json::from_str(&contents) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    log::error!("Failed to parse config: {}", e);
+                    Config::default()
+                }
+            },
+            Err(e) => {
+                log::error!("Failed to read config file: {}", e);
+                Config::default()
+            }
         }
     } else {
+        log::warn!("Config file not found at {:?}, using defaults", path);
         Config::default()
     }
 }

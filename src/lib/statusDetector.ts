@@ -1,13 +1,24 @@
 import type { AgentStatus } from "../types";
+import { log } from "./logger";
 
 const DONE_TIMEOUT_MS = 5_000;
+
+/** Number of meaningful output chunks (without a waiting pattern re-appearing)
+ *  after which stickyWaiting auto-clears. Prevents false-positive patterns
+ *  from keeping the status stuck on "waiting" while the agent is clearly working. */
+const STICKY_EXPIRY_CHUNKS = 3;
 
 // Matches ANSI escape sequences: CSI (ESC[...letter), OSC (ESC]...BEL), and 2-char escapes
 const ANSI_RE = /\x1b(?:\[[^a-zA-Z@]*[a-zA-Z@]|\][^\x07]*\x07?|[^[\]])/g;
 
+/** Strip ANSI escape sequences for clean pattern matching */
+function stripAnsi(text: string): string {
+  return text.replace(ANSI_RE, "");
+}
+
 /** Returns true if text contains visible characters after stripping ANSI sequences and control chars */
 function isMeaningfulOutput(text: string): boolean {
-  const stripped = text.replace(ANSI_RE, "").replace(/[\x00-\x1f\x7f]/g, "");
+  const stripped = stripAnsi(text).replace(/[\x00-\x1f\x7f]/g, "");
   return /\S/.test(stripped);
 }
 
@@ -20,7 +31,7 @@ const WAITING_PATTERNS = [
   /Allow this action/i,
   /Press any key/i,
   /Are you sure/i,
-  /Confirm/i,
+  /\bConfirm\b/i,
   /\? \[Y\/n\]/i,
   /\? \(Y\/n\)/i,
   /Enter a value/i,
@@ -41,8 +52,11 @@ interface DetectorState {
   lastOutputTime: number;
   currentStatus: AgentStatus;
   idleTimeoutId: ReturnType<typeof setTimeout> | null;
-  /** When true, "waiting" status persists until clearWaiting() is called */
+  /** When true, "waiting" status persists until clearWaiting() is called or auto-expires */
   stickyWaiting: boolean;
+  /** Meaningful output chunks since the last waiting pattern match.
+   *  Once this reaches STICKY_EXPIRY_CHUNKS, stickyWaiting auto-clears. */
+  chunksSinceWaiting: number;
 }
 
 const detectors = new Map<string, DetectorState>();
@@ -54,6 +68,7 @@ export function initDetector(sessionId: string): void {
     currentStatus: "running",
     idleTimeoutId: null,
     stickyWaiting: false,
+    chunksSinceWaiting: 0,
   });
 }
 
@@ -65,12 +80,15 @@ export function processOutput(
   const state = detectors.get(sessionId);
   if (!state) return;
 
-  // Always check for waiting/error patterns (they can appear in styled output)
+  // Strip ANSI before pattern matching so escape sequences (terminal titles,
+  // cursor movements, etc.) don't cause false-positive pattern matches
+  const clean = stripAnsi(text);
+
   let detectedWaiting = false;
   let detectedError = false;
 
   for (const p of WAITING_PATTERNS) {
-    if (p.test(text)) {
+    if (p.test(clean)) {
       detectedWaiting = true;
       break;
     }
@@ -78,7 +96,7 @@ export function processOutput(
 
   if (!detectedWaiting) {
     for (const p of ERROR_PATTERNS) {
-      if (p.test(text)) {
+      if (p.test(clean)) {
         detectedError = true;
         break;
       }
@@ -105,13 +123,27 @@ export function processOutput(
   if (detectedWaiting) {
     newStatus = "waiting";
     state.stickyWaiting = true;
+    state.chunksSinceWaiting = 0;
   } else if (state.stickyWaiting) {
-    newStatus = "waiting";
+    state.chunksSinceWaiting++;
+    if (state.chunksSinceWaiting >= STICKY_EXPIRY_CHUNKS) {
+      // Agent has produced enough output without a waiting pattern re-appearing —
+      // the earlier match was likely a false positive (e.g. "Confirmed" in output)
+      state.stickyWaiting = false;
+      state.chunksSinceWaiting = 0;
+      if (detectedError) {
+        newStatus = "error";
+      }
+      // else stays "running"
+    } else {
+      newStatus = "waiting";
+    }
   } else if (detectedError) {
     newStatus = "error";
   }
 
   if (newStatus !== state.currentStatus) {
+    log.debug(`Status transition id=${sessionId}: ${state.currentStatus} -> ${newStatus}`);
     state.currentStatus = newStatus;
     onStatusChange(sessionId, newStatus);
   }
@@ -147,6 +179,7 @@ export function markExited(
 ): void {
   const state = detectors.get(sessionId);
   if (!state) return;
+  log.debug(`Session exited id=${sessionId}`);
   if (state.idleTimeoutId !== null) {
     clearTimeout(state.idleTimeoutId);
     state.idleTimeoutId = null;

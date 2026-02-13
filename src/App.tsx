@@ -15,7 +15,7 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, renameSession, clearSessionScrollback, getHomeDir } from "./lib/ipc";
+import { createSession, closeSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify } from "./lib/ipc";
 import { disposeTerminal, getTerminal, setTerminalConfig } from "./lib/terminal";
 import {
   loadWorkspaceFromStorage,
@@ -28,6 +28,7 @@ import {
 import { remapSessionIds, getMaxPaneIdNumber, setPaneIdCounter, closePane, getVisibleSessionIds, findPaneBySessionId } from "./lib/paneLayout";
 import type { PaneNode } from "./lib/paneLayout";
 import { initTaskDetector, destroyTaskDetector } from "./lib/taskDetector";
+import { log, initLogger } from "./lib/logger";
 import "@xterm/xterm/css/xterm.css";
 
 export default function App() {
@@ -62,6 +63,9 @@ export default function App() {
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [newSessionDialogOpen, setNewSessionDialogOpen] = useState(false);
+
+  // Throttle notifications: don't re-notify the same session within 30s
+  const lastNotifyRef = useRef(new Map<string, number>());
 
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
@@ -118,7 +122,7 @@ export default function App() {
         paneLayout.focusOrSwapSession(info.id);
       }
     } catch (err) {
-      console.error("Failed to create session:", err);
+      log.error(`Failed to create session: ${err}`);
     }
   }, [doCreateSession, config.repos.length, paneLayout]);
 
@@ -133,7 +137,7 @@ export default function App() {
           paneLayout.focusOrSwapSession(info.id);
         }
       } catch (err) {
-        console.error("Failed to create session:", err);
+        log.error(`Failed to create session: ${err}`);
       }
     },
     [doCreateSession, paneLayout]
@@ -206,7 +210,7 @@ export default function App() {
       const info = await doCreateSession(name, "", homeDirRef.current);
       paneLayout.split("horizontal", info.id);
     } catch (err) {
-      console.error("Failed to create session for split:", err);
+      log.error(`Failed to create session for split: ${err}`);
     }
   }, [doCreateSession, paneLayout]);
 
@@ -218,7 +222,7 @@ export default function App() {
       const info = await doCreateSession(name, "", homeDirRef.current);
       paneLayout.split("vertical", info.id);
     } catch (err) {
-      console.error("Failed to create session for split:", err);
+      log.error(`Failed to create session for split: ${err}`);
     }
   }, [doCreateSession, paneLayout]);
 
@@ -240,6 +244,25 @@ export default function App() {
       } else if (status !== "waiting") {
         // Session left waiting state — dismiss any lingering toasts for it
         dismissBySessionId(sessionId);
+      }
+
+      // Desktop notifications when window is not focused
+      if ((status === "waiting" || status === "error") && !document.hasFocus()) {
+        flashTaskbar();
+
+        // Throttle: don't re-notify the same session within 30s
+        const now = Date.now();
+        const lastTime = lastNotifyRef.current.get(sessionId) ?? 0;
+        if (now - lastTime > 30_000) {
+          lastNotifyRef.current.set(sessionId, now);
+          const session = sessionsRef.current.find((s) => s.id === sessionId);
+          const name = session?.name ?? "Session";
+          if (status === "waiting") {
+            notify("Session needs input", `${name} is waiting for your response`);
+          } else {
+            notify("Session error", `${name} encountered an error`);
+          }
+        }
       }
     },
     [updateSessionStatus, addToast, dismissBySessionId]
@@ -270,7 +293,7 @@ export default function App() {
       const { exportSessionOutput } = await import("./lib/export");
       await exportSessionOutput(id, session.name);
     } catch (err) {
-      console.error("Export failed:", err);
+      log.error(`Export failed: ${err}`);
     }
   }, []);
 
@@ -303,6 +326,8 @@ export default function App() {
     const unlisten = listen<string>("clipboard-paste", (event) => {
       const text = event.payload;
       if (!text) return;
+
+      log.debug(`Clipboard paste received, length=${text.length}`);
 
       // If a non-terminal input is focused (e.g., dialog), paste into it
       const active = document.activeElement;
@@ -370,6 +395,9 @@ export default function App() {
     didInit.current = true;
 
     (async () => {
+      // Initialize logger first so all subsequent logs are captured
+      await initLogger();
+      log.info("Switchboard starting");
       // Resolve home directory before creating any sessions
       try {
         homeDirRef.current = await getHomeDir();
@@ -380,6 +408,7 @@ export default function App() {
       const savedWorkspace = loadWorkspaceFromStorage();
 
       if (savedWorkspace && savedWorkspace.sessions.length > 0) {
+        log.info(`Restoring workspace with ${savedWorkspace.sessions.length} sessions`);
         const idMap = new Map<string, string>();
         const newSessions: import("./types").Session[] = [];
         const restoredCounter = savedWorkspace.sessionCounter;
@@ -394,10 +423,12 @@ export default function App() {
               repoColor: saved.repoColor,
               group: saved.group,
               restoredFromId: saved.id,
+              cols: saved.cols,
+              rows: saved.rows,
             });
             initTaskDetector(info.id);
           } catch (err) {
-            console.error("Failed to restore session:", saved.name, err);
+            log.error(`Failed to restore session ${saved.name}: ${err}`);
           }
         }
 
@@ -411,7 +442,7 @@ export default function App() {
             initTaskDetector(info.id);
             paneLayout.initLayout(info.id);
           } catch (e) {
-            console.error("Failed to create session:", e);
+            log.error(`Failed to create session: ${e}`);
           }
           return;
         }
@@ -446,6 +477,7 @@ export default function App() {
         }
       } else {
         // Fresh start
+        log.info("No saved workspace, creating fresh session");
         sessionCounterRef.current++;
         const name = `Shell ${sessionCounterRef.current}`;
         try {
@@ -454,7 +486,7 @@ export default function App() {
           initTaskDetector(info.id);
           paneLayout.initLayout(info.id);
         } catch (err) {
-          console.error("Failed to create session:", err);
+          log.error(`Failed to create session: ${err}`);
         }
       }
     })();
