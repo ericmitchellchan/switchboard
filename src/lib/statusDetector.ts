@@ -2,6 +2,15 @@ import type { AgentStatus } from "../types";
 
 const DONE_TIMEOUT_MS = 5_000;
 
+// Matches ANSI escape sequences: CSI (ESC[...letter), OSC (ESC]...BEL), and 2-char escapes
+const ANSI_RE = /\x1b(?:\[[^a-zA-Z@]*[a-zA-Z@]|\][^\x07]*\x07?|[^[\]])/g;
+
+/** Returns true if text contains visible characters after stripping ANSI sequences and control chars */
+function isMeaningfulOutput(text: string): boolean {
+  const stripped = text.replace(ANSI_RE, "").replace(/[\x00-\x1f\x7f]/g, "");
+  return /\S/.test(stripped);
+}
+
 const WAITING_PATTERNS = [
   /\(y\/n\)/i,
   /\[y\/n\]/i,
@@ -56,38 +65,50 @@ export function processOutput(
   const state = detectors.get(sessionId);
   if (!state) return;
 
+  // Always check for waiting/error patterns (they can appear in styled output)
+  let detectedWaiting = false;
+  let detectedError = false;
+
+  for (const p of WAITING_PATTERNS) {
+    if (p.test(text)) {
+      detectedWaiting = true;
+      break;
+    }
+  }
+
+  if (!detectedWaiting) {
+    for (const p of ERROR_PATTERNS) {
+      if (p.test(text)) {
+        detectedError = true;
+        break;
+      }
+    }
+  }
+
+  // If no pattern matched and the output is just control sequences (cursor moves,
+  // title updates, etc.), ignore it — don't reset the timer or flip to "running"
+  if (!detectedWaiting && !detectedError && !isMeaningfulOutput(text)) {
+    return;
+  }
+
   state.lastOutputTime = Date.now();
 
-  // Clear existing idle timeout
+  // Clear existing done timeout
   if (state.idleTimeoutId !== null) {
     clearTimeout(state.idleTimeoutId);
     state.idleTimeoutId = null;
   }
 
-  // Priority: waiting > error > running
+  // Determine new status: waiting > error > running
   let newStatus: AgentStatus = "running";
 
-  for (const p of WAITING_PATTERNS) {
-    if (p.test(text)) {
-      newStatus = "waiting";
-      break;
-    }
-  }
-
-  if (newStatus === "waiting") {
+  if (detectedWaiting) {
+    newStatus = "waiting";
     state.stickyWaiting = true;
   } else if (state.stickyWaiting) {
-    // Keep waiting status until explicitly cleared by user input
     newStatus = "waiting";
-  }
-
-  if (newStatus !== "waiting") {
-    for (const p of ERROR_PATTERNS) {
-      if (p.test(text)) {
-        newStatus = "error";
-        break;
-      }
-    }
+  } else if (detectedError) {
+    newStatus = "error";
   }
 
   if (newStatus !== state.currentStatus) {
