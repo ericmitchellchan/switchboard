@@ -1,4 +1,4 @@
-export type AgentStatus = "running" | "waiting" | "idle" | "error" | "exited";
+export type AgentStatus = "running" | "waiting" | "done" | "error" | "exited";
 
 export interface SessionInfo {
   id: string;

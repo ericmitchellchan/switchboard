@@ -108,9 +108,10 @@ export function attachToDOM(sessionId: string, container: HTMLElement, withWebGL
     enableWebGL(sessionId);
   }
 
-  // Fit to container
+  // Fit to container and scroll to bottom (reattach can leave viewport mid-scrollback)
   requestAnimationFrame(() => {
     fitAddon.fit();
+    terminal.scrollToBottom();
   });
 }
 
@@ -184,7 +185,9 @@ export function serializeTerminal(sessionId: string): string | null {
 export function writeRestoreContent(sessionId: string, content: string): void {
   const instance = terminalMap.get(sessionId);
   if (!instance || !content) return;
-  instance.terminal.write(content);
+  instance.terminal.write(content, () => {
+    instance.terminal.scrollToBottom();
+  });
 }
 
 export function fitTerminal(sessionId: string): { cols: number; rows: number } | null {

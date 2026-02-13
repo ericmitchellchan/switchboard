@@ -13,7 +13,7 @@ export function useToasts() {
   const timersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
 
   const addToast = useCallback(
-    (sessionId: string, sessionName: string, message: string) => {
+    (sessionId: string, sessionName: string, message: string, persistent = false) => {
       const id = `${sessionId}-${Date.now()}`;
       const toast: ToastItem = {
         id,
@@ -23,14 +23,22 @@ export function useToasts() {
         createdAt: Date.now(),
       };
 
-      setToasts((prev) => [...prev, toast]);
+      setToasts((prev) => {
+        // Don't add duplicate toast for same session if one already exists
+        if (persistent && prev.some((t) => t.sessionId === sessionId)) {
+          return prev;
+        }
+        return [...prev, toast];
+      });
 
-      // Auto-dismiss after 5s
-      const timer = setTimeout(() => {
-        setToasts((prev) => prev.filter((t) => t.id !== id));
-        timersRef.current.delete(id);
-      }, 5000);
-      timersRef.current.set(id, timer);
+      if (!persistent) {
+        // Auto-dismiss after 5s
+        const timer = setTimeout(() => {
+          setToasts((prev) => prev.filter((t) => t.id !== id));
+          timersRef.current.delete(id);
+        }, 5000);
+        timersRef.current.set(id, timer);
+      }
 
       return id;
     },
@@ -46,5 +54,23 @@ export function useToasts() {
     }
   }, []);
 
-  return { toasts, addToast, dismissToast };
+  const dismissBySessionId = useCallback((sessionId: string) => {
+    setToasts((prev) => {
+      const keep: ToastItem[] = [];
+      for (const t of prev) {
+        if (t.sessionId === sessionId) {
+          const timer = timersRef.current.get(t.id);
+          if (timer) {
+            clearTimeout(timer);
+            timersRef.current.delete(t.id);
+          }
+        } else {
+          keep.push(t);
+        }
+      }
+      return keep;
+    });
+  }, []);
+
+  return { toasts, addToast, dismissToast, dismissBySessionId };
 }

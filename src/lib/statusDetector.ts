@@ -1,6 +1,6 @@
 import type { AgentStatus } from "../types";
 
-const IDLE_TIMEOUT_MS = 15_000;
+const DONE_TIMEOUT_MS = 5_000;
 
 const WAITING_PATTERNS = [
   /\(y\/n\)/i,
@@ -32,6 +32,8 @@ interface DetectorState {
   lastOutputTime: number;
   currentStatus: AgentStatus;
   idleTimeoutId: ReturnType<typeof setTimeout> | null;
+  /** When true, "waiting" status persists until clearWaiting() is called */
+  stickyWaiting: boolean;
 }
 
 const detectors = new Map<string, DetectorState>();
@@ -42,6 +44,7 @@ export function initDetector(sessionId: string): void {
     lastOutputTime: Date.now(),
     currentStatus: "running",
     idleTimeoutId: null,
+    stickyWaiting: false,
   });
 }
 
@@ -71,6 +74,13 @@ export function processOutput(
     }
   }
 
+  if (newStatus === "waiting") {
+    state.stickyWaiting = true;
+  } else if (state.stickyWaiting) {
+    // Keep waiting status until explicitly cleared by user input
+    newStatus = "waiting";
+  }
+
   if (newStatus !== "waiting") {
     for (const p of ERROR_PATTERNS) {
       if (p.test(text)) {
@@ -85,14 +95,22 @@ export function processOutput(
     onStatusChange(sessionId, newStatus);
   }
 
-  // Set up idle timeout
+  // Set up done timeout — only fires when actively running (not waiting/error)
   state.idleTimeoutId = setTimeout(() => {
     const s = detectors.get(sessionId);
-    if (s && s.currentStatus !== "exited") {
-      s.currentStatus = "idle";
-      onStatusChange(sessionId, "idle");
+    if (s && s.currentStatus === "running") {
+      s.currentStatus = "done";
+      onStatusChange(sessionId, "done");
     }
-  }, IDLE_TIMEOUT_MS);
+  }, DONE_TIMEOUT_MS);
+}
+
+/** Clear sticky waiting state when the user sends input (they responded to the prompt) */
+export function clearWaiting(sessionId: string): void {
+  const state = detectors.get(sessionId);
+  if (state) {
+    state.stickyWaiting = false;
+  }
 }
 
 export function markExited(

@@ -25,7 +25,7 @@ import {
   startPeriodicSave,
   stopPeriodicSave,
 } from "./lib/workspace";
-import { remapSessionIds, getMaxPaneIdNumber, setPaneIdCounter, closePane, getVisibleSessionIds } from "./lib/paneLayout";
+import { remapSessionIds, getMaxPaneIdNumber, setPaneIdCounter, closePane, getVisibleSessionIds, findPaneBySessionId } from "./lib/paneLayout";
 import type { PaneNode } from "./lib/paneLayout";
 import { initTaskDetector, destroyTaskDetector } from "./lib/taskDetector";
 import "@xterm/xterm/css/xterm.css";
@@ -56,8 +56,8 @@ export default function App() {
     bulkSetSessions,
   } = useSessions();
 
-  const { toasts, addToast, dismissToast } = useToasts();
-  const { activeTasks, completedTasks, addTask, addAutoTask, resolveByFingerprint, toggleTask, removeTask } = useTasks();
+  const { toasts, addToast, dismissToast, dismissBySessionId } = useToasts();
+  const { activeTasks, completedTasks, addTask, addAutoTask, resolveByFingerprint, toggleTask, removeTask, clearCompleted } = useTasks();
   const { sidebarState, cycleSidebar } = useSidebarState();
   const paneLayout = usePaneLayout();
 
@@ -76,11 +76,12 @@ export default function App() {
   const switchToSession = useCallback(
     (sessionId: string) => {
       switchToSessionDirect(sessionId);
+      dismissBySessionId(sessionId);
       if (paneLayout.root) {
         paneLayout.focusOrSwapSession(sessionId);
       }
     },
-    [switchToSessionDirect, paneLayout]
+    [switchToSessionDirect, dismissBySessionId, paneLayout]
   );
 
   // Derive active session from focused pane when split
@@ -164,6 +165,31 @@ export default function App() {
     }
   }, [removeSession, paneLayout]);
 
+  // Close a specific session by ID (from tab X button)
+  const handleCloseSpecificTab = useCallback(async (sessionId: string) => {
+    // If session is in a pane, close that pane first
+    if (paneLayout.root) {
+      const pane = findPaneBySessionId(paneLayout.root, sessionId);
+      if (pane) {
+        const newRoot = closePane(paneLayout.root, pane.id);
+        const stillVisible = newRoot ? getVisibleSessionIds(newRoot).includes(sessionId) : false;
+        paneLayout.close(pane.id);
+        if (stillVisible) return; // session still in another pane
+      }
+    }
+
+    try {
+      destroyTaskDetector(sessionId);
+      cleanupSessionListeners(sessionId);
+      disposeTerminal(sessionId);
+      await closeSession(sessionId);
+      clearSessionScrollback(sessionId).catch(() => {});
+    } catch {
+      // Session may already be gone
+    }
+    removeSession(sessionId);
+  }, [removeSession, paneLayout]);
+
   const handleClosePane = useCallback(() => {
     // Close pane but keep session alive
     if (!paneLayout.root || !paneLayout.focusedPaneId) return;
@@ -204,14 +230,17 @@ export default function App() {
   const handleStatusChange = useCallback(
     (sessionId: string, status: AgentStatus) => {
       updateSessionStatus(sessionId, status);
-      if (status === "waiting" && sessionId !== activeIdRef.current) {
+      if (status === "waiting" && sessionId !== effectiveActiveIdRef.current) {
         const session = sessionsRef.current.find((s) => s.id === sessionId);
         if (session) {
-          addToast(sessionId, session.name, "Needs your input");
+          addToast(sessionId, session.name, "Needs your input", true);
         }
+      } else if (status !== "waiting") {
+        // Session left waiting state — dismiss any lingering toasts for it
+        dismissBySessionId(sessionId);
       }
     },
-    [updateSessionStatus, addToast]
+    [updateSessionStatus, addToast, dismissBySessionId]
   );
 
   const handleRenameTab = useCallback(
@@ -441,6 +470,7 @@ export default function App() {
         sessions={sessions}
         activeId={effectiveActiveSessionId}
         onSelect={switchToSession}
+        onClose={handleCloseSpecificTab}
         onRename={handleRenameTab}
         waitingCount={waitingCount}
       />
@@ -533,6 +563,7 @@ export default function App() {
           onToggle={toggleTask}
           onRemove={removeTask}
           onAdd={addTask}
+          onClearCompleted={clearCompleted}
           onExpand={cycleSidebar}
           onSwitchToSession={switchToSession}
         />

@@ -8,6 +8,7 @@ interface TaskSidebarProps {
   onToggle: (id: string) => void;
   onRemove: (id: string) => void;
   onAdd: (text: string, priority: Task["priority"], source: Task["source"]) => void;
+  onClearCompleted: () => void;
   onExpand: () => void;
   onSwitchToSession?: (sessionId: string) => void;
 }
@@ -41,10 +42,12 @@ export function TaskSidebar({
   onToggle,
   onRemove,
   onAdd,
+  onClearCompleted,
   onExpand,
   onSwitchToSession,
 }: TaskSidebarProps) {
   const [inputValue, setInputValue] = useState("");
+  const [confirmClear, setConfirmClear] = useState(false);
 
   if (state === "hidden") return null;
 
@@ -268,14 +271,74 @@ export function TaskSidebar({
             <div
               style={{
                 padding: "8px 12px 4px",
-                fontFamily: "var(--font-mono)",
-                fontSize: 9,
-                fontWeight: 600,
-                color: "#3F3F46",
-                letterSpacing: "0.05em",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
               }}
             >
-              COMPLETED ({completedTasks.length})
+              <span
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 9,
+                  fontWeight: 600,
+                  color: "#3F3F46",
+                  letterSpacing: "0.05em",
+                }}
+              >
+                COMPLETED ({completedTasks.length})
+              </span>
+              {confirmClear ? (
+                <span style={{ display: "flex", gap: 4 }}>
+                  <button
+                    onClick={() => {
+                      onClearCompleted();
+                      setConfirmClear(false);
+                    }}
+                    style={{
+                      background: "none",
+                      border: "1px solid #EF4444",
+                      borderRadius: 3,
+                      cursor: "pointer",
+                      fontFamily: "var(--font-mono)",
+                      fontSize: 9,
+                      color: "#EF4444",
+                      padding: "1px 6px",
+                    }}
+                  >
+                    Yes, clear
+                  </button>
+                  <button
+                    onClick={() => setConfirmClear(false)}
+                    style={{
+                      background: "none",
+                      border: "1px solid #3F3F46",
+                      borderRadius: 3,
+                      cursor: "pointer",
+                      fontFamily: "var(--font-mono)",
+                      fontSize: 9,
+                      color: "#52525B",
+                      padding: "1px 6px",
+                    }}
+                  >
+                    No
+                  </button>
+                </span>
+              ) : (
+                <button
+                  onClick={() => setConfirmClear(true)}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 9,
+                    color: "#3F3F46",
+                    padding: 0,
+                  }}
+                >
+                  Clear
+                </button>
+              )}
             </div>
             {completedTasks.map((task) => (
               <ManualTaskRow

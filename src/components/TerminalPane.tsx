@@ -19,6 +19,7 @@ import {
   initDetector,
   processOutput,
   markExited,
+  clearWaiting,
 } from "../lib/statusDetector";
 import { SearchBar } from "./SearchBar";
 
@@ -81,6 +82,7 @@ export function TerminalPane({
 
     // User input -> PTY
     instance.terminal.onData((data: string) => {
+      clearWaiting(sessionId);
       writeToSession(sessionId, data).catch(console.error);
     });
 
@@ -167,6 +169,9 @@ export function TerminalPane({
       if (dims) {
         resizeSession(sessionId, dims.cols, dims.rows).catch(console.error);
       }
+      // Ensure viewport is at the bottom after reattach
+      const inst = getTerminal(sessionId);
+      if (inst) inst.terminal.scrollToBottom();
     });
 
     return () => {

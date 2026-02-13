@@ -48,6 +48,10 @@ impl PtySession {
         let mut cmd = CommandBuilder::new(&shell_cmd);
         cmd.cwd(&working_dir);
 
+        // Remove env vars that would prevent tools from launching inside Switchboard
+        // (e.g. Claude Code refuses to start if it detects a parent CLAUDECODE session)
+        cmd.env_remove("CLAUDECODE");
+
         let shell_lower = shell_cmd.to_lowercase();
         if shell_lower.contains("powershell") || shell_lower.contains("pwsh") {
             cmd.arg("-NoLogo");

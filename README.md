@@ -1,89 +1,82 @@
 # Switchboard
 
-A terminal manager built with Tauri v2, React 18, and xterm.js. Designed for running multiple AI coding agents (Claude Code, Cursor, etc.) side by side with status detection, task tracking, and workspace persistence.
+A terminal multiplexer for AI coding agents. Manage multiple PTY sessions in a tabbed, split-pane interface with real-time status detection, task tracking, and workspace persistence.
+
+Built with Tauri v2, React 18, TypeScript, and xterm.js.
 
 ## Features
 
-- **Tabbed terminal sessions** with split panes (horizontal/vertical binary tree layout)
-- **Agent status detection** — automatically detects running/waiting/idle/error/exited states from PTY output
-- **Toast notifications** when a background session needs your input
-- **Task sidebar** with auto-detection of build errors, test failures, and git conflicts
-- **Workspace persistence** — sessions, pane layout, and terminal scrollback survive app restarts
-- **Clipboard integration** — Ctrl+C copies selected text, Ctrl+V pastes (including Wispr Flow support via global shortcut)
-- **Terminal search** (Ctrl+F) with xterm.js search addon
-- **Repo-aware sessions** — configure repos in `switchboard.toml` for quick project switching
-- **WebGL rendering** with automatic fallback
-
-## Prerequisites
-
-- **Node.js** v22+ (ARM64 or x64)
-- **pnpm** (`npm install -g pnpm`)
-- **Rust** stable toolchain via rustup
-- **Visual Studio Build Tools** (MSVC linker + Windows SDK)
-
-## Getting Started
-
-```powershell
-# Install dependencies
-pnpm install
-
-# Run in development mode (sets up MSVC environment automatically)
-.\dev.ps1
-
-# Rust compile check only
-.\build.ps1
-```
+- **Tabbed terminal sessions** with per-tab PTY processes
+- **Split panes** — horizontal and vertical splits with resizable dividers
+- **Agent status detection** — automatically detects running, waiting (needs approval), done, and error states from terminal output
+- **Persistent notifications** — background tabs that need input show a sticky toast until you respond
+- **Task sidebar** — auto-detects build errors, test failures, and git conflicts; also supports manual notes
+- **Workspace persistence** — sessions, tabs, pane layout, and scrollback restored on restart
+- **Repo-aware sessions** — configure repos to get color-coded tabs and quick-launch via Ctrl+T
+- **Terminal search** — Ctrl+F in-terminal search powered by xterm.js addon-search
+- **Clipboard integration** — Ctrl+V paste works with Wispr Flow and other tools that simulate keystrokes
+- **Keyboard-driven** — full shortcut set for tab/pane management
 
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
 |---|---|
-| Ctrl+T | New tab |
-| Ctrl+W | Close tab and session |
+| Ctrl+T | New session |
+| Ctrl+W | Close tab + session |
 | Ctrl+Shift+W | Close pane only (keep session) |
 | Ctrl+[ / Ctrl+] | Previous / next tab |
 | Ctrl+1-9 | Jump to tab by index |
 | Ctrl+B | Toggle task sidebar |
-| Ctrl+F | Search in terminal |
-| Ctrl+\\ | Split pane horizontally (side by side) |
-| Ctrl+- | Split pane vertically (stacked) |
+| Ctrl+F | Terminal search |
+| Ctrl+\ | Split horizontal |
+| Ctrl+- | Split vertical |
 | Ctrl+Alt+Arrow | Move focus between panes |
-| Ctrl+C | Copy selection, or SIGINT if no selection |
-| Ctrl+V | Paste from clipboard |
 
-## Project Structure
+## Status Indicators
 
+Each tab shows a colored dot reflecting the session state:
+
+- **Blue (pulsing)** — Running: actively producing output
+- **Yellow (pulsing)** — Waiting: needs approval or input (y/n prompt, permission request)
+- **Green** — Done: output finished, ready for next command
+- **Red** — Error: error detected in output
+- **Gray** — Exited: process ended
+
+## Development
+
+### Prerequisites
+
+- Node.js (v22+)
+- pnpm
+- Rust toolchain (stable)
+- Visual Studio Build Tools (for MSVC linker on Windows)
+
+### Setup
+
+```bash
+pnpm install
 ```
-src/                    # React frontend
-  App.tsx               # Root component
-  types.ts              # TypeScript interfaces
-  components/           # UI components (TabBar, TerminalPane, StatusBar, etc.)
-  hooks/                # React hooks (useSessions, usePaneLayout, useTasks, etc.)
-  lib/                  # Core logic (terminal, IPC, status/task detection, workspace)
-src-tauri/              # Rust backend
-  src/lib.rs            # Tauri commands (session management, scrollback persistence)
-  src/pty/              # PTY session management (ConPTY on Windows)
-  src/config.rs         # Config loading from switchboard.toml
+
+### Dev
+
+```powershell
+# On Windows (sets MSVC env vars automatically):
+.\dev.ps1
+
+# Or manually:
+pnpm tauri dev
 ```
 
-## Configuration
+### Build
 
-Create a `switchboard.toml` in the app's config directory to define repos:
-
-```toml
-shell = "powershell.exe"
-
-[[repos]]
-path = "C:\\Users\\you\\projects\\my-app"
-color = "#60A5FA"
-group = "work"
+```powershell
+.\build.ps1
 ```
 
 ## Tech Stack
 
-- **Tauri v2** — native window, IPC, system access
-- **React 18** — UI rendering
-- **xterm.js v5** — terminal emulation (WebGL, search, serialize, fit addons)
-- **portable-pty 0.8.1** — PTY management (ConPTY on Windows)
-- **Vite** — frontend bundler
-- **TypeScript** — type safety throughout
+- **Frontend**: React 18, TypeScript, Vite
+- **Terminal**: xterm.js v5 (with WebGL, search, fit addons)
+- **Desktop**: Tauri v2
+- **PTY**: portable-pty 0.8.1
+- **Font**: JetBrains Mono (bundled)

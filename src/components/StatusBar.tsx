@@ -7,7 +7,7 @@ interface StatusBarProps {
   onToggleSidebar?: () => void;
 }
 
-const DISPLAY_ORDER: AgentStatus[] = ["running", "waiting", "idle", "error", "exited"];
+const DISPLAY_ORDER: AgentStatus[] = ["running", "waiting", "done", "error", "exited"];
 
 export function StatusBar({ sessions, taskCount, onToggleSidebar }: StatusBarProps) {
   const counts = new Map<AgentStatus, number>();

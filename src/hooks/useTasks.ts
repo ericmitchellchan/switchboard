@@ -17,7 +17,11 @@ function saveTasks(tasks: Task[]) {
 }
 
 export function useTasks() {
-  const [tasks, setTasks] = useState<Task[]>(loadTasks);
+  const [tasks, setTasks] = useState<Task[]>(() => {
+    // On mount, auto-clear completed tasks from previous sessions
+    const loaded = loadTasks();
+    return loaded.filter((t) => !t.done);
+  });
 
   useEffect(() => {
     saveTasks(tasks);
@@ -95,6 +99,10 @@ export function useTasks() {
     setTasks((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
+  const clearCompleted = useCallback(() => {
+    setTasks((prev) => prev.filter((t) => !t.done));
+  }, []);
+
   const activeTasks = tasks.filter((t) => !t.done);
   const completedTasks = tasks.filter((t) => t.done);
   const autoTasks = activeTasks.filter((t) => t.source === "auto");
@@ -111,5 +119,6 @@ export function useTasks() {
     resolveByFingerprint,
     toggleTask,
     removeTask,
+    clearCompleted,
   };
 }

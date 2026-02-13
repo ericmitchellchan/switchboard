@@ -7,6 +7,7 @@ interface TabBarProps {
   sessions: Session[];
   activeId: string | null;
   onSelect: (id: string) => void;
+  onClose: (id: string) => void;
   onRename: (id: string, newName: string) => void;
   waitingCount: number;
 }
@@ -15,6 +16,7 @@ export function TabBar({
   sessions,
   activeId,
   onSelect,
+  onClose,
   onRename,
   waitingCount,
 }: TabBarProps) {
@@ -23,6 +25,7 @@ export function TabBar({
   const [canScrollRight, setCanScrollRight] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const checkScroll = () => {
@@ -123,21 +126,6 @@ export function TabBar({
         >
           SWITCHBOARD
         </span>
-        {sessions.length > 0 && (
-          <span
-            style={{
-              fontSize: 10,
-              fontWeight: 700,
-              color: "#0A0A0B",
-              backgroundColor: "#A78BFA",
-              borderRadius: 4,
-              padding: "1px 5px",
-              fontFamily: "var(--font-mono)",
-            }}
-          >
-            {sessions.length}
-          </span>
-        )}
         {waitingCount > 0 && (
           <span
             style={{
@@ -208,10 +196,15 @@ export function TabBar({
             const showDivider = session.repo !== lastRepo && idx > 0;
             lastRepo = session.repo;
 
+            const isHovered = hoveredId === session.id;
+            const showClose = isActive || isHovered;
+
             return (
               <div
                 key={session.id}
                 data-session-id={session.id}
+                onMouseEnter={() => setHoveredId(session.id)}
+                onMouseLeave={() => setHoveredId(null)}
                 style={{
                   display: "flex",
                   alignItems: "stretch",
@@ -233,7 +226,7 @@ export function TabBar({
                     display: "flex",
                     alignItems: "center",
                     gap: 8,
-                    padding: "0 14px",
+                    padding: "0 6px 0 14px",
                     border: "none",
                     borderTop: isActive
                       ? `2px solid ${cfg.color}`
@@ -306,6 +299,38 @@ export function TabBar({
                       {session.repo}
                     </span>
                   )}
+                  <span
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onClose(session.id);
+                    }}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      width: 18,
+                      height: 18,
+                      borderRadius: 4,
+                      fontSize: 14,
+                      lineHeight: 1,
+                      color: showClose ? "#71717A" : "transparent",
+                      cursor: "pointer",
+                      transition: "color 0.1s, background-color 0.1s",
+                      backgroundColor: "transparent",
+                      marginLeft: 2,
+                      flexShrink: 0,
+                    }}
+                    onMouseEnter={(e) => {
+                      (e.currentTarget as HTMLElement).style.color = "#E4E4E7";
+                      (e.currentTarget as HTMLElement).style.backgroundColor = "#3F3F46";
+                    }}
+                    onMouseLeave={(e) => {
+                      (e.currentTarget as HTMLElement).style.color = showClose ? "#71717A" : "transparent";
+                      (e.currentTarget as HTMLElement).style.backgroundColor = "transparent";
+                    }}
+                  >
+                    {"\u00D7"}
+                  </span>
                 </button>
               </div>
             );
