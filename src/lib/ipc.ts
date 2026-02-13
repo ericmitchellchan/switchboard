@@ -46,6 +46,10 @@ export async function getConfig(): Promise<Config> {
   return invoke("get_config");
 }
 
+export async function getHomeDir(): Promise<string> {
+  return invoke("get_home_dir");
+}
+
 export async function saveScrollback(sessionId: string, data: string): Promise<void> {
   return invoke("save_scrollback", { sessionId, data });
 }
@@ -60,6 +64,10 @@ export async function clearScrollback(): Promise<void> {
 
 export async function clearSessionScrollback(sessionId: string): Promise<void> {
   return invoke("clear_session_scrollback", { sessionId });
+}
+
+export async function writeFile(path: string, content: string): Promise<void> {
+  return invoke("write_file", { path, content });
 }
 
 export function onSessionOutput(

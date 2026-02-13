@@ -96,6 +96,26 @@ export function TerminalPane({
       listenerCleanups.set(sessionId, arr);
     };
 
+    // Helper: process a single PTY output chunk (write + detect)
+    const processPtyChunk = (bytes: Uint8Array) => {
+      instance.terminal.write(bytes);
+      const decoder = sessionDecoders.get(sessionId);
+      const text = decoder ? decoder.decode(bytes, { stream: true }) : new TextDecoder().decode(bytes);
+      processOutput(sessionId, text, onStatusChangeRef.current);
+      if (onAutoTaskRef.current) {
+        const detected = detectTasks(sessionId, text);
+        for (const task of detected) onAutoTaskRef.current!(task, sessionId);
+      }
+      if (onResolveTaskRef.current) {
+        const resolved = detectResolutions(sessionId, text);
+        for (const prefix of resolved) onResolveTaskRef.current!(prefix);
+      }
+    };
+
+    // Buffer PTY output while scrollback is being restored to prevent
+    // the new shell's prompt from appearing before the old scrollback content.
+    let pendingOutput: Uint8Array[] | null = restoredFromId ? [] : null;
+
     // PTY output -> terminal + status detector + task detector
     onSessionOutput(sessionId, (b64data: string) => {
       try {
@@ -104,28 +124,11 @@ export function TerminalPane({
         for (let i = 0; i < binaryStr.length; i++) {
           bytes[i] = binaryStr.charCodeAt(i);
         }
-        instance.terminal.write(bytes);
-
-        // Decode as UTF-8 for text-based detection (regex needs proper unicode)
-        const decoder = sessionDecoders.get(sessionId);
-        const text = decoder ? decoder.decode(bytes, { stream: true }) : new TextDecoder().decode(bytes);
-        processOutput(sessionId, text, onStatusChangeRef.current);
-
-        // Task detection
-        if (onAutoTaskRef.current || onResolveTaskRef.current) {
-          if (onAutoTaskRef.current) {
-            const detected = detectTasks(sessionId, text);
-            for (const task of detected) {
-              onAutoTaskRef.current!(task, sessionId);
-            }
-          }
-          if (onResolveTaskRef.current) {
-            const resolved = detectResolutions(sessionId, text);
-            for (const prefix of resolved) {
-              onResolveTaskRef.current!(prefix);
-            }
-          }
+        if (pendingOutput !== null) {
+          pendingOutput.push(bytes);
+          return;
         }
+        processPtyChunk(bytes);
       } catch {
         // ignore decode errors
       }
@@ -147,7 +150,16 @@ export function TerminalPane({
     if (restoredFromId) {
       loadScrollback(restoredFromId).then((content) => {
         if (content) writeRestoreContent(sessionId, content);
-      }).catch(() => {});
+        // Flush any PTY output that arrived during restore
+        const buffered = pendingOutput;
+        pendingOutput = null;
+        if (buffered) for (const chunk of buffered) processPtyChunk(chunk);
+      }).catch(() => {
+        // On error, flush buffer anyway so output isn't lost
+        const buffered = pendingOutput;
+        pendingOutput = null;
+        if (buffered) for (const chunk of buffered) processPtyChunk(chunk);
+      });
     }
   }, []);
 

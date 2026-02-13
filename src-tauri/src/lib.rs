@@ -95,6 +95,13 @@ async fn get_config() -> Result<Config, String> {
     Ok(load_config())
 }
 
+#[tauri::command]
+async fn get_home_dir() -> Result<String, String> {
+    dirs::home_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .ok_or_else(|| "Cannot resolve home directory".to_string())
+}
+
 fn scrollback_dir() -> Result<std::path::PathBuf, String> {
     let base = dirs::data_local_dir().ok_or("Cannot resolve local data dir")?;
     Ok(base.join("switchboard").join("scrollback"))
@@ -138,6 +145,11 @@ async fn clear_session_scrollback(session_id: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn write_file(path: String, content: String) -> Result<(), String> {
+    std::fs::write(&path, content.as_bytes()).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app_state = Arc::new(AppState {
@@ -147,6 +159,7 @@ pub fn run() {
     let ctrl_v = Shortcut::new(Some(Modifiers::CONTROL), Code::KeyV);
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(
@@ -178,15 +191,30 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(move |window, event| {
-            // Register the global shortcut only while our window is focused
-            // so we don't steal Ctrl+V from other applications.
-            if let tauri::WindowEvent::Focused(focused) = event {
-                let app = window.app_handle();
-                if *focused {
-                    let _ = app.global_shortcut().register(ctrl_v);
-                } else {
-                    let _ = app.global_shortcut().unregister(ctrl_v);
+            match event {
+                // Register the global shortcut only while our window is focused
+                // so we don't steal Ctrl+V from other applications.
+                tauri::WindowEvent::Focused(focused) => {
+                    let app = window.app_handle();
+                    if *focused {
+                        let _ = app.global_shortcut().register(ctrl_v);
+                    } else {
+                        let _ = app.global_shortcut().unregister(ctrl_v);
+                    }
                 }
+                // Emit file paths when files are dropped onto the window
+                tauri::WindowEvent::DragDrop(drag_event) => {
+                    if let tauri::DragDropEvent::Drop { paths, .. } = drag_event {
+                        let path_strings: Vec<String> = paths
+                            .iter()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .collect();
+                        if !path_strings.is_empty() {
+                            let _ = window.emit("file-drop", path_strings);
+                        }
+                    }
+                }
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -201,6 +229,8 @@ pub fn run() {
             load_scrollback,
             clear_scrollback,
             clear_session_scrollback,
+            get_home_dir,
+            write_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

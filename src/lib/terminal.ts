@@ -3,6 +3,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
+import { WebLinksAddon } from "@xterm/addon-web-links";
+import { open } from "@tauri-apps/plugin-shell";
 
 const THEME = {
   background: "#0C0C0E",
@@ -35,6 +37,7 @@ export interface TerminalInstance {
   webglAddon: WebglAddon | null;
   searchAddon: SearchAddon;
   serializeAddon: SerializeAddon;
+  webLinksAddon: WebLinksAddon;
 }
 
 // Module-level map: keeps terminal instances alive across React renders
@@ -78,12 +81,18 @@ export function createTerminal(sessionId: string): TerminalInstance {
   const serializeAddon = new SerializeAddon();
   terminal.loadAddon(serializeAddon);
 
+  const webLinksAddon = new WebLinksAddon((_event, uri) => {
+    open(uri).catch(console.error);
+  });
+  terminal.loadAddon(webLinksAddon);
+
   const instance: TerminalInstance = {
     terminal,
     fitAddon,
     webglAddon: null,
     searchAddon,
     serializeAddon,
+    webLinksAddon,
   };
 
   terminalMap.set(sessionId, instance);

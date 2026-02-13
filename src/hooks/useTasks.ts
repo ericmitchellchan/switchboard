@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import type { Task } from "../types";
 
 const STORAGE_KEY = "switchboard:tasks";
@@ -103,10 +103,10 @@ export function useTasks() {
     setTasks((prev) => prev.filter((t) => !t.done));
   }, []);
 
-  const activeTasks = tasks.filter((t) => !t.done);
-  const completedTasks = tasks.filter((t) => t.done);
-  const autoTasks = activeTasks.filter((t) => t.source === "auto");
-  const manualTasks = activeTasks.filter((t) => t.source === "manual");
+  const activeTasks = useMemo(() => tasks.filter((t) => !t.done), [tasks]);
+  const completedTasks = useMemo(() => tasks.filter((t) => t.done), [tasks]);
+  const autoTasks = useMemo(() => activeTasks.filter((t) => t.source === "auto"), [activeTasks]);
+  const manualTasks = useMemo(() => activeTasks.filter((t) => t.source === "manual"), [activeTasks]);
 
   return {
     tasks,

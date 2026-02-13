@@ -14,6 +14,7 @@ export interface ShortcutActions {
   onSplitVertical?: () => void;
   onClosePane?: () => void;
   onMoveFocus?: (direction: "up" | "down" | "left" | "right") => void;
+  onExport?: () => void;
 }
 
 // Keys we intercept from xterm.js
@@ -36,8 +37,8 @@ function isOurShortcut(e: KeyboardEvent): boolean {
     return true;
   }
 
-  // Ctrl+Shift+W (close pane)
-  if (e.shiftKey && key === "w") return true;
+  // Ctrl+Shift+W (close pane), Ctrl+Shift+S (export)
+  if (e.shiftKey && (key === "w" || key === "s")) return true;
 
   // Ctrl+Alt+Arrow (move focus between panes)
   if (e.altKey && (key === "arrowup" || key === "arrowdown" || key === "arrowleft" || key === "arrowright")) {
@@ -120,11 +121,18 @@ export function useKeyboardShortcuts(
         return;
       }
 
-      // Ctrl+Shift+W — close pane only
-      if (e.shiftKey && key === "w") {
-        e.preventDefault();
-        a.onClosePane?.();
-        return;
+      // Ctrl+Shift shortcuts
+      if (e.shiftKey) {
+        if (key === "w") {
+          e.preventDefault();
+          a.onClosePane?.();
+          return;
+        }
+        if (key === "s") {
+          e.preventDefault();
+          a.onExport?.();
+          return;
+        }
       }
 
       switch (key) {

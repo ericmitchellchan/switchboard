@@ -15,7 +15,7 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, renameSession, clearSessionScrollback } from "./lib/ipc";
+import { createSession, closeSession, renameSession, clearSessionScrollback, getHomeDir } from "./lib/ipc";
 import { disposeTerminal, getTerminal, setTerminalConfig } from "./lib/terminal";
 import {
   loadWorkspaceFromStorage,
@@ -30,12 +30,9 @@ import type { PaneNode } from "./lib/paneLayout";
 import { initTaskDetector, destroyTaskDetector } from "./lib/taskDetector";
 import "@xterm/xterm/css/xterm.css";
 
-const DEFAULT_CWD = "C:\\Users\\ericm";
-
-let sessionCounter = 0;
-
 export default function App() {
   const sessionCounterRef = useRef(0);
+  const homeDirRef = useRef("");
 
   const config = useConfig();
 
@@ -97,9 +94,9 @@ export default function App() {
 
   // Helper: create a session and return its info
   const doCreateSession = useCallback(
-    async (name: string, repo: string, workingDir: string, repoColor?: string) => {
+    async (name: string, repo: string, workingDir: string, repoColor?: string, group?: string) => {
       const info = await createSession(name, repo, workingDir);
-      addSession({ ...info, status: "running", repoColor });
+      addSession({ ...info, status: "running", repoColor, group });
       initTaskDetector(info.id);
       return info;
     },
@@ -111,14 +108,14 @@ export default function App() {
       setNewSessionDialogOpen(true);
       return;
     }
-    sessionCounter++;
-    sessionCounterRef.current = sessionCounter;
-    const name = `Shell ${sessionCounter}`;
+    sessionCounterRef.current++;
+    const name = `Shell ${sessionCounterRef.current}`;
     try {
-      const info = await doCreateSession(name, "", DEFAULT_CWD);
-      // Init pane layout if this is the first session
+      const info = await doCreateSession(name, "", homeDirRef.current);
       if (!paneLayout.root) {
         paneLayout.initLayout(info.id);
+      } else {
+        paneLayout.focusOrSwapSession(info.id);
       }
     } catch (err) {
       console.error("Failed to create session:", err);
@@ -126,12 +123,14 @@ export default function App() {
   }, [doCreateSession, config.repos.length, paneLayout]);
 
   const handleCreateSession = useCallback(
-    async (name: string, repo: string, workingDir: string, repoColor?: string) => {
+    async (name: string, repo: string, workingDir: string, repoColor?: string, group?: string) => {
       setNewSessionDialogOpen(false);
       try {
-        const info = await doCreateSession(name, repo, workingDir, repoColor);
+        const info = await doCreateSession(name, repo, workingDir, repoColor, group);
         if (!paneLayout.root) {
           paneLayout.initLayout(info.id);
+        } else {
+          paneLayout.focusOrSwapSession(info.id);
         }
       } catch (err) {
         console.error("Failed to create session:", err);
@@ -155,14 +154,14 @@ export default function App() {
     }
 
     if (!sessionStillVisible) {
+      destroyTaskDetector(id);
+      cleanupSessionListeners(id);
+      disposeTerminal(id);
       try {
-        destroyTaskDetector(id);
-        cleanupSessionListeners(id);
-        disposeTerminal(id);
         await closeSession(id);
         clearSessionScrollback(id).catch(() => {});
       } catch {
-        // Session may already be gone
+        // PTY may already be gone
       }
       removeSession(id);
     }
@@ -181,14 +180,14 @@ export default function App() {
       }
     }
 
+    destroyTaskDetector(sessionId);
+    cleanupSessionListeners(sessionId);
+    disposeTerminal(sessionId);
     try {
-      destroyTaskDetector(sessionId);
-      cleanupSessionListeners(sessionId);
-      disposeTerminal(sessionId);
       await closeSession(sessionId);
       clearSessionScrollback(sessionId).catch(() => {});
     } catch {
-      // Session may already be gone
+      // PTY may already be gone
     }
     removeSession(sessionId);
   }, [removeSession, paneLayout]);
@@ -201,11 +200,10 @@ export default function App() {
 
   const handleSplitHorizontal = useCallback(async () => {
     if (!paneLayout.root) return;
-    sessionCounter++;
-    sessionCounterRef.current = sessionCounter;
-    const name = `Shell ${sessionCounter}`;
+    sessionCounterRef.current++;
+    const name = `Shell ${sessionCounterRef.current}`;
     try {
-      const info = await doCreateSession(name, "", DEFAULT_CWD);
+      const info = await doCreateSession(name, "", homeDirRef.current);
       paneLayout.split("horizontal", info.id);
     } catch (err) {
       console.error("Failed to create session for split:", err);
@@ -214,11 +212,10 @@ export default function App() {
 
   const handleSplitVertical = useCallback(async () => {
     if (!paneLayout.root) return;
-    sessionCounter++;
-    sessionCounterRef.current = sessionCounter;
-    const name = `Shell ${sessionCounter}`;
+    sessionCounterRef.current++;
+    const name = `Shell ${sessionCounterRef.current}`;
     try {
-      const info = await doCreateSession(name, "", DEFAULT_CWD);
+      const info = await doCreateSession(name, "", homeDirRef.current);
       paneLayout.split("vertical", info.id);
     } catch (err) {
       console.error("Failed to create session for split:", err);
@@ -264,6 +261,19 @@ export default function App() {
     [addAutoTask]
   );
 
+  const handleExport = useCallback(async () => {
+    const id = effectiveActiveIdRef.current;
+    if (!id) return;
+    const session = sessionsRef.current.find((s) => s.id === id);
+    if (!session) return;
+    try {
+      const { exportSessionOutput } = await import("./lib/export");
+      await exportSessionOutput(id, session.name);
+    } catch (err) {
+      console.error("Export failed:", err);
+    }
+  }, []);
+
   const toggleSearch = useCallback(() => {
     setSearchOpen((prev) => !prev);
   }, []);
@@ -281,6 +291,7 @@ export default function App() {
       onSplitVertical: handleSplitVertical,
       onClosePane: handleClosePane,
       onMoveFocus: paneLayout.moveFocus,
+      onExport: handleExport,
     },
     effectiveActiveSessionId
   );
@@ -319,6 +330,31 @@ export default function App() {
     };
   }, []);
 
+  // Listen for file drop events — paste file paths into the active terminal
+  useEffect(() => {
+    const unlisten = listen<string[]>("file-drop", (event) => {
+      const paths = event.payload;
+      if (!paths || paths.length === 0) return;
+
+      // Quote paths containing spaces, join with space separator
+      const formatted = paths
+        .map((p) => (p.includes(" ") ? `"${p}"` : p))
+        .join(" ");
+
+      const sessionId = effectiveActiveIdRef.current;
+      if (sessionId) {
+        const instance = getTerminal(sessionId);
+        if (instance) {
+          instance.terminal.paste(formatted);
+        }
+      }
+    });
+
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
   // Refs for periodic save to access latest state without re-creating the interval
   const sessionsRef2 = useRef(sessions);
   sessionsRef2.current = sessions;
@@ -333,14 +369,20 @@ export default function App() {
     if (didInit.current) return;
     didInit.current = true;
 
-    const savedWorkspace = loadWorkspaceFromStorage();
+    (async () => {
+      // Resolve home directory before creating any sessions
+      try {
+        homeDirRef.current = await getHomeDir();
+      } catch {
+        homeDirRef.current = "";
+      }
 
-    if (savedWorkspace && savedWorkspace.sessions.length > 0) {
-      // Restore from saved workspace
-      (async () => {
+      const savedWorkspace = loadWorkspaceFromStorage();
+
+      if (savedWorkspace && savedWorkspace.sessions.length > 0) {
         const idMap = new Map<string, string>();
         const newSessions: import("./types").Session[] = [];
-        let restoredCounter = savedWorkspace.sessionCounter;
+        const restoredCounter = savedWorkspace.sessionCounter;
 
         for (const saved of savedWorkspace.sessions) {
           try {
@@ -361,11 +403,10 @@ export default function App() {
 
         if (newSessions.length === 0) {
           // All restores failed — fall back to fresh session
-          sessionCounter++;
-          sessionCounterRef.current = sessionCounter;
-          const name = `Shell ${sessionCounter}`;
+          sessionCounterRef.current++;
+          const name = `Shell ${sessionCounterRef.current}`;
           try {
-            const info = await createSession(name, "", DEFAULT_CWD);
+            const info = await createSession(name, "", homeDirRef.current);
             addSession({ ...info, status: "running" });
             initTaskDetector(info.id);
             paneLayout.initLayout(info.id);
@@ -376,8 +417,7 @@ export default function App() {
         }
 
         // Remap pane layout IDs
-        sessionCounter = restoredCounter;
-        sessionCounterRef.current = sessionCounter;
+        sessionCounterRef.current = restoredCounter;
         const savedPaneLayout = savedWorkspace.paneLayout as PaneNode | null;
         let restoredRoot: PaneNode | null = null;
         let restoredFocusedPaneId: string | null = null;
@@ -402,23 +442,22 @@ export default function App() {
             paneLayout.focusPane(restoredFocusedPaneId);
           }
         } else {
-          // No saved pane layout — init with first session
           paneLayout.initLayout(newSessions[0].id);
         }
-      })();
-    } else {
-      // Fresh start
-      sessionCounter++;
-      sessionCounterRef.current = sessionCounter;
-      const name = `Shell ${sessionCounter}`;
-      createSession(name, "", DEFAULT_CWD)
-        .then((info) => {
+      } else {
+        // Fresh start
+        sessionCounterRef.current++;
+        const name = `Shell ${sessionCounterRef.current}`;
+        try {
+          const info = await createSession(name, "", homeDirRef.current);
           addSession({ ...info, status: "running" });
           initTaskDetector(info.id);
           paneLayout.initLayout(info.id);
-        })
-        .catch(console.error);
-    }
+        } catch (err) {
+          console.error("Failed to create session:", err);
+        }
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -603,7 +642,7 @@ function NewSessionDialogLazy({
   onClose,
 }: {
   repos: RepoConfig[];
-  onCreateSession: (name: string, repo: string, workingDir: string, repoColor?: string) => void;
+  onCreateSession: (name: string, repo: string, workingDir: string, repoColor?: string, group?: string) => void;
   onClose: () => void;
 }) {
   return (

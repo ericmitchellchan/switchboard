@@ -89,8 +89,8 @@ export function TabBar({
     setEditingId(null);
   };
 
-  // Group sessions by repo for dividers
-  let lastRepo = "";
+  // Group sessions by group/repo for dividers
+  let lastGroup = "";
 
   return (
     <div
@@ -193,8 +193,9 @@ export function TabBar({
           {sessions.map((session, idx) => {
             const isActive = session.id === activeId;
             const cfg = STATUS_CONFIGS[session.status] || STATUS_CONFIGS.running;
-            const showDivider = session.repo !== lastRepo && idx > 0;
-            lastRepo = session.repo;
+            const groupKey = session.group || session.repo || "";
+            const showDivider = groupKey !== lastGroup && idx > 0 && groupKey !== "";
+            lastGroup = groupKey;
 
             const isHovered = hoveredId === session.id;
             const showClose = isActive || isHovered;
@@ -212,13 +213,21 @@ export function TabBar({
                 }}
               >
                 {showDivider && (
-                  <div
-                    style={{
-                      width: 1,
-                      backgroundColor: "#27272A",
-                      margin: "8px 0",
-                    }}
-                  />
+                  <div style={{ display: "flex", alignItems: "center", paddingLeft: 4, gap: 4 }}>
+                    <div style={{ width: 1, backgroundColor: "#27272A", margin: "8px 0" }} />
+                    <span
+                      style={{
+                        fontFamily: "var(--font-mono)",
+                        fontSize: 8.5,
+                        fontWeight: 600,
+                        color: "#52525B",
+                        letterSpacing: "0.04em",
+                        padding: "0 4px",
+                      }}
+                    >
+                      {groupKey.toUpperCase()}
+                    </span>
+                  </div>
                 )}
                 <button
                   onClick={() => onSelect(session.id)}

@@ -3,7 +3,7 @@ import type { RepoConfig } from "../types";
 
 interface NewSessionDialogProps {
   repos: RepoConfig[];
-  onCreateSession: (name: string, repo: string, workingDir: string, repoColor?: string) => void;
+  onCreateSession: (name: string, repo: string, workingDir: string, repoColor?: string, group?: string) => void;
   onClose: () => void;
 }
 
@@ -62,7 +62,7 @@ export function NewSessionDialog({ repos, onCreateSession, onClose }: NewSession
       if (option.type === "plain") {
         onCreateSession("Shell", "", option.path);
       } else {
-        onCreateSession(option.name, option.name, option.path, option.color);
+        onCreateSession(option.name, option.name, option.path, option.color, option.group);
       }
     },
     [onCreateSession]
