@@ -17,6 +17,10 @@ export type PaneNode = PaneLeaf | PaneBranch;
 
 let paneIdCounter = 0;
 
+export function setPaneIdCounter(n: number): void {
+  paneIdCounter = n;
+}
+
 function nextPaneId(): string {
   return `pane-${++paneIdCounter}`;
 }
@@ -162,6 +166,30 @@ function getAllLeavesWithPath(node: PaneNode, path: string[] = []): LeafWithPath
     ...getAllLeavesWithPath(node.first, [...path, "first"]),
     ...getAllLeavesWithPath(node.second, [...path, "second"]),
   ];
+}
+
+export function remapSessionIds(root: PaneNode, idMap: Map<string, string>): PaneNode {
+  return mapNode(root, (node) => {
+    if (node.type === "leaf") {
+      const newId = idMap.get(node.sessionId);
+      if (newId) return { ...node, sessionId: newId };
+    }
+    return node;
+  });
+}
+
+export function getMaxPaneIdNumber(root: PaneNode): number {
+  let max = 0;
+  const walk = (node: PaneNode) => {
+    const match = node.id.match(/^pane-(\d+)$/);
+    if (match) max = Math.max(max, parseInt(match[1], 10));
+    if (node.type === "branch") {
+      walk(node.first);
+      walk(node.second);
+    }
+  };
+  walk(root);
+  return max;
 }
 
 // Generic tree mapper — applies fn bottom-up

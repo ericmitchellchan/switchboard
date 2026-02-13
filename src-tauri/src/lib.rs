@@ -95,6 +95,49 @@ async fn get_config() -> Result<Config, String> {
     Ok(load_config())
 }
 
+fn scrollback_dir() -> Result<std::path::PathBuf, String> {
+    let base = dirs::data_local_dir().ok_or("Cannot resolve local data dir")?;
+    Ok(base.join("switchboard").join("scrollback"))
+}
+
+#[tauri::command]
+async fn save_scrollback(session_id: String, data: String) -> Result<(), String> {
+    let dir = scrollback_dir()?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{}.txt", session_id));
+    std::fs::write(&path, data.as_bytes()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn load_scrollback(session_id: String) -> Result<String, String> {
+    let dir = scrollback_dir()?;
+    let path = dir.join(format!("{}.txt", session_id));
+    match std::fs::read_to_string(&path) {
+        Ok(content) => Ok(content),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+async fn clear_scrollback() -> Result<(), String> {
+    let dir = scrollback_dir()?;
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn clear_session_scrollback(session_id: String) -> Result<(), String> {
+    let dir = scrollback_dir()?;
+    let path = dir.join(format!("{}.txt", session_id));
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app_state = Arc::new(AppState {
@@ -147,6 +190,10 @@ pub fn run() {
             rename_session,
             list_sessions,
             get_config,
+            save_scrollback,
+            load_scrollback,
+            clear_scrollback,
+            clear_session_scrollback,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

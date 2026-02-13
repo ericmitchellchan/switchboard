@@ -2,6 +2,12 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
+#[cfg(windows)]
+extern "system" {
+    fn SetConsoleCP(wCodePageID: u32) -> i32;
+    fn SetConsoleOutputCP(wCodePageID: u32) -> i32;
+}
+
 pub struct PtySession {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
@@ -19,6 +25,13 @@ impl PtySession {
         rows: u16,
         shell: Option<String>,
     ) -> Result<(Self, Box<dyn Read + Send>), String> {
+        // Set parent process console to UTF-8 before creating ConPTY
+        #[cfg(windows)]
+        unsafe {
+            SetConsoleCP(65001);
+            SetConsoleOutputCP(65001);
+        }
+
         let pty_system = native_pty_system();
 
         let pair = pty_system
@@ -34,9 +47,12 @@ impl PtySession {
         let mut cmd = CommandBuilder::new(&shell_cmd);
         cmd.cwd(&working_dir);
 
-        // For PowerShell, disable the logo banner
-        if shell_cmd.to_lowercase().contains("powershell") {
+        let shell_lower = shell_cmd.to_lowercase();
+        if shell_lower.contains("powershell") || shell_lower.contains("pwsh") {
             cmd.arg("-NoLogo");
+            cmd.arg("-NoExit");
+            cmd.arg("-Command");
+            cmd.arg("chcp 65001 | Out-Null");
         }
 
         pair.slave

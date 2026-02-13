@@ -15,8 +15,18 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, renameSession } from "./lib/ipc";
+import { createSession, closeSession, renameSession, clearSessionScrollback } from "./lib/ipc";
 import { disposeTerminal, getTerminal } from "./lib/terminal";
+import {
+  loadWorkspaceFromStorage,
+  buildSavedWorkspace,
+  saveWorkspaceToStorage,
+  saveAllScrollbacks,
+  startPeriodicSave,
+  stopPeriodicSave,
+} from "./lib/workspace";
+import { remapSessionIds, getMaxPaneIdNumber, setPaneIdCounter } from "./lib/paneLayout";
+import type { PaneNode } from "./lib/paneLayout";
 import { initTaskDetector, destroyTaskDetector } from "./lib/taskDetector";
 import "@xterm/xterm/css/xterm.css";
 
@@ -38,6 +48,7 @@ export default function App() {
     switchToSession: switchToSessionDirect,
     switchByIndex,
     switchRelative,
+    bulkSetSessions,
   } = useSessions();
 
   const { toasts, addToast, dismissToast } = useToasts();
@@ -134,6 +145,7 @@ export default function App() {
       destroyTaskDetector(id);
       disposeTerminal(id);
       await closeSession(id);
+      clearSessionScrollback(id).catch(() => {});
     } catch {
       // Session may already be gone
     }
@@ -261,20 +273,143 @@ export default function App() {
     };
   }, []);
 
-  // Auto-create first session on mount
+  // Refs for periodic save to access latest state without re-creating the interval
+  const sessionsRef2 = useRef(sessions);
+  sessionsRef2.current = sessions;
+  const activeIdRef2 = useRef(activeSessionId);
+  activeIdRef2.current = activeSessionId;
+  const paneLayoutRef = useRef(paneLayout);
+  paneLayoutRef.current = paneLayout;
+
+  // Restore workspace or create fresh session on mount
   const didInit = useRef(false);
   useEffect(() => {
     if (didInit.current) return;
     didInit.current = true;
-    sessionCounter++;
-    const name = `Shell ${sessionCounter}`;
-    createSession(name, "", DEFAULT_CWD)
-      .then((info) => {
-        addSession({ ...info, status: "running" });
-        initTaskDetector(info.id);
-        paneLayout.initLayout(info.id);
-      })
-      .catch(console.error);
+
+    const savedWorkspace = loadWorkspaceFromStorage();
+
+    if (savedWorkspace && savedWorkspace.sessions.length > 0) {
+      // Restore from saved workspace
+      (async () => {
+        const idMap = new Map<string, string>();
+        const newSessions: import("./types").Session[] = [];
+        let restoredCounter = savedWorkspace.sessionCounter;
+
+        for (const saved of savedWorkspace.sessions) {
+          try {
+            const info = await createSession(saved.name, saved.repo, saved.working_dir);
+            idMap.set(saved.id, info.id);
+            newSessions.push({
+              ...info,
+              status: "running",
+              repoColor: saved.repoColor,
+              group: saved.group,
+              restoredFromId: saved.id,
+            });
+            initTaskDetector(info.id);
+          } catch (err) {
+            console.error("Failed to restore session:", saved.name, err);
+          }
+        }
+
+        if (newSessions.length === 0) {
+          // All restores failed — fall back to fresh session
+          sessionCounter++;
+          const name = `Shell ${sessionCounter}`;
+          try {
+            const info = await createSession(name, "", DEFAULT_CWD);
+            addSession({ ...info, status: "running" });
+            initTaskDetector(info.id);
+            paneLayout.initLayout(info.id);
+          } catch (e) {
+            console.error("Failed to create session:", e);
+          }
+          return;
+        }
+
+        // Remap pane layout IDs
+        sessionCounter = restoredCounter;
+        const savedPaneLayout = savedWorkspace.paneLayout as PaneNode | null;
+        let restoredRoot: PaneNode | null = null;
+        let restoredFocusedPaneId: string | null = null;
+
+        if (savedPaneLayout) {
+          restoredRoot = remapSessionIds(savedPaneLayout, idMap);
+          setPaneIdCounter(getMaxPaneIdNumber(restoredRoot));
+          restoredFocusedPaneId = savedWorkspace.focusedPaneId;
+        }
+
+        // Determine active session
+        const remappedActiveId = savedWorkspace.activeSessionId
+          ? idMap.get(savedWorkspace.activeSessionId) ?? newSessions[0].id
+          : newSessions[0].id;
+
+        // Bulk-set sessions and pane layout
+        bulkSetSessions(newSessions, remappedActiveId);
+
+        if (restoredRoot) {
+          paneLayout.setRoot(restoredRoot);
+          if (restoredFocusedPaneId) {
+            paneLayout.focusPane(restoredFocusedPaneId);
+          }
+        } else {
+          // No saved pane layout — init with first session
+          paneLayout.initLayout(newSessions[0].id);
+        }
+      })();
+    } else {
+      // Fresh start
+      sessionCounter++;
+      const name = `Shell ${sessionCounter}`;
+      createSession(name, "", DEFAULT_CWD)
+        .then((info) => {
+          addSession({ ...info, status: "running" });
+          initTaskDetector(info.id);
+          paneLayout.initLayout(info.id);
+        })
+        .catch(console.error);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Periodic save (every 30s) + beforeunload
+  useEffect(() => {
+    startPeriodicSave(() => ({
+      sessions: sessionsRef2.current,
+      activeSessionId: activeIdRef2.current,
+      paneLayout: paneLayoutRef.current.root,
+      focusedPaneId: paneLayoutRef.current.focusedPaneId,
+      sessionCounter,
+    }));
+
+    const handleBeforeUnload = () => {
+      const state = {
+        sessions: sessionsRef2.current,
+        activeSessionId: activeIdRef2.current,
+        paneLayout: paneLayoutRef.current.root,
+        focusedPaneId: paneLayoutRef.current.focusedPaneId,
+        sessionCounter,
+      };
+      if (state.sessions.length > 0) {
+        const workspace = buildSavedWorkspace(
+          state.sessions,
+          state.activeSessionId,
+          state.paneLayout,
+          state.focusedPaneId,
+          state.sessionCounter
+        );
+        saveWorkspaceToStorage(workspace);
+        // Fire-and-forget scrollback saves (can't await in beforeunload)
+        saveAllScrollbacks(state.sessions).catch(() => {});
+      }
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      stopPeriodicSave();
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

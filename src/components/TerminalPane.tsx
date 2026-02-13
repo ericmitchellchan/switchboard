@@ -6,12 +6,14 @@ import {
   detachFromDOM,
   fitTerminal,
   getTerminal,
+  writeRestoreContent,
 } from "../lib/terminal";
 import {
   writeToSession,
   resizeSession,
   onSessionOutput,
   onSessionExited,
+  loadScrollback,
 } from "../lib/ipc";
 import {
   initDetector,
@@ -71,9 +73,13 @@ export function TerminalPane({
     // PTY output -> terminal + status detector + task detector
     onSessionOutput(sessionId, (b64data: string) => {
       try {
-        const bytes = atob(b64data);
+        const binaryStr = atob(b64data);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) {
+          bytes[i] = binaryStr.charCodeAt(i);
+        }
         instance.terminal.write(bytes);
-        processOutput(sessionId, bytes, onStatusChangeRef.current);
+        processOutput(sessionId, binaryStr, onStatusChangeRef.current);
 
         // Task detection (lazy import to avoid circular deps)
         if (onAutoTaskRef.current || onResolveTaskRef.current) {
@@ -123,6 +129,13 @@ export function TerminalPane({
 
     // Attach to DOM
     attachToDOM(sessionId, container);
+
+    // Restore scrollback content for sessions that were restored from a saved workspace
+    if (session.restoredFromId) {
+      loadScrollback(session.restoredFromId).then((content) => {
+        if (content) writeRestoreContent(sessionId, content);
+      }).catch(() => {});
+    }
 
     // Do an initial resize to sync terminal size with PTY
     requestAnimationFrame(() => {

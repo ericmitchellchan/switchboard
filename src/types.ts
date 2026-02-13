@@ -11,6 +11,7 @@ export interface Session extends SessionInfo {
   status: AgentStatus;
   repoColor?: string;
   group?: string;
+  restoredFromId?: string;
 }
 
 export interface RepoConfig {
@@ -42,4 +43,23 @@ export interface Task {
   category?: TaskCategory;
   fingerprint?: string;
   autoResolved?: boolean;
+}
+
+export interface SavedSession {
+  id: string;
+  name: string;
+  repo: string;
+  working_dir: string;
+  repoColor?: string;
+  group?: string;
+}
+
+export interface SavedWorkspace {
+  version: 1;
+  sessions: SavedSession[];
+  activeSessionId: string | null;
+  paneLayout: unknown; // PaneNode serialized
+  focusedPaneId: string | null;
+  sessionCounter: number;
+  savedAt: number;
 }

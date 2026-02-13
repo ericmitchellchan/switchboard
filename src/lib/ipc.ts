@@ -46,6 +46,22 @@ export async function getConfig(): Promise<Config> {
   return invoke("get_config");
 }
 
+export async function saveScrollback(sessionId: string, data: string): Promise<void> {
+  return invoke("save_scrollback", { sessionId, data });
+}
+
+export async function loadScrollback(sessionId: string): Promise<string> {
+  return invoke("load_scrollback", { sessionId });
+}
+
+export async function clearScrollback(): Promise<void> {
+  return invoke("clear_scrollback");
+}
+
+export async function clearSessionScrollback(sessionId: string): Promise<void> {
+  return invoke("clear_session_scrollback", { sessionId });
+}
+
 export function onSessionOutput(
   sessionId: string,
   callback: (data: string) => void

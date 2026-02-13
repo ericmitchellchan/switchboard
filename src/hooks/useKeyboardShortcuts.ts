@@ -64,6 +64,16 @@ export function useKeyboardShortcuts(
 
     const handler = instance.terminal.attachCustomKeyEventHandler(
       (e: KeyboardEvent) => {
+        // Ctrl+C: copy selection or send SIGINT
+        if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "c" && e.type === "keydown") {
+          if (instance.terminal.hasSelection()) {
+            navigator.clipboard.writeText(instance.terminal.getSelection()).catch(console.error);
+            instance.terminal.clearSelection();
+            return false; // don't send to PTY
+          }
+          return true; // no selection → send SIGINT as normal
+        }
+
         if (isOurShortcut(e)) {
           // Return false = xterm won't process it, we handle it in the global listener
           return false;

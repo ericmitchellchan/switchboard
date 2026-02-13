@@ -76,6 +76,14 @@ export function useSessions() {
     [sessions, activeSessionId]
   );
 
+  const bulkSetSessions = useCallback(
+    (newSessions: Session[], activeId: string | null) => {
+      setSessions(newSessions);
+      setActiveSessionId(activeId);
+    },
+    []
+  );
+
   const activeSession = sessions.find((s) => s.id === activeSessionId) ?? null;
   const waitingCount = sessions.filter((s) => s.status === "waiting").length;
 
@@ -91,5 +99,6 @@ export function useSessions() {
     switchToSession,
     switchByIndex,
     switchRelative,
+    bulkSetSessions,
   };
 }

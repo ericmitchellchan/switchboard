@@ -2,6 +2,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { SearchAddon } from "@xterm/addon-search";
+import { SerializeAddon } from "@xterm/addon-serialize";
 
 const THEME = {
   background: "#0C0C0E",
@@ -33,6 +34,7 @@ export interface TerminalInstance {
   fitAddon: FitAddon;
   webglAddon: WebglAddon | null;
   searchAddon: SearchAddon;
+  serializeAddon: SerializeAddon;
 }
 
 // Module-level map: keeps terminal instances alive across React renders
@@ -62,11 +64,15 @@ export function createTerminal(sessionId: string): TerminalInstance {
   const searchAddon = new SearchAddon();
   terminal.loadAddon(searchAddon);
 
+  const serializeAddon = new SerializeAddon();
+  terminal.loadAddon(serializeAddon);
+
   const instance: TerminalInstance = {
     terminal,
     fitAddon,
     webglAddon: null,
     searchAddon,
+    serializeAddon,
   };
 
   terminalMap.set(sessionId, instance);
@@ -152,6 +158,22 @@ export function disposeTerminal(sessionId: string): void {
   }
   instance.terminal.dispose();
   terminalMap.delete(sessionId);
+}
+
+export function serializeTerminal(sessionId: string): string | null {
+  const instance = terminalMap.get(sessionId);
+  if (!instance) return null;
+  try {
+    return instance.serializeAddon.serialize();
+  } catch {
+    return null;
+  }
+}
+
+export function writeRestoreContent(sessionId: string, content: string): void {
+  const instance = terminalMap.get(sessionId);
+  if (!instance || !content) return;
+  instance.terminal.write(content);
 }
 
 export function fitTerminal(sessionId: string): { cols: number; rows: number } | null {
