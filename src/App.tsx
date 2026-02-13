@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, lazy, Suspense } from "react"
 import type { AgentStatus, RepoConfig } from "./types";
 import { TabBar } from "./components/TabBar";
 import { SessionHeader } from "./components/SessionHeader";
-import { TerminalPane } from "./components/TerminalPane";
+import { TerminalPane, cleanupSessionListeners } from "./components/TerminalPane";
 import { StatusBar } from "./components/StatusBar";
 import { ToastStack } from "./components/Toast";
 import { TaskSidebar } from "./components/TaskSidebar";
@@ -16,7 +16,7 @@ import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
 import { createSession, closeSession, renameSession, clearSessionScrollback } from "./lib/ipc";
-import { disposeTerminal, getTerminal } from "./lib/terminal";
+import { disposeTerminal, getTerminal, setTerminalConfig } from "./lib/terminal";
 import {
   loadWorkspaceFromStorage,
   buildSavedWorkspace,
@@ -25,7 +25,7 @@ import {
   startPeriodicSave,
   stopPeriodicSave,
 } from "./lib/workspace";
-import { remapSessionIds, getMaxPaneIdNumber, setPaneIdCounter } from "./lib/paneLayout";
+import { remapSessionIds, getMaxPaneIdNumber, setPaneIdCounter, closePane, getVisibleSessionIds } from "./lib/paneLayout";
 import type { PaneNode } from "./lib/paneLayout";
 import { initTaskDetector, destroyTaskDetector } from "./lib/taskDetector";
 import "@xterm/xterm/css/xterm.css";
@@ -36,6 +36,11 @@ let sessionCounter = 0;
 
 export default function App() {
   const config = useConfig();
+
+  // Apply config font settings to terminal module
+  useEffect(() => {
+    setTerminalConfig({ fontSize: config.font_size, fontFamily: config.font });
+  }, [config.font, config.font_size]);
 
   const {
     sessions,
@@ -132,24 +137,31 @@ export default function App() {
   );
 
   const handleCloseTab = useCallback(async () => {
-    const id = activeIdRef.current;
+    const id = effectiveActiveIdRef.current;
     if (!id) return;
 
-    // If split, close the pane that has this session
+    // Check if session will still be visible in another pane after closing
+    let sessionStillVisible = false;
     if (paneLayout.root && paneLayout.focusedPaneId) {
-      // Close the focused pane and its session
+      const newRoot = closePane(paneLayout.root, paneLayout.focusedPaneId);
+      if (newRoot) {
+        sessionStillVisible = getVisibleSessionIds(newRoot).includes(id);
+      }
       paneLayout.close(paneLayout.focusedPaneId);
     }
 
-    try {
-      destroyTaskDetector(id);
-      disposeTerminal(id);
-      await closeSession(id);
-      clearSessionScrollback(id).catch(() => {});
-    } catch {
-      // Session may already be gone
+    if (!sessionStillVisible) {
+      try {
+        destroyTaskDetector(id);
+        cleanupSessionListeners(id);
+        disposeTerminal(id);
+        await closeSession(id);
+        clearSessionScrollback(id).catch(() => {});
+      } catch {
+        // Session may already be gone
+      }
+      removeSession(id);
     }
-    removeSession(id);
   }, [removeSession, paneLayout]);
 
   const handleClosePane = useCallback(() => {

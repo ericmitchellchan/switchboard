@@ -46,7 +46,11 @@
       "Bash(C:UsersericmAppDataRoamingnpmpnpm.cmd install)",
       "Bash(cmd.exe /c \"pnpm install\")",
       "Bash(grep:*)",
-      "WebFetch(domain:docs.wisprflow.ai)"
+      "WebFetch(domain:docs.wisprflow.ai)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nAdd workspace persistence, Ctrl+C copy, and UTF-8 PTY support\n\n- Workspace persistence: save/restore sessions, pane layout, and terminal\n  scrollback across app restarts \\(localStorage + disk via Rust commands\\)\n- Ctrl+C copies selected text to clipboard; sends SIGINT when no selection\n- UTF-8 console codepage setup for ConPTY sessions\n- Serialize addon for xterm.js terminal content snapshots\n- Periodic auto-save every 30s + synchronous save on beforeunload\n- Scrollback files stored in %LOCALAPPDATA%/switchboard/scrollback/\n- Add README with features, setup, shortcuts, and project structure\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(cargo doc:*)",
+      "Bash(pnpm tauri icon:*)",
+      "Bash(tasklist:*)"
     ]
   }
 }

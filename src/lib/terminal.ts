@@ -40,14 +40,25 @@ export interface TerminalInstance {
 // Module-level map: keeps terminal instances alive across React renders
 const terminalMap = new Map<string, TerminalInstance>();
 
+// Module-level config for font settings — set once from App after config loads
+let terminalConfig = {
+  fontSize: 13,
+  fontFamily: "'JetBrains Mono', 'Cascadia Code', 'SF Mono', monospace",
+};
+
+export function setTerminalConfig(cfg: { fontSize?: number; fontFamily?: string }) {
+  if (cfg.fontSize !== undefined) terminalConfig.fontSize = cfg.fontSize;
+  if (cfg.fontFamily !== undefined) terminalConfig.fontFamily = `'${cfg.fontFamily}', 'Cascadia Code', 'SF Mono', monospace`;
+}
+
 export function createTerminal(sessionId: string): TerminalInstance {
   // Return existing if already created
   const existing = terminalMap.get(sessionId);
   if (existing) return existing;
 
   const terminal = new Terminal({
-    fontFamily: "'JetBrains Mono', 'Cascadia Code', 'SF Mono', monospace",
-    fontSize: 13,
+    fontFamily: terminalConfig.fontFamily,
+    fontSize: terminalConfig.fontSize,
     lineHeight: 1.3,
     theme: THEME,
     cursorBlink: true,

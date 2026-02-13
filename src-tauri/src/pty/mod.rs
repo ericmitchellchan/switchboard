@@ -56,7 +56,9 @@ impl PtyManager {
             .sessions
             .lock()
             .map_err(|e| format!("Lock error: {}", e))?;
-        sessions.remove(id);
+        if let Some(mut session) = sessions.remove(id) {
+            session.kill();
+        }
         Ok(())
     }
 

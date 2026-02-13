@@ -1,4 +1,4 @@
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
@@ -11,6 +11,7 @@ extern "system" {
 pub struct PtySession {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
+    killer: Box<dyn ChildKiller + Send + Sync>,
     pub name: String,
     pub repo: String,
     pub working_dir: String,
@@ -55,9 +56,10 @@ impl PtySession {
             cmd.arg("chcp 65001 | Out-Null");
         }
 
-        pair.slave
+        let child = pair.slave
             .spawn_command(cmd)
             .map_err(|e| format!("Failed to spawn shell: {}", e))?;
+        let killer = child.clone_killer();
 
         let reader = pair
             .master
@@ -72,6 +74,7 @@ impl PtySession {
         let session = PtySession {
             writer: Arc::new(Mutex::new(writer)),
             master: pair.master,
+            killer,
             name,
             repo,
             working_dir,
@@ -98,5 +101,15 @@ impl PtySession {
                 pixel_height: 0,
             })
             .map_err(|e| format!("Resize error: {}", e))
+    }
+
+    pub fn kill(&mut self) {
+        let _ = self.killer.kill();
+    }
+}
+
+impl Drop for PtySession {
+    fn drop(&mut self) {
+        self.kill();
     }
 }

@@ -43,11 +43,16 @@ export function saveWorkspaceToStorage(workspace: SavedWorkspace): void {
   }
 }
 
+const MAX_SCROLLBACK_SIZE = 1_000_000; // 1MB
+
 export async function saveAllScrollbacks(sessions: Session[]): Promise<void> {
   const promises = sessions.map((s) => {
     const content = serializeTerminal(s.id);
     if (content) {
-      return saveScrollback(s.id, content).catch(() => {});
+      const capped = content.length > MAX_SCROLLBACK_SIZE
+        ? content.slice(-MAX_SCROLLBACK_SIZE) // keep the tail (most recent)
+        : content;
+      return saveScrollback(s.id, capped).catch(() => {});
     }
     return Promise.resolve();
   });

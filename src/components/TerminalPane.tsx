@@ -22,6 +22,20 @@ import {
 } from "../lib/statusDetector";
 import { SearchBar } from "./SearchBar";
 
+// Module-level map for event listener cleanup functions
+const listenerCleanups = new Map<string, (() => void)[]>();
+
+// Reusable UTF-8 decoder (avoids per-chunk allocation)
+const utf8Decoder = new TextDecoder();
+
+export function cleanupSessionListeners(sessionId: string) {
+  const fns = listenerCleanups.get(sessionId);
+  if (fns) {
+    fns.forEach((fn) => fn());
+    listenerCleanups.delete(sessionId);
+  }
+}
+
 interface TerminalPaneProps {
   session: Session;
   searchOpen?: boolean;
@@ -55,7 +69,7 @@ export function TerminalPane({
   onResolveTaskRef.current = onResolveTask;
 
   // Set up terminal data wiring (once per session)
-  const wireSession = useCallback((sessionId: string) => {
+  const wireSession = useCallback((sessionId: string, restoredFromId?: string) => {
     if (setupDone.current.has(sessionId)) return;
     setupDone.current.add(sessionId);
 
@@ -70,6 +84,13 @@ export function TerminalPane({
       writeToSession(sessionId, data).catch(console.error);
     });
 
+    // Helper to store unlisten functions
+    const pushCleanup = (unlisten: () => void) => {
+      const arr = listenerCleanups.get(sessionId) ?? [];
+      arr.push(unlisten);
+      listenerCleanups.set(sessionId, arr);
+    };
+
     // PTY output -> terminal + status detector + task detector
     onSessionOutput(sessionId, (b64data: string) => {
       try {
@@ -79,19 +100,22 @@ export function TerminalPane({
           bytes[i] = binaryStr.charCodeAt(i);
         }
         instance.terminal.write(bytes);
-        processOutput(sessionId, binaryStr, onStatusChangeRef.current);
+
+        // Decode as UTF-8 for text-based detection (regex needs proper unicode)
+        const text = utf8Decoder.decode(bytes);
+        processOutput(sessionId, text, onStatusChangeRef.current);
 
         // Task detection (lazy import to avoid circular deps)
         if (onAutoTaskRef.current || onResolveTaskRef.current) {
           import("../lib/taskDetector").then(({ detectTasks, detectResolutions }) => {
             if (onAutoTaskRef.current) {
-              const detected = detectTasks(sessionId, bytes);
+              const detected = detectTasks(sessionId, text);
               for (const task of detected) {
                 onAutoTaskRef.current!(task, sessionId);
               }
             }
             if (onResolveTaskRef.current) {
-              const resolved = detectResolutions(sessionId, bytes);
+              const resolved = detectResolutions(sessionId, text);
               for (const prefix of resolved) {
                 onResolveTaskRef.current!(prefix);
               }
@@ -101,19 +125,26 @@ export function TerminalPane({
       } catch {
         // ignore decode errors
       }
-    });
+    }).then(pushCleanup);
 
     // Session exit
     onSessionExited(sessionId, () => {
       instance.terminal.write("\r\n\x1b[90m[Process exited]\x1b[0m\r\n");
       markExited(sessionId, onStatusChangeRef.current);
       onExitedRef.current(sessionId);
-    });
+    }).then(pushCleanup);
 
     // Resize -> PTY
     instance.terminal.onResize(({ cols, rows }) => {
       resizeSession(sessionId, cols, rows).catch(console.error);
     });
+
+    // Restore scrollback for sessions restored from a saved workspace (once, gated by setupDone)
+    if (restoredFromId) {
+      loadScrollback(restoredFromId).then((content) => {
+        if (content) writeRestoreContent(sessionId, content);
+      }).catch(() => {});
+    }
   }, []);
 
   // Attach/detach terminal when session changes
@@ -125,17 +156,10 @@ export function TerminalPane({
 
     // Create terminal if it doesn't exist
     createTerminal(sessionId);
-    wireSession(sessionId);
+    wireSession(sessionId, session.restoredFromId);
 
     // Attach to DOM
     attachToDOM(sessionId, container);
-
-    // Restore scrollback content for sessions that were restored from a saved workspace
-    if (session.restoredFromId) {
-      loadScrollback(session.restoredFromId).then((content) => {
-        if (content) writeRestoreContent(sessionId, content);
-      }).catch(() => {});
-    }
 
     // Do an initial resize to sync terminal size with PTY
     requestAnimationFrame(() => {
@@ -152,7 +176,10 @@ export function TerminalPane({
 
   // Handle window resize
   useEffect(() => {
+    let mounted = true;
+
     const handleResize = () => {
+      if (!mounted) return;
       const dims = fitTerminal(session.id);
       if (dims) {
         resizeSession(session.id, dims.cols, dims.rows).catch(console.error);
@@ -170,6 +197,7 @@ export function TerminalPane({
     }
 
     return () => {
+      mounted = false;
       window.removeEventListener("resize", handleResize);
       if (ro) ro.disconnect();
     };

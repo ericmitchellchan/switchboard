@@ -62,13 +62,3 @@ pub fn load_config() -> Config {
     }
 }
 
-pub fn save_config(config: &Config) -> Result<(), String> {
-    let path = config_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("Failed to create config dir: {}", e))?;
-    }
-    let json =
-        serde_json::to_string_pretty(config).map_err(|e| format!("Serialize error: {}", e))?;
-    fs::write(&path, json).map_err(|e| format!("Write error: {}", e))?;
-    Ok(())
-}

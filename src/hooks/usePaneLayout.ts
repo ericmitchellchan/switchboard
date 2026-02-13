@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useRef } from "react";
 import {
   type PaneNode,
   createSinglePane,
@@ -16,80 +16,108 @@ import {
 export function usePaneLayout() {
   const [root, setRoot] = useState<PaneNode | null>(null);
   const [focusedPaneId, setFocusedPaneId] = useState<string | null>(null);
+  const focusedPaneIdRef = useRef<string | null>(null);
+  focusedPaneIdRef.current = focusedPaneId;
 
   const initLayout = useCallback((sessionId: string) => {
     const pane = createSinglePane(sessionId);
     setRoot(pane);
     setFocusedPaneId(pane.id);
+    focusedPaneIdRef.current = pane.id;
   }, []);
 
   const split = useCallback(
     (direction: "horizontal" | "vertical", newSessionId: string) => {
-      if (!root || !focusedPaneId) return null;
-      const result = splitPane(root, focusedPaneId, direction, newSessionId);
-      setRoot(result.root);
-      setFocusedPaneId(result.newPaneId);
-      return result.newPaneId;
+      let newPaneId: string | null = null;
+      setRoot((prevRoot) => {
+        const fpId = focusedPaneIdRef.current;
+        if (!prevRoot || !fpId) return prevRoot;
+        const result = splitPane(prevRoot, fpId, direction, newSessionId);
+        newPaneId = result.newPaneId;
+        setFocusedPaneId(result.newPaneId);
+        focusedPaneIdRef.current = result.newPaneId;
+        return result.root;
+      });
+      return newPaneId;
     },
-    [root, focusedPaneId]
+    []
   );
 
   const close = useCallback(
     (paneId: string) => {
-      if (!root) return;
-      const newRoot = closePane(root, paneId);
-      if (newRoot === null) {
-        setRoot(null);
-        setFocusedPaneId(null);
-        return;
-      }
-      setRoot(newRoot);
-      // If we closed the focused pane, focus the first leaf
-      if (paneId === focusedPaneId) {
-        const leaves = getAllLeafIds(newRoot);
-        setFocusedPaneId(leaves[0] || null);
-      }
+      setRoot((prevRoot) => {
+        if (!prevRoot) return prevRoot;
+        const newRoot = closePane(prevRoot, paneId);
+        if (newRoot === null) {
+          setFocusedPaneId(null);
+          focusedPaneIdRef.current = null;
+          return null;
+        }
+        // If we closed the focused pane, focus the first leaf
+        if (paneId === focusedPaneIdRef.current) {
+          const leaves = getAllLeafIds(newRoot);
+          const next = leaves[0] || null;
+          setFocusedPaneId(next);
+          focusedPaneIdRef.current = next;
+        }
+        return newRoot;
+      });
     },
-    [root, focusedPaneId]
+    []
   );
 
   const moveFocus = useCallback(
     (direction: "up" | "down" | "left" | "right") => {
-      if (!root || !focusedPaneId) return;
-      const next = findAdjacentPane(root, focusedPaneId, direction);
-      if (next) setFocusedPaneId(next);
+      setRoot((prevRoot) => {
+        const fpId = focusedPaneIdRef.current;
+        if (!prevRoot || !fpId) return prevRoot;
+        const next = findAdjacentPane(prevRoot, fpId, direction);
+        if (next) {
+          setFocusedPaneId(next);
+          focusedPaneIdRef.current = next;
+        }
+        return prevRoot; // root unchanged
+      });
     },
-    [root, focusedPaneId]
+    []
   );
 
   const resize = useCallback(
     (branchId: string, ratio: number) => {
-      if (!root) return;
-      setRoot(resizeSplit(root, branchId, ratio));
+      setRoot((prevRoot) => {
+        if (!prevRoot) return prevRoot;
+        return resizeSplit(prevRoot, branchId, ratio);
+      });
     },
-    [root]
+    []
   );
 
   const focusPane = useCallback((paneId: string) => {
     setFocusedPaneId(paneId);
+    focusedPaneIdRef.current = paneId;
   }, []);
 
   // Focus a pane by session, or swap focused pane's session
   const focusOrSwapSession = useCallback(
     (sessionId: string) => {
-      if (!root) return;
-      // If the session is already visible in a pane, just focus that pane
-      const existing = findPaneBySessionId(root, sessionId);
-      if (existing) {
-        setFocusedPaneId(existing.id);
-        return;
-      }
-      // Otherwise swap the focused pane's session
-      if (focusedPaneId) {
-        setRoot(swapPaneSession(root, focusedPaneId, sessionId));
-      }
+      setRoot((prevRoot) => {
+        if (!prevRoot) return prevRoot;
+        // If the session is already visible in a pane, just focus that pane
+        const existing = findPaneBySessionId(prevRoot, sessionId);
+        if (existing) {
+          setFocusedPaneId(existing.id);
+          focusedPaneIdRef.current = existing.id;
+          return prevRoot; // root unchanged
+        }
+        // Otherwise swap the focused pane's session
+        const fpId = focusedPaneIdRef.current;
+        if (fpId) {
+          return swapPaneSession(prevRoot, fpId, sessionId);
+        }
+        return prevRoot;
+      });
     },
-    [root, focusedPaneId]
+    []
   );
 
   const visibleSessionIds = useMemo(

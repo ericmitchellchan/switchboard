@@ -4,7 +4,7 @@ mod pty;
 use config::{load_config, Config};
 use pty::{PtyManager, SessionInfo};
 use std::sync::Arc;
-use tauri::{Emitter, Manager, State};
+use tauri::{image::Image, Emitter, Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use uuid::Uuid;
@@ -164,6 +164,13 @@ pub fn run() {
         )
         .manage(app_state)
         .setup(move |app| {
+            // Set window icon from bundled PNG
+            if let Some(window) = app.get_webview_window("main") {
+                if let Ok(icon) = Image::from_bytes(include_bytes!("../icons/icon.png")) {
+                    let _ = window.set_icon(icon);
+                }
+            }
+
             // Register Ctrl+V as a global shortcut so it fires at the OS
             // level, catching both real keystrokes and simulated ones from
             // tools like Wispr Flow (which don't reach the webview).
