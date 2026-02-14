@@ -101,7 +101,18 @@ export function TerminalPane({
 
     // Helper: process a single PTY output chunk (write + detect)
     const processPtyChunk = (bytes: Uint8Array) => {
+      // Preserve scroll position when user has scrolled up to read earlier content.
+      // Without this, terminal.write() auto-scrolls the viewport to the bottom.
+      const buf = instance.terminal.buffer.active;
+      const isAtBottom = buf.baseY + instance.terminal.rows >= buf.length;
+      const savedViewportY = buf.viewportY;
+
       instance.terminal.write(bytes);
+
+      if (!isAtBottom) {
+        instance.terminal.scrollToLine(savedViewportY);
+      }
+
       const decoder = sessionDecoders.get(sessionId);
       const text = decoder ? decoder.decode(bytes, { stream: true }) : new TextDecoder().decode(bytes);
       processOutput(sessionId, text, onStatusChangeRef.current);
