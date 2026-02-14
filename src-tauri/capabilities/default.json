@@ -15,6 +15,7 @@
     "global-shortcut:allow-is-registered",
     "dialog:allow-save",
     "log:default",
-    "notification:default"
+    "notification:default",
+    "core:window:allow-request-user-attention"
   ]
 }

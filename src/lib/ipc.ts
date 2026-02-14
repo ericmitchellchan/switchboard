@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
 import {
   isPermissionGranted,
   requestPermission,
@@ -100,8 +100,9 @@ export function onSessionExited(
 }
 
 export function flashTaskbar() {
-  // 2 = Informational (non-critical flash), 1 = Critical (continuous flash)
-  getCurrentWindow().requestUserAttention(2).catch(() => {});
+  getCurrentWindow()
+    .requestUserAttention(UserAttentionType.Informational)
+    .catch(() => {});
 }
 
 export async function notify(title: string, body: string) {

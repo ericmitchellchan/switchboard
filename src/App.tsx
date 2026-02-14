@@ -246,9 +246,15 @@ export default function App() {
         dismissBySessionId(sessionId);
       }
 
-      // Desktop notifications when window is not focused
-      if ((status === "waiting" || status === "error") && !document.hasFocus()) {
-        flashTaskbar();
+      // Desktop notifications: fire when window is unfocused OR when a
+      // non-active session needs attention (user is looking at another tab)
+      const isBackground = !document.hasFocus();
+      const isDifferentTab = sessionId !== effectiveActiveIdRef.current;
+      if ((status === "waiting" || status === "error") && (isBackground || isDifferentTab)) {
+        // Taskbar flash only when window is unfocused (no effect if already focused)
+        if (isBackground) {
+          flashTaskbar();
+        }
 
         // Throttle: don't re-notify the same session within 30s
         const now = Date.now();
