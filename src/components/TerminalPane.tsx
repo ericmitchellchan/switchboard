@@ -253,6 +253,26 @@ export function TerminalPane({
 
         // Reveal after fit — GPU-composited transition avoids layout thrash
         container.style.opacity = "1";
+
+        // Delayed re-fit: double-RAF may fire before flex layout fully settles.
+        // A second fit after 150ms mirrors how minimize/maximize naturally works.
+        setTimeout(() => {
+          const inst2 = getTerminal(sessionId);
+          if (!inst2?.terminal.element?.parentElement) return;
+          const buf = inst2.terminal.buffer.active;
+          const beforeY = buf.viewportY;
+          const beforeBase = buf.baseY;
+          const dims2 = fitTerminal(sessionId);
+          if (dims2) {
+            resizeSession(sessionId, dims2.cols, dims2.rows).catch(console.error);
+          }
+          if (beforeY >= beforeBase) {
+            inst2.terminal.scrollToBottom();
+          } else {
+            const newBase = inst2.terminal.buffer.active.baseY;
+            inst2.terminal.scrollToLine(Math.min(beforeY, newBase));
+          }
+        }, 150);
       });
     });
 
@@ -271,18 +291,20 @@ export function TerminalPane({
       if (resizeTimer) clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
         if (!mounted) return;
-        // Check if user is at the bottom before reflow changes line count
         const inst = getTerminal(session.id);
-        const wasAtBottom = inst
-          ? inst.terminal.buffer.active.viewportY >= inst.terminal.buffer.active.baseY
-          : false;
+        if (!inst) return;
+        const buf = inst.terminal.buffer.active;
+        const savedY = buf.viewportY;
+        const savedBase = buf.baseY;
         const dims = fitTerminal(session.id);
         if (dims) {
           resizeSession(session.id, dims.cols, dims.rows).catch(console.error);
         }
-        // Preserve scroll position: if user was at bottom, stay there
-        if (wasAtBottom && inst) {
+        if (savedY >= savedBase) {
           inst.terminal.scrollToBottom();
+        } else {
+          const newBase = inst.terminal.buffer.active.baseY;
+          inst.terminal.scrollToLine(Math.min(savedY, newBase));
         }
       }, 100);
     };

@@ -88,6 +88,14 @@ export default function App() {
     [switchToSessionDirect, dismissBySessionId, paneLayout]
   );
 
+  // Reinit pane layout when root becomes null but sessions still exist
+  // (e.g. closing the only pane via tab X button leaves root=null)
+  useEffect(() => {
+    if (!paneLayout.root && activeSessionId && sessions.length > 0) {
+      paneLayout.initLayout(activeSessionId);
+    }
+  }, [paneLayout.root, activeSessionId, sessions.length, paneLayout]);
+
   // Derive active session from focused pane when split
   const effectiveActiveSessionId = paneLayout.isSplit
     ? paneLayout.focusedSessionId ?? activeSessionId
@@ -618,6 +626,21 @@ export default function App() {
       }, GPU_SETTLE_MS);
     };
 
+    // --- Visibility change (alt-tab back) ---
+    // WebView2 may discard GPU-rendered content when backgrounded.
+    // Unlike sleep/wake, the WebGL context isn't lost — just the render surface is stale.
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== "visible") return;
+      log.debug("Window became visible, refreshing terminal renders");
+      clearAllTextureAtlases();
+      for (const id of getAllTerminalIds()) {
+        const inst = getTerminal(id);
+        if (!inst?.terminal.element?.parentElement) continue;
+        inst.terminal.refresh(0, inst.terminal.rows - 1);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
     // --- Native power events (Win32 WM_POWERBROADCAST) ---
     // These fire reliably even when the JS event loop was frozen during sleep.
     const unlistenSuspend = listen("power:suspend", () => {
@@ -654,6 +677,7 @@ export default function App() {
       stopPeriodicSave();
       clearInterval(heartbeatTimer);
       window.removeEventListener("beforeunload", handleBeforeUnload);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       unlistenSuspend.then((fn) => fn());
       unlistenResume.then((fn) => fn());
     };
