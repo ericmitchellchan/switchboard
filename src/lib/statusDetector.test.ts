@@ -548,12 +548,12 @@ describe("structural numbered-list detection", () => {
       const cb = vi.fn();
       processOutput(SID, "Are you sure?\n  1. Yes\n  2. No\n", cb);
       const waitingCalls = cb.mock.calls.filter(
-        (c: [string, string]) => c[1] === "waiting"
+        (c) => c[1] === "waiting"
       ).length;
       vi.advanceTimersByTime(750);
       // Should not get an additional waiting transition
       const afterCalls = cb.mock.calls.filter(
-        (c: [string, string]) => c[1] === "waiting"
+        (c) => c[1] === "waiting"
       ).length;
       expect(afterCalls).toBe(waitingCalls);
     });

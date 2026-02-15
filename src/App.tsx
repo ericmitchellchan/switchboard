@@ -15,7 +15,7 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, renameSession, resizeSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify } from "./lib/ipc";
+import { createSession, closeSession, restartSession, renameSession, resizeSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify } from "./lib/ipc";
 import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, fitTerminal, getAllTerminalIds } from "./lib/terminal";
 import {
   loadWorkspaceFromStorage,
@@ -28,6 +28,7 @@ import {
 import { remapSessionIds, getMaxPaneIdNumber, setPaneIdCounter, closePane, getVisibleSessionIds, findPaneBySessionId } from "./lib/paneLayout";
 import type { PaneNode } from "./lib/paneLayout";
 import { initTaskDetector, destroyTaskDetector } from "./lib/taskDetector";
+import { checkForUpdates } from "./lib/updater";
 import { log, initLogger } from "./lib/logger";
 import "@xterm/xterm/css/xterm.css";
 
@@ -229,6 +230,39 @@ export default function App() {
   const handleSessionExited = useCallback(
     (sessionId: string) => {
       updateSessionStatus(sessionId, "exited");
+    },
+    [updateSessionStatus]
+  );
+
+  const handleRestartSession = useCallback(
+    async (sessionId: string) => {
+      const session = sessionsRef.current.find((s) => s.id === sessionId);
+      if (!session) return;
+
+      log.info(`Restarting session id=${sessionId} name=${session.name}`);
+
+      // Clean up old listeners and terminal state
+      cleanupSessionListeners(sessionId);
+      const inst = getTerminal(sessionId);
+      if (inst) {
+        inst.terminal.clear();
+      }
+
+      // Re-init task detector for fresh detection
+      destroyTaskDetector(sessionId);
+      initTaskDetector(sessionId);
+
+      try {
+        await restartSession(
+          sessionId,
+          session.name,
+          session.repo,
+          session.working_dir,
+        );
+        updateSessionStatus(sessionId, "running");
+      } catch (err) {
+        log.error(`Failed to restart session id=${sessionId}: ${err}`);
+      }
     },
     [updateSessionStatus]
   );
@@ -495,6 +529,9 @@ export default function App() {
           log.error(`Failed to create session: ${err}`);
         }
       }
+
+      // Check for updates after workspace init (non-blocking)
+      checkForUpdates();
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -533,72 +570,82 @@ export default function App() {
 
     window.addEventListener("beforeunload", handleBeforeUnload);
 
-    // --- Sleep/wake detection via timestamp-gap heartbeat ---
+    const GPU_SETTLE_MS = 2_000; // wait for GPU after wake
+
+    // Shared helpers for sleep/wake (used by both native events and heartbeat fallback)
+    const saveWorkspaceNow = () => {
+      const state = {
+        sessions: sessionsRef2.current,
+        activeSessionId: activeIdRef2.current,
+        paneLayout: paneLayoutRef.current.root,
+        focusedPaneId: paneLayoutRef.current.focusedPaneId,
+        sessionCounter: sessionCounterRef.current,
+      };
+      if (state.sessions.length > 0) {
+        const workspace = buildSavedWorkspace(
+          state.sessions,
+          state.activeSessionId,
+          state.paneLayout,
+          state.focusedPaneId,
+          state.sessionCounter
+        );
+        saveWorkspaceToStorage(workspace);
+        saveAllScrollbacks(state.sessions).catch(() => {});
+      }
+    };
+
+    const recoverFromWake = () => {
+      // Clear corrupt texture atlases (cheap, safe)
+      clearAllTextureAtlases();
+
+      // Re-enable lost WebGL contexts after GPU settles
+      setTimeout(() => {
+        recoverAllWebGL();
+
+        // Re-fit all attached terminals
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            for (const id of getAllTerminalIds()) {
+              const inst = getTerminal(id);
+              if (!inst?.terminal.element?.parentElement) continue;
+              const dims = fitTerminal(id);
+              if (dims) {
+                resizeSession(id, dims.cols, dims.rows).catch(() => {});
+              }
+            }
+          });
+        });
+      }, GPU_SETTLE_MS);
+    };
+
+    // --- Native power events (Win32 WM_POWERBROADCAST) ---
+    // These fire reliably even when the JS event loop was frozen during sleep.
+    const unlistenSuspend = listen("power:suspend", () => {
+      log.info("Power suspend detected (native)");
+      saveWorkspaceNow();
+    });
+
+    const unlistenResume = listen("power:resume", () => {
+      log.info("Power resume detected (native)");
+      recoverFromWake();
+    });
+
+    // --- Heartbeat fallback for non-native wake detection ---
     //
     // Neither visibilitychange nor window.blur fire reliably in
     // Tauri/WebView2 on Windows (see tauri#10592, WebView2Feedback#4626).
-    // Instead, we use a setInterval heartbeat: if the gap between ticks
-    // exceeds a threshold, the system was sleeping.
-    //
-    // On wake we:
-    //  1. Save workspace + scrollback (may not have been saved before sleep)
-    //  2. Clear texture atlases on surviving WebGL contexts (fixes
-    //     Chromium/Nvidia corrupt-glyph bug where context is NOT lost
-    //     but GPU-side textures are garbled)
-    //  3. After a delay, re-enable WebGL for any terminals that fully
-    //     lost their context (GPU needs time to stabilize after wake)
-    //  4. Re-fit all terminals in case the window resized during sleep
+    // The heartbeat catches wake events the native path might miss
+    // (e.g., VM pause, platforms without WM_POWERBROADCAST).
     const HEARTBEAT_MS = 10_000;       // 10s heartbeat
     const SLEEP_THRESHOLD_MS = 15_000; // 15s gap = definitely slept
-    const GPU_SETTLE_MS = 2_000;       // wait for GPU after wake
     let lastHeartbeat = Date.now();
 
     const heartbeatTimer = setInterval(() => {
       const now = Date.now();
       if (now - lastHeartbeat > SLEEP_THRESHOLD_MS) {
-        log.info(`System wake detected (gap=${Math.round((now - lastHeartbeat) / 1000)}s)`);
-
-        // 1. Save workspace immediately
-        const state = {
-          sessions: sessionsRef2.current,
-          activeSessionId: activeIdRef2.current,
-          paneLayout: paneLayoutRef.current.root,
-          focusedPaneId: paneLayoutRef.current.focusedPaneId,
-          sessionCounter: sessionCounterRef.current,
-        };
-        if (state.sessions.length > 0) {
-          const workspace = buildSavedWorkspace(
-            state.sessions,
-            state.activeSessionId,
-            state.paneLayout,
-            state.focusedPaneId,
-            state.sessionCounter
-          );
-          saveWorkspaceToStorage(workspace);
-          saveAllScrollbacks(state.sessions).catch(() => {});
-        }
-
-        // 2. Clear corrupt texture atlases (cheap, safe)
-        clearAllTextureAtlases();
-
-        // 3. Re-enable lost WebGL contexts after GPU settles
-        setTimeout(() => {
-          recoverAllWebGL();
-
-          // 4. Re-fit all attached terminals
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-              for (const id of getAllTerminalIds()) {
-                const inst = getTerminal(id);
-                if (!inst?.terminal.element?.parentElement) continue;
-                const dims = fitTerminal(id);
-                if (dims) {
-                  resizeSession(id, dims.cols, dims.rows).catch(() => {});
-                }
-              }
-            });
-          });
-        }, GPU_SETTLE_MS);
+        log.info(`System wake detected via heartbeat fallback (gap=${Math.round((now - lastHeartbeat) / 1000)}s)`);
+        saveWorkspaceNow();
+        recoverFromWake();
       }
       lastHeartbeat = now;
     }, HEARTBEAT_MS);
@@ -607,6 +654,8 @@ export default function App() {
       stopPeriodicSave();
       clearInterval(heartbeatTimer);
       window.removeEventListener("beforeunload", handleBeforeUnload);
+      unlistenSuspend.then((fn) => fn());
+      unlistenResume.then((fn) => fn());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -655,6 +704,7 @@ export default function App() {
               onStatusChange={handleStatusChange}
               onAutoTask={handleAutoTask}
               onResolveTask={resolveByFingerprint}
+              onRestart={handleRestartSession}
               isSplit
             />
           ) : (
@@ -677,6 +727,7 @@ export default function App() {
                   onStatusChange={handleStatusChange}
                   onAutoTask={handleAutoTask}
                   onResolveTask={resolveByFingerprint}
+                  onRestart={handleRestartSession}
                 />
               </div>
             ) : null

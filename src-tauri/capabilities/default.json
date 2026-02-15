@@ -16,6 +16,9 @@
     "dialog:allow-save",
     "log:default",
     "notification:default",
-    "core:window:allow-request-user-attention"
+    "core:window:allow-request-user-attention",
+    "updater:default",
+    "process:allow-restart",
+    "process:allow-exit"
   ]
 }

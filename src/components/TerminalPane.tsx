@@ -66,6 +66,7 @@ interface TerminalPaneProps {
   onStatusChange: (sessionId: string, status: AgentStatus) => void;
   onAutoTask?: (task: { text: string; fingerprint: string; priority: "high" | "med" | "low"; category: string }, sessionId: string) => void;
   onResolveTask?: (fingerprintPrefix: string) => void;
+  onRestart?: (sessionId: string) => void;
   isFocused?: boolean;
 }
 
@@ -77,6 +78,7 @@ export function TerminalPane({
   onStatusChange,
   onAutoTask,
   onResolveTask,
+  onRestart,
   isFocused = true,
 }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -323,6 +325,42 @@ export function TerminalPane({
           transition: "opacity 0.05s",
         }}
       />
+      {session.status === "exited" && onRestart && (
+        <div
+          style={{
+            position: "absolute",
+            bottom: 24,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 10,
+          }}
+        >
+          <button
+            onClick={() => onRestart(session.id)}
+            style={{
+              background: "#A78BFA22",
+              border: "1px solid #A78BFA66",
+              color: "#A78BFA",
+              fontFamily: "var(--font-mono)",
+              fontSize: 13,
+              padding: "6px 16px",
+              borderRadius: 6,
+              cursor: "pointer",
+              transition: "background 0.15s, border-color 0.15s",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = "#A78BFA33";
+              e.currentTarget.style.borderColor = "#A78BFA99";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = "#A78BFA22";
+              e.currentTarget.style.borderColor = "#A78BFA66";
+            }}
+          >
+            Restart Session
+          </button>
+        </div>
+      )}
     </div>
   );
 }

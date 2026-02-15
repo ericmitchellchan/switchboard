@@ -16,6 +16,7 @@ interface PaneContainerProps {
   onStatusChange: (sessionId: string, status: AgentStatus) => void;
   onAutoTask: (task: { text: string; fingerprint: string; priority: "high" | "med" | "low"; category: string }, sessionId: string) => void;
   onResolveTask: (fingerprintPrefix: string) => void;
+  onRestart?: (sessionId: string) => void;
   isSplit: boolean;
 }
 
@@ -31,6 +32,7 @@ export function PaneContainer({
   onStatusChange,
   onAutoTask,
   onResolveTask,
+  onRestart,
   isSplit,
 }: PaneContainerProps) {
   return (
@@ -47,6 +49,7 @@ export function PaneContainer({
         onStatusChange={onStatusChange}
         onAutoTask={onAutoTask}
         onResolveTask={onResolveTask}
+        onRestart={onRestart}
         isSplit={isSplit}
       />
     </div>
@@ -65,6 +68,7 @@ interface PaneNodeRendererProps {
   onStatusChange: (sessionId: string, status: AgentStatus) => void;
   onAutoTask: (task: { text: string; fingerprint: string; priority: "high" | "med" | "low"; category: string }, sessionId: string) => void;
   onResolveTask: (fingerprintPrefix: string) => void;
+  onRestart?: (sessionId: string) => void;
   isSplit: boolean;
 }
 
@@ -80,6 +84,7 @@ function PaneNodeRenderer({
   onStatusChange,
   onAutoTask,
   onResolveTask,
+  onRestart,
   isSplit,
 }: PaneNodeRendererProps) {
   if (node.type === "leaf") {
@@ -116,6 +121,7 @@ function PaneNodeRenderer({
           onStatusChange={onStatusChange}
           onAutoTask={onAutoTask}
           onResolveTask={onResolveTask}
+          onRestart={onRestart}
           isFocused={isFocused}
         />
       </div>
@@ -159,6 +165,7 @@ function PaneNodeRenderer({
           onStatusChange={onStatusChange}
           onAutoTask={onAutoTask}
           onResolveTask={onResolveTask}
+          onRestart={onRestart}
           isSplit={isSplit}
         />
       </div>
@@ -188,6 +195,7 @@ function PaneNodeRenderer({
           onStatusChange={onStatusChange}
           onAutoTask={onAutoTask}
           onResolveTask={onResolveTask}
+          onRestart={onRestart}
           isSplit={isSplit}
         />
       </div>

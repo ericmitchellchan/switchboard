@@ -1,4 +1,5 @@
 mod config;
+mod power;
 mod pty;
 
 use config::{load_config, Config};
@@ -47,6 +48,45 @@ async fn create_session(
 
     Ok(SessionInfo {
         id,
+        name,
+        repo,
+        working_dir,
+    })
+}
+
+#[tauri::command]
+async fn restart_session(
+    state: State<'_, Arc<AppState>>,
+    app_handle: tauri::AppHandle,
+    session_id: String,
+    name: String,
+    repo: String,
+    working_dir: String,
+    cols: Option<u16>,
+    rows: Option<u16>,
+) -> Result<SessionInfo, String> {
+    let c = cols.unwrap_or(120);
+    let r = rows.unwrap_or(30);
+    let cfg = load_config();
+
+    log::info!("Restarting session id={} name={:?} repo={:?} working_dir={:?}", session_id, name, repo, working_dir);
+
+    state.pty_manager.restart_session(
+        session_id.clone(),
+        name.clone(),
+        repo.clone(),
+        working_dir.clone(),
+        c,
+        r,
+        Some(cfg.shell),
+        app_handle,
+    ).map_err(|e| {
+        log::error!("Failed to restart session id={}: {}", session_id, e);
+        e
+    })?;
+
+    Ok(SessionInfo {
+        id: session_id,
         name,
         repo,
         working_dir,
@@ -181,6 +221,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
@@ -202,6 +244,9 @@ pub fn run() {
                 if let Ok(icon) = Image::from_bytes(include_bytes!("../icons/icon.png")) {
                     let _ = window.set_icon(icon);
                 }
+
+                // Install native power monitor for sleep/wake detection
+                power::install_power_monitor(&window, app.handle().clone());
             }
 
             // Register Ctrl+V as a global shortcut so it fires at the OS
@@ -241,6 +286,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             create_session,
+            restart_session,
             close_session,
             write_to_session,
             resize_session,

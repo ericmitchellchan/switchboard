@@ -56,6 +56,52 @@ impl PtyManager {
         Ok(())
     }
 
+    pub fn restart_session(
+        &self,
+        id: String,
+        name: String,
+        repo: String,
+        working_dir: String,
+        cols: u16,
+        rows: u16,
+        shell: Option<String>,
+        app_handle: AppHandle,
+    ) -> Result<(), String> {
+        // Close old PTY if it exists (ignore errors — it may already be dead)
+        {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .map_err(|e| format!("Lock error: {}", e))?;
+            if let Some(mut old) = sessions.remove(&id) {
+                old.kill();
+                log::info!("Killed old PTY for restart id={}", id);
+            }
+        }
+
+        // Create new PTY with same session ID
+        let (session, reader) =
+            PtySession::spawn(name, repo, working_dir, cols, rows, shell)?;
+
+        {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .map_err(|e| format!("Lock error: {}", e))?;
+            sessions.insert(id.clone(), session);
+        }
+
+        log::info!("Session restarted id={}, spawning reader thread", id);
+
+        let session_id = id.clone();
+        let handle = app_handle.clone();
+        tokio::task::spawn_blocking(move || {
+            read_pty_output(reader, session_id, handle);
+        });
+
+        Ok(())
+    }
+
     pub fn close_session(&self, id: &str) -> Result<(), String> {
         let mut sessions = self
             .sessions

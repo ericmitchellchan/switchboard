@@ -20,6 +20,18 @@ export async function createSession(
   return invoke("create_session", { name, repo, workingDir: working_dir, cols, rows });
 }
 
+export async function restartSession(
+  sessionId: string,
+  name: string,
+  repo: string,
+  working_dir: string,
+  cols?: number,
+  rows?: number
+): Promise<SessionInfo> {
+  log.debug(`IPC restartSession id=${sessionId} name=${name}`);
+  return invoke("restart_session", { sessionId, name, repo, workingDir: working_dir, cols, rows });
+}
+
 export async function closeSession(sessionId: string): Promise<void> {
   log.debug(`IPC closeSession id=${sessionId}`);
   return invoke("close_session", { sessionId });
