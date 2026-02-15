@@ -7,6 +7,7 @@ import {
   fitTerminal,
   getTerminal,
   writeRestoreContent,
+  popSavedScrollPosition,
 } from "../lib/terminal";
 import {
   writeToSession,
@@ -225,11 +226,31 @@ export function TerminalPane({
         if (dims) {
           resizeSession(sessionId, dims.cols, dims.rows).catch(console.error);
         }
-        // Only scroll to bottom on first attach; re-attaches preserve scroll position
-        if (isFirstAttach) {
-          const inst = getTerminal(sessionId);
-          if (inst) inst.terminal.scrollToBottom();
+
+        const inst = getTerminal(sessionId);
+        if (inst) {
+          if (isFirstAttach) {
+            // First attach: scroll to bottom
+            inst.terminal.scrollToBottom();
+          } else {
+            // Re-attach: restore scroll position saved at detach time.
+            // fit() may have reflowed the buffer (column change → line rewrap),
+            // which can reset viewportY to 0.
+            const saved = popSavedScrollPosition(sessionId);
+            if (saved) {
+              const wasAtBottom = saved.viewportY >= saved.baseY;
+              if (wasAtBottom) {
+                inst.terminal.scrollToBottom();
+              } else {
+                // Clamp to valid range in case reflow shortened the buffer
+                const newBaseY = inst.terminal.buffer.active.baseY;
+                const clampedY = Math.min(saved.viewportY, newBaseY);
+                inst.terminal.scrollToLine(clampedY);
+              }
+            }
+          }
         }
+
         // Reveal after fit — GPU-composited transition avoids layout thrash
         container.style.opacity = "1";
       });

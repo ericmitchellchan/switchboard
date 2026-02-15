@@ -44,6 +44,9 @@ export interface TerminalInstance {
 // Module-level map: keeps terminal instances alive across React renders
 const terminalMap = new Map<string, TerminalInstance>();
 
+// Saved scroll positions for restoring after detach/reattach
+const savedScrollPositions = new Map<string, { viewportY: number; baseY: number }>();
+
 // Module-level config for font settings — set once from App after config loads
 let terminalConfig = {
   fontSize: 13,
@@ -167,6 +170,13 @@ export function detachFromDOM(sessionId: string): void {
   const instance = terminalMap.get(sessionId);
   if (!instance) return;
 
+  // Save scroll position before detaching so we can restore after reattach
+  const buf = instance.terminal.buffer.active;
+  savedScrollPositions.set(sessionId, {
+    viewportY: buf.viewportY,
+    baseY: buf.baseY,
+  });
+
   // Dispose WebGL to free the context
   if (instance.webglAddon) {
     instance.webglAddon.dispose();
@@ -178,6 +188,13 @@ export function detachFromDOM(sessionId: string): void {
   if (el && el.parentElement) {
     el.parentElement.removeChild(el);
   }
+}
+
+/** Retrieve and clear saved scroll position (used after reattach + fit) */
+export function popSavedScrollPosition(sessionId: string): { viewportY: number; baseY: number } | undefined {
+  const saved = savedScrollPositions.get(sessionId);
+  if (saved) savedScrollPositions.delete(sessionId);
+  return saved;
 }
 
 export function getTerminal(sessionId: string): TerminalInstance | undefined {
@@ -194,6 +211,7 @@ export function disposeTerminal(sessionId: string): void {
   }
   instance.terminal.dispose();
   terminalMap.delete(sessionId);
+  savedScrollPositions.delete(sessionId);
 }
 
 export function serializeTerminal(sessionId: string): string | null {
