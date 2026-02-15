@@ -1,24 +1,36 @@
 import type { AgentStatus } from "../types";
 import { log } from "./logger";
 
-const DONE_TIMEOUT_MS = 5_000;
+/** Default idle timeout — if no output for this long while "running", transition to "done".
+ *  Longer = less flickering between blue/green during multi-step agent work. */
+const DONE_TIMEOUT_MS = 8_000;
+
+/** Shorter idle timeout used after a structural completion signal (checkmark + past tense + timing).
+ *  Lets us show "done" faster when we're confident the agent actually finished. */
+const SHORT_DONE_TIMEOUT_MS = 2_000;
 
 /** Number of meaningful output chunks (without a waiting pattern re-appearing)
  *  after which stickyWaiting auto-clears. Prevents false-positive patterns
- *  from keeping the status stuck on "waiting" while the agent is clearly working. */
-const STICKY_EXPIRY_CHUNKS = 3;
+ *  from keeping the status stuck on "waiting" while the agent is clearly working.
+ *  Higher = more conservative (stays yellow longer). */
+const STICKY_EXPIRY_CHUNKS = 12;
 
 /** Rolling buffer size for multi-chunk numbered-list detection */
 const RECENT_LINES_MAX = 10;
 
-/** Silence window after numbered list before transitioning to "waiting" */
-const PENDING_WAITING_DELAY_MS = 750;
+/** Silence window after numbered list before transitioning to "waiting".
+ *  Must be long enough that streaming output finishes before we commit to "waiting". */
+const PENDING_WAITING_DELAY_MS = 1_500;
 
 /** Matches numbered options like "  1. Allow", "  2. No" (capped at 1-4) */
 const NUMBERED_OPTION_RE = /^\s*([1-4])\.\s+\S/;
 
 /** Matches Claude Code's running indicator like "(3s, 1.2k tokens)" */
 const TOKEN_COUNTER_RE = /\(\d+s,\s*[\d.]+k?\s*tokens?\)/;
+
+/** Matches Claude Code's completion lines: checkmark + word(s) + (Xs) timing.
+ *  e.g. "✓ Edited src/App.tsx (2s)", "✔ Wrote file.txt (0.5s)", "✓ Ran tests (15s)" */
+const COMPLETION_RE = /[✓✔]\s+\w+.*\(\d+(\.\d+)?s\)/;
 
 // Matches ANSI escape sequences: CSI (ESC[...letter), OSC (ESC]...BEL), and 2-char escapes
 const ANSI_RE = /\x1b(?:\[[^a-zA-Z@]*[a-zA-Z@]|\][^\x07]*\x07?|[^[\]])/g;
@@ -177,9 +189,18 @@ export function processOutput(
   // Store callback ref for async timer use
   state.lastCallback = onStatusChange;
 
-  // Token counter is a strong "running" signal — cancel any pending list timer
-  if (TOKEN_COUNTER_RE.test(clean)) {
+  const hasTokenCounter = TOKEN_COUNTER_RE.test(clean);
+  const hasCompletion = COMPLETION_RE.test(clean);
+
+  // Token counter is a strong "running" signal — the agent is actively
+  // processing, so cancel any pending numbered-list timer AND clear sticky
+  // waiting (the agent clearly moved past any earlier prompt)
+  if (hasTokenCounter) {
     cancelPendingWaiting(state);
+    if (state.stickyWaiting) {
+      state.stickyWaiting = false;
+      state.chunksSinceWaiting = 0;
+    }
   }
 
   // If meaningful output arrives while a pending timer is active, cancel it —
@@ -254,14 +275,17 @@ export function processOutput(
     }, PENDING_WAITING_DELAY_MS);
   }
 
-  // Set up done timeout — only fires when actively running (not waiting/error)
+  // Set up done timeout — only fires when actively running (not waiting/error).
+  // Use a shorter timeout when we detected a completion pattern (checkmark + timing),
+  // since that's a strong signal the agent finished an action.
+  const doneDelay = hasCompletion ? SHORT_DONE_TIMEOUT_MS : DONE_TIMEOUT_MS;
   state.idleTimeoutId = setTimeout(() => {
     const s = detectors.get(sessionId);
     if (s && s.currentStatus === "running") {
       s.currentStatus = "done";
       onStatusChange(sessionId, "done");
     }
-  }, DONE_TIMEOUT_MS);
+  }, doneDelay);
 }
 
 /** Clear sticky waiting state when the user sends input (they responded to the prompt) */

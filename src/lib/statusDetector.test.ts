@@ -177,8 +177,8 @@ describe("isMeaningfulOutput (via processOutput behavior)", () => {
     processOutput(SID, "\x1b[32mhello\x1b[0m", cb);
     // Already running, meaningful text keeps running → no change
     expect(cb).not.toHaveBeenCalled();
-    // But timer should be set — advance past 5s and check
-    vi.advanceTimersByTime(5000);
+    // But timer should be set — advance past 8s and check
+    vi.advanceTimersByTime(8000);
     expect(cb).toHaveBeenCalledWith(SID, "done");
   });
 
@@ -221,15 +221,16 @@ describe("state machine transitions", () => {
     expect(cb).not.toHaveBeenCalled();
   });
 
-  it("waiting → 3 output chunks without re-match → sticky auto-expires → 'running'", () => {
+  it("waiting → 12 output chunks without re-match → sticky auto-expires → 'running'", () => {
     const cb = vi.fn();
     processOutput(SID, "(y/n)", cb);
     expect(cb).toHaveBeenCalledWith(SID, "waiting");
     cb.mockClear();
-    processOutput(SID, "chunk 1", cb);
-    processOutput(SID, "chunk 2", cb);
+    for (let i = 1; i <= 11; i++) {
+      processOutput(SID, `chunk ${i}`, cb);
+    }
     expect(cb).not.toHaveBeenCalled(); // still waiting
-    processOutput(SID, "chunk 3", cb);
+    processOutput(SID, "chunk 12", cb);
     expect(cb).toHaveBeenCalledWith(SID, "running"); // auto-expired
   });
 
@@ -237,16 +238,18 @@ describe("state machine transitions", () => {
     const cb = vi.fn();
     processOutput(SID, "(y/n)", cb);
     cb.mockClear();
-    processOutput(SID, "chunk 1", cb);
-    processOutput(SID, "chunk 2", cb);
+    for (let i = 1; i <= 5; i++) {
+      processOutput(SID, `chunk ${i}`, cb);
+    }
     // Pattern appears again — counter resets
     processOutput(SID, "(y/n)", cb);
     expect(cb).not.toHaveBeenCalled(); // still waiting, no transition
-    // Need 3 MORE chunks to auto-expire
-    processOutput(SID, "chunk A", cb);
-    processOutput(SID, "chunk B", cb);
+    // Need 12 MORE chunks to auto-expire
+    for (let i = 1; i <= 11; i++) {
+      processOutput(SID, `chunk ${String.fromCharCode(64 + i)}`, cb);
+    }
     expect(cb).not.toHaveBeenCalled();
-    processOutput(SID, "chunk C", cb);
+    processOutput(SID, "chunk L", cb);
     expect(cb).toHaveBeenCalledWith(SID, "running");
   });
 
@@ -283,20 +286,20 @@ describe("state machine transitions", () => {
     expect(cb).toHaveBeenCalledWith(SID, "running");
   });
 
-  it("running → 5s idle → 'done' + callback fires", () => {
+  it("running → 8s idle → 'done' + callback fires", () => {
     const cb = vi.fn();
     processOutput(SID, "compiling...", cb);
     expect(cb).not.toHaveBeenCalled(); // still running
-    vi.advanceTimersByTime(5000);
+    vi.advanceTimersByTime(8000);
     expect(cb).toHaveBeenCalledWith(SID, "done");
   });
 
-  it("waiting → 5s idle → stays 'waiting' (timer doesn't override)", () => {
+  it("waiting → 8s idle → stays 'waiting' (timer doesn't override)", () => {
     const cb = vi.fn();
     processOutput(SID, "(y/n)", cb);
     expect(cb).toHaveBeenCalledWith(SID, "waiting");
     cb.mockClear();
-    vi.advanceTimersByTime(5000);
+    vi.advanceTimersByTime(8000);
     // Timer checks s.currentStatus === "running" — it's "waiting" so no-op
     expect(cb).not.toHaveBeenCalled();
   });
@@ -304,7 +307,7 @@ describe("state machine transitions", () => {
   it("done → new output → 'running' + callback fires", () => {
     const cb = vi.fn();
     processOutput(SID, "compiling...", cb);
-    vi.advanceTimersByTime(5000);
+    vi.advanceTimersByTime(8000);
     expect(cb).toHaveBeenCalledWith(SID, "done");
     cb.mockClear();
     processOutput(SID, "new output", cb);
@@ -330,14 +333,14 @@ describe("state machine transitions", () => {
 // ── Timer behavior ──────────────────────────────────────────────
 
 describe("timer behavior", () => {
-  it("output resets the 5s timer", () => {
+  it("output resets the 8s timer", () => {
     const cb = vi.fn();
     processOutput(SID, "line 1", cb);
-    vi.advanceTimersByTime(3000);
+    vi.advanceTimersByTime(5000);
     processOutput(SID, "line 2", cb); // resets timer
-    vi.advanceTimersByTime(3000);
-    expect(cb).not.toHaveBeenCalled(); // only 3s since last output
-    vi.advanceTimersByTime(2000); // now 5s since line 2
+    vi.advanceTimersByTime(5000);
+    expect(cb).not.toHaveBeenCalled(); // only 5s since last output
+    vi.advanceTimersByTime(3000); // now 8s since line 2
     expect(cb).toHaveBeenCalledWith(SID, "done");
   });
 
@@ -346,15 +349,15 @@ describe("timer behavior", () => {
     processOutput(SID, "a", cb);
     processOutput(SID, "b", cb);
     processOutput(SID, "c", cb);
-    vi.advanceTimersByTime(5000);
+    vi.advanceTimersByTime(8000);
     expect(cb).toHaveBeenCalledTimes(1);
     expect(cb).toHaveBeenCalledWith(SID, "done");
   });
 
-  it("timer fires after exactly DONE_TIMEOUT_MS (5000)", () => {
+  it("timer fires after exactly DONE_TIMEOUT_MS (8000)", () => {
     const cb = vi.fn();
     processOutput(SID, "output", cb);
-    vi.advanceTimersByTime(4999);
+    vi.advanceTimersByTime(7999);
     expect(cb).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1);
     expect(cb).toHaveBeenCalledWith(SID, "done");
@@ -363,19 +366,19 @@ describe("timer behavior", () => {
   it("timer does not fire if new output arrives before timeout", () => {
     const cb = vi.fn();
     processOutput(SID, "output 1", cb);
-    vi.advanceTimersByTime(4000);
+    vi.advanceTimersByTime(7000);
     processOutput(SID, "output 2", cb);
-    vi.advanceTimersByTime(4000);
-    // 4s since "output 2" — no done yet
+    vi.advanceTimersByTime(7000);
+    // 7s since "output 2" — no done yet
     expect(cb).not.toHaveBeenCalled();
   });
 
   it("non-meaningful output does NOT reset timer", () => {
     const cb = vi.fn();
     processOutput(SID, "real output", cb);
-    vi.advanceTimersByTime(3000);
+    vi.advanceTimersByTime(5000);
     processOutput(SID, "\x1b[1;1H", cb); // just cursor move
-    vi.advanceTimersByTime(2000); // 5s since "real output"
+    vi.advanceTimersByTime(3000); // 8s since "real output"
     expect(cb).toHaveBeenCalledWith(SID, "done");
   });
 });
@@ -412,14 +415,14 @@ describe("structural numbered-list detection", () => {
       const cb = vi.fn();
       processOutput(SID, "Claude wants to run a command:\n  1. Yes\n  2. No\n", cb);
       expect(cb).not.toHaveBeenCalledWith(SID, "waiting"); // not yet (timer pending)
-      vi.advanceTimersByTime(750);
+      vi.advanceTimersByTime(1500);
       expect(cb).toHaveBeenCalledWith(SID, "waiting");
     });
 
     it("detects 3-option list + silence as waiting", () => {
       const cb = vi.fn();
       processOutput(SID, "Choose:\n  1. Allow\n  2. Deny\n  3. Always allow\n", cb);
-      vi.advanceTimersByTime(750);
+      vi.advanceTimersByTime(1500);
       expect(cb).toHaveBeenCalledWith(SID, "waiting");
     });
 
@@ -430,7 +433,7 @@ describe("structural numbered-list detection", () => {
         "Select:\n  1. Allow once\n  2. Allow always\n  3. Deny\n  4. Skip\n",
         cb
       );
-      vi.advanceTimersByTime(750);
+      vi.advanceTimersByTime(1500);
       expect(cb).toHaveBeenCalledWith(SID, "waiting");
     });
   });
@@ -441,9 +444,9 @@ describe("structural numbered-list detection", () => {
       const cb = vi.fn();
       processOutput(SID, "Steps:\n  1. First thing\n  2. Second thing\n", cb);
       // More output arrives before timer fires
-      vi.advanceTimersByTime(200);
+      vi.advanceTimersByTime(500);
       processOutput(SID, "Now let me explain step 1...\n", cb);
-      vi.advanceTimersByTime(600); // total 800ms since list
+      vi.advanceTimersByTime(1200); // total 1700ms since list
       // Should not transition to waiting
       expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
     });
@@ -451,21 +454,21 @@ describe("structural numbered-list detection", () => {
     it("does not match a single numbered item", () => {
       const cb = vi.fn();
       processOutput(SID, "  1. Just one item\n", cb);
-      vi.advanceTimersByTime(750);
+      vi.advanceTimersByTime(1500);
       expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
     });
 
     it("does not match non-consecutive numbers", () => {
       const cb = vi.fn();
       processOutput(SID, "  1. First\n  3. Third\n", cb);
-      vi.advanceTimersByTime(750);
+      vi.advanceTimersByTime(1500);
       expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
     });
 
     it("does not match list not starting from 1", () => {
       const cb = vi.fn();
       processOutput(SID, "  2. Second\n  3. Third\n", cb);
-      vi.advanceTimersByTime(750);
+      vi.advanceTimersByTime(1500);
       expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
     });
 
@@ -473,7 +476,7 @@ describe("structural numbered-list detection", () => {
       const cb = vi.fn();
       // Trailing "5. E" breaks the backward scan, so no valid list detected
       processOutput(SID, "  1. A\n  2. B\n  3. C\n  4. D\n  5. E\n", cb);
-      vi.advanceTimersByTime(750);
+      vi.advanceTimersByTime(1500);
       expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
     });
   });
@@ -484,7 +487,7 @@ describe("structural numbered-list detection", () => {
       const cb = vi.fn();
       processOutput(SID, "Permission needed:\n  1. Allow\n", cb);
       processOutput(SID, "  2. Deny\n", cb);
-      vi.advanceTimersByTime(750);
+      vi.advanceTimersByTime(1500);
       expect(cb).toHaveBeenCalledWith(SID, "waiting");
     });
 
@@ -493,23 +496,23 @@ describe("structural numbered-list detection", () => {
       processOutput(SID, "  1. Yes\n", cb);
       processOutput(SID, "  2. No\n", cb);
       processOutput(SID, "  3. Always\n", cb);
-      vi.advanceTimersByTime(750);
+      vi.advanceTimersByTime(1500);
       expect(cb).toHaveBeenCalledWith(SID, "waiting");
     });
 
     it("resets timer when additional numbered item arrives", () => {
       const cb = vi.fn();
       processOutput(SID, "Question:\n  1. Yes\n  2. No\n", cb);
-      // Timer started. 500ms later, a 3rd option arrives (also a numbered item,
+      // Timer started. 800ms later, a 3rd option arrives (also a numbered item,
       // so the old timer is NOT cancelled by the "non-numbered output" check,
       // but a new timer is started because the list still trails)
-      vi.advanceTimersByTime(500);
+      vi.advanceTimersByTime(800);
       processOutput(SID, "  3. Maybe\n", cb);
-      // Wait for original timer to fire (750ms from first processOutput)
-      vi.advanceTimersByTime(300);
+      // Wait for original timer to fire (1500ms from first processOutput)
+      vi.advanceTimersByTime(800);
       // The first timer may have fired — that's OK. Check final state after
       // the second timer also fires.
-      vi.advanceTimersByTime(500);
+      vi.advanceTimersByTime(800);
       expect(cb).toHaveBeenCalledWith(SID, "waiting");
     });
   });
@@ -520,7 +523,7 @@ describe("structural numbered-list detection", () => {
       const cb = vi.fn();
       processOutput(SID, "  1. Yes\n  2. No\n", cb);
       clearWaiting(SID, cb);
-      vi.advanceTimersByTime(750);
+      vi.advanceTimersByTime(1500);
       expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
     });
 
@@ -530,7 +533,7 @@ describe("structural numbered-list detection", () => {
       clearWaiting(SID, cb);
       // Now send just "2. No" — should NOT match because buffer was cleared
       processOutput(SID, "  2. No\n", cb);
-      vi.advanceTimersByTime(750);
+      vi.advanceTimersByTime(1500);
       expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
     });
   });
@@ -550,7 +553,7 @@ describe("structural numbered-list detection", () => {
       const waitingCalls = cb.mock.calls.filter(
         (c) => c[1] === "waiting"
       ).length;
-      vi.advanceTimersByTime(750);
+      vi.advanceTimersByTime(1500);
       // Should not get an additional waiting transition
       const afterCalls = cb.mock.calls.filter(
         (c) => c[1] === "waiting"
@@ -562,7 +565,7 @@ describe("structural numbered-list detection", () => {
       const cb = vi.fn();
       processOutput(SID, "  1. Allow\n  2. Deny\n", cb);
       markExited(SID, cb);
-      vi.advanceTimersByTime(750);
+      vi.advanceTimersByTime(1500);
       const lastCall = cb.mock.calls[cb.mock.calls.length - 1];
       expect(lastCall).toEqual([SID, "exited"]);
       expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
@@ -572,7 +575,7 @@ describe("structural numbered-list detection", () => {
       const cb = vi.fn();
       processOutput(SID, "  1. Allow\n  2. Deny\n", cb);
       destroyDetector(SID);
-      expect(() => vi.advanceTimersByTime(750)).not.toThrow();
+      expect(() => vi.advanceTimersByTime(1500)).not.toThrow();
     });
   });
 
@@ -620,19 +623,59 @@ describe("structural numbered-list detection", () => {
     it("cancels pending waiting timer when token counter appears", () => {
       const cb = vi.fn();
       processOutput(SID, "  1. Allow\n  2. Deny\n", cb);
-      vi.advanceTimersByTime(200);
+      vi.advanceTimersByTime(500);
       processOutput(SID, "(3s, 1.2k tokens)\n", cb);
-      vi.advanceTimersByTime(600);
+      vi.advanceTimersByTime(1200);
       expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
     });
 
     it("cancels pending timer for token counter without k suffix", () => {
       const cb = vi.fn();
       processOutput(SID, "  1. Yes\n  2. No\n", cb);
-      vi.advanceTimersByTime(100);
+      vi.advanceTimersByTime(300);
       processOutput(SID, "(12s, 450 tokens)\n", cb);
-      vi.advanceTimersByTime(700);
+      vi.advanceTimersByTime(1300);
       expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
+    });
+
+    it("token counter clears sticky waiting immediately", () => {
+      const cb = vi.fn();
+      processOutput(SID, "(y/n)", cb);
+      expect(cb).toHaveBeenCalledWith(SID, "waiting");
+      cb.mockClear();
+      // Token counter = strong running signal, should clear sticky and transition
+      processOutput(SID, "(5s, 2.3k tokens)", cb);
+      expect(cb).toHaveBeenCalledWith(SID, "running");
+    });
+  });
+
+  // ─── Group 8: Completion pattern detection ──────────────────────────
+  describe("completion pattern", () => {
+    it("completion pattern triggers shorter done timeout (2s)", () => {
+      const cb = vi.fn();
+      processOutput(SID, "✓ Edited src/App.tsx (2s)", cb);
+      // Should NOT be done yet at 1999ms
+      vi.advanceTimersByTime(1999);
+      expect(cb).not.toHaveBeenCalledWith(SID, "done");
+      // Should be done at 2000ms
+      vi.advanceTimersByTime(1);
+      expect(cb).toHaveBeenCalledWith(SID, "done");
+    });
+
+    it("non-completion output uses full 8s timeout", () => {
+      const cb = vi.fn();
+      processOutput(SID, "compiling files...", cb);
+      vi.advanceTimersByTime(7999);
+      expect(cb).not.toHaveBeenCalledWith(SID, "done");
+      vi.advanceTimersByTime(1);
+      expect(cb).toHaveBeenCalledWith(SID, "done");
+    });
+
+    it("matches checkmark with fractional timing", () => {
+      const cb = vi.fn();
+      processOutput(SID, "✔ Wrote file.txt (0.5s)", cb);
+      vi.advanceTimersByTime(2000);
+      expect(cb).toHaveBeenCalledWith(SID, "done");
     });
   });
 });
