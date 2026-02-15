@@ -5,6 +5,7 @@ import {
   processOutput,
   clearWaiting,
   markExited,
+  _testOnly,
 } from "./statusDetector";
 const SID = "test-session";
 
@@ -399,5 +400,239 @@ describe("callback discipline", () => {
     // First one transitions to error, subsequent ones stay error
     expect(cb).toHaveBeenCalledTimes(1);
     expect(cb).toHaveBeenCalledWith(SID, "error");
+  });
+});
+
+// ── Structural numbered-list detection ─────────────────────────────
+
+describe("structural numbered-list detection", () => {
+  // ─── Group 1: Basic detection ──────────────────────────────────────
+  describe("basic detection", () => {
+    it("detects 2-option list + silence as waiting", () => {
+      const cb = vi.fn();
+      processOutput(SID, "Claude wants to run a command:\n  1. Yes\n  2. No\n", cb);
+      expect(cb).not.toHaveBeenCalledWith(SID, "waiting"); // not yet (timer pending)
+      vi.advanceTimersByTime(750);
+      expect(cb).toHaveBeenCalledWith(SID, "waiting");
+    });
+
+    it("detects 3-option list + silence as waiting", () => {
+      const cb = vi.fn();
+      processOutput(SID, "Choose:\n  1. Allow\n  2. Deny\n  3. Always allow\n", cb);
+      vi.advanceTimersByTime(750);
+      expect(cb).toHaveBeenCalledWith(SID, "waiting");
+    });
+
+    it("detects 4-option list + silence as waiting", () => {
+      const cb = vi.fn();
+      processOutput(
+        SID,
+        "Select:\n  1. Allow once\n  2. Allow always\n  3. Deny\n  4. Skip\n",
+        cb
+      );
+      vi.advanceTimersByTime(750);
+      expect(cb).toHaveBeenCalledWith(SID, "waiting");
+    });
+  });
+
+  // ─── Group 2: False positive prevention ────────────────────────────
+  describe("false positive prevention", () => {
+    it("stays running when numbered list is followed by more output", () => {
+      const cb = vi.fn();
+      processOutput(SID, "Steps:\n  1. First thing\n  2. Second thing\n", cb);
+      // More output arrives before timer fires
+      vi.advanceTimersByTime(200);
+      processOutput(SID, "Now let me explain step 1...\n", cb);
+      vi.advanceTimersByTime(600); // total 800ms since list
+      // Should not transition to waiting
+      expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
+    });
+
+    it("does not match a single numbered item", () => {
+      const cb = vi.fn();
+      processOutput(SID, "  1. Just one item\n", cb);
+      vi.advanceTimersByTime(750);
+      expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
+    });
+
+    it("does not match non-consecutive numbers", () => {
+      const cb = vi.fn();
+      processOutput(SID, "  1. First\n  3. Third\n", cb);
+      vi.advanceTimersByTime(750);
+      expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
+    });
+
+    it("does not match list not starting from 1", () => {
+      const cb = vi.fn();
+      processOutput(SID, "  2. Second\n  3. Third\n", cb);
+      vi.advanceTimersByTime(750);
+      expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
+    });
+
+    it("does not match numbers > 4", () => {
+      const cb = vi.fn();
+      // Trailing "5. E" breaks the backward scan, so no valid list detected
+      processOutput(SID, "  1. A\n  2. B\n  3. C\n  4. D\n  5. E\n", cb);
+      vi.advanceTimersByTime(750);
+      expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
+    });
+  });
+
+  // ─── Group 3: Chunk boundaries ─────────────────────────────────────
+  describe("chunk boundaries", () => {
+    it("detects list split across 2 chunks", () => {
+      const cb = vi.fn();
+      processOutput(SID, "Permission needed:\n  1. Allow\n", cb);
+      processOutput(SID, "  2. Deny\n", cb);
+      vi.advanceTimersByTime(750);
+      expect(cb).toHaveBeenCalledWith(SID, "waiting");
+    });
+
+    it("detects list split across 3 chunks", () => {
+      const cb = vi.fn();
+      processOutput(SID, "  1. Yes\n", cb);
+      processOutput(SID, "  2. No\n", cb);
+      processOutput(SID, "  3. Always\n", cb);
+      vi.advanceTimersByTime(750);
+      expect(cb).toHaveBeenCalledWith(SID, "waiting");
+    });
+
+    it("resets timer when additional numbered item arrives", () => {
+      const cb = vi.fn();
+      processOutput(SID, "Question:\n  1. Yes\n  2. No\n", cb);
+      // Timer started. 500ms later, a 3rd option arrives (also a numbered item,
+      // so the old timer is NOT cancelled by the "non-numbered output" check,
+      // but a new timer is started because the list still trails)
+      vi.advanceTimersByTime(500);
+      processOutput(SID, "  3. Maybe\n", cb);
+      // Wait for original timer to fire (750ms from first processOutput)
+      vi.advanceTimersByTime(300);
+      // The first timer may have fired — that's OK. Check final state after
+      // the second timer also fires.
+      vi.advanceTimersByTime(500);
+      expect(cb).toHaveBeenCalledWith(SID, "waiting");
+    });
+  });
+
+  // ─── Group 4: clearWaiting interaction ─────────────────────────────
+  describe("clearWaiting interaction", () => {
+    it("cancels pending timer on clearWaiting", () => {
+      const cb = vi.fn();
+      processOutput(SID, "  1. Yes\n  2. No\n", cb);
+      clearWaiting(SID, cb);
+      vi.advanceTimersByTime(750);
+      expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
+    });
+
+    it("clears recentLines so old lines don't combine with new", () => {
+      const cb = vi.fn();
+      processOutput(SID, "  1. Yes\n", cb);
+      clearWaiting(SID, cb);
+      // Now send just "2. No" — should NOT match because buffer was cleared
+      processOutput(SID, "  2. No\n", cb);
+      vi.advanceTimersByTime(750);
+      expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
+    });
+  });
+
+  // ─── Group 5: Legacy pattern interaction ───────────────────────────
+  describe("legacy pattern interaction", () => {
+    it("legacy waiting pattern takes priority over numbered list timer", () => {
+      const cb = vi.fn();
+      processOutput(SID, "Do you want to proceed (y/n)?\n  1. Yes\n  2. No\n", cb);
+      // Should be immediately waiting via legacy pattern, no timer needed
+      expect(cb).toHaveBeenCalledWith(SID, "waiting");
+    });
+
+    it("does not fire duplicate waiting when already waiting via legacy", () => {
+      const cb = vi.fn();
+      processOutput(SID, "Are you sure?\n  1. Yes\n  2. No\n", cb);
+      const waitingCalls = cb.mock.calls.filter(
+        (c: [string, string]) => c[1] === "waiting"
+      ).length;
+      vi.advanceTimersByTime(750);
+      // Should not get an additional waiting transition
+      const afterCalls = cb.mock.calls.filter(
+        (c: [string, string]) => c[1] === "waiting"
+      ).length;
+      expect(afterCalls).toBe(waitingCalls);
+    });
+
+    it("markExited cancels pending timer", () => {
+      const cb = vi.fn();
+      processOutput(SID, "  1. Allow\n  2. Deny\n", cb);
+      markExited(SID, cb);
+      vi.advanceTimersByTime(750);
+      const lastCall = cb.mock.calls[cb.mock.calls.length - 1];
+      expect(lastCall).toEqual([SID, "exited"]);
+      expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
+    });
+
+    it("destroyDetector cancels pending timer without crash", () => {
+      const cb = vi.fn();
+      processOutput(SID, "  1. Allow\n  2. Deny\n", cb);
+      destroyDetector(SID);
+      expect(() => vi.advanceTimersByTime(750)).not.toThrow();
+    });
+  });
+
+  // ─── Group 6: hasTrailingNumberedList edge cases ───────────────────
+  describe("hasTrailingNumberedList", () => {
+    const { hasTrailingNumberedList } = _testOnly;
+
+    it("returns false for empty array", () => {
+      expect(hasTrailingNumberedList([])).toBe(false);
+    });
+
+    it("returns false for single item", () => {
+      expect(hasTrailingNumberedList(["  1. Yes"])).toBe(false);
+    });
+
+    it("returns true for 2 consecutive items", () => {
+      expect(hasTrailingNumberedList(["  1. Yes", "  2. No"])).toBe(true);
+    });
+
+    it("returns true when preamble precedes the list", () => {
+      expect(
+        hasTrailingNumberedList([
+          "Do you want to allow this action?",
+          "  1. Allow",
+          "  2. Deny",
+        ])
+      ).toBe(true);
+    });
+
+    it("works without leading whitespace", () => {
+      expect(hasTrailingNumberedList(["1. Allow", "2. Deny"])).toBe(true);
+    });
+
+    it("returns false when numbers skip", () => {
+      expect(hasTrailingNumberedList(["  1. A", "  3. C"])).toBe(false);
+    });
+
+    it("returns false when list doesn't start from 1", () => {
+      expect(hasTrailingNumberedList(["  2. B", "  3. C"])).toBe(false);
+    });
+  });
+
+  // ─── Group 7: Token counter ────────────────────────────────────────
+  describe("token counter", () => {
+    it("cancels pending waiting timer when token counter appears", () => {
+      const cb = vi.fn();
+      processOutput(SID, "  1. Allow\n  2. Deny\n", cb);
+      vi.advanceTimersByTime(200);
+      processOutput(SID, "(3s, 1.2k tokens)\n", cb);
+      vi.advanceTimersByTime(600);
+      expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
+    });
+
+    it("cancels pending timer for token counter without k suffix", () => {
+      const cb = vi.fn();
+      processOutput(SID, "  1. Yes\n  2. No\n", cb);
+      vi.advanceTimersByTime(100);
+      processOutput(SID, "(12s, 450 tokens)\n", cb);
+      vi.advanceTimersByTime(700);
+      expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
+    });
   });
 });

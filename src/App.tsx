@@ -15,8 +15,8 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify } from "./lib/ipc";
-import { disposeTerminal, getTerminal, setTerminalConfig } from "./lib/terminal";
+import { createSession, closeSession, renameSession, resizeSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify } from "./lib/ipc";
+import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, fitTerminal, getAllTerminalIds } from "./lib/terminal";
 import {
   loadWorkspaceFromStorage,
   buildSavedWorkspace,
@@ -532,8 +532,80 @@ export default function App() {
     };
 
     window.addEventListener("beforeunload", handleBeforeUnload);
+
+    // --- Sleep/wake detection via timestamp-gap heartbeat ---
+    //
+    // Neither visibilitychange nor window.blur fire reliably in
+    // Tauri/WebView2 on Windows (see tauri#10592, WebView2Feedback#4626).
+    // Instead, we use a setInterval heartbeat: if the gap between ticks
+    // exceeds a threshold, the system was sleeping.
+    //
+    // On wake we:
+    //  1. Save workspace + scrollback (may not have been saved before sleep)
+    //  2. Clear texture atlases on surviving WebGL contexts (fixes
+    //     Chromium/Nvidia corrupt-glyph bug where context is NOT lost
+    //     but GPU-side textures are garbled)
+    //  3. After a delay, re-enable WebGL for any terminals that fully
+    //     lost their context (GPU needs time to stabilize after wake)
+    //  4. Re-fit all terminals in case the window resized during sleep
+    const HEARTBEAT_MS = 10_000;       // 10s heartbeat
+    const SLEEP_THRESHOLD_MS = 15_000; // 15s gap = definitely slept
+    const GPU_SETTLE_MS = 2_000;       // wait for GPU after wake
+    let lastHeartbeat = Date.now();
+
+    const heartbeatTimer = setInterval(() => {
+      const now = Date.now();
+      if (now - lastHeartbeat > SLEEP_THRESHOLD_MS) {
+        log.info(`System wake detected (gap=${Math.round((now - lastHeartbeat) / 1000)}s)`);
+
+        // 1. Save workspace immediately
+        const state = {
+          sessions: sessionsRef2.current,
+          activeSessionId: activeIdRef2.current,
+          paneLayout: paneLayoutRef.current.root,
+          focusedPaneId: paneLayoutRef.current.focusedPaneId,
+          sessionCounter: sessionCounterRef.current,
+        };
+        if (state.sessions.length > 0) {
+          const workspace = buildSavedWorkspace(
+            state.sessions,
+            state.activeSessionId,
+            state.paneLayout,
+            state.focusedPaneId,
+            state.sessionCounter
+          );
+          saveWorkspaceToStorage(workspace);
+          saveAllScrollbacks(state.sessions).catch(() => {});
+        }
+
+        // 2. Clear corrupt texture atlases (cheap, safe)
+        clearAllTextureAtlases();
+
+        // 3. Re-enable lost WebGL contexts after GPU settles
+        setTimeout(() => {
+          recoverAllWebGL();
+
+          // 4. Re-fit all attached terminals
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              for (const id of getAllTerminalIds()) {
+                const inst = getTerminal(id);
+                if (!inst?.terminal.element?.parentElement) continue;
+                const dims = fitTerminal(id);
+                if (dims) {
+                  resizeSession(id, dims.cols, dims.rows).catch(() => {});
+                }
+              }
+            });
+          });
+        }, GPU_SETTLE_MS);
+      }
+      lastHeartbeat = now;
+    }, HEARTBEAT_MS);
+
     return () => {
       stopPeriodicSave();
+      clearInterval(heartbeatTimer);
       window.removeEventListener("beforeunload", handleBeforeUnload);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

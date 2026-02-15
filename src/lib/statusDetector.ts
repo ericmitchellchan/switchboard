@@ -8,6 +8,18 @@ const DONE_TIMEOUT_MS = 5_000;
  *  from keeping the status stuck on "waiting" while the agent is clearly working. */
 const STICKY_EXPIRY_CHUNKS = 3;
 
+/** Rolling buffer size for multi-chunk numbered-list detection */
+const RECENT_LINES_MAX = 10;
+
+/** Silence window after numbered list before transitioning to "waiting" */
+const PENDING_WAITING_DELAY_MS = 750;
+
+/** Matches numbered options like "  1. Allow", "  2. No" (capped at 1-4) */
+const NUMBERED_OPTION_RE = /^\s*([1-4])\.\s+\S/;
+
+/** Matches Claude Code's running indicator like "(3s, 1.2k tokens)" */
+const TOKEN_COUNTER_RE = /\(\d+s,\s*[\d.]+k?\s*tokens?\)/;
+
 // Matches ANSI escape sequences: CSI (ESC[...letter), OSC (ESC]...BEL), and 2-char escapes
 const ANSI_RE = /\x1b(?:\[[^a-zA-Z@]*[a-zA-Z@]|\][^\x07]*\x07?|[^[\]])/g;
 
@@ -20,6 +32,36 @@ function stripAnsi(text: string): string {
 function isMeaningfulOutput(text: string): boolean {
   const stripped = stripAnsi(text).replace(/[\x00-\x1f\x7f]/g, "");
   return /\S/.test(stripped);
+}
+
+/**
+ * Check if the tail of the line buffer contains a consecutive numbered list
+ * starting from 1 with at least 2 items (e.g. "1. Yes\n2. No").
+ */
+function hasTrailingNumberedList(lines: string[]): boolean {
+  const numbers: number[] = [];
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const match = NUMBERED_OPTION_RE.exec(lines[i]);
+    if (match) {
+      numbers.unshift(parseInt(match[1], 10));
+    } else {
+      break; // Non-numbered line stops the backward scan
+    }
+  }
+  if (numbers.length < 2) return false;
+  if (numbers[0] !== 1) return false;
+  for (let i = 1; i < numbers.length; i++) {
+    if (numbers[i] !== numbers[i - 1] + 1) return false;
+  }
+  return true;
+}
+
+/** Cancel any pending numbered-list waiting timer */
+function cancelPendingWaiting(state: DetectorState): void {
+  if (state.pendingWaitingTimerId !== null) {
+    clearTimeout(state.pendingWaitingTimerId);
+    state.pendingWaitingTimerId = null;
+  }
 }
 
 const WAITING_PATTERNS = [
@@ -62,6 +104,12 @@ interface DetectorState {
   /** Meaningful output chunks since the last waiting pattern match.
    *  Once this reaches STICKY_EXPIRY_CHUNKS, stickyWaiting auto-clears. */
   chunksSinceWaiting: number;
+  /** Rolling buffer of recent non-blank cleaned lines for numbered-list detection */
+  recentLines: string[];
+  /** Timer for numbered-list-then-silence detection */
+  pendingWaitingTimerId: ReturnType<typeof setTimeout> | null;
+  /** Stores latest onStatusChange ref for async timer callback */
+  lastCallback: ((sessionId: string, status: AgentStatus) => void) | null;
 }
 
 const detectors = new Map<string, DetectorState>();
@@ -74,6 +122,9 @@ export function initDetector(sessionId: string): void {
     idleTimeoutId: null,
     stickyWaiting: false,
     chunksSinceWaiting: 0,
+    recentLines: [],
+    pendingWaitingTimerId: null,
+    lastCallback: null,
   });
 }
 
@@ -114,6 +165,33 @@ export function processOutput(
     return;
   }
 
+  // Accumulate non-blank cleaned lines into rolling buffer
+  const newLines = clean.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  if (newLines.length > 0) {
+    state.recentLines.push(...newLines);
+    if (state.recentLines.length > RECENT_LINES_MAX) {
+      state.recentLines = state.recentLines.slice(-RECENT_LINES_MAX);
+    }
+  }
+
+  // Store callback ref for async timer use
+  state.lastCallback = onStatusChange;
+
+  // Token counter is a strong "running" signal — cancel any pending list timer
+  if (TOKEN_COUNTER_RE.test(clean)) {
+    cancelPendingWaiting(state);
+  }
+
+  // If meaningful output arrives while a pending timer is active, cancel it —
+  // the numbered list was part of response text, not a prompt
+  if (state.pendingWaitingTimerId !== null && !detectedWaiting) {
+    // Only cancel if we got non-numbered-list meaningful output
+    const isOnlyNumberedItems = newLines.length > 0 && newLines.every((l) => NUMBERED_OPTION_RE.test(l));
+    if (!isOnlyNumberedItems) {
+      cancelPendingWaiting(state);
+    }
+  }
+
   state.lastOutputTime = Date.now();
 
   // Clear existing done timeout
@@ -129,6 +207,7 @@ export function processOutput(
     newStatus = "waiting";
     state.stickyWaiting = true;
     state.chunksSinceWaiting = 0;
+    cancelPendingWaiting(state); // Legacy pattern wins, no need for timer
   } else if (state.stickyWaiting) {
     state.chunksSinceWaiting++;
     if (state.chunksSinceWaiting >= STICKY_EXPIRY_CHUNKS) {
@@ -153,6 +232,28 @@ export function processOutput(
     onStatusChange(sessionId, newStatus);
   }
 
+  // After resolving status: if we're "running" and tail has a numbered list,
+  // start the silence timer for structural waiting detection
+  if (
+    newStatus === "running" &&
+    state.pendingWaitingTimerId === null &&
+    hasTrailingNumberedList(state.recentLines)
+  ) {
+    state.pendingWaitingTimerId = setTimeout(() => {
+      const s = detectors.get(sessionId);
+      if (s && s.currentStatus === "running") {
+        s.pendingWaitingTimerId = null;
+        s.stickyWaiting = true;
+        s.chunksSinceWaiting = 0;
+        s.currentStatus = "waiting";
+        log.debug(`Status transition id=${sessionId}: running -> waiting (numbered list)`);
+        if (s.lastCallback) {
+          s.lastCallback(sessionId, "waiting");
+        }
+      }
+    }, PENDING_WAITING_DELAY_MS);
+  }
+
   // Set up done timeout — only fires when actively running (not waiting/error)
   state.idleTimeoutId = setTimeout(() => {
     const s = detectors.get(sessionId);
@@ -171,6 +272,8 @@ export function clearWaiting(
   const state = detectors.get(sessionId);
   if (state) {
     state.stickyWaiting = false;
+    cancelPendingWaiting(state);
+    state.recentLines = [];
     if (state.currentStatus === "waiting" && onStatusChange) {
       state.currentStatus = "running";
       onStatusChange(sessionId, "running");
@@ -189,6 +292,7 @@ export function markExited(
     clearTimeout(state.idleTimeoutId);
     state.idleTimeoutId = null;
   }
+  cancelPendingWaiting(state);
   state.currentStatus = "exited";
   onStatusChange(sessionId, "exited");
 }
@@ -199,6 +303,10 @@ export function destroyDetector(sessionId: string): void {
     if (state.idleTimeoutId !== null) {
       clearTimeout(state.idleTimeoutId);
     }
+    cancelPendingWaiting(state);
     detectors.delete(sessionId);
   }
 }
+
+/** Exported for testing only */
+export const _testOnly = { hasTrailingNumberedList };

@@ -31,6 +31,22 @@ const listenerCleanups = new Map<string, (() => void)[]>();
 // Per-session streaming UTF-8 decoders (handles multi-byte chars split across chunks)
 const sessionDecoders = new Map<string, TextDecoder>();
 
+// Module-level wiring guard: prevents duplicate listeners when React
+// unmounts/remounts TerminalPane for the same session (e.g. single-pane ↔ split)
+const wiredSessions = new Set<string>();
+
+// Module-level callback refs so listener closures always see the latest
+// callbacks regardless of which component instance last rendered.
+const sessionCallbacks = new Map<
+  string,
+  {
+    onStatusChange: (sessionId: string, status: AgentStatus) => void;
+    onExited: (sessionId: string) => void;
+    onAutoTask?: (task: { text: string; fingerprint: string; priority: "high" | "med" | "low"; category: string }, sessionId: string) => void;
+    onResolveTask?: (fingerprintPrefix: string) => void;
+  }
+>();
+
 export function cleanupSessionListeners(sessionId: string) {
   const fns = listenerCleanups.get(sessionId);
   if (fns) {
@@ -38,6 +54,8 @@ export function cleanupSessionListeners(sessionId: string) {
     listenerCleanups.delete(sessionId);
   }
   sessionDecoders.delete(sessionId);
+  wiredSessions.delete(sessionId);
+  sessionCallbacks.delete(sessionId);
 }
 
 interface TerminalPaneProps {
@@ -62,20 +80,15 @@ export function TerminalPane({
   isFocused = true,
 }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const setupDone = useRef(new Set<string>());
-  const onStatusChangeRef = useRef(onStatusChange);
-  onStatusChangeRef.current = onStatusChange;
-  const onExitedRef = useRef(onExited);
-  onExitedRef.current = onExited;
-  const onAutoTaskRef = useRef(onAutoTask);
-  onAutoTaskRef.current = onAutoTask;
-  const onResolveTaskRef = useRef(onResolveTask);
-  onResolveTaskRef.current = onResolveTask;
 
-  // Set up terminal data wiring (once per session)
+  // Update module-level callback refs on every render so listener closures
+  // always invoke the latest callbacks from whichever component instance is active.
+  sessionCallbacks.set(session.id, { onStatusChange, onExited, onAutoTask, onResolveTask });
+
+  // Set up terminal data wiring (once per session, module-level guard)
   const wireSession = useCallback((sessionId: string, restoredFromId?: string) => {
-    if (setupDone.current.has(sessionId)) return;
-    setupDone.current.add(sessionId);
+    if (wiredSessions.has(sessionId)) return;
+    wiredSessions.add(sessionId);
 
     log.debug(`Wiring session id=${sessionId}`);
 
@@ -86,12 +99,6 @@ export function TerminalPane({
     initDetector(sessionId);
     sessionDecoders.set(sessionId, new TextDecoder("utf-8"));
 
-    // User input -> PTY
-    instance.terminal.onData((data: string) => {
-      clearWaiting(sessionId, onStatusChangeRef.current);
-      writeToSession(sessionId, data).catch(console.error);
-    });
-
     // Helper to store unlisten functions
     const pushCleanup = (unlisten: () => void) => {
       const arr = listenerCleanups.get(sessionId) ?? [];
@@ -99,30 +106,34 @@ export function TerminalPane({
       listenerCleanups.set(sessionId, arr);
     };
 
+    // Callback accessors that read from the module-level map
+    const getCbs = () => sessionCallbacks.get(sessionId);
+
+    // User input -> PTY
+    const onDataDisposable = instance.terminal.onData((data: string) => {
+      const cbs = getCbs();
+      if (cbs) clearWaiting(sessionId, cbs.onStatusChange);
+      writeToSession(sessionId, data).catch(console.error);
+    });
+    pushCleanup(() => onDataDisposable.dispose());
+
     // Helper: process a single PTY output chunk (write + detect)
     const processPtyChunk = (bytes: Uint8Array) => {
-      // Preserve scroll position when user has scrolled up to read earlier content.
-      // Without this, terminal.write() auto-scrolls the viewport to the bottom.
-      const buf = instance.terminal.buffer.active;
-      const isAtBottom = buf.baseY + instance.terminal.rows >= buf.length;
-      const savedViewportY = buf.viewportY;
-
       instance.terminal.write(bytes);
-
-      if (!isAtBottom) {
-        instance.terminal.scrollToLine(savedViewportY);
-      }
 
       const decoder = sessionDecoders.get(sessionId);
       const text = decoder ? decoder.decode(bytes, { stream: true }) : new TextDecoder().decode(bytes);
-      processOutput(sessionId, text, onStatusChangeRef.current);
-      if (onAutoTaskRef.current) {
-        const detected = detectTasks(sessionId, text);
-        for (const task of detected) onAutoTaskRef.current!(task, sessionId);
-      }
-      if (onResolveTaskRef.current) {
-        const resolved = detectResolutions(sessionId, text);
-        for (const prefix of resolved) onResolveTaskRef.current!(prefix);
+      const cbs = getCbs();
+      if (cbs) {
+        processOutput(sessionId, text, cbs.onStatusChange);
+        if (cbs.onAutoTask) {
+          const detected = detectTasks(sessionId, text);
+          for (const task of detected) cbs.onAutoTask(task, sessionId);
+        }
+        if (cbs.onResolveTask) {
+          const resolved = detectResolutions(sessionId, text);
+          for (const prefix of resolved) cbs.onResolveTask(prefix);
+        }
       }
     };
 
@@ -151,28 +162,30 @@ export function TerminalPane({
     // Session exit
     onSessionExited(sessionId, () => {
       instance.terminal.write("\r\n\x1b[90m[Process exited]\x1b[0m\r\n");
-      markExited(sessionId, onStatusChangeRef.current);
-      onExitedRef.current(sessionId);
+      const cbs = getCbs();
+      if (cbs) {
+        markExited(sessionId, cbs.onStatusChange);
+        cbs.onExited(sessionId);
+      }
     }).then(pushCleanup);
 
     // Resize -> PTY
-    instance.terminal.onResize(({ cols, rows }) => {
+    const onResizeDisposable = instance.terminal.onResize(({ cols, rows }) => {
       resizeSession(sessionId, cols, rows).catch(console.error);
     });
+    pushCleanup(() => onResizeDisposable.dispose());
 
-    // Restore scrollback for sessions restored from a saved workspace (once, gated by setupDone)
+    // Restore scrollback for sessions restored from a saved workspace
     if (restoredFromId) {
       log.debug(`Restoring scrollback for session id=${sessionId} from=${restoredFromId}`);
       loadScrollback(restoredFromId).then((content) => {
         if (content) writeRestoreContent(sessionId, content);
         log.debug(`Scrollback restored for session id=${sessionId}`);
-        // Flush any PTY output that arrived during restore
         const buffered = pendingOutput;
         pendingOutput = null;
         if (buffered) for (const chunk of buffered) processPtyChunk(chunk);
       }).catch((e) => {
         log.warn(`Failed to restore scrollback for session id=${sessionId}: ${e}`);
-        // On error, flush buffer anyway so output isn't lost
         const buffered = pendingOutput;
         pendingOutput = null;
         if (buffered) for (const chunk of buffered) processPtyChunk(chunk);
@@ -186,6 +199,9 @@ export function TerminalPane({
     if (!container) return;
 
     const sessionId = session.id;
+
+    // Track whether this is the first attach (terminal just created, no content yet).
+    const isFirstAttach = !wiredSessions.has(sessionId);
 
     // Create terminal if it doesn't exist (pass saved dims for restored sessions)
     createTerminal(sessionId, { cols: session.cols, rows: session.rows });
@@ -207,8 +223,11 @@ export function TerminalPane({
         if (dims) {
           resizeSession(sessionId, dims.cols, dims.rows).catch(console.error);
         }
-        const inst = getTerminal(sessionId);
-        if (inst) inst.terminal.scrollToBottom();
+        // Only scroll to bottom on first attach; re-attaches preserve scroll position
+        if (isFirstAttach) {
+          const inst = getTerminal(sessionId);
+          if (inst) inst.terminal.scrollToBottom();
+        }
         // Reveal after fit — GPU-composited transition avoids layout thrash
         container.style.opacity = "1";
       });
@@ -232,7 +251,7 @@ export function TerminalPane({
         // Check if user is at the bottom before reflow changes line count
         const inst = getTerminal(session.id);
         const wasAtBottom = inst
-          ? inst.terminal.buffer.active.baseY + inst.terminal.rows >= inst.terminal.buffer.active.length
+          ? inst.terminal.buffer.active.viewportY >= inst.terminal.buffer.active.baseY
           : false;
         const dims = fitTerminal(session.id);
         if (dims) {

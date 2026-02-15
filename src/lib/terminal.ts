@@ -230,3 +230,40 @@ export function fitTerminal(sessionId: string): { cols: number; rows: number } |
     return null;
   }
 }
+
+/** Return all active terminal session IDs */
+export function getAllTerminalIds(): string[] {
+  return Array.from(terminalMap.keys());
+}
+
+/**
+ * Clear the texture atlas on all terminals that still have a live WebGL
+ * context.  This fixes the Chromium/Nvidia bug where glyph textures
+ * become corrupt after OS resume (the WebGL context is NOT lost, but
+ * the GPU-side texture data is garbled).
+ */
+export function clearAllTextureAtlases(): void {
+  for (const [sessionId, instance] of terminalMap) {
+    if (!instance.webglAddon) continue;
+    if (!instance.terminal.element?.parentElement) continue;
+    log.debug(`Clearing texture atlas for session id=${sessionId}`);
+    instance.terminal.clearTextureAtlas();
+  }
+}
+
+/**
+ * Re-enable WebGL for all terminals that are attached to the DOM but lost
+ * their WebGL context (e.g. after system sleep).  Falls back to canvas
+ * rendering silently if WebGL re-creation fails.
+ */
+export function recoverAllWebGL(): void {
+  for (const [sessionId, instance] of terminalMap) {
+    // Only recover for terminals currently attached to the DOM
+    if (!instance.terminal.element?.parentElement) continue;
+    // Only recover if WebGL was lost (addon is null)
+    if (instance.webglAddon) continue;
+
+    log.debug(`Recovering WebGL for session id=${sessionId}`);
+    enableWebGL(sessionId);
+  }
+}
