@@ -12,6 +12,9 @@ Built with Tauri v2, React 18, TypeScript, and xterm.js.
 - **Persistent notifications** — background tabs that need input show a sticky toast until you respond
 - **Task sidebar** — auto-detects build errors, test failures, and git conflicts; also supports manual notes
 - **Workspace persistence** — sessions, tabs, pane layout, and scrollback restored on restart
+- **Sleep/wake recovery** — native Win32 power event detection preserves sessions through sleep cycles, with JS heartbeat fallback
+- **Session restart** — restart exited sessions in-place with a single click
+- **Auto-update** — checks for updates on startup via GitHub Releases
 - **Repo-aware sessions** — configure repos to get color-coded tabs and quick-launch via Ctrl+T
 - **Terminal search** — Ctrl+F in-terminal search powered by xterm.js addon-search
 - **Clipboard integration** — Ctrl+V paste works with Wispr Flow and other tools that simulate keystrokes
@@ -67,11 +70,40 @@ pnpm install
 pnpm tauri dev
 ```
 
-### Build
+### Quick Check (Rust only)
 
 ```powershell
 .\build.ps1
 ```
+
+### Production Build
+
+```powershell
+.\build.ps1 -Full
+```
+
+Produces an NSIS installer at `src-tauri/target/release/bundle/nsis/`. Installs to `%LOCALAPPDATA%` (no admin required).
+
+### Releasing
+
+See [RELEASE.md](RELEASE.md) for the full release process (signing keys, GitHub Actions, version bumping).
+
+## Architecture
+
+```
+src/                    # React frontend
+  App.tsx               # Root component, wires hooks + components
+  components/           # TabBar, TerminalPane, PaneContainer, TaskSidebar, etc.
+  hooks/                # useSessions, usePaneLayout, useKeyboardShortcuts, etc.
+  lib/                  # terminal.ts, statusDetector.ts, taskDetector.ts, paneLayout.ts
+src-tauri/              # Rust backend
+  src/lib.rs            # Tauri commands, plugin registration, setup
+  src/pty/              # PTY session management (portable-pty)
+  src/power.rs          # Win32 sleep/wake detection (WM_POWERBROADCAST)
+  src/config.rs         # User config loading
+```
+
+Terminal instances are stored in a module-level Map outside React state to avoid re-renders. PTY output is base64-encoded and sent over Tauri events per session. The pane layout is an immutable binary tree of leaves and branches.
 
 ## Tech Stack
 
@@ -80,3 +112,5 @@ pnpm tauri dev
 - **Desktop**: Tauri v2
 - **PTY**: portable-pty 0.8.1
 - **Font**: JetBrains Mono (bundled)
+- **Installer**: NSIS (Windows)
+- **Auto-update**: tauri-plugin-updater via GitHub Releases
