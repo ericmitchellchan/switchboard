@@ -160,6 +160,17 @@ export function TerminalPane({
     });
     pushCleanup(() => onWriteParsedDisposable.dispose());
 
+    // Buffer change listener — fires when app enters/exits alternate screen buffer
+    // (e.g., vim, htop, fzf, Claude Code plan editor). Without this, WebGL can
+    // get stuck rendering stale content from the previous buffer, causing a black screen.
+    const onBufferChangeDisposable = instance.terminal.buffer.onBufferChange(() => {
+      instance.terminal.refresh(0, instance.terminal.rows - 1);
+      if (instance.webglAddon) {
+        instance.terminal.clearTextureAtlas();
+      }
+    });
+    pushCleanup(() => onBufferChangeDisposable.dispose());
+
     // Buffer PTY output while scrollback is being restored to prevent
     // the new shell's prompt from appearing before the old scrollback content.
     let pendingOutput: Uint8Array[] | null = restoredFromId ? [] : null;
