@@ -107,6 +107,22 @@ const ERROR_PATTERNS = [
   /Exception:/,
 ];
 
+/** Status priority: higher number = higher priority (transitions up are instant) */
+const STATUS_PRIORITY: Record<AgentStatus, number> = {
+  done: 0,
+  running: 1,
+  error: 2,
+  waiting: 3,
+  exited: 4,
+};
+
+/** Minimum dwell time (ms) before transitioning TO a given status.
+ *  Transitions to running require 400ms hold to prevent done→running flicker.
+ *  Higher-priority transitions (waiting/error) are instant. */
+const DWELL_MS: Partial<Record<AgentStatus, number>> = {
+  running: 400,
+};
+
 interface DetectorState {
   lastOutputTime: number;
   currentStatus: AgentStatus;
@@ -122,9 +138,37 @@ interface DetectorState {
   pendingWaitingTimerId: ReturnType<typeof setTimeout> | null;
   /** Stores latest onStatusChange ref for async timer callback */
   lastCallback: ((sessionId: string, status: AgentStatus) => void) | null;
+  /** Timestamp of the last committed status transition */
+  lastTransitionTime: number;
+  /** Pending dwell transition (queued lower-priority status change) */
+  pendingDwell: {
+    status: AgentStatus;
+    timerId: ReturnType<typeof setTimeout>;
+  } | null;
 }
 
 const detectors = new Map<string, DetectorState>();
+
+// --- RAF coalescing: at most one React update per session per frame ---
+const pendingStatusUpdates = new Map<string, { status: AgentStatus; callback: (sessionId: string, status: AgentStatus) => void }>();
+let rafId: number | null = null;
+
+function emitStatusChange(
+  sessionId: string,
+  status: AgentStatus,
+  callback: (sessionId: string, status: AgentStatus) => void
+): void {
+  pendingStatusUpdates.set(sessionId, { status, callback });
+  if (rafId === null) {
+    rafId = requestAnimationFrame(() => {
+      for (const [sid, { status: s, callback: cb }] of pendingStatusUpdates) {
+        cb(sid, s);
+      }
+      pendingStatusUpdates.clear();
+      rafId = null;
+    });
+  }
+}
 
 export function initDetector(sessionId: string): void {
   destroyDetector(sessionId);
@@ -137,9 +181,221 @@ export function initDetector(sessionId: string): void {
     recentLines: [],
     pendingWaitingTimerId: null,
     lastCallback: null,
+    lastTransitionTime: Date.now(),
+    pendingDwell: null,
   });
 }
 
+/** Cancel any pending dwell transition */
+function cancelPendingDwell(state: DetectorState): void {
+  if (state.pendingDwell) {
+    clearTimeout(state.pendingDwell.timerId);
+    state.pendingDwell = null;
+  }
+}
+
+/**
+ * Attempt a status transition with dwell-time hysteresis.
+ * - Higher-priority transitions are instant and cancel pending lower-priority ones.
+ * - Lower-priority transitions are deferred by DWELL_MS for the target status.
+ */
+function transitionWithDwell(
+  sessionId: string,
+  state: DetectorState,
+  newStatus: AgentStatus,
+  onStatusChange: (sessionId: string, status: AgentStatus) => void
+): void {
+  if (newStatus === state.currentStatus) return;
+
+  const currentPriority = STATUS_PRIORITY[state.currentStatus] ?? 0;
+  const newPriority = STATUS_PRIORITY[newStatus] ?? 0;
+  const dwellMs = DWELL_MS[newStatus] ?? 0;
+
+  // Higher priority → instant transition, cancel any pending dwell
+  if (newPriority > currentPriority) {
+    cancelPendingDwell(state);
+    commitTransition(sessionId, state, newStatus, onStatusChange);
+    return;
+  }
+
+  // Same or lower priority with no dwell → instant
+  if (dwellMs <= 0) {
+    cancelPendingDwell(state);
+    commitTransition(sessionId, state, newStatus, onStatusChange);
+    return;
+  }
+
+  // Same or lower priority with dwell — check elapsed time
+  const elapsed = Date.now() - state.lastTransitionTime;
+  if (elapsed >= dwellMs) {
+    cancelPendingDwell(state);
+    commitTransition(sessionId, state, newStatus, onStatusChange);
+    return;
+  }
+
+  // Queue the transition if not already queued for this status
+  if (state.pendingDwell?.status === newStatus) return;
+  cancelPendingDwell(state);
+  const remaining = dwellMs - elapsed;
+  state.pendingDwell = {
+    status: newStatus,
+    timerId: setTimeout(() => {
+      const s = detectors.get(sessionId);
+      if (s && s.pendingDwell?.status === newStatus) {
+        s.pendingDwell = null;
+        // Revalidate: only commit if still desired
+        if (s.currentStatus !== newStatus) {
+          commitTransition(sessionId, s, newStatus, onStatusChange);
+        }
+      }
+    }, remaining),
+  };
+}
+
+function commitTransition(
+  sessionId: string,
+  state: DetectorState,
+  newStatus: AgentStatus,
+  onStatusChange: (sessionId: string, status: AgentStatus) => void
+): void {
+  log.debug(`Status transition id=${sessionId}: ${state.currentStatus} -> ${newStatus}`);
+  state.currentStatus = newStatus;
+  state.lastTransitionTime = Date.now();
+  emitStatusChange(sessionId, newStatus, onStatusChange);
+}
+
+/**
+ * Buffer-based detection: operates on clean text lines read from xterm's buffer
+ * after onWriteParsed fires. Lines are already stripped of ANSI by xterm's
+ * buffer.translateToString(true). This avoids false matches from mid-chunk
+ * ANSI splits and fires at most once per frame.
+ */
+export function processBufferLines(
+  sessionId: string,
+  lines: string[],
+  onStatusChange: (sessionId: string, status: AgentStatus) => void
+): void {
+  const state = detectors.get(sessionId);
+  if (!state) return;
+
+  // Check if any line has meaningful visible content
+  const hasMeaningful = lines.some((l) => /\S/.test(l));
+  if (!hasMeaningful) return;
+
+  // Store callback ref for async timer use
+  state.lastCallback = onStatusChange;
+
+  let detectedWaiting = false;
+  let detectedError = false;
+  let hasTokenCounter = false;
+  let hasCompletion = false;
+
+  for (const line of lines) {
+    if (!detectedWaiting) {
+      for (const p of WAITING_PATTERNS) {
+        if (p.test(line)) {
+          detectedWaiting = true;
+          break;
+        }
+      }
+    }
+    if (!detectedWaiting && !detectedError) {
+      for (const p of ERROR_PATTERNS) {
+        if (p.test(line)) {
+          detectedError = true;
+          break;
+        }
+      }
+    }
+    if (!hasTokenCounter && TOKEN_COUNTER_RE.test(line)) hasTokenCounter = true;
+    if (!hasCompletion && COMPLETION_RE.test(line)) hasCompletion = true;
+  }
+
+  // Token counter is a strong "running" signal
+  if (hasTokenCounter) {
+    cancelPendingWaiting(state);
+    if (state.stickyWaiting) {
+      state.stickyWaiting = false;
+      state.chunksSinceWaiting = 0;
+    }
+  }
+
+  // Non-blank lines for numbered-list detection (use entire line array)
+  const nonBlankLines = lines.filter((l) => l.trim().length > 0);
+
+  // If meaningful output arrives while a pending timer is active, cancel it
+  if (state.pendingWaitingTimerId !== null && !detectedWaiting) {
+    const isOnlyNumberedItems = nonBlankLines.length > 0 && nonBlankLines.every((l) => NUMBERED_OPTION_RE.test(l));
+    if (!isOnlyNumberedItems) {
+      cancelPendingWaiting(state);
+    }
+  }
+
+  state.lastOutputTime = Date.now();
+
+  // Clear existing done timeout
+  if (state.idleTimeoutId !== null) {
+    clearTimeout(state.idleTimeoutId);
+    state.idleTimeoutId = null;
+  }
+
+  // Determine new status: waiting > error > running
+  let newStatus: AgentStatus = "running";
+
+  if (detectedWaiting) {
+    newStatus = "waiting";
+    state.stickyWaiting = true;
+    state.chunksSinceWaiting = 0;
+    cancelPendingWaiting(state);
+  } else if (state.stickyWaiting) {
+    state.chunksSinceWaiting++;
+    if (state.chunksSinceWaiting >= STICKY_EXPIRY_CHUNKS) {
+      state.stickyWaiting = false;
+      state.chunksSinceWaiting = 0;
+      if (detectedError) {
+        newStatus = "error";
+      }
+    } else {
+      newStatus = "waiting";
+    }
+  } else if (detectedError) {
+    newStatus = "error";
+  }
+
+  if (newStatus !== state.currentStatus) {
+    transitionWithDwell(sessionId, state, newStatus, onStatusChange);
+  }
+
+  // Numbered list detection on the buffer lines directly
+  // Use the effective current status (may have been updated by transitionWithDwell)
+  if (
+    state.currentStatus === "running" &&
+    state.pendingWaitingTimerId === null &&
+    hasTrailingNumberedList(nonBlankLines)
+  ) {
+    state.pendingWaitingTimerId = setTimeout(() => {
+      const s = detectors.get(sessionId);
+      if (s && s.currentStatus === "running") {
+        s.pendingWaitingTimerId = null;
+        s.stickyWaiting = true;
+        s.chunksSinceWaiting = 0;
+        // waiting is high priority → instant transition
+        transitionWithDwell(sessionId, s, "waiting", s.lastCallback ?? onStatusChange);
+      }
+    }, PENDING_WAITING_DELAY_MS);
+  }
+
+  // Set up done timeout
+  const doneDelay = hasCompletion ? SHORT_DONE_TIMEOUT_MS : DONE_TIMEOUT_MS;
+  state.idleTimeoutId = setTimeout(() => {
+    const s = detectors.get(sessionId);
+    if (s && s.currentStatus === "running") {
+      transitionWithDwell(sessionId, s, "done", onStatusChange);
+    }
+  }, doneDelay);
+}
+
+/** @deprecated Use processBufferLines() with onWriteParsed instead */
 export function processOutput(
   sessionId: string,
   text: string,
@@ -250,7 +506,7 @@ export function processOutput(
   if (newStatus !== state.currentStatus) {
     log.debug(`Status transition id=${sessionId}: ${state.currentStatus} -> ${newStatus}`);
     state.currentStatus = newStatus;
-    onStatusChange(sessionId, newStatus);
+    emitStatusChange(sessionId, newStatus, onStatusChange);
   }
 
   // After resolving status: if we're "running" and tail has a numbered list,
@@ -269,7 +525,7 @@ export function processOutput(
         s.currentStatus = "waiting";
         log.debug(`Status transition id=${sessionId}: running -> waiting (numbered list)`);
         if (s.lastCallback) {
-          s.lastCallback(sessionId, "waiting");
+          emitStatusChange(sessionId, "waiting", s.lastCallback);
         }
       }
     }, PENDING_WAITING_DELAY_MS);
@@ -283,7 +539,7 @@ export function processOutput(
     const s = detectors.get(sessionId);
     if (s && s.currentStatus === "running") {
       s.currentStatus = "done";
-      onStatusChange(sessionId, "done");
+      emitStatusChange(sessionId, "done", onStatusChange);
     }
   }, doneDelay);
 }
@@ -297,10 +553,12 @@ export function clearWaiting(
   if (state) {
     state.stickyWaiting = false;
     cancelPendingWaiting(state);
+    cancelPendingDwell(state);
     state.recentLines = [];
     if (state.currentStatus === "waiting" && onStatusChange) {
       state.currentStatus = "running";
-      onStatusChange(sessionId, "running");
+      state.lastTransitionTime = Date.now();
+      emitStatusChange(sessionId, "running", onStatusChange);
     }
   }
 }
@@ -317,7 +575,9 @@ export function markExited(
     state.idleTimeoutId = null;
   }
   cancelPendingWaiting(state);
+  cancelPendingDwell(state);
   state.currentStatus = "exited";
+  state.lastTransitionTime = Date.now();
   onStatusChange(sessionId, "exited");
 }
 
@@ -328,6 +588,7 @@ export function destroyDetector(sessionId: string): void {
       clearTimeout(state.idleTimeoutId);
     }
     cancelPendingWaiting(state);
+    cancelPendingDwell(state);
     detectors.delete(sessionId);
   }
 }

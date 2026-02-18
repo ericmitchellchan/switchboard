@@ -7,7 +7,8 @@ import {
   fitTerminal,
   getTerminal,
   writeRestoreContent,
-  popSavedScrollPosition,
+  getSavedScrollPosition,
+  clearSavedScrollPosition,
 } from "../lib/terminal";
 import {
   writeToSession,
@@ -18,7 +19,7 @@ import {
 } from "../lib/ipc";
 import {
   initDetector,
-  processOutput,
+  processBufferLines,
   markExited,
   clearWaiting,
 } from "../lib/statusDetector";
@@ -120,7 +121,8 @@ export function TerminalPane({
     });
     pushCleanup(() => onDataDisposable.dispose());
 
-    // Helper: process a single PTY output chunk (write + detect)
+    // Helper: process a single PTY output chunk (write + task detect)
+    // Status detection is handled by onWriteParsed (buffer-based, not raw chunks)
     const processPtyChunk = (bytes: Uint8Array) => {
       instance.terminal.write(bytes);
 
@@ -128,7 +130,6 @@ export function TerminalPane({
       const text = decoder ? decoder.decode(bytes, { stream: true }) : new TextDecoder().decode(bytes);
       const cbs = getCbs();
       if (cbs) {
-        processOutput(sessionId, text, cbs.onStatusChange);
         if (cbs.onAutoTask) {
           const detected = detectTasks(sessionId, text);
           for (const task of detected) cbs.onAutoTask(task, sessionId);
@@ -139,6 +140,25 @@ export function TerminalPane({
         }
       }
     };
+
+    // Buffer-based status detection: fires after xterm parses all buffered
+    // data (at most once per frame). Reads clean text from the terminal
+    // buffer instead of raw PTY chunks, avoiding false matches from
+    // mid-chunk ANSI splits.
+    const BUFFER_READ_LINES = 15;
+    const onWriteParsedDisposable = instance.terminal.onWriteParsed(() => {
+      const cbs = getCbs();
+      if (!cbs) return;
+      const buf = instance.terminal.buffer.active;
+      const lines: string[] = [];
+      const startY = Math.max(0, buf.cursorY - BUFFER_READ_LINES + 1);
+      for (let y = startY; y <= buf.cursorY; y++) {
+        const line = buf.getLine(y);
+        if (line) lines.push(line.translateToString(true));
+      }
+      processBufferLines(sessionId, lines, cbs.onStatusChange);
+    });
+    pushCleanup(() => onWriteParsedDisposable.dispose());
 
     // Buffer PTY output while scrollback is being restored to prevent
     // the new shell's prompt from appearing before the old scrollback content.
@@ -210,11 +230,17 @@ export function TerminalPane({
     createTerminal(sessionId, { cols: session.cols, rows: session.rows });
     wireSession(sessionId, session.restoredFromId);
 
+    log.info(`Attach terminal id=${sessionId} firstAttach=${isFirstAttach}`);
+
     // Hide until fit completes to prevent 2-frame flash at wrong size
     container.style.opacity = "0";
 
     // Attach to DOM
     attachToDOM(sessionId, container);
+
+    // Capture saved scroll position once before any async work so it's
+    // not affected by races (re-renders, cleanup firing between save/restore)
+    const savedScroll = isFirstAttach ? null : getSavedScrollPosition(sessionId);
 
     // Use a double-RAF so the browser fully computes layout before we
     // measure the container.  A single RAF fires before layout settles,
@@ -227,28 +253,10 @@ export function TerminalPane({
           resizeSession(sessionId, dims.cols, dims.rows).catch(console.error);
         }
 
-        const inst = getTerminal(sessionId);
-        if (inst) {
-          if (isFirstAttach) {
-            // First attach: scroll to bottom
-            inst.terminal.scrollToBottom();
-          } else {
-            // Re-attach: restore scroll position saved at detach time.
-            // fit() may have reflowed the buffer (column change → line rewrap),
-            // which can reset viewportY to 0.
-            const saved = popSavedScrollPosition(sessionId);
-            if (saved) {
-              const wasAtBottom = saved.viewportY >= saved.baseY;
-              if (wasAtBottom) {
-                inst.terminal.scrollToBottom();
-              } else {
-                // Clamp to valid range in case reflow shortened the buffer
-                const newBaseY = inst.terminal.buffer.active.baseY;
-                const clampedY = Math.min(saved.viewportY, newBaseY);
-                inst.terminal.scrollToLine(clampedY);
-              }
-            }
-          }
+        // Scroll to bottom on first attach only (no saved state to restore)
+        if (isFirstAttach) {
+          const inst = getTerminal(sessionId);
+          if (inst) inst.terminal.scrollToBottom();
         }
 
         // Reveal after fit — GPU-composited transition avoids layout thrash
@@ -256,21 +264,33 @@ export function TerminalPane({
 
         // Delayed re-fit: double-RAF may fire before flex layout fully settles.
         // A second fit after 150ms mirrors how minimize/maximize naturally works.
+        // ALL scroll restoration happens here — this is the final fit, so its
+        // scroll restore is the one that sticks.
+        const rafCols = dims?.cols;
+        const rafRows = dims?.rows;
         setTimeout(() => {
           const inst2 = getTerminal(sessionId);
           if (!inst2?.terminal.element?.parentElement) return;
-          const buf = inst2.terminal.buffer.active;
-          const beforeY = buf.viewportY;
-          const beforeBase = buf.baseY;
           const dims2 = fitTerminal(sessionId);
           if (dims2) {
+            if (dims2.cols !== rafCols || dims2.rows !== rafRows) {
+              log.info(`Delayed re-fit id=${sessionId} changed dims: ${rafCols}x${rafRows} -> ${dims2.cols}x${dims2.rows}`);
+            }
             resizeSession(sessionId, dims2.cols, dims2.rows).catch(console.error);
           }
-          if (beforeY >= beforeBase) {
+          // Restore scroll position after final fit
+          if (isFirstAttach) {
             inst2.terminal.scrollToBottom();
-          } else {
-            const newBase = inst2.terminal.buffer.active.baseY;
-            inst2.terminal.scrollToLine(Math.min(beforeY, newBase));
+          } else if (savedScroll) {
+            const wasAtBottom = savedScroll.viewportY >= savedScroll.baseY;
+            log.debug(`Scroll restore id=${sessionId} saved={viewportY:${savedScroll.viewportY}, baseY:${savedScroll.baseY}} wasAtBottom=${wasAtBottom} newBaseY=${inst2.terminal.buffer.active.baseY}`);
+            if (wasAtBottom) {
+              inst2.terminal.scrollToBottom();
+            } else {
+              const newBaseY = inst2.terminal.buffer.active.baseY;
+              inst2.terminal.scrollToLine(Math.min(savedScroll.viewportY, newBaseY));
+            }
+            clearSavedScrollPosition(sessionId);
           }
         }, 150);
       });

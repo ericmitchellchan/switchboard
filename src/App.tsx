@@ -16,7 +16,7 @@ import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
 import { createSession, closeSession, restartSession, renameSession, resizeSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify } from "./lib/ipc";
-import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, fitTerminal, getAllTerminalIds } from "./lib/terminal";
+import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, fitTerminal, getAllTerminalIds, saveScrollPosition, restoreScrollPosition } from "./lib/terminal";
 import {
   loadWorkspaceFromStorage,
   buildSavedWorkspace,
@@ -79,6 +79,7 @@ export default function App() {
   // When active session changes via tab bar, sync with pane layout
   const switchToSession = useCallback(
     (sessionId: string) => {
+      log.info(`Switch to session id=${sessionId}`);
       switchToSessionDirect(sessionId);
       dismissBySessionId(sessionId);
       if (paneLayout.root) {
@@ -92,6 +93,7 @@ export default function App() {
   // (e.g. closing the only pane via tab X button leaves root=null)
   useEffect(() => {
     if (!paneLayout.root && activeSessionId && sessions.length > 0) {
+      log.warn(`Pane layout root is null but ${sessions.length} sessions exist — reinitializing with id=${activeSessionId}`);
       paneLayout.initLayout(activeSessionId);
     }
   }, [paneLayout.root, activeSessionId, sessions.length, paneLayout]);
@@ -156,6 +158,8 @@ export default function App() {
     const id = effectiveActiveIdRef.current;
     if (!id) return;
 
+    log.info(`Close active tab id=${id} paneId=${paneLayout.focusedPaneId} sessions=${sessionsRef.current.length}`);
+
     // Check if session will still be visible in another pane after closing
     let sessionStillVisible = false;
     if (paneLayout.root && paneLayout.focusedPaneId) {
@@ -167,6 +171,7 @@ export default function App() {
     }
 
     if (!sessionStillVisible) {
+      log.info(`Destroying session id=${id} (not visible in other panes)`);
       destroyTaskDetector(id);
       cleanupSessionListeners(id);
       disposeTerminal(id);
@@ -177,11 +182,15 @@ export default function App() {
         // PTY may already be gone
       }
       removeSession(id);
+    } else {
+      log.debug(`Session id=${id} still visible in another pane, keeping alive`);
     }
   }, [removeSession, paneLayout]);
 
   // Close a specific session by ID (from tab X button)
   const handleCloseSpecificTab = useCallback(async (sessionId: string) => {
+    log.info(`Close specific tab id=${sessionId} sessions=${sessionsRef.current.length}`);
+
     // If session is in a pane, close that pane first
     if (paneLayout.root) {
       const pane = findPaneBySessionId(paneLayout.root, sessionId);
@@ -189,10 +198,14 @@ export default function App() {
         const newRoot = closePane(paneLayout.root, pane.id);
         const stillVisible = newRoot ? getVisibleSessionIds(newRoot).includes(sessionId) : false;
         paneLayout.close(pane.id);
-        if (stillVisible) return; // session still in another pane
+        if (stillVisible) {
+          log.debug(`Session id=${sessionId} still visible in another pane, keeping alive`);
+          return;
+        }
       }
     }
 
+    log.info(`Destroying session id=${sessionId}`);
     destroyTaskDetector(sessionId);
     cleanupSessionListeners(sessionId);
     disposeTerminal(sessionId);
@@ -237,6 +250,8 @@ export default function App() {
 
   const handleSessionExited = useCallback(
     (sessionId: string) => {
+      const session = sessionsRef.current.find((s) => s.id === sessionId);
+      log.info(`Session exited id=${sessionId} name=${session?.name ?? "?"}`);
       updateSessionStatus(sessionId, "exited");
     },
     [updateSessionStatus]
@@ -464,6 +479,7 @@ export default function App() {
         for (const saved of savedWorkspace.sessions) {
           try {
             const info = await createSession(saved.name, saved.repo, saved.working_dir);
+            log.info(`Restored session "${saved.name}" old=${saved.id} -> new=${info.id}`);
             idMap.set(saved.id, info.id);
             newSessions.push({
               ...info,
@@ -555,6 +571,7 @@ export default function App() {
     }));
 
     const handleBeforeUnload = () => {
+      log.info(`beforeunload: saving workspace with ${sessionsRef2.current.length} sessions`);
       const state = {
         sessions: sessionsRef2.current,
         activeSessionId: activeIdRef2.current,
@@ -630,14 +647,27 @@ export default function App() {
     // WebView2 may discard GPU-rendered content when backgrounded.
     // Unlike sleep/wake, the WebGL context isn't lost — just the render surface is stale.
     const handleVisibilityChange = () => {
-      if (document.visibilityState !== "visible") return;
-      log.debug("Window became visible, refreshing terminal renders");
+      const ids = getAllTerminalIds();
+      if (document.visibilityState === "hidden") {
+        log.info(`Window hidden — saving scroll positions for ${ids.length} terminals`);
+        for (const id of ids) {
+          saveScrollPosition(id);
+        }
+        return;
+      }
+      log.info(`Window became visible, refreshing ${ids.length} terminals`);
       clearAllTextureAtlases();
-      for (const id of getAllTerminalIds()) {
+      for (const id of ids) {
         const inst = getTerminal(id);
         if (!inst?.terminal.element?.parentElement) continue;
         inst.terminal.refresh(0, inst.terminal.rows - 1);
       }
+      // Restore scroll positions after refresh settles
+      requestAnimationFrame(() => {
+        for (const id of ids) {
+          restoreScrollPosition(id);
+        }
+      });
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
 

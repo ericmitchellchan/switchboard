@@ -172,10 +172,11 @@ export function detachFromDOM(sessionId: string): void {
 
   // Save scroll position before detaching so we can restore after reattach
   const buf = instance.terminal.buffer.active;
-  savedScrollPositions.set(sessionId, {
-    viewportY: buf.viewportY,
-    baseY: buf.baseY,
-  });
+  const scrollPos = { viewportY: buf.viewportY, baseY: buf.baseY };
+  savedScrollPositions.set(sessionId, scrollPos);
+
+  const atBottom = scrollPos.viewportY >= scrollPos.baseY;
+  log.debug(`Detaching terminal id=${sessionId} scroll={viewportY:${scrollPos.viewportY}, baseY:${scrollPos.baseY}, atBottom:${atBottom}} webgl=${!!instance.webglAddon}`);
 
   // Dispose WebGL to free the context
   if (instance.webglAddon) {
@@ -190,11 +191,37 @@ export function detachFromDOM(sessionId: string): void {
   }
 }
 
-/** Retrieve and clear saved scroll position (used after reattach + fit) */
-export function popSavedScrollPosition(sessionId: string): { viewportY: number; baseY: number } | undefined {
+/** Retrieve saved scroll position without deleting (non-destructive read) */
+export function getSavedScrollPosition(sessionId: string): { viewportY: number; baseY: number } | undefined {
+  return savedScrollPositions.get(sessionId);
+}
+
+/** Explicitly clear saved scroll position after successful restoration */
+export function clearSavedScrollPosition(sessionId: string): void {
+  savedScrollPositions.delete(sessionId);
+}
+
+/** Save scroll position without detaching (for visibility change / alt-tab) */
+export function saveScrollPosition(sessionId: string): void {
+  const instance = terminalMap.get(sessionId);
+  if (!instance) return;
+  const buf = instance.terminal.buffer.active;
+  savedScrollPositions.set(sessionId, { viewportY: buf.viewportY, baseY: buf.baseY });
+}
+
+/** Restore scroll position from saved state (non-destructive — does not clear) */
+export function restoreScrollPosition(sessionId: string): void {
+  const instance = terminalMap.get(sessionId);
+  if (!instance) return;
   const saved = savedScrollPositions.get(sessionId);
-  if (saved) savedScrollPositions.delete(sessionId);
-  return saved;
+  if (!saved) return;
+  const wasAtBottom = saved.viewportY >= saved.baseY;
+  if (wasAtBottom) {
+    instance.terminal.scrollToBottom();
+  } else {
+    const newBaseY = instance.terminal.buffer.active.baseY;
+    instance.terminal.scrollToLine(Math.min(saved.viewportY, newBaseY));
+  }
 }
 
 export function getTerminal(sessionId: string): TerminalInstance | undefined {
@@ -261,12 +288,15 @@ export function getAllTerminalIds(): string[] {
  * the GPU-side texture data is garbled).
  */
 export function clearAllTextureAtlases(): void {
+  let count = 0;
   for (const [sessionId, instance] of terminalMap) {
     if (!instance.webglAddon) continue;
     if (!instance.terminal.element?.parentElement) continue;
     log.debug(`Clearing texture atlas for session id=${sessionId}`);
     instance.terminal.clearTextureAtlas();
+    count++;
   }
+  log.info(`Cleared texture atlases for ${count}/${terminalMap.size} terminals`);
 }
 
 /**
@@ -275,6 +305,7 @@ export function clearAllTextureAtlases(): void {
  * rendering silently if WebGL re-creation fails.
  */
 export function recoverAllWebGL(): void {
+  let recovered = 0;
   for (const [sessionId, instance] of terminalMap) {
     // Only recover for terminals currently attached to the DOM
     if (!instance.terminal.element?.parentElement) continue;
@@ -283,5 +314,9 @@ export function recoverAllWebGL(): void {
 
     log.debug(`Recovering WebGL for session id=${sessionId}`);
     enableWebGL(sessionId);
+    recovered++;
+  }
+  if (recovered > 0) {
+    log.info(`Recovered WebGL for ${recovered} terminals`);
   }
 }
