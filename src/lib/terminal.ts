@@ -264,6 +264,15 @@ export function fitTerminal(sessionId: string): { cols: number; rows: number } |
   const instance = terminalMap.get(sessionId);
   if (!instance) return null;
 
+  // Guard: skip fit if container has zero dimensions (detached or not yet laid out).
+  // fit() with a 0-size container produces cols=2/rows=1, causing a buffer reflow
+  // that corrupts scroll state.
+  const container = instance.terminal.element?.parentElement;
+  if (container && (container.clientWidth === 0 || container.clientHeight === 0)) {
+    log.debug(`Skipping fit for session id=${sessionId}: container has zero dimensions`);
+    return null;
+  }
+
   try {
     instance.fitAddon.fit();
     return {
@@ -273,6 +282,48 @@ export function fitTerminal(sessionId: string): { cols: number; rows: number } |
   } catch (e) {
     log.warn(`Failed to fit terminal for session id=${sessionId}: ${e}`);
     return null;
+  }
+}
+
+/**
+ * Force the viewport DOM element's scroll state to match the terminal buffer.
+ *
+ * After a detach/reattach cycle the browser resets .xterm-viewport scrollTop
+ * to 0.  xterm's internal syncScrollArea() may read this stale value before
+ * our scroll restoration runs, leaving the viewport permanently desynced.
+ *
+ * This function:
+ * 1. Recalculates .xterm-scroll-area height from the *actual* buffer line
+ *    count (fixes "can't scroll to bottom" when fit() read stale dimensions).
+ * 2. Sets .xterm-viewport scrollTop to match buffer.viewportY (fixes
+ *    "viewport stuck at top").
+ */
+export function forceViewportScrollSync(sessionId: string): void {
+  const instance = terminalMap.get(sessionId);
+  if (!instance) return;
+
+  const terminal = instance.terminal;
+  const el = terminal.element;
+  if (!el || !el.parentElement) return;
+
+  const core = (terminal as any)._core;
+  const cellHeight: number | undefined =
+    core?._renderService?.dimensions?.css?.cell?.height;
+  if (!cellHeight || cellHeight <= 0) return;
+
+  const buf = terminal.buffer.active;
+
+  // Fix scroll area height — must equal totalLines * cellHeight so the
+  // viewport's max scrollTop allows reaching the real bottom.
+  const scrollAreaEl = el.querySelector(".xterm-scroll-area") as HTMLElement | null;
+  if (scrollAreaEl) {
+    scrollAreaEl.style.height = `${buf.length * cellHeight}px`;
+  }
+
+  // Fix viewport scrollTop
+  const viewportEl = el.querySelector(".xterm-viewport") as HTMLElement | null;
+  if (viewportEl) {
+    viewportEl.scrollTop = buf.viewportY * cellHeight;
   }
 }
 

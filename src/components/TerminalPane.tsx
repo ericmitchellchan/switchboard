@@ -9,6 +9,7 @@ import {
   writeRestoreContent,
   getSavedScrollPosition,
   clearSavedScrollPosition,
+  forceViewportScrollSync,
 } from "../lib/terminal";
 import {
   writeToSession,
@@ -303,6 +304,20 @@ export function TerminalPane({
             }
             clearSavedScrollPosition(sessionId);
           }
+
+          // Force viewport DOM state to match buffer — fixes the desync
+          // where the browser resets scrollTop=0 on detach and xterm's
+          // internal RAF-queued sync hasn't caught up yet.
+          forceViewportScrollSync(sessionId);
+
+          // Deferred sync: xterm batches viewport updates via RAF.
+          // Our scrollToBottom/scrollToLine above set the buffer's ydisp
+          // correctly, but xterm's queued syncScrollArea may overwrite the
+          // DOM scrollTop with a stale value. This RAF runs AFTER that
+          // queued sync, giving us the final word on scroll position.
+          requestAnimationFrame(() => {
+            forceViewportScrollSync(sessionId);
+          });
         }, 150);
       });
     });
@@ -337,6 +352,8 @@ export function TerminalPane({
           const newBase = inst.terminal.buffer.active.baseY;
           inst.terminal.scrollToLine(Math.min(savedY, newBase));
         }
+        // Force viewport DOM sync after resize to prevent scroll desync
+        forceViewportScrollSync(session.id);
       }, 100);
     };
 
