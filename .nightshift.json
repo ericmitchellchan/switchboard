@@ -1,0 +1,5 @@
+{
+  "test_command": "pnpm test",
+  "watch_extensions": [".ts", ".tsx", ".rs"],
+  "test_timeout": 120
+}
