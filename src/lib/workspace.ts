@@ -1,6 +1,6 @@
 import type { Session, SavedSession, SavedWorkspace } from "../types";
 import type { PaneNode } from "./paneLayout";
-import { serializeTerminal, getTerminal } from "./terminal";
+import { serializeTerminal, getTerminal, isSessionDirty, clearSessionDirty } from "./terminal";
 import { saveScrollback } from "./ipc";
 
 const STORAGE_KEY = "switchboard:workspace";
@@ -50,10 +50,18 @@ export function saveWorkspaceToStorage(workspace: SavedWorkspace): void {
 
 const MAX_SCROLLBACK_SIZE = 1_000_000; // 1MB
 
-export async function saveAllScrollbacks(sessions: Session[]): Promise<void> {
+/**
+ * Serialize and save scrollback for sessions that have new data.
+ * @param onlyDirty - when true (default for periodic saves), skip sessions
+ *   that haven't received PTY data since the last save.  Pass false for
+ *   beforeunload / explicit saves where completeness matters.
+ */
+export async function saveAllScrollbacks(sessions: Session[], onlyDirty = false): Promise<void> {
   const promises = sessions.map((s) => {
+    if (onlyDirty && !isSessionDirty(s.id)) return Promise.resolve();
     const content = serializeTerminal(s.id);
     if (content) {
+      clearSessionDirty(s.id);
       const capped = content.length > MAX_SCROLLBACK_SIZE
         ? content.slice(-MAX_SCROLLBACK_SIZE) // keep the tail (most recent)
         : content;
@@ -120,7 +128,7 @@ export function startPeriodicSave(
       state.sessionCounter
     );
     saveWorkspaceToStorage(workspace);
-    saveAllScrollbacks(state.sessions).catch(() => {});
+    saveAllScrollbacks(state.sessions, true).catch(() => {});
   }, 30_000);
 }
 

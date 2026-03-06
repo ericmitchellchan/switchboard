@@ -10,6 +10,8 @@ import {
   getSavedScrollPosition,
   clearSavedScrollPosition,
   forceViewportScrollSync,
+  forceViewportRefresh,
+  markSessionDirty,
 } from "../lib/terminal";
 import {
   writeToSession,
@@ -37,6 +39,10 @@ const sessionDecoders = new Map<string, TextDecoder>();
 // Module-level wiring guard: prevents duplicate listeners when React
 // unmounts/remounts TerminalPane for the same session (e.g. single-pane ↔ split)
 const wiredSessions = new Set<string>();
+
+// Sessions currently settling after reattach — suppresses ResizeObserver
+// from racing with the attach sequence's own fit + scroll restoration.
+const settlingSessionIds = new Set<string>();
 
 // Module-level callback refs so listener closures always see the latest
 // callbacks regardless of which component instance last rendered.
@@ -126,6 +132,7 @@ export function TerminalPane({
     // Status detection is handled by onWriteParsed (buffer-based, not raw chunks)
     const processPtyChunk = (bytes: Uint8Array) => {
       instance.terminal.write(bytes);
+      markSessionDirty(sessionId);
 
       const decoder = sessionDecoders.get(sessionId);
       const text = decoder ? decoder.decode(bytes, { stream: true }) : new TextDecoder().decode(bytes);
@@ -244,6 +251,10 @@ export function TerminalPane({
 
     log.info(`Attach terminal id=${sessionId} firstAttach=${isFirstAttach}`);
 
+    // Suppress ResizeObserver during the settling window so it doesn't
+    // race with our fit + scroll restoration sequence.
+    settlingSessionIds.add(sessionId);
+
     // Hide until fit completes to prevent 2-frame flash at wrong size
     container.style.opacity = "0";
 
@@ -281,6 +292,8 @@ export function TerminalPane({
         const rafCols = dims?.cols;
         const rafRows = dims?.rows;
         setTimeout(() => {
+          settlingSessionIds.delete(sessionId);
+
           const inst2 = getTerminal(sessionId);
           if (!inst2?.terminal.element?.parentElement) return;
           const dims2 = fitTerminal(sessionId);
@@ -290,7 +303,15 @@ export function TerminalPane({
             }
             resizeSession(sessionId, dims2.cols, dims2.rows).catch(console.error);
           }
-          // Restore scroll position after final fit
+
+          // Force xterm to recalculate the viewport scroll area.
+          // When container size hasn't changed, fit() is a no-op (xterm
+          // skips resize for unchanged dimensions). But the buffer grew
+          // while the tab was hidden, so the scroll area height is stale.
+          // A dummy rows+1/rows resize forces the full viewport refresh.
+          forceViewportRefresh(sessionId);
+
+          // Restore scroll position after final fit + viewport refresh
           if (isFirstAttach) {
             inst2.terminal.scrollToBottom();
           } else if (savedScroll) {
@@ -305,24 +326,22 @@ export function TerminalPane({
             clearSavedScrollPosition(sessionId);
           }
 
-          // Force viewport DOM state to match buffer — fixes the desync
-          // where the browser resets scrollTop=0 on detach and xterm's
-          // internal RAF-queued sync hasn't caught up yet.
+          // Sync viewport DOM over several frames to beat any xterm
+          // internal RAF-queued viewport updates that could overwrite
+          // our scroll position.
           forceViewportScrollSync(sessionId);
-
-          // Deferred sync: xterm batches viewport updates via RAF.
-          // Our scrollToBottom/scrollToLine above set the buffer's ydisp
-          // correctly, but xterm's queued syncScrollArea may overwrite the
-          // DOM scrollTop with a stale value. This RAF runs AFTER that
-          // queued sync, giving us the final word on scroll position.
-          requestAnimationFrame(() => {
+          let syncFrame = 0;
+          const doSync = () => {
             forceViewportScrollSync(sessionId);
-          });
+            if (++syncFrame < 3) requestAnimationFrame(doSync);
+          };
+          requestAnimationFrame(doSync);
         }, 150);
       });
     });
 
     return () => {
+      settlingSessionIds.delete(sessionId);
       detachFromDOM(sessionId);
     };
   }, [session.id, wireSession]);
@@ -334,9 +353,11 @@ export function TerminalPane({
 
     const handleResize = () => {
       if (!mounted) return;
+      if (settlingSessionIds.has(session.id)) return;
       if (resizeTimer) clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
         if (!mounted) return;
+        if (settlingSessionIds.has(session.id)) return;
         const inst = getTerminal(session.id);
         if (!inst) return;
         const buf = inst.terminal.buffer.active;

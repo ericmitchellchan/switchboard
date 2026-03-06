@@ -47,6 +47,10 @@ const terminalMap = new Map<string, TerminalInstance>();
 // Saved scroll positions for restoring after detach/reattach
 const savedScrollPositions = new Map<string, { viewportY: number; baseY: number }>();
 
+// Dirty tracking: sessions that received new PTY data since last serialization.
+// Prevents saveAllScrollbacks from serializing unchanged terminals every 30s.
+const dirtySessionIds = new Set<string>();
+
 // Module-level config for font settings — set once from App after config loads
 let terminalConfig = {
   fontSize: 13,
@@ -228,6 +232,21 @@ export function getTerminal(sessionId: string): TerminalInstance | undefined {
   return terminalMap.get(sessionId);
 }
 
+/** Mark a session as having new data (call after terminal.write) */
+export function markSessionDirty(sessionId: string): void {
+  dirtySessionIds.add(sessionId);
+}
+
+/** Check if a session has new data since last clearSessionDirty */
+export function isSessionDirty(sessionId: string): boolean {
+  return dirtySessionIds.has(sessionId);
+}
+
+/** Clear dirty flag after serialization */
+export function clearSessionDirty(sessionId: string): void {
+  dirtySessionIds.delete(sessionId);
+}
+
 export function disposeTerminal(sessionId: string): void {
   const instance = terminalMap.get(sessionId);
   if (!instance) return;
@@ -325,6 +344,31 @@ export function forceViewportScrollSync(sessionId: string): void {
   if (viewportEl) {
     viewportEl.scrollTop = buf.viewportY * cellHeight;
   }
+}
+
+/**
+ * Force xterm to fully recalculate viewport scroll state.
+ *
+ * After detach/reattach, fit() is a no-op when the container size hasn't
+ * changed — xterm never calls resize(), so the viewport scroll area stays
+ * stale from before detach.  Content written while the tab was hidden
+ * increases the buffer but the scroll area height doesn't update, making
+ * it impossible to scroll to the real bottom.
+ *
+ * A rows+1 / rows cycle forces xterm through its full resize path
+ * (buffer adjust + viewport refresh) without causing a column reflow.
+ */
+export function forceViewportRefresh(sessionId: string): void {
+  const instance = terminalMap.get(sessionId);
+  if (!instance) return;
+  const { terminal } = instance;
+  if (!terminal.element?.parentElement) return;
+
+  const { cols, rows } = terminal;
+  if (cols < 2 || rows < 2) return;
+
+  terminal.resize(cols, rows + 1);
+  terminal.resize(cols, rows);
 }
 
 /** Return all active terminal session IDs */
