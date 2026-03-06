@@ -584,16 +584,24 @@ export function clearWaiting(
   onStatusChange?: (sessionId: string, status: AgentStatus) => void
 ): void {
   const state = detectors.get(sessionId);
-  if (state) {
-    state.stickyWaiting = false;
-    cancelPendingWaiting(state);
-    cancelPendingDwell(state);
-    state.recentLines = [];
-    if (state.currentStatus === "waiting" && onStatusChange) {
-      state.currentStatus = "running";
-      state.lastTransitionTime = Date.now();
-      emitStatusChange(sessionId, "running", onStatusChange);
-    }
+  if (!state) return;
+  // Always clear recentLines — cheap, and prevents old partial numbered lists
+  // from combining with new output after user input.
+  state.recentLines = [];
+  // Fast path: nothing else to clear — skip work on every keystroke
+  if (
+    !state.stickyWaiting &&
+    state.pendingWaitingTimerId === null &&
+    state.pendingDwell === null &&
+    state.currentStatus !== "waiting"
+  ) return;
+  state.stickyWaiting = false;
+  cancelPendingWaiting(state);
+  cancelPendingDwell(state);
+  if (state.currentStatus === "waiting" && onStatusChange) {
+    state.currentStatus = "running";
+    state.lastTransitionTime = Date.now();
+    emitStatusChange(sessionId, "running", onStatusChange);
   }
 }
 
