@@ -17,10 +17,10 @@ if ($Full) {
         Write-Warning "Generate one with: pnpm tauri signer generate -w $keyPath"
     }
 
-    Set-Location "C:\Users\ericm\Cursor\Antigravity\switchboard"
+    Set-Location "$PSScriptRoot"
     & "C:\Users\ericm\AppData\Roaming\npm\pnpm.cmd" tauri build 2>&1
 } else {
     # Quick cargo check (default)
-    Set-Location "C:\Users\ericm\Cursor\Antigravity\switchboard\src-tauri"
+    Set-Location "$PSScriptRoot\src-tauri"
     & "C:\Users\ericm\.cargo\bin\cargo.exe" check 2>&1
 }

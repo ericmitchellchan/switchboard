@@ -148,6 +148,7 @@ These are recurring problem areas from git history — be aware when working in 
 ## Jira & Knowledge Routing
 
 - **Jira instance**: ericmitchellchan.atlassian.net (Cloud ID: `26513658-3895-4d82-b441-08240a277d6b`)
+- **Jira project key**: SWIT
 - **Jira tools**: Use `mcp__personal-jira__*` for all Jira operations
 - **Board type**: Kanban
 - **Knowledge layer**: chat-recall with `project="switchboard"`
@@ -160,13 +161,136 @@ These are recurring problem areas from git history — be aware when working in 
 - **Request**: Out-of-scope observation — "I noticed this but it's not my task." Agent creates it, does NOT act on it
 
 ### Orchestration Workflow
-This project uses the spec → Jira decomposition → agent execution pattern:
-1. **Spec/Feature** defined (by Eric or orchestrator session)
-2. **Epic** created in Jira, decomposed into **Tasks**
-3. Each Task specifies: objective, files to modify, files to read, acceptance criteria, verification command
-4. **Agents execute Tasks** in isolated sessions — each agent only knows its own Task
-5. **Nightshift gates completion** — tests must pass before agent can finish
-6. No two Tasks should share files to modify (read-only overlap is fine)
+
+#### The Flow
+```
+1. ORCHESTRATOR generates ticket decomposition (Epic → Tasks)
+   ↓
+2. ERIC reviews tickets, adds missing context, approves
+   ↓
+3. ORCHESTRATOR sets blocker/related relationships between tickets
+   ↓
+4. ORCHESTRATOR assigns tickets to sub-agents, starting with
+   unblocked foundation tickets first
+   ↓
+5. SUB-AGENT reads ticket + all related/blocking tickets
+   ↓
+6. SUB-AGENT has questions? → Surfaces them, moves to next clear ticket
+   SUB-AGENT is clear? → Implements, self-checks against done checklist
+   ↓
+7. ERIC answers surfaced questions (answers go into ticket)
+   ↓
+8. SUB-AGENT picks up clarified tickets and implements
+   ↓
+9. Nightshift gates completion — tests must pass
+```
+
+#### Decomposition Rules
+- No two Tasks share files to modify (read-only overlap is fine)
+- Each Task specifies: objective, files to modify, files to read, acceptance criteria, verification command
+- **Be explicit about create vs modify**: Say "create from scratch using X as template" or "modify existing file" — never "audit if exists, otherwise build"
+- **Foundation tickets first**: The first tickets establish shared patterns/utilities. Everything else follows.
+- Expect 1-2 review passes — the first decomposition will have gaps
+
+#### Decomposition Review (Eric's Role)
+Before any sub-agent starts, Eric reviews every ticket:
+- Does this ticket have enough detail for someone with NO context to build it?
+- Are there decisions or constraints from experience that aren't captured?
+- Does this ticket depend on another ticket's output? Is that dependency marked?
+- Would a developer starting this ticket have questions? Add the answers now.
+
+### JIRA Ticket Relationships
+
+Relationships give sub-agents a context chain. Instead of cramming all context into one ticket, each ticket carries its own details plus links to tickets it depends on or relates to.
+
+#### Relationship Types
+
+**Blocker ("is blocked by"):** Ticket B cannot start until Ticket A is done.
+- A utility/helper must exist before the feature that uses it
+- A refactor must land before the feature that depends on the new structure
+- A type definition must be created before the module that imports it
+
+**Related ("relates to"):** Ticket B doesn't need Ticket A done but needs to know what it contains for consistency.
+- Two features that touch adjacent code areas
+- Two tickets that share a data type or interface
+- Features that interact at runtime (e.g., status detection + tab bar display)
+
+#### Sub-Agent Instructions for Relationships
+When a sub-agent picks up a JIRA ticket:
+1. Read the full ticket content
+2. Check for blocker relationships — if blocked by another ticket, read that ticket too (it should be done with implementation details)
+3. Check for related tickets — read them to understand shared context
+4. If after reading the ticket and its related tickets you still have questions, DO NOT GUESS — surface the question (see below)
+
+### JIRA Ticket Template
+
+```
+Title: [Epic Name] — [Short Description]
+
+## Objective
+[1-2 sentences — what this task does and why]
+
+## Files to Modify
+- [explicit list — these files are owned by this task]
+
+## Files to Read (context only)
+- [read-only references for understanding]
+
+## Acceptance Criteria
+- [ ] [concrete pass/fail criterion]
+- [ ] [concrete pass/fail criterion]
+
+## Verification Command
+`pnpm test` (or more specific command)
+
+## Decisions / Context
+[Paste relevant context directly into the ticket.
+Do NOT link to files and expect the agent to find them.
+Redundancy between docs and tickets is intentional.]
+
+## Relationships
+- Blocked by: [ticket IDs — must be done before this starts]
+- Related to: [ticket IDs — read for shared context]
+
+## Open Questions (if any)
+[Questions flagged during decomposition that need answers.
+Sub-agent must NOT proceed on parts that depend on unanswered questions.]
+```
+
+**Why paste instead of link:** When a sub-agent reads a JIRA ticket via MCP, it gets the content in one read. If context is linked ("see statusDetector.ts line 47"), the agent has to make separate reads and bring context back. Details drop in that handoff. Paste the content directly.
+
+### Sub-Agent Question Surfacing
+
+Sub-agents NEVER silently guess. When encountering uncertainty:
+
+**Ask, don't assume.**
+
+Examples of when to surface a question:
+- The ticket says "handle edge case" but doesn't specify the behavior
+- Two related tickets describe the same interface differently
+- The ticket says "update the type" but the type is used in files not listed
+- A dependency exists that isn't captured in the ticket relationships
+
+Questions must be specific and actionable:
+```
+Good: "SWIT-12: The ticket says to add error recovery to the PTY
+reader thread but doesn't specify retry behavior — should I retry
+immediately, use exponential backoff, or just log and let the
+session show as exited?"
+
+Bad: "I have some questions about error handling."
+```
+
+When uncertain:
+1. Add a comment on the JIRA ticket with specific questions
+2. Move to the next ticket that is unblocked and clear
+3. Do not implement anything you're uncertain about
+
+### Session Management
+
+- **3-5 Tasks per session.** Commit, start fresh. Files carry context; conversations don't.
+- **Serial epics, cautious parallelism within.** Epics run one at a time. Tasks within an epic can parallelize only if they touch completely separate files.
+- If a session is getting long and quality drops, stop, commit, and start fresh.
 
 ## Agent Instructions
 
@@ -176,3 +300,4 @@ This project uses the spec → Jira decomposition → agent execution pattern:
 - If tests fail, fix them — the Nightshift stop hook blocks on failure (exit code 2).
 - When creating orchestration Tasks, specify files to modify explicitly — no two Tasks share files.
 - If you discover out-of-scope work, create a **Request** ticket — do NOT act on it.
+- When spawning sub-agents, paste the full ticket content into the prompt — do not summarize or link.
