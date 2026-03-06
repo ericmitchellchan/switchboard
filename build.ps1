@@ -13,7 +13,7 @@ if ($Full) {
         $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content $keyPath -Raw
         Write-Host "Signing key loaded from $keyPath"
     } else {
-        Write-Warning "No signing key found at $keyPath — build will not be signed"
+        Write-Warning "No signing key found at $keyPath - build will not be signed"
         Write-Warning "Generate one with: pnpm tauri signer generate -w $keyPath"
     }
 

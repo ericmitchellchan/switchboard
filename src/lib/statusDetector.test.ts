@@ -10,7 +10,9 @@ import {
 const SID = "test-session";
 
 beforeEach(() => {
-  vi.useFakeTimers();
+  vi.useFakeTimers({
+    toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"],
+  });
   initDetector(SID);
 });
 

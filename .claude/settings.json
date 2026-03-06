@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"C:/Users/ericm/projects/nightshift/scripts/verify-tests.py\"",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  }
+}

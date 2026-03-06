@@ -160,7 +160,8 @@ function emitStatusChange(
 ): void {
   pendingStatusUpdates.set(sessionId, { status, callback });
   if (rafId === null) {
-    rafId = requestAnimationFrame(() => {
+    rafId = -1; // Mark as scheduled before calling rAF
+    requestAnimationFrame(() => {
       for (const [sid, { status: s, callback: cb }] of pendingStatusUpdates) {
         cb(sid, s);
       }
