@@ -12,11 +12,18 @@ const SHORT_DONE_TIMEOUT_MS = 2_000;
 /** Number of meaningful output chunks (without a waiting pattern re-appearing)
  *  after which stickyWaiting auto-clears. Prevents false-positive patterns
  *  from keeping the status stuck on "waiting" while the agent is clearly working.
- *  Higher = more conservative (stays yellow longer). */
-const STICKY_EXPIRY_CHUNKS = 12;
+ *  With PATTERN_SCAN_LINES=3, patterns scroll out of the scan window quickly,
+ *  so this is a safety net for edge cases. */
+const STICKY_EXPIRY_CHUNKS = 6;
 
 /** Rolling buffer size for multi-chunk numbered-list detection */
 const RECENT_LINES_MAX = 10;
+
+/** How many trailing lines (near cursor) to check for waiting/error patterns.
+ *  Patterns outside this window are considered "old output" and ignored.
+ *  Keeps false positives short-lived: a pattern at line N only triggers
+ *  for ~3 lines of subsequent output before scrolling out of range. */
+const PATTERN_SCAN_LINES = 3;
 
 /** Silence window after numbered list before transitioning to "waiting".
  *  Must be long enough that streaming output finishes before we commit to "waiting". */
@@ -31,6 +38,10 @@ const TOKEN_COUNTER_RE = /\(\d+s,\s*[\d.]+k?\s*tokens?\)/;
 /** Matches Claude Code's completion lines: checkmark + word(s) + (Xs) timing.
  *  e.g. "✓ Edited src/App.tsx (2s)", "✔ Wrote file.txt (0.5s)", "✓ Ran tests (15s)" */
 const COMPLETION_RE = /[✓✔]\s+\w+.*\(\d+(\.\d+)?s\)/;
+
+/** Matches Claude Code's idle prompt (agent finished, waiting for new task).
+ *  Only matches when ❯ appears alone on a line (possibly with whitespace). */
+const PROMPT_RE = /^\s*❯\s*$/;
 
 // Matches ANSI escape sequences: CSI (ESC[...letter), OSC (ESC]...BEL), and 2-char escapes
 const ANSI_RE = /\x1b(?:\[[^a-zA-Z@]*[a-zA-Z@]|\][^\x07]*\x07?|[^[\]])/g;
@@ -286,33 +297,50 @@ export function processBufferLines(
   // Store callback ref for async timer use
   state.lastCallback = onStatusChange;
 
-  let detectedWaiting = false;
-  let detectedError = false;
   let hasTokenCounter = false;
   let hasCompletion = false;
+  let hasPrompt = false;
 
+  // Scan ALL lines for structural signals (token counter, completion, prompt)
   for (const line of lines) {
-    if (!detectedWaiting) {
-      for (const p of WAITING_PATTERNS) {
-        if (p.test(line)) {
-          detectedWaiting = true;
-          break;
-        }
-      }
-    }
-    if (!detectedWaiting && !detectedError) {
-      for (const p of ERROR_PATTERNS) {
-        if (p.test(line)) {
-          detectedError = true;
-          break;
-        }
-      }
-    }
     if (!hasTokenCounter && TOKEN_COUNTER_RE.test(line)) hasTokenCounter = true;
     if (!hasCompletion && COMPLETION_RE.test(line)) hasCompletion = true;
+    if (!hasPrompt && PROMPT_RE.test(line)) hasPrompt = true;
   }
 
-  // Token counter is a strong "running" signal
+  // Only scan the LAST few lines for waiting/error patterns.
+  // Patterns from older output (scrolled above the scan window) are
+  // considered stale — they would otherwise re-trigger on every frame
+  // until they scroll past the full buffer read window.
+  const patternLines = lines.slice(-PATTERN_SCAN_LINES);
+  let detectedWaiting = false;
+  let detectedError = false;
+
+  // Token counter is a strong "running" signal — if the agent is actively
+  // counting tokens, any waiting/error pattern in the same window is stale
+  // output from a previous step.  Skip pattern matching entirely.
+  if (!hasTokenCounter) {
+    for (const line of patternLines) {
+      if (!detectedWaiting) {
+        for (const p of WAITING_PATTERNS) {
+          if (p.test(line)) {
+            detectedWaiting = true;
+            break;
+          }
+        }
+      }
+      if (!detectedWaiting && !detectedError) {
+        for (const p of ERROR_PATTERNS) {
+          if (p.test(line)) {
+            detectedError = true;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  // Token counter clears sticky waiting and pending timers
   if (hasTokenCounter) {
     cancelPendingWaiting(state);
     if (state.stickyWaiting) {
@@ -386,8 +414,13 @@ export function processBufferLines(
     }, PENDING_WAITING_DELAY_MS);
   }
 
-  // Set up done timeout
-  const doneDelay = hasCompletion ? SHORT_DONE_TIMEOUT_MS : DONE_TIMEOUT_MS;
+  // Set up done timeout.
+  // Prompt (❯) = agent returned to idle prompt → very fast done.
+  // Completion (✓ ... Xs) = agent finished a tool step → quick done.
+  // Otherwise = standard idle timeout.
+  const doneDelay = hasPrompt ? 500
+    : hasCompletion ? SHORT_DONE_TIMEOUT_MS
+    : DONE_TIMEOUT_MS;
   state.idleTimeoutId = setTimeout(() => {
     const s = detectors.get(sessionId);
     if (s && s.currentStatus === "running") {

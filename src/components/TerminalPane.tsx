@@ -153,14 +153,20 @@ export function TerminalPane({
     // data (at most once per frame). Reads clean text from the terminal
     // buffer instead of raw PTY chunks, avoiding false matches from
     // mid-chunk ANSI splits.
+    //
+    // IMPORTANT: buf.cursorY is viewport-relative (0 to rows-1) but
+    // buf.getLine(y) indexes from the start of scrollback. We must use
+    // baseY + cursorY to get the absolute cursor position, otherwise
+    // we read old scrollback lines instead of current output.
     const BUFFER_READ_LINES = 15;
     const onWriteParsedDisposable = instance.terminal.onWriteParsed(() => {
       const cbs = getCbs();
       if (!cbs) return;
       const buf = instance.terminal.buffer.active;
       const lines: string[] = [];
-      const startY = Math.max(0, buf.cursorY - BUFFER_READ_LINES + 1);
-      for (let y = startY; y <= buf.cursorY; y++) {
+      const cursorAbsY = buf.baseY + buf.cursorY;
+      const startY = Math.max(0, cursorAbsY - BUFFER_READ_LINES + 1);
+      for (let y = startY; y <= cursorAbsY; y++) {
         const line = buf.getLine(y);
         if (line) lines.push(line.translateToString(true));
       }

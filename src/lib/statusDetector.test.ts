@@ -3,6 +3,7 @@ import {
   initDetector,
   destroyDetector,
   processOutput,
+  processBufferLines,
   clearWaiting,
   markExited,
   _testOnly,
@@ -223,16 +224,16 @@ describe("state machine transitions", () => {
     expect(cb).not.toHaveBeenCalled();
   });
 
-  it("waiting → 12 output chunks without re-match → sticky auto-expires → 'running'", () => {
+  it("waiting → 6 output chunks without re-match → sticky auto-expires → 'running'", () => {
     const cb = vi.fn();
     processOutput(SID, "(y/n)", cb);
     expect(cb).toHaveBeenCalledWith(SID, "waiting");
     cb.mockClear();
-    for (let i = 1; i <= 11; i++) {
+    for (let i = 1; i <= 5; i++) {
       processOutput(SID, `chunk ${i}`, cb);
     }
     expect(cb).not.toHaveBeenCalled(); // still waiting
-    processOutput(SID, "chunk 12", cb);
+    processOutput(SID, "chunk 6", cb);
     expect(cb).toHaveBeenCalledWith(SID, "running"); // auto-expired
   });
 
@@ -240,18 +241,18 @@ describe("state machine transitions", () => {
     const cb = vi.fn();
     processOutput(SID, "(y/n)", cb);
     cb.mockClear();
-    for (let i = 1; i <= 5; i++) {
+    for (let i = 1; i <= 3; i++) {
       processOutput(SID, `chunk ${i}`, cb);
     }
     // Pattern appears again — counter resets
     processOutput(SID, "(y/n)", cb);
     expect(cb).not.toHaveBeenCalled(); // still waiting, no transition
-    // Need 12 MORE chunks to auto-expire
-    for (let i = 1; i <= 11; i++) {
+    // Need 6 MORE chunks to auto-expire
+    for (let i = 1; i <= 5; i++) {
       processOutput(SID, `chunk ${String.fromCharCode(64 + i)}`, cb);
     }
     expect(cb).not.toHaveBeenCalled();
-    processOutput(SID, "chunk L", cb);
+    processOutput(SID, "chunk F", cb);
     expect(cb).toHaveBeenCalledWith(SID, "running");
   });
 
@@ -679,5 +680,84 @@ describe("structural numbered-list detection", () => {
       vi.advanceTimersByTime(2000);
       expect(cb).toHaveBeenCalledWith(SID, "done");
     });
+  });
+});
+
+// ── processBufferLines-specific tests ───────────────────────────
+
+describe("processBufferLines", () => {
+  it("token counter overrides waiting pattern in same scan window", () => {
+    const cb = vi.fn();
+    // Both patterns visible in the same 15-line window — token counter should win
+    processBufferLines(
+      SID,
+      [
+        "Do you want to proceed (y/n)?",
+        "processing...",
+        "(3s, 1.2k tokens)",
+      ],
+      cb
+    );
+    expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
+  });
+
+  it("token counter overrides error pattern in same scan window", () => {
+    const cb = vi.fn();
+    processBufferLines(
+      SID,
+      [
+        "Error: cannot find module",
+        "(5s, 2.1k tokens)",
+      ],
+      cb
+    );
+    expect(cb).not.toHaveBeenCalledWith(SID, "error");
+  });
+
+  it("waiting pattern only matches in last 3 lines", () => {
+    const cb = vi.fn();
+    // (y/n) is 8 lines back — outside the 3-line pattern scan window
+    const lines = [
+      "(y/n)",
+      "line 2",
+      "line 3",
+      "line 4",
+      "line 5",
+      "line 6",
+      "line 7",
+      "line 8",
+      "line 9",
+      "line 10",
+    ];
+    processBufferLines(SID, lines, cb);
+    // Pattern is outside last 3 lines → should NOT trigger waiting
+    expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
+  });
+
+  it("waiting pattern in last 3 lines still triggers", () => {
+    const cb = vi.fn();
+    const lines = [
+      "some old output",
+      "more old output",
+      "Do you want to proceed?",
+    ];
+    processBufferLines(SID, lines, cb);
+    expect(cb).toHaveBeenCalledWith(SID, "waiting");
+  });
+
+  it("prompt ❯ triggers fast done timeout (500ms)", () => {
+    const cb = vi.fn();
+    processBufferLines(SID, ["✓ Task completed (5s)", "❯ "], cb);
+    vi.advanceTimersByTime(499);
+    expect(cb).not.toHaveBeenCalledWith(SID, "done");
+    vi.advanceTimersByTime(1);
+    expect(cb).toHaveBeenCalledWith(SID, "done");
+  });
+
+  it("prompt ❯ with leading whitespace still matches", () => {
+    const cb = vi.fn();
+    processBufferLines(SID, ["  ❯ "], cb);
+    vi.advanceTimersByTime(500);
+    expect(cb).toHaveBeenCalledWith(SID, "done");
   });
 });
