@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, lazy, Suspense } from "react"
 import type { AgentStatus, RepoConfig } from "./types";
 import { TabBar } from "./components/TabBar";
 import { SessionHeader } from "./components/SessionHeader";
-import { TerminalPane, cleanupSessionListeners, suppressResizeForSessions } from "./components/TerminalPane";
+import { TerminalPane, cleanupSessionListeners } from "./components/TerminalPane";
 import { StatusBar } from "./components/StatusBar";
 import { ToastStack } from "./components/Toast";
 import { TaskSidebar } from "./components/TaskSidebar";
@@ -15,8 +15,9 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, restartSession, renameSession, resizeSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify } from "./lib/ipc";
-import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, fitTerminal, getAllTerminalIds, saveScrollPosition, restoreScrollPosition } from "./lib/terminal";
+import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify } from "./lib/ipc";
+import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition } from "./lib/terminal";
+import { enqueueFit } from "./lib/fitQueue";
 import {
   loadWorkspaceFromStorage,
   buildSavedWorkspace,
@@ -64,17 +65,9 @@ export default function App() {
   const { sidebarState, cycleSidebar: rawCycleSidebar } = useSidebarState();
   const paneLayout = usePaneLayout();
 
-  // Wrap cycleSidebar to suppress ResizeObserver during sidebar width transition.
-  // Without this, flex layout recomputes over multiple frames → ResizeObserver
-  // fires mid-transition → fitTerminal reads intermediate width → column reflow
-  // corruption.
-  const cycleSidebar = useCallback(() => {
-    if (paneLayout.root) {
-      const visibleIds = getVisibleSessionIds(paneLayout.root);
-      suppressResizeForSessions(visibleIds, 250);
-    }
-    rawCycleSidebar();
-  }, [rawCycleSidebar, paneLayout.root]);
+  // No wrapper needed — the fitQueue's per-session debounce (100ms) naturally
+  // coalesces the ResizeObserver events that fire during sidebar width transition.
+  const cycleSidebar = rawCycleSidebar;
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [newSessionDialogOpen, setNewSessionDialogOpen] = useState(false);
@@ -639,23 +632,14 @@ export default function App() {
       // Clear corrupt texture atlases (cheap, safe)
       clearAllTextureAtlases();
 
-      // Re-enable lost WebGL contexts after GPU settles
+      // Re-enable lost WebGL contexts after GPU settles, then re-fit
       setTimeout(() => {
         recoverAllWebGL();
-
-        // Re-fit all attached terminals
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
-            for (const id of getAllTerminalIds()) {
-              const inst = getTerminal(id);
-              if (!inst?.terminal.element?.parentElement) continue;
-              const dims = fitTerminal(id);
-              if (dims) {
-                resizeSession(id, dims.cols, dims.rows).catch(() => {});
-              }
-            }
-          });
-        });
+        for (const id of getAllTerminalIds()) {
+          const inst = getTerminal(id);
+          if (!inst?.terminal.element?.parentElement) continue;
+          enqueueFit(id, "wake", {}, 0);
+        }
       }, GPU_SETTLE_MS);
     };
 
@@ -676,14 +660,9 @@ export default function App() {
       for (const id of ids) {
         const inst = getTerminal(id);
         if (!inst?.terminal.element?.parentElement) continue;
-        inst.terminal.refresh(0, inst.terminal.rows - 1);
+        const saved = getSavedScrollPosition(id);
+        enqueueFit(id, "visibility", { savedScroll: saved }, 0);
       }
-      // Restore scroll positions after refresh settles
-      requestAnimationFrame(() => {
-        for (const id of ids) {
-          restoreScrollPosition(id);
-        }
-      });
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
 

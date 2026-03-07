@@ -4,13 +4,10 @@ import {
   createTerminal,
   attachToDOM,
   detachFromDOM,
-  fitTerminal,
   getTerminal,
   writeRestoreContent,
   getSavedScrollPosition,
   clearSavedScrollPosition,
-  forceViewportScrollSync,
-  forceViewportRefresh,
   markSessionDirty,
 } from "../lib/terminal";
 import {
@@ -20,6 +17,7 @@ import {
   onSessionExited,
   loadScrollback,
 } from "../lib/ipc";
+import { enqueueFit, cancelPendingFit } from "../lib/fitQueue";
 import {
   initDetector,
   processBufferLines,
@@ -39,19 +37,6 @@ const sessionDecoders = new Map<string, TextDecoder>();
 // Module-level wiring guard: prevents duplicate listeners when React
 // unmounts/remounts TerminalPane for the same session (e.g. single-pane ↔ split)
 const wiredSessions = new Set<string>();
-
-// Sessions currently settling after reattach — suppresses ResizeObserver
-// from racing with the attach sequence's own fit + scroll restoration.
-const settlingSessionIds = new Set<string>();
-
-/** Mark all provided sessions as settling for `durationMs` (suppresses ResizeObserver).
- *  Used by App.tsx when sidebar width changes to prevent mid-transition fit corruption. */
-export function suppressResizeForSessions(sessionIds: string[], durationMs = 200): void {
-  for (const id of sessionIds) settlingSessionIds.add(id);
-  setTimeout(() => {
-    for (const id of sessionIds) settlingSessionIds.delete(id);
-  }, durationMs);
-}
 
 // Module-level callback refs so listener closures always see the latest
 // callbacks regardless of which component instance last rendered.
@@ -266,147 +251,51 @@ export function TerminalPane({
 
     log.info(`Attach terminal id=${sessionId} firstAttach=${isFirstAttach}`);
 
-    // Suppress ResizeObserver during the settling window so it doesn't
-    // race with our fit + scroll restoration sequence.
-    settlingSessionIds.add(sessionId);
-
-    // Hide until fit completes to prevent 2-frame flash at wrong size
+    // Hide until fit + scroll restore completes to prevent flash at wrong size/position
     container.style.opacity = "0";
 
     // Attach to DOM
     attachToDOM(sessionId, container);
 
-    // Capture saved scroll position once before any async work so it's
-    // not affected by races (re-renders, cleanup firing between save/restore)
+    // Capture saved scroll position before any async work
     const savedScroll = isFirstAttach ? null : getSavedScrollPosition(sessionId);
+    if (savedScroll) clearSavedScrollPosition(sessionId);
 
-    // Use a double-RAF so the browser fully computes layout before we
-    // measure the container.  A single RAF fires before layout settles,
-    // causing fit() to read a stale clientHeight → wrong row count →
-    // max-scroll too small → user can't scroll to the real bottom.
+    // Double-RAF so the browser fully computes layout before measuring.
+    // Then the unified fitQueue pipeline handles: fit → viewport refresh →
+    // wait for xterm internals → scroll restore → viewport sync → reveal.
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        const dims = fitTerminal(sessionId);
-        if (dims) {
-          resizeSession(sessionId, dims.cols, dims.rows).catch(console.error);
-        }
-
-        // Scroll to bottom on first attach only (no saved state to restore)
-        if (isFirstAttach) {
-          const inst = getTerminal(sessionId);
-          if (inst) inst.terminal.scrollToBottom();
-        }
-
-        // Reveal after fit — GPU-composited transition avoids layout thrash
-        container.style.opacity = "1";
-
-        // Delayed re-fit: double-RAF may fire before flex layout fully settles.
-        // A second fit after 150ms mirrors how minimize/maximize naturally works.
-        // ALL scroll restoration happens here — this is the final fit, so its
-        // scroll restore is the one that sticks.
-        const rafCols = dims?.cols;
-        const rafRows = dims?.rows;
-        setTimeout(() => {
-          settlingSessionIds.delete(sessionId);
-
-          const inst2 = getTerminal(sessionId);
-          if (!inst2?.terminal.element?.parentElement) return;
-          const dims2 = fitTerminal(sessionId);
-          if (dims2) {
-            if (dims2.cols !== rafCols || dims2.rows !== rafRows) {
-              log.info(`Delayed re-fit id=${sessionId} changed dims: ${rafCols}x${rafRows} -> ${dims2.cols}x${dims2.rows}`);
-            }
-            resizeSession(sessionId, dims2.cols, dims2.rows).catch(console.error);
-          }
-
-          // Force xterm to recalculate the viewport scroll area.
-          // When container size hasn't changed, fit() is a no-op (xterm
-          // skips resize for unchanged dimensions). But the buffer grew
-          // while the tab was hidden, so the scroll area height is stale.
-          // A dummy rows+1/rows resize forces the full viewport refresh.
-          forceViewportRefresh(sessionId);
-
-          // Restore scroll position after final fit + viewport refresh.
-          //
-          // Key insight: while the tab was hidden, PTY data may have grown
-          // the buffer (baseY increased). The saved scroll position was
-          // captured at detach time with the old baseY. We check wasAtBottom
-          // against the *saved* state (correct: user WAS at bottom when they
-          // left). If they were at bottom, we scroll to the new bottom.
-          // If they were mid-scroll, we restore their old viewport position,
-          // clamped to the new buffer length.
-          if (isFirstAttach) {
-            inst2.terminal.scrollToBottom();
-          } else if (savedScroll) {
-            const wasAtBottom = savedScroll.viewportY >= savedScroll.baseY;
-            const newBaseY = inst2.terminal.buffer.active.baseY;
-            log.debug(`Scroll restore id=${sessionId} saved={viewportY:${savedScroll.viewportY}, baseY:${savedScroll.baseY}} wasAtBottom=${wasAtBottom} newBaseY=${newBaseY}`);
-            if (wasAtBottom) {
-              inst2.terminal.scrollToBottom();
-            } else {
-              inst2.terminal.scrollToLine(Math.min(savedScroll.viewportY, newBaseY));
-            }
-            clearSavedScrollPosition(sessionId);
-          } else {
-            // No saved scroll state (edge case) — default to bottom
-            inst2.terminal.scrollToBottom();
-          }
-
-          // Sync viewport DOM over several frames to beat any xterm
-          // internal RAF-queued viewport updates that could overwrite
-          // our scroll position.
-          forceViewportScrollSync(sessionId);
-          let syncFrame = 0;
-          const doSync = () => {
-            forceViewportScrollSync(sessionId);
-            if (++syncFrame < 5) requestAnimationFrame(doSync);
-          };
-          requestAnimationFrame(doSync);
-        }, 150);
+        enqueueFit(sessionId, "attach", {
+          isFirstAttach,
+          savedScroll,
+          onReveal: () => { container.style.opacity = "1"; },
+        }, 0);
       });
     });
 
     return () => {
-      settlingSessionIds.delete(sessionId);
+      cancelPendingFit(sessionId);
       detachFromDOM(sessionId);
     };
   }, [session.id, wireSession]);
 
-  // Handle window resize (debounced to avoid excessive IPC during pane drag)
+  // Handle window/container resize via unified fit pipeline (100ms debounce)
   useEffect(() => {
     let mounted = true;
-    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
 
     const handleResize = () => {
       if (!mounted) return;
-      if (settlingSessionIds.has(session.id)) return;
-      if (resizeTimer) clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => {
-        if (!mounted) return;
-        if (settlingSessionIds.has(session.id)) return;
-        const inst = getTerminal(session.id);
-        if (!inst) return;
-        const buf = inst.terminal.buffer.active;
-        const savedY = buf.viewportY;
-        const savedBase = buf.baseY;
-        const dims = fitTerminal(session.id);
-        if (dims) {
-          resizeSession(session.id, dims.cols, dims.rows).catch(console.error);
-        }
-        if (savedY >= savedBase) {
-          inst.terminal.scrollToBottom();
-        } else {
-          const newBase = inst.terminal.buffer.active.baseY;
-          inst.terminal.scrollToLine(Math.min(savedY, newBase));
-        }
-        // Force viewport DOM sync after resize to prevent scroll desync
-        forceViewportScrollSync(session.id);
+      const inst = getTerminal(session.id);
+      if (!inst?.terminal.element?.parentElement) return;
+      const buf = inst.terminal.buffer.active;
+      enqueueFit(session.id, "resize", {
+        savedScroll: { viewportY: buf.viewportY, baseY: buf.baseY },
       }, 100);
     };
 
     window.addEventListener("resize", handleResize);
 
-    // Also observe container size changes
     const container = containerRef.current;
     let ro: ResizeObserver | null = null;
     if (container) {
@@ -416,7 +305,7 @@ export function TerminalPane({
 
     return () => {
       mounted = false;
-      if (resizeTimer) clearTimeout(resizeTimer);
+      cancelPendingFit(session.id);
       window.removeEventListener("resize", handleResize);
       if (ro) ro.disconnect();
     };
