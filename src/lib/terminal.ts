@@ -283,12 +283,13 @@ export function fitTerminal(sessionId: string): { cols: number; rows: number } |
   const instance = terminalMap.get(sessionId);
   if (!instance) return null;
 
-  // Guard: skip fit if container has zero dimensions (detached or not yet laid out).
-  // fit() with a 0-size container produces cols=2/rows=1, causing a buffer reflow
-  // that corrupts scroll state.
+  // Guard: skip fit if container has zero or very small dimensions (detached,
+  // not yet laid out, or mid-layout-transition).  fit() with tiny containers
+  // produces cols=2/rows=1, causing xterm to reflow the entire scrollback to
+  // 2 columns — corrupting all wrapped lines irreversibly.
   const container = instance.terminal.element?.parentElement;
-  if (container && (container.clientWidth === 0 || container.clientHeight === 0)) {
-    log.debug(`Skipping fit for session id=${sessionId}: container has zero dimensions`);
+  if (container && (container.clientWidth < 10 || container.clientHeight < 10)) {
+    log.debug(`Skipping fit for session id=${sessionId}: container too small (${container.clientWidth}x${container.clientHeight})`);
     return null;
   }
 

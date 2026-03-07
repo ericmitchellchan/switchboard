@@ -683,6 +683,50 @@ describe("structural numbered-list detection", () => {
   });
 });
 
+// ── Content dedup (anti-flicker) ─────────────────────────────────
+
+describe("content dedup", () => {
+  it("identical buffer reads do not reset idle timer (prevents done↔running flicker)", () => {
+    const cb = vi.fn();
+    const lines = ["some output", "❯ "];
+
+    // First read: sets 500ms prompt-based done timeout
+    processBufferLines(SID, lines, cb);
+    vi.advanceTimersByTime(500);
+    expect(cb).toHaveBeenCalledWith(SID, "done");
+    cb.mockClear();
+
+    // Second identical read (simulating cursor blink): should be skipped
+    processBufferLines(SID, lines, cb);
+    vi.advanceTimersByTime(8000);
+    expect(cb).not.toHaveBeenCalledWith(SID, "running");
+  });
+
+  it("different buffer lines are still processed normally", () => {
+    const cb = vi.fn();
+    processBufferLines(SID, ["output line 1"], cb);
+    vi.advanceTimersByTime(500);
+
+    // Different content should be processed
+    processBufferLines(SID, ["output line 1", "new output"], cb);
+    // Still running, so no callback (same status)
+    expect(cb).not.toHaveBeenCalledWith(SID, "done");
+  });
+
+  it("dedup state is cleared on destroyDetector", () => {
+    const cb = vi.fn();
+    processBufferLines(SID, ["hello"], cb);
+
+    destroyDetector(SID);
+    initDetector(SID);
+
+    // Same lines should be processed again after re-init
+    processBufferLines(SID, ["hello"], cb);
+    vi.advanceTimersByTime(8000);
+    expect(cb).toHaveBeenCalledWith(SID, "done");
+  });
+});
+
 // ── processBufferLines-specific tests ───────────────────────────
 
 describe("processBufferLines", () => {

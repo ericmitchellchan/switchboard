@@ -44,6 +44,15 @@ const wiredSessions = new Set<string>();
 // from racing with the attach sequence's own fit + scroll restoration.
 const settlingSessionIds = new Set<string>();
 
+/** Mark all provided sessions as settling for `durationMs` (suppresses ResizeObserver).
+ *  Used by App.tsx when sidebar width changes to prevent mid-transition fit corruption. */
+export function suppressResizeForSessions(sessionIds: string[], durationMs = 200): void {
+  for (const id of sessionIds) settlingSessionIds.add(id);
+  setTimeout(() => {
+    for (const id of sessionIds) settlingSessionIds.delete(id);
+  }, durationMs);
+}
+
 // Module-level callback refs so listener closures always see the latest
 // callbacks regardless of which component instance last rendered.
 const sessionCallbacks = new Map<
@@ -317,19 +326,30 @@ export function TerminalPane({
           // A dummy rows+1/rows resize forces the full viewport refresh.
           forceViewportRefresh(sessionId);
 
-          // Restore scroll position after final fit + viewport refresh
+          // Restore scroll position after final fit + viewport refresh.
+          //
+          // Key insight: while the tab was hidden, PTY data may have grown
+          // the buffer (baseY increased). The saved scroll position was
+          // captured at detach time with the old baseY. We check wasAtBottom
+          // against the *saved* state (correct: user WAS at bottom when they
+          // left). If they were at bottom, we scroll to the new bottom.
+          // If they were mid-scroll, we restore their old viewport position,
+          // clamped to the new buffer length.
           if (isFirstAttach) {
             inst2.terminal.scrollToBottom();
           } else if (savedScroll) {
             const wasAtBottom = savedScroll.viewportY >= savedScroll.baseY;
-            log.debug(`Scroll restore id=${sessionId} saved={viewportY:${savedScroll.viewportY}, baseY:${savedScroll.baseY}} wasAtBottom=${wasAtBottom} newBaseY=${inst2.terminal.buffer.active.baseY}`);
+            const newBaseY = inst2.terminal.buffer.active.baseY;
+            log.debug(`Scroll restore id=${sessionId} saved={viewportY:${savedScroll.viewportY}, baseY:${savedScroll.baseY}} wasAtBottom=${wasAtBottom} newBaseY=${newBaseY}`);
             if (wasAtBottom) {
               inst2.terminal.scrollToBottom();
             } else {
-              const newBaseY = inst2.terminal.buffer.active.baseY;
               inst2.terminal.scrollToLine(Math.min(savedScroll.viewportY, newBaseY));
             }
             clearSavedScrollPosition(sessionId);
+          } else {
+            // No saved scroll state (edge case) — default to bottom
+            inst2.terminal.scrollToBottom();
           }
 
           // Sync viewport DOM over several frames to beat any xterm
@@ -339,7 +359,7 @@ export function TerminalPane({
           let syncFrame = 0;
           const doSync = () => {
             forceViewportScrollSync(sessionId);
-            if (++syncFrame < 3) requestAnimationFrame(doSync);
+            if (++syncFrame < 5) requestAnimationFrame(doSync);
           };
           requestAnimationFrame(doSync);
         }, 150);

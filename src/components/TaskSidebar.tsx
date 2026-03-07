@@ -9,6 +9,8 @@ interface TaskSidebarProps {
   onRemove: (id: string) => void;
   onAdd: (text: string, priority: Task["priority"], source: Task["source"]) => void;
   onClearCompleted: () => void;
+  onClearAll: () => void;
+  onClearAutoTasks: () => void;
   onExpand: () => void;
   onSwitchToSession?: (sessionId: string) => void;
 }
@@ -43,11 +45,14 @@ export function TaskSidebar({
   onRemove,
   onAdd,
   onClearCompleted,
+  onClearAll,
+  onClearAutoTasks,
   onExpand,
   onSwitchToSession,
 }: TaskSidebarProps) {
   const [inputValue, setInputValue] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
+  const [confirmClearActive, setConfirmClearActive] = useState(false);
 
   if (state === "hidden") return null;
 
@@ -179,20 +184,97 @@ export function TaskSidebar({
             </span>
           )}
         </div>
-        <button
-          onClick={onExpand}
-          style={{
-            background: "none",
-            border: "none",
-            cursor: "pointer",
-            fontFamily: "var(--font-mono)",
-            fontSize: 14,
-            color: "#52525B",
-            padding: "0 2px",
-          }}
-        >
-          {"\u203A"}
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          {activeTasks.length > 0 && !confirmClearActive && (
+            <button
+              onClick={() => setConfirmClearActive(true)}
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                fontFamily: "var(--font-mono)",
+                fontSize: 9,
+                color: "#3F3F46",
+                padding: "0 2px",
+              }}
+            >
+              Clear
+            </button>
+          )}
+          {confirmClearActive && (
+            <span style={{ display: "flex", gap: 3, alignItems: "center" }}>
+              {autoTasks.length > 0 && (
+                <button
+                  onClick={() => {
+                    onClearAutoTasks();
+                    setConfirmClearActive(false);
+                  }}
+                  style={{
+                    background: "none",
+                    border: "1px solid #F59E0B",
+                    borderRadius: 3,
+                    cursor: "pointer",
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 8,
+                    color: "#F59E0B",
+                    padding: "1px 4px",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  Auto
+                </button>
+              )}
+              <button
+                onClick={() => {
+                  onClearAll();
+                  setConfirmClearActive(false);
+                }}
+                style={{
+                  background: "none",
+                  border: "1px solid #EF4444",
+                  borderRadius: 3,
+                  cursor: "pointer",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 8,
+                  color: "#EF4444",
+                  padding: "1px 4px",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                All
+              </button>
+              <button
+                onClick={() => setConfirmClearActive(false)}
+                style={{
+                  background: "none",
+                  border: "1px solid #3F3F46",
+                  borderRadius: 3,
+                  cursor: "pointer",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 8,
+                  color: "#52525B",
+                  padding: "1px 4px",
+                }}
+              >
+                {"\u00D7"}
+              </button>
+            </span>
+          )}
+          <button
+            onClick={onExpand}
+            style={{
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              fontFamily: "var(--font-mono)",
+              fontSize: 14,
+              color: "#52525B",
+              padding: "0 2px",
+            }}
+          >
+            {"\u203A"}
+          </button>
+        </div>
       </div>
 
       {/* Task list */}

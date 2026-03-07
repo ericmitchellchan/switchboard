@@ -9,6 +9,7 @@ interface TabBarProps {
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
   onRename: (id: string, newName: string) => void;
+  onReorder?: (sessionId: string, newIndex: number) => void;
   waitingCount: number;
 }
 
@@ -18,6 +19,7 @@ export function TabBar({
   onSelect,
   onClose,
   onRename,
+  onReorder,
   waitingCount,
 }: TabBarProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -26,6 +28,8 @@ export function TabBar({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const checkScroll = () => {
@@ -204,12 +208,38 @@ export function TabBar({
               <div
                 key={session.id}
                 data-session-id={session.id}
+                draggable={!!onReorder}
+                onDragStart={(e) => {
+                  setDraggedId(session.id);
+                  e.dataTransfer.effectAllowed = "move";
+                }}
+                onDragEnd={() => {
+                  setDraggedId(null);
+                  setDragOverIdx(null);
+                }}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setDragOverIdx(idx);
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  if (draggedId && onReorder) {
+                    onReorder(draggedId, idx);
+                  }
+                  setDraggedId(null);
+                  setDragOverIdx(null);
+                }}
                 onMouseEnter={() => setHoveredId(session.id)}
                 onMouseLeave={() => setHoveredId(null)}
                 style={{
                   display: "flex",
                   alignItems: "stretch",
                   flexShrink: 0,
+                  opacity: draggedId === session.id ? 0.4 : 1,
+                  borderLeft: dragOverIdx === idx && draggedId && draggedId !== session.id
+                    ? "2px solid #A78BFA"
+                    : "none",
+                  transition: "opacity 0.15s",
                 }}
               >
                 {showDivider && (

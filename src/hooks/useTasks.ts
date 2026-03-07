@@ -103,6 +103,14 @@ export function useTasks() {
     setTasks((prev) => prev.filter((t) => !t.done));
   }, []);
 
+  const clearAll = useCallback(() => {
+    setTasks([]);
+  }, []);
+
+  const clearAutoTasks = useCallback(() => {
+    setTasks((prev) => prev.filter((t) => t.source !== "auto"));
+  }, []);
+
   const activeTasks = useMemo(() => tasks.filter((t) => !t.done), [tasks]);
   const completedTasks = useMemo(() => tasks.filter((t) => t.done), [tasks]);
   const autoTasks = useMemo(() => activeTasks.filter((t) => t.source === "auto"), [activeTasks]);
@@ -120,5 +128,7 @@ export function useTasks() {
     toggleTask,
     removeTask,
     clearCompleted,
+    clearAll,
+    clearAutoTasks,
   };
 }

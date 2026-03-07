@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, lazy, Suspense } from "react"
 import type { AgentStatus, RepoConfig } from "./types";
 import { TabBar } from "./components/TabBar";
 import { SessionHeader } from "./components/SessionHeader";
-import { TerminalPane, cleanupSessionListeners } from "./components/TerminalPane";
+import { TerminalPane, cleanupSessionListeners, suppressResizeForSessions } from "./components/TerminalPane";
 import { StatusBar } from "./components/StatusBar";
 import { ToastStack } from "./components/Toast";
 import { TaskSidebar } from "./components/TaskSidebar";
@@ -54,13 +54,27 @@ export default function App() {
     switchToSession: switchToSessionDirect,
     switchByIndex,
     switchRelative,
+    moveSession,
+    reorderSession,
     bulkSetSessions,
   } = useSessions();
 
   const { toasts, addToast, dismissToast, dismissBySessionId } = useToasts();
-  const { activeTasks, completedTasks, addTask, addAutoTask, resolveByFingerprint, toggleTask, removeTask, clearCompleted } = useTasks();
-  const { sidebarState, cycleSidebar } = useSidebarState();
+  const { activeTasks, completedTasks, addTask, addAutoTask, resolveByFingerprint, toggleTask, removeTask, clearCompleted, clearAll, clearAutoTasks } = useTasks();
+  const { sidebarState, cycleSidebar: rawCycleSidebar } = useSidebarState();
   const paneLayout = usePaneLayout();
+
+  // Wrap cycleSidebar to suppress ResizeObserver during sidebar width transition.
+  // Without this, flex layout recomputes over multiple frames → ResizeObserver
+  // fires mid-transition → fitTerminal reads intermediate width → column reflow
+  // corruption.
+  const cycleSidebar = useCallback(() => {
+    if (paneLayout.root) {
+      const visibleIds = getVisibleSessionIds(paneLayout.root);
+      suppressResizeForSessions(visibleIds, 250);
+    }
+    rawCycleSidebar();
+  }, [rawCycleSidebar, paneLayout.root]);
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [newSessionDialogOpen, setNewSessionDialogOpen] = useState(false);
@@ -378,6 +392,8 @@ export default function App() {
       onClosePane: handleClosePane,
       onMoveFocus: paneLayout.moveFocus,
       onExport: handleExport,
+      onMoveTabLeft: () => { if (effectiveActiveSessionId) moveSession(effectiveActiveSessionId, -1); },
+      onMoveTabRight: () => { if (effectiveActiveSessionId) moveSession(effectiveActiveSessionId, 1); },
     },
     effectiveActiveSessionId
   );
@@ -732,6 +748,7 @@ export default function App() {
         onSelect={switchToSession}
         onClose={handleCloseSpecificTab}
         onRename={handleRenameTab}
+        onReorder={reorderSession}
         waitingCount={waitingCount}
       />
 
@@ -826,6 +843,8 @@ export default function App() {
           onRemove={removeTask}
           onAdd={addTask}
           onClearCompleted={clearCompleted}
+          onClearAll={clearAll}
+          onClearAutoTasks={clearAutoTasks}
           onExpand={cycleSidebar}
           onSwitchToSession={switchToSession}
         />

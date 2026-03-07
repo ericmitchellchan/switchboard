@@ -67,6 +67,29 @@ export function useSessions() {
     setActiveSessionId(s[nextIndex].id);
   }, []);
 
+  const moveSession = useCallback((sessionId: string, direction: -1 | 1) => {
+    setSessions((prev) => {
+      const idx = prev.findIndex((s) => s.id === sessionId);
+      if (idx < 0) return prev;
+      const newIdx = idx + direction;
+      if (newIdx < 0 || newIdx >= prev.length) return prev;
+      const next = [...prev];
+      [next[idx], next[newIdx]] = [next[newIdx], next[idx]];
+      return next;
+    });
+  }, []);
+
+  const reorderSession = useCallback((sessionId: string, newIndex: number) => {
+    setSessions((prev) => {
+      const idx = prev.findIndex((s) => s.id === sessionId);
+      if (idx < 0 || idx === newIndex) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(idx, 1);
+      next.splice(newIndex, 0, moved);
+      return next;
+    });
+  }, []);
+
   const bulkSetSessions = useCallback(
     (newSessions: Session[], activeId: string | null) => {
       setSessions(newSessions);
@@ -90,6 +113,8 @@ export function useSessions() {
     switchToSession,
     switchByIndex,
     switchRelative,
+    moveSession,
+    reorderSession,
     bulkSetSessions,
   };
 }

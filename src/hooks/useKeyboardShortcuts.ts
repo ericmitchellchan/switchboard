@@ -15,6 +15,8 @@ export interface ShortcutActions {
   onClosePane?: () => void;
   onMoveFocus?: (direction: "up" | "down" | "left" | "right") => void;
   onExport?: () => void;
+  onMoveTabLeft?: () => void;
+  onMoveTabRight?: () => void;
 }
 
 // Keys we intercept from xterm.js
@@ -42,8 +44,9 @@ function isOurShortcut(e: KeyboardEvent): boolean {
     return true;
   }
 
-  // Ctrl+Shift+W (close pane), Ctrl+Shift+S (export)
-  if (e.shiftKey && (key === "w" || key === "s")) return true;
+  // Ctrl+Shift+W (close pane), Ctrl+Shift+S (export), Ctrl+Shift+[/] (move tab)
+  // Shift+[ produces { and Shift+] produces } on most keyboards
+  if (e.shiftKey && (key === "w" || key === "s" || key === "{" || key === "}")) return true;
 
   // Ctrl+Alt+Arrow (move focus between panes)
   if (e.altKey && (key === "arrowup" || key === "arrowdown" || key === "arrowleft" || key === "arrowright")) {
@@ -143,6 +146,18 @@ export function useKeyboardShortcuts(
         if (key === "s") {
           e.preventDefault();
           a.onExport?.();
+          return;
+        }
+        // Ctrl+Shift+[ / Ctrl+Shift+] — move tab left/right
+        // On most keyboards, Shift+[ = { and Shift+] = }
+        if (key === "{" || key === "[") {
+          e.preventDefault();
+          a.onMoveTabLeft?.();
+          return;
+        }
+        if (key === "}" || key === "]") {
+          e.preventDefault();
+          a.onMoveTabRight?.();
           return;
         }
       }

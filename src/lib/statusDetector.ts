@@ -160,6 +160,10 @@ interface DetectorState {
 
 const detectors = new Map<string, DetectorState>();
 
+// Content dedup: skip processBufferLines when the buffer hasn't changed.
+// Prevents cursor blink / internal xterm redraws from resetting the idle timer.
+const lastProcessedLines = new Map<string, string>();
+
 // --- RAF coalescing: at most one React update per session per frame ---
 const pendingStatusUpdates = new Map<string, { status: AgentStatus; callback: (sessionId: string, status: AgentStatus) => void }>();
 let rafId: number | null = null;
@@ -293,6 +297,14 @@ export function processBufferLines(
   // Check if any line has meaningful visible content
   const hasMeaningful = lines.some((l) => /\S/.test(l));
   if (!hasMeaningful) return;
+
+  // Dedup: skip if these exact lines were already processed.
+  // Cursor blink and internal xterm redraws trigger onWriteParsed without
+  // new PTY data — re-reading the same buffer lines would reset the idle
+  // timer and cause done↔running flickering.
+  const lineKey = lines.join("\n");
+  if (lastProcessedLines.get(sessionId) === lineKey) return;
+  lastProcessedLines.set(sessionId, lineKey);
 
   // Store callback ref for async timer use
   state.lastCallback = onStatusChange;
@@ -633,6 +645,7 @@ export function destroyDetector(sessionId: string): void {
     cancelPendingDwell(state);
     detectors.delete(sessionId);
   }
+  lastProcessedLines.delete(sessionId);
 }
 
 /** Exported for testing only */
