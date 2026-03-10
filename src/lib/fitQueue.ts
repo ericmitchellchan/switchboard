@@ -2,12 +2,16 @@
  * Unified fit/scroll pipeline for terminal sessions.
  *
  * All terminal fitting and scroll restoration funnels through enqueueFit().
- * Simplified pipeline (terminals stay in DOM, no reattach workarounds):
+ * Pipeline phases (terminals stay in DOM, visibility via CSS display toggle):
  *
+ *   0. Layout gate — wait for container to have real dimensions
+ *      (needed after display:none → flex transitions)
  *   1. fit() — measure container, set cols/rows
- *   2. Wait 1 RAF — let xterm settle
+ *   1.5. forceViewportRefresh — resize cycle to force syncScrollArea
+ *   2. Wait 2 RAFs — let xterm's resize handler settle
  *   3. Scroll restore — set the scroll position
- *   4. Reveal — show the container
+ *   3.5. forceViewportScrollSync — double-sync DOM scrollTop to buffer
+ *   4. Reveal + Focus — show container and focus terminal
  *
  * Per-session debouncing prevents rapid-fire fits during sidebar toggle,
  * window resize, and pane drag.
@@ -16,6 +20,8 @@
 import {
   fitTerminal,
   getTerminal,
+  forceViewportRefresh,
+  forceViewportScrollSync,
 } from "./terminal";
 import { resizeSession } from "./ipc";
 import { log } from "./logger";
@@ -26,6 +32,7 @@ export interface FitContext {
   isFirstAttach?: boolean;
   savedScroll?: { viewportY: number; baseY: number } | null;
   onReveal?: () => void;
+  shouldFocus?: boolean;
 }
 
 // Per-session debounce timers
@@ -75,6 +82,19 @@ function raf(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => resolve()));
 }
 
+/** Wait until the terminal's container has real dimensions (post display:none → flex) */
+async function waitForLayout(sessionId: string, maxAttempts = 10): Promise<boolean> {
+  for (let i = 0; i < maxAttempts; i++) {
+    const inst = getTerminal(sessionId);
+    const container = inst?.terminal.element?.parentElement;
+    if (container && container.clientWidth > 0 && container.clientHeight > 0) {
+      return true;
+    }
+    await raf();
+  }
+  return false;
+}
+
 async function runFit(
   sessionId: string,
   reason: FitReason,
@@ -88,13 +108,27 @@ async function runFit(
 
   log.debug(`fitQueue: start id=${sessionId} reason=${reason}`);
 
+  // Phase 0: Wait for layout (needed after display:none → flex transitions)
+  if (reason === "show" || reason === "visibility" || reason === "attach") {
+    const hasLayout = await waitForLayout(sessionId);
+    if (!hasLayout) {
+      log.warn(`fitQueue: layout timeout id=${sessionId} reason=${reason}`);
+      context.onReveal?.();
+      return;
+    }
+  }
+
   // Phase 1: Fit terminal to container dimensions
   const dims = fitTerminal(sessionId);
   if (dims) {
     resizeSession(sessionId, dims.cols, dims.rows).catch(console.error);
   }
 
-  // Phase 2: Wait 1 RAF for xterm's internal resize handler to settle
+  // Phase 1.5: Force viewport refresh (ensures xterm recalculates scroll area)
+  forceViewportRefresh(sessionId);
+
+  // Phase 2: Wait 2 RAFs for xterm's resize handler + syncScrollArea
+  await raf();
   await raf();
 
   // Phase 3: Scroll restoration
@@ -132,8 +166,20 @@ async function runFit(
   }
   // For wake/visibility with no savedScroll: leave scroll position as-is
 
-  // Phase 4: Reveal the container
+  // Phase 3.5: Viewport scroll sync (double-sync pattern from v0.1.x)
+  forceViewportScrollSync(sessionId);
+  await raf();
+  forceViewportScrollSync(sessionId);
+
+  // Phase 4: Reveal + Focus
   context.onReveal?.();
+
+  if (context.shouldFocus) {
+    const focusInst = getTerminal(sessionId);
+    if (focusInst) {
+      focusInst.terminal.focus();
+    }
+  }
 
   log.debug(`fitQueue: complete id=${sessionId}`);
 }

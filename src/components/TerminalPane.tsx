@@ -284,12 +284,16 @@ export function TerminalPane({
       const wasHidden = showTerminal(sessionId);
       if (wasHidden) {
         log.debug(`Terminal becoming visible id=${sessionId}`);
-        enqueueFit(sessionId, "show", {}, 0);
+        enqueueFit(sessionId, "show", { shouldFocus: isFocused }, 0);
+      } else if (isFocused) {
+        // Already visible, just needs focus (e.g. split pane focus change)
+        const instance = getTerminal(sessionId);
+        if (instance) instance.terminal.focus();
       }
     } else {
       hideTerminal(sessionId);
     }
-  }, [visible, session.id]);
+  }, [visible, session.id, isFocused]);
 
   // Handle window/container resize via unified fit pipeline (100ms debounce).
   // Skip resize when hidden — the "show" fit handles re-measuring when visible.
@@ -324,15 +328,6 @@ export function TerminalPane({
       if (ro) ro.disconnect();
     };
   }, [session.id, visible]);
-
-  // Focus management for split panes
-  useEffect(() => {
-    if (!isFocused) return;
-    const instance = getTerminal(session.id);
-    if (instance) {
-      instance.terminal.focus();
-    }
-  }, [isFocused, session.id]);
 
   // Close search refocuses terminal
   const handleCloseSearch = useCallback(() => {

@@ -339,6 +339,45 @@ export function fitTerminal(sessionId: string): { cols: number; rows: number } |
   }
 }
 
+/**
+ * Force xterm through a full resize cycle even if cols/rows didn't change.
+ * Needed because fitAddon.fit() may skip the internal resize when dimensions
+ * are unchanged after a display:none -> flex transition.
+ */
+export function forceViewportRefresh(sessionId: string): void {
+  const instance = terminalMap.get(sessionId);
+  if (!instance) return;
+  const cols = instance.terminal.cols;
+  const rows = instance.terminal.rows;
+  if (cols <= 2) return; // can't shrink further
+  instance.terminal.resize(cols - 1, rows);
+  instance.terminal.resize(cols, rows);
+}
+
+/**
+ * Directly sync the .xterm-viewport DOM element's scrollTop to match the
+ * terminal buffer state. Fixes viewport desync after display:none transitions
+ * where xterm's internal scroll area height and scrollTop are stale.
+ */
+export function forceViewportScrollSync(sessionId: string): void {
+  const instance = terminalMap.get(sessionId);
+  if (!instance) return;
+  const el = instance.terminal.element;
+  if (!el) return;
+  const viewport = el.querySelector('.xterm-viewport') as HTMLElement | null;
+  if (!viewport) return;
+  const buf = instance.terminal.buffer.active;
+  // Access cell height via core renderer dimensions (allowProposedApi is true)
+  const core = (instance.terminal as any)._core;
+  const cellHeight = core?._renderService?.dimensions?.css?.cell?.height;
+  if (!cellHeight || cellHeight <= 0) return;
+  const scrollArea = el.querySelector('.xterm-scroll-area') as HTMLElement | null;
+  if (scrollArea) {
+    scrollArea.style.height = `${(buf.baseY + instance.terminal.rows) * cellHeight}px`;
+  }
+  viewport.scrollTop = buf.viewportY * cellHeight;
+}
+
 /** Return all active terminal session IDs */
 export function getAllTerminalIds(): string[] {
   return Array.from(terminalMap.keys());
