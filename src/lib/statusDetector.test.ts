@@ -852,3 +852,176 @@ describe("processBufferLines", () => {
     expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
   });
 });
+
+// ── Hybrid waiting detection (cursor blink + wide scan) ─────────
+
+describe("hybrid waiting detection", () => {
+  it("detects waiting on cursor blink (position unchanged)", () => {
+    const cb = vi.fn();
+    const lines = [
+      "some output",
+      "Do you want to proceed?",
+    ];
+
+    // First call at cursorAbsY=10
+    processBufferLines(SID, lines, 10, cb);
+    expect(cb).toHaveBeenCalledWith(SID, "waiting");
+    cb.mockClear();
+
+    // Clear waiting to reset state
+    clearWaiting(SID, cb);
+    cb.mockClear();
+
+    // Second call with same cursorAbsY=10 (cursor blink) — should still detect waiting
+    processBufferLines(SID, lines, 10, cb);
+    expect(cb).toHaveBeenCalledWith(SID, "waiting");
+  });
+
+  it("detects waiting from done state via numbered list", () => {
+    const cb = vi.fn();
+
+    // Send output and advance past DONE_TIMEOUT_MS to reach "done"
+    processBufferLines(SID, ["compiling..."], 10, cb);
+    vi.advanceTimersByTime(8000);
+    expect(cb).toHaveBeenCalledWith(SID, "done");
+    cb.mockClear();
+
+    // Now send numbered list from "done" state
+    processBufferLines(
+      SID,
+      ["Choose an option:", "  1. Allow", "  2. Deny"],
+      12,
+      cb
+    );
+
+    // Advance past PENDING_WAITING_DELAY_MS (1500ms)
+    // First, the dwell timer for running (400ms) must fire
+    vi.advanceTimersByTime(400);
+    // Then advance past the numbered list timer
+    vi.advanceTimersByTime(1500);
+    expect(cb).toHaveBeenCalledWith(SID, "waiting");
+  });
+
+  it("detects waiting with wide prompt (6+ lines)", () => {
+    const cb = vi.fn();
+    // Realistic Claude Code prompt spanning 6 lines
+    const lines = [
+      "I'd like to edit src/App.tsx to add the new feature.",
+      "",
+      "Use the file editor to make changes?",
+      "",
+      "  1. Yes",
+      "  2. No",
+    ];
+    processBufferLines(SID, lines, 10, cb);
+    // The "Use the file editor" pattern should be detected within the 8-line window
+    expect(cb).toHaveBeenCalledWith(SID, "waiting");
+  });
+
+  it("new Claude Code patterns detected: Use the file editor", () => {
+    const cb = vi.fn();
+    processBufferLines(SID, ["Use the file editor to create the file?"], 10, cb);
+    expect(cb).toHaveBeenCalledWith(SID, "waiting");
+  });
+
+  it("new Claude Code patterns detected: Try to create a new file", () => {
+    const cb = vi.fn();
+    processBufferLines(SID, ["Try to create a new file?"], 10, cb);
+    expect(cb).toHaveBeenCalledWith(SID, "waiting");
+  });
+
+  it("new Claude Code patterns detected: Allow Read to access", () => {
+    const cb = vi.fn();
+    processBufferLines(SID, ["Allow Read to access the file?"], 10, cb);
+    expect(cb).toHaveBeenCalledWith(SID, "waiting");
+  });
+
+  it("new Claude Code patterns detected: Do you want to create", () => {
+    const cb = vi.fn();
+    processBufferLines(SID, ["Do you want to create this file?"], 10, cb);
+    expect(cb).toHaveBeenCalledWith(SID, "waiting");
+  });
+
+  it("new Claude Code patterns detected: May I proceed", () => {
+    const cb = vi.fn();
+    processBufferLines(SID, ["May I proceed with the changes?"], 10, cb);
+    expect(cb).toHaveBeenCalledWith(SID, "waiting");
+  });
+
+  it("new Claude Code patterns detected: Allow tool", () => {
+    const cb = vi.fn();
+    processBufferLines(SID, ["Allow the Read tool to access this path?"], 10, cb);
+    expect(cb).toHaveBeenCalledWith(SID, "waiting");
+  });
+
+  it("cursor blink doesn't cause running→done flicker (regression)", () => {
+    const cb = vi.fn();
+    // Initial output — running
+    processBufferLines(SID, ["compiling..."], 10, cb);
+    expect(cb).not.toHaveBeenCalled(); // still running
+
+    // 3s later, cursor blink (same position, no prompt) — should reset idle timer
+    vi.advanceTimersByTime(3000);
+    processBufferLines(SID, ["compiling..."], 10, cb);
+
+    // 3s after the blink (6s total) — should NOT be done yet (timer was reset)
+    vi.advanceTimersByTime(3000);
+    expect(cb).not.toHaveBeenCalledWith(SID, "done");
+
+    // 5 more seconds (8s since blink reset) — NOW should be done
+    vi.advanceTimersByTime(5000);
+    expect(cb).toHaveBeenCalledWith(SID, "done");
+  });
+
+  it("token counter suppresses waiting scan on cursor blink", () => {
+    const cb = vi.fn();
+    // Lines contain both a token counter AND a waiting pattern
+    const lines = [
+      "Do you want to proceed?",
+      "(3s, 1.2k tokens)",
+    ];
+
+    // First call
+    processBufferLines(SID, lines, 10, cb);
+    // Token counter suppresses waiting
+    expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
+    cb.mockClear();
+
+    // Second call at same position (cursor blink) — token counter should still suppress
+    processBufferLines(SID, lines, 10, cb);
+    expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
+  });
+
+  it("waiting pattern in 8-line window triggers (wider than 3-line error window)", () => {
+    const cb = vi.fn();
+    // Place waiting pattern 6 lines back — inside 8-line window but outside 3-line error window
+    const lines = [
+      "old output line 1",
+      "old output line 2",
+      "Do you want to proceed?",
+      "blank line",
+      "  1. Yes",
+      "  2. No",
+      "  3. Always allow",
+      "another line",
+      "yet another line",
+    ];
+    processBufferLines(SID, lines, 10, cb);
+    expect(cb).toHaveBeenCalledWith(SID, "waiting");
+  });
+
+  it("error pattern outside 3-line window does NOT trigger", () => {
+    const cb = vi.fn();
+    // Error pattern is 5 lines back — inside 8-line waiting window but outside 3-line error window
+    const lines = [
+      "Error: something went wrong",
+      "line 2",
+      "line 3",
+      "line 4",
+      "line 5",
+    ];
+    processBufferLines(SID, lines, 10, cb);
+    // Error should NOT be detected (it's outside the 3-line error scan window)
+    expect(cb).not.toHaveBeenCalledWith(SID, "error");
+  });
+});

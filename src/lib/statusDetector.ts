@@ -25,6 +25,12 @@ const RECENT_LINES_MAX = 10;
  *  for ~3 lines of subsequent output before scrolling out of range. */
 const PATTERN_SCAN_LINES = 3;
 
+/** How many trailing lines to check for waiting patterns specifically.
+ *  Wider than PATTERN_SCAN_LINES because Claude Code prompts span 5-7 lines
+ *  (question + blank + numbered options + prompt character). Error patterns
+ *  keep the narrow 3-line window to avoid false positives from old output. */
+const WAITING_SCAN_LINES = 8;
+
 /** Silence window after numbered list before transitioning to "waiting".
  *  Must be long enough that streaming output finishes before we commit to "waiting". */
 const PENDING_WAITING_DELAY_MS = 1_500;
@@ -106,6 +112,12 @@ const WAITING_PATTERNS = [
   /\? \(Y\/n\)/i,
   /Enter a value/i,
   /waiting for input/i,
+  /Use the (?:file editor|web fetcher|shell|terminal)/i,
+  /Try to create (?:a new file|the file)/i,
+  /Allow [\w\s]+ to/i,
+  /Do you want to (?:create|edit|delete|run|execute|install)/i,
+  /\bAllow\b.*\btool\b/i,
+  /May I (?:proceed|continue|create|edit|run)/i,
 ];
 
 const ERROR_PATTERNS = [
@@ -293,6 +305,24 @@ function commitTransition(
   emitStatusChange(sessionId, newStatus, onStatusChange);
 }
 
+/** Start the numbered-list silence timer for waiting detection */
+function startNumberedListTimer(
+  sessionId: string,
+  state: DetectorState,
+  onStatusChange: (sid: string, status: AgentStatus) => void
+): void {
+  if (state.pendingWaitingTimerId !== null) return; // Already running
+  state.pendingWaitingTimerId = setTimeout(() => {
+    const s = detectors.get(sessionId);
+    if (s && s.currentStatus !== "waiting" && s.currentStatus !== "exited") {
+      s.pendingWaitingTimerId = null;
+      s.stickyWaiting = true;
+      s.chunksSinceWaiting = 0;
+      transitionWithDwell(sessionId, s, "waiting", s.lastCallback ?? onStatusChange);
+    }
+  }, PENDING_WAITING_DELAY_MS);
+}
+
 /**
  * Buffer-based detection: operates on clean text lines read from xterm's buffer
  * after onWriteParsed fires. Lines are already stripped of ANSI by xterm's
@@ -320,7 +350,7 @@ export function processBufferLines(
 
   if (positionUnchanged) {
     // Cursor blink / redraw: reset idle timer so it doesn't freeze,
-    // but skip all pattern matching (no new data to analyze).
+    // but skip running/done/error pattern matching (no new data to analyze).
     state.lastOutputTime = Date.now();
     if (state.idleTimeoutId !== null) {
       clearTimeout(state.idleTimeoutId);
@@ -334,6 +364,31 @@ export function processBufferLines(
         transitionWithDwell(sessionId, s, "done", onStatusChange);
       }
     }, doneDelay);
+
+    // Even on cursor blink, scan for waiting patterns on visible lines.
+    // Prompts persist on screen and must be detected even when cursor hasn't moved.
+    if (state.currentStatus !== "waiting" && !state.stickyWaiting) {
+      const hasTokenCounter = lines.some((l) => TOKEN_COUNTER_RE.test(l));
+      if (!hasTokenCounter) {
+        const waitingScan = lines.slice(-WAITING_SCAN_LINES);
+        for (const line of waitingScan) {
+          for (const p of WAITING_PATTERNS) {
+            if (p.test(line)) {
+              state.stickyWaiting = true;
+              state.chunksSinceWaiting = 0;
+              cancelPendingWaiting(state);
+              transitionWithDwell(sessionId, state, "waiting", onStatusChange);
+              return;
+            }
+          }
+        }
+        // Also check numbered list
+        const nonBlank = lines.filter((l) => l.trim().length > 0);
+        if (hasTrailingNumberedList(nonBlank)) {
+          startNumberedListTimer(sessionId, state, onStatusChange);
+        }
+      }
+    }
     return;
   }
 
@@ -365,9 +420,11 @@ export function processBufferLines(
   }
 
   // Scan delta lines for waiting/error patterns (only new content).
-  // Also limit to PATTERN_SCAN_LINES from the tail so stale patterns
-  // in the delta window don't re-trigger.
-  const patternLines = deltaLines.slice(-PATTERN_SCAN_LINES);
+  // Waiting patterns use a wider window (WAITING_SCAN_LINES=8) because
+  // Claude Code prompts span 5-7 lines. Error patterns keep the narrow
+  // 3-line window (PATTERN_SCAN_LINES) to avoid false positives from old output.
+  const waitingPatternLines = deltaLines.slice(-WAITING_SCAN_LINES);
+  const errorPatternLines = deltaLines.slice(-PATTERN_SCAN_LINES);
   let detectedWaiting = false;
   let detectedError = false;
 
@@ -375,7 +432,7 @@ export function processBufferLines(
   // counting tokens, any waiting/error pattern in the same window is stale
   // output from a previous step.  Skip pattern matching entirely.
   if (!hasTokenCounter) {
-    for (const line of patternLines) {
+    for (const line of waitingPatternLines) {
       if (!detectedWaiting) {
         for (const p of WAITING_PATTERNS) {
           if (p.test(line)) {
@@ -384,11 +441,15 @@ export function processBufferLines(
           }
         }
       }
-      if (!detectedWaiting && !detectedError) {
-        for (const p of ERROR_PATTERNS) {
-          if (p.test(line)) {
-            detectedError = true;
-            break;
+    }
+    if (!detectedWaiting) {
+      for (const line of errorPatternLines) {
+        if (!detectedError) {
+          for (const p of ERROR_PATTERNS) {
+            if (p.test(line)) {
+              detectedError = true;
+              break;
+            }
           }
         }
       }
@@ -451,23 +512,13 @@ export function processBufferLines(
   }
 
   // Numbered list detection on the buffer lines directly
-  // Use the effective current status (may have been updated by transitionWithDwell)
   if (
     !hasTokenCounter &&
-    state.currentStatus === "running" &&
-    state.pendingWaitingTimerId === null &&
+    state.currentStatus !== "waiting" &&
+    state.currentStatus !== "exited" &&
     hasTrailingNumberedList(nonBlankLines)
   ) {
-    state.pendingWaitingTimerId = setTimeout(() => {
-      const s = detectors.get(sessionId);
-      if (s && s.currentStatus === "running") {
-        s.pendingWaitingTimerId = null;
-        s.stickyWaiting = true;
-        s.chunksSinceWaiting = 0;
-        // waiting is high priority → instant transition
-        transitionWithDwell(sessionId, s, "waiting", s.lastCallback ?? onStatusChange);
-      }
-    }, PENDING_WAITING_DELAY_MS);
+    startNumberedListTimer(sessionId, state, onStatusChange);
   }
 
   // Set up done timeout.
@@ -692,4 +743,4 @@ export function destroyDetector(sessionId: string): void {
 }
 
 /** Exported for testing only */
-export const _testOnly = { hasTrailingNumberedList };
+export const _testOnly = { hasTrailingNumberedList, startNumberedListTimer };
