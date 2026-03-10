@@ -44,8 +44,11 @@ export interface TerminalInstance {
 // Module-level map: keeps terminal instances alive across React renders
 const terminalMap = new Map<string, TerminalInstance>();
 
-// Saved scroll positions for restoring after detach/reattach
+// Saved scroll positions for restoring after visibility change / sleep-wake
 const savedScrollPositions = new Map<string, { viewportY: number; baseY: number }>();
+
+// Hidden session tracking: sessions whose parent container has display:none
+const hiddenSessionIds = new Set<string>();
 
 // Dirty tracking: sessions that received new PTY data since last serialization.
 // Prevents saveAllScrollbacks from serializing unchanged terminals every 30s.
@@ -170,17 +173,47 @@ export function disableWebGL(sessionId: string): void {
   instance.webglAddon = null;
 }
 
+/**
+ * Mark a terminal as hidden (parent container set to display:none by the
+ * rendering layer).  Disables WebGL to free the GPU context but leaves the
+ * terminal element in the DOM — no scroll reset, no reattach needed.
+ */
+export function hideTerminal(sessionId: string): void {
+  if (hiddenSessionIds.has(sessionId)) return;
+  hiddenSessionIds.add(sessionId);
+  disableWebGL(sessionId);
+  log.debug(`Terminal hidden id=${sessionId}`);
+}
+
+/**
+ * Mark a terminal as visible again.  Re-enables WebGL and returns true if the
+ * terminal was previously hidden (caller should enqueueFit to adjust to the
+ * now-visible container dimensions).
+ */
+export function showTerminal(sessionId: string): boolean {
+  if (!hiddenSessionIds.has(sessionId)) return false;
+  hiddenSessionIds.delete(sessionId);
+  enableWebGL(sessionId);
+  log.debug(`Terminal shown id=${sessionId}`);
+  return true;
+}
+
+/** Check if a terminal is currently hidden */
+export function isTerminalHidden(sessionId: string): boolean {
+  return hiddenSessionIds.has(sessionId);
+}
+
+/**
+ * Remove a terminal element from the DOM (final cleanup before dispose).
+ * Only called when a session is being closed — NOT on tab switch.
+ */
 export function detachFromDOM(sessionId: string): void {
   const instance = terminalMap.get(sessionId);
   if (!instance) return;
 
-  // Save scroll position before detaching so we can restore after reattach
-  const buf = instance.terminal.buffer.active;
-  const scrollPos = { viewportY: buf.viewportY, baseY: buf.baseY };
-  savedScrollPositions.set(sessionId, scrollPos);
+  log.debug(`Detaching terminal id=${sessionId} (final cleanup)`);
 
-  const atBottom = scrollPos.viewportY >= scrollPos.baseY;
-  log.debug(`Detaching terminal id=${sessionId} scroll={viewportY:${scrollPos.viewportY}, baseY:${scrollPos.baseY}, atBottom:${atBottom}} webgl=${!!instance.webglAddon}`);
+  hiddenSessionIds.delete(sessionId);
 
   // Dispose WebGL to free the context
   if (instance.webglAddon) {
@@ -258,6 +291,7 @@ export function disposeTerminal(sessionId: string): void {
   instance.terminal.dispose();
   terminalMap.delete(sessionId);
   savedScrollPositions.delete(sessionId);
+  hiddenSessionIds.delete(sessionId);
 }
 
 export function serializeTerminal(sessionId: string): string | null {
@@ -303,73 +337,6 @@ export function fitTerminal(sessionId: string): { cols: number; rows: number } |
     log.warn(`Failed to fit terminal for session id=${sessionId}: ${e}`);
     return null;
   }
-}
-
-/**
- * Force the viewport DOM element's scroll state to match the terminal buffer.
- *
- * After a detach/reattach cycle the browser resets .xterm-viewport scrollTop
- * to 0.  xterm's internal syncScrollArea() may read this stale value before
- * our scroll restoration runs, leaving the viewport permanently desynced.
- *
- * This function:
- * 1. Recalculates .xterm-scroll-area height from the *actual* buffer line
- *    count (fixes "can't scroll to bottom" when fit() read stale dimensions).
- * 2. Sets .xterm-viewport scrollTop to match buffer.viewportY (fixes
- *    "viewport stuck at top").
- */
-export function forceViewportScrollSync(sessionId: string): void {
-  const instance = terminalMap.get(sessionId);
-  if (!instance) return;
-
-  const terminal = instance.terminal;
-  const el = terminal.element;
-  if (!el || !el.parentElement) return;
-
-  const core = (terminal as any)._core;
-  const cellHeight: number | undefined =
-    core?._renderService?.dimensions?.css?.cell?.height;
-  if (!cellHeight || cellHeight <= 0) return;
-
-  const buf = terminal.buffer.active;
-
-  // Fix scroll area height — must equal totalLines * cellHeight so the
-  // viewport's max scrollTop allows reaching the real bottom.
-  const scrollAreaEl = el.querySelector(".xterm-scroll-area") as HTMLElement | null;
-  if (scrollAreaEl) {
-    scrollAreaEl.style.height = `${buf.length * cellHeight}px`;
-  }
-
-  // Fix viewport scrollTop
-  const viewportEl = el.querySelector(".xterm-viewport") as HTMLElement | null;
-  if (viewportEl) {
-    viewportEl.scrollTop = buf.viewportY * cellHeight;
-  }
-}
-
-/**
- * Force xterm to fully recalculate viewport scroll state.
- *
- * After detach/reattach, fit() is a no-op when the container size hasn't
- * changed — xterm never calls resize(), so the viewport scroll area stays
- * stale from before detach.  Content written while the tab was hidden
- * increases the buffer but the scroll area height doesn't update, making
- * it impossible to scroll to the real bottom.
- *
- * A rows+1 / rows cycle forces xterm through its full resize path
- * (buffer adjust + viewport refresh) without causing a column reflow.
- */
-export function forceViewportRefresh(sessionId: string): void {
-  const instance = terminalMap.get(sessionId);
-  if (!instance) return;
-  const { terminal } = instance;
-  if (!terminal.element?.parentElement) return;
-
-  const { cols, rows } = terminal;
-  if (cols < 2 || rows < 2) return;
-
-  terminal.resize(cols, rows + 1);
-  terminal.resize(cols, rows);
 }
 
 /** Return all active terminal session IDs */

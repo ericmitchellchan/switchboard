@@ -1,6 +1,6 @@
 [package]
 name = "switchboard"
-version = "0.1.1"
+version = "0.2.0"
 description = "Terminal session manager for Claude Code"
 authors = ["you"]
 edition = "2021"

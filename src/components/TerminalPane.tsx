@@ -3,11 +3,10 @@ import type { Session, AgentStatus } from "../types";
 import {
   createTerminal,
   attachToDOM,
-  detachFromDOM,
   getTerminal,
   writeRestoreContent,
-  getSavedScrollPosition,
-  clearSavedScrollPosition,
+  showTerminal,
+  hideTerminal,
   markSessionDirty,
 } from "../lib/terminal";
 import {
@@ -63,6 +62,7 @@ export function cleanupSessionListeners(sessionId: string) {
 
 interface TerminalPaneProps {
   session: Session;
+  visible?: boolean;
   searchOpen?: boolean;
   onCloseSearch?: () => void;
   onExited: (sessionId: string) => void;
@@ -75,6 +75,7 @@ interface TerminalPaneProps {
 
 export function TerminalPane({
   session,
+  visible = true,
   searchOpen,
   onCloseSearch,
   onExited,
@@ -164,7 +165,7 @@ export function TerminalPane({
         const line = buf.getLine(y);
         if (line) lines.push(line.translateToString(true));
       }
-      processBufferLines(sessionId, lines, cbs.onStatusChange);
+      processBufferLines(sessionId, lines, cursorAbsY, cbs.onStatusChange);
     });
     pushCleanup(() => onWriteParsedDisposable.dispose());
 
@@ -235,53 +236,66 @@ export function TerminalPane({
     }
   }, []);
 
-  // Attach/detach terminal when session changes
+  // Mount-once: create terminal, attach to DOM, wire data listeners.
+  // The terminal element stays in the DOM for the lifetime of the component —
+  // visibility is toggled via CSS (display:none on the parent wrapper) and
+  // the showTerminal/hideTerminal helpers manage WebGL context.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     const sessionId = session.id;
 
-    // Track whether this is the first attach (terminal just created, no content yet).
-    const isFirstAttach = !wiredSessions.has(sessionId);
-
     // Create terminal if it doesn't exist (pass saved dims for restored sessions)
     createTerminal(sessionId, { cols: session.cols, rows: session.rows });
     wireSession(sessionId, session.restoredFromId);
 
-    log.info(`Attach terminal id=${sessionId} firstAttach=${isFirstAttach}`);
+    log.info(`Mount terminal id=${sessionId}`);
 
-    // Hide until fit + scroll restore completes to prevent flash at wrong size/position
+    // Hide until first fit completes to prevent flash at wrong size/position
     container.style.opacity = "0";
 
-    // Attach to DOM
+    // Attach to DOM (only opens terminal.open() on first call)
     attachToDOM(sessionId, container);
 
-    // Capture saved scroll position before any async work
-    const savedScroll = isFirstAttach ? null : getSavedScrollPosition(sessionId);
-    if (savedScroll) clearSavedScrollPosition(sessionId);
-
     // Double-RAF so the browser fully computes layout before measuring.
-    // Then the unified fitQueue pipeline handles: fit → viewport refresh →
-    // wait for xterm internals → scroll restore → viewport sync → reveal.
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         enqueueFit(sessionId, "attach", {
-          isFirstAttach,
-          savedScroll,
+          isFirstAttach: true,
           onReveal: () => { container.style.opacity = "1"; },
         }, 0);
       });
     });
 
+    // Cleanup only runs when the component unmounts (session close)
     return () => {
       cancelPendingFit(sessionId);
-      detachFromDOM(sessionId);
     };
-  }, [session.id, wireSession]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.id]);
 
-  // Handle window/container resize via unified fit pipeline (100ms debounce)
+  // Visibility effect: show/hide terminal when the visible prop changes.
+  // When becoming visible, re-enable WebGL and fit to (potentially new) container size.
+  // When becoming hidden, disable WebGL to free GPU context.
   useEffect(() => {
+    const sessionId = session.id;
+    if (visible) {
+      const wasHidden = showTerminal(sessionId);
+      if (wasHidden) {
+        log.debug(`Terminal becoming visible id=${sessionId}`);
+        enqueueFit(sessionId, "show", {}, 0);
+      }
+    } else {
+      hideTerminal(sessionId);
+    }
+  }, [visible, session.id]);
+
+  // Handle window/container resize via unified fit pipeline (100ms debounce).
+  // Skip resize when hidden — the "show" fit handles re-measuring when visible.
+  useEffect(() => {
+    if (!visible) return;
+
     let mounted = true;
 
     const handleResize = () => {
@@ -309,7 +323,7 @@ export function TerminalPane({
       window.removeEventListener("resize", handleResize);
       if (ro) ro.disconnect();
     };
-  }, [session.id]);
+  }, [session.id, visible]);
 
   // Focus management for split panes
   useEffect(() => {

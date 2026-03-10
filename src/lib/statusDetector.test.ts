@@ -683,46 +683,75 @@ describe("structural numbered-list detection", () => {
   });
 });
 
-// ── Content dedup (anti-flicker) ─────────────────────────────────
+// ── Position-based delta detection (anti-flicker) ────────────────
 
-describe("content dedup", () => {
-  it("identical buffer reads do not reset idle timer (prevents done↔running flicker)", () => {
+describe("position-based delta detection", () => {
+  it("same cursor position (cursor blink) resets idle timer but skips pattern matching", () => {
     const cb = vi.fn();
     const lines = ["some output", "❯ "];
 
-    // First read: sets 500ms prompt-based done timeout
-    processBufferLines(SID, lines, cb);
+    // First read at cursorY=10: sets 500ms prompt-based done timeout
+    processBufferLines(SID, lines, 10, cb);
     vi.advanceTimersByTime(500);
     expect(cb).toHaveBeenCalledWith(SID, "done");
     cb.mockClear();
 
-    // Second identical read (simulating cursor blink): should be skipped
-    processBufferLines(SID, lines, cb);
+    // Second read at same cursorY=10 (cursor blink): should skip patterns
+    // but reset idle timer (no false "running" transition)
+    processBufferLines(SID, lines, 10, cb);
     vi.advanceTimersByTime(8000);
     expect(cb).not.toHaveBeenCalledWith(SID, "running");
   });
 
-  it("different buffer lines are still processed normally", () => {
+  it("advanced cursor position processes new lines normally", () => {
     const cb = vi.fn();
-    processBufferLines(SID, ["output line 1"], cb);
+    processBufferLines(SID, ["output line 1"], 10, cb);
     vi.advanceTimersByTime(500);
 
-    // Different content should be processed
-    processBufferLines(SID, ["output line 1", "new output"], cb);
+    // Cursor advanced — new content should be processed
+    processBufferLines(SID, ["output line 1", "new output"], 11, cb);
     // Still running, so no callback (same status)
     expect(cb).not.toHaveBeenCalledWith(SID, "done");
   });
 
-  it("dedup state is cleared on destroyDetector", () => {
+  it("position tracking is cleared on destroyDetector", () => {
     const cb = vi.fn();
-    processBufferLines(SID, ["hello"], cb);
+    processBufferLines(SID, ["hello"], 10, cb);
 
     destroyDetector(SID);
     initDetector(SID);
 
-    // Same lines should be processed again after re-init
-    processBufferLines(SID, ["hello"], cb);
+    // Same cursorY should be processed again after re-init (fresh state)
+    processBufferLines(SID, ["hello"], 10, cb);
     vi.advanceTimersByTime(8000);
+    expect(cb).toHaveBeenCalledWith(SID, "done");
+  });
+
+  it("cursor position reset (terminal clear) reprocesses all lines", () => {
+    const cb = vi.fn();
+    processBufferLines(SID, ["some output"], 50, cb);
+    vi.advanceTimersByTime(500);
+
+    // Terminal cleared — cursorY dropped below previous
+    processBufferLines(SID, ["(y/n)"], 0, cb);
+    expect(cb).toHaveBeenCalledWith(SID, "waiting");
+  });
+
+  it("cursor blink on running terminal resets idle timer correctly", () => {
+    const cb = vi.fn();
+    // Initial output
+    processBufferLines(SID, ["compiling..."], 10, cb);
+
+    // 5s later, cursor blink (same position) — should reset timer
+    vi.advanceTimersByTime(5000);
+    processBufferLines(SID, ["compiling..."], 10, cb);
+
+    // 5s after the blink — total 10s from first, but only 5s since blink reset
+    vi.advanceTimersByTime(5000);
+    expect(cb).not.toHaveBeenCalledWith(SID, "done");
+
+    // 3 more seconds — now 8s since blink
+    vi.advanceTimersByTime(3000);
     expect(cb).toHaveBeenCalledWith(SID, "done");
   });
 });
@@ -740,6 +769,7 @@ describe("processBufferLines", () => {
         "processing...",
         "(3s, 1.2k tokens)",
       ],
+      10,
       cb
     );
     expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
@@ -753,6 +783,7 @@ describe("processBufferLines", () => {
         "Error: cannot find module",
         "(5s, 2.1k tokens)",
       ],
+      10,
       cb
     );
     expect(cb).not.toHaveBeenCalledWith(SID, "error");
@@ -773,7 +804,7 @@ describe("processBufferLines", () => {
       "line 9",
       "line 10",
     ];
-    processBufferLines(SID, lines, cb);
+    processBufferLines(SID, lines, 10, cb);
     // Pattern is outside last 3 lines → should NOT trigger waiting
     expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
   });
@@ -785,13 +816,13 @@ describe("processBufferLines", () => {
       "more old output",
       "Do you want to proceed?",
     ];
-    processBufferLines(SID, lines, cb);
+    processBufferLines(SID, lines, 10, cb);
     expect(cb).toHaveBeenCalledWith(SID, "waiting");
   });
 
   it("prompt ❯ triggers fast done timeout (500ms)", () => {
     const cb = vi.fn();
-    processBufferLines(SID, ["✓ Task completed (5s)", "❯ "], cb);
+    processBufferLines(SID, ["✓ Task completed (5s)", "❯ "], 10, cb);
     vi.advanceTimersByTime(499);
     expect(cb).not.toHaveBeenCalledWith(SID, "done");
     vi.advanceTimersByTime(1);
@@ -800,8 +831,24 @@ describe("processBufferLines", () => {
 
   it("prompt ❯ with leading whitespace still matches", () => {
     const cb = vi.fn();
-    processBufferLines(SID, ["  ❯ "], cb);
+    processBufferLines(SID, ["  ❯ "], 10, cb);
     vi.advanceTimersByTime(500);
     expect(cb).toHaveBeenCalledWith(SID, "done");
+  });
+
+  it("token counter with numbered list does NOT set waiting timer", () => {
+    const cb = vi.fn();
+    processBufferLines(
+      SID,
+      [
+        "  1. Allow",
+        "  2. Deny",
+        "(3s, 1.2k tokens)",
+      ],
+      10,
+      cb
+    );
+    vi.advanceTimersByTime(1500);
+    expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
   });
 });

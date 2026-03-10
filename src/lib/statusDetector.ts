@@ -156,13 +156,14 @@ interface DetectorState {
     status: AgentStatus;
     timerId: ReturnType<typeof setTimeout>;
   } | null;
+  /** Last processed absolute cursor Y — for delta-based detection */
+  lastProcessedCursorY: number;
+  /** Timestamp when the current dwell transition first started.
+   *  Tracks elapsed time so streaming output doesn't endlessly restart the timer. */
+  dwellStartTime: number | null;
 }
 
 const detectors = new Map<string, DetectorState>();
-
-// Content dedup: skip processBufferLines when the buffer hasn't changed.
-// Prevents cursor blink / internal xterm redraws from resetting the idle timer.
-const lastProcessedLines = new Map<string, string>();
 
 // --- RAF coalescing: at most one React update per session per frame ---
 const pendingStatusUpdates = new Map<string, { status: AgentStatus; callback: (sessionId: string, status: AgentStatus) => void }>();
@@ -199,6 +200,8 @@ export function initDetector(sessionId: string): void {
     lastCallback: null,
     lastTransitionTime: Date.now(),
     pendingDwell: null,
+    lastProcessedCursorY: -1,
+    dwellStartTime: null,
   });
 }
 
@@ -230,6 +233,7 @@ function transitionWithDwell(
   // Higher priority → instant transition, cancel any pending dwell
   if (newPriority > currentPriority) {
     cancelPendingDwell(state);
+    state.dwellStartTime = null;
     commitTransition(sessionId, state, newStatus, onStatusChange);
     return;
   }
@@ -237,14 +241,22 @@ function transitionWithDwell(
   // Same or lower priority with no dwell → instant
   if (dwellMs <= 0) {
     cancelPendingDwell(state);
+    state.dwellStartTime = null;
     commitTransition(sessionId, state, newStatus, onStatusChange);
     return;
   }
 
-  // Same or lower priority with dwell — check elapsed time
-  const elapsed = Date.now() - state.lastTransitionTime;
+  // Track when dwell first started — survives re-queuing from streaming output.
+  // Once elapsed time exceeds dwellMs, commit immediately instead of endlessly
+  // restarting the timer on every chunk.
+  if (state.dwellStartTime === null || state.pendingDwell?.status !== newStatus) {
+    state.dwellStartTime = Date.now();
+  }
+
+  const elapsed = Date.now() - state.dwellStartTime;
   if (elapsed >= dwellMs) {
     cancelPendingDwell(state);
+    state.dwellStartTime = null;
     commitTransition(sessionId, state, newStatus, onStatusChange);
     return;
   }
@@ -259,6 +271,7 @@ function transitionWithDwell(
       const s = detectors.get(sessionId);
       if (s && s.pendingDwell?.status === newStatus) {
         s.pendingDwell = null;
+        s.dwellStartTime = null;
         // Revalidate: only commit if still desired
         if (s.currentStatus !== newStatus) {
           commitTransition(sessionId, s, newStatus, onStatusChange);
@@ -289,6 +302,7 @@ function commitTransition(
 export function processBufferLines(
   sessionId: string,
   lines: string[],
+  cursorAbsY: number,
   onStatusChange: (sessionId: string, status: AgentStatus) => void
 ): void {
   const state = detectors.get(sessionId);
@@ -298,13 +312,43 @@ export function processBufferLines(
   const hasMeaningful = lines.some((l) => /\S/.test(l));
   if (!hasMeaningful) return;
 
-  // Dedup: skip if these exact lines were already processed.
-  // Cursor blink and internal xterm redraws trigger onWriteParsed without
-  // new PTY data — re-reading the same buffer lines would reset the idle
-  // timer and cause done↔running flickering.
-  const lineKey = lines.join("\n");
-  if (lastProcessedLines.get(sessionId) === lineKey) return;
-  lastProcessedLines.set(sessionId, lineKey);
+  // Position-based delta detection (replaces content dedup).
+  // Cursor blink and internal xterm redraws fire onWriteParsed without
+  // new PTY data — the cursor position stays the same.
+  const positionUnchanged = cursorAbsY === state.lastProcessedCursorY && cursorAbsY >= 0;
+  const positionReset = cursorAbsY < state.lastProcessedCursorY;
+
+  if (positionUnchanged) {
+    // Cursor blink / redraw: reset idle timer so it doesn't freeze,
+    // but skip all pattern matching (no new data to analyze).
+    state.lastOutputTime = Date.now();
+    if (state.idleTimeoutId !== null) {
+      clearTimeout(state.idleTimeoutId);
+      state.idleTimeoutId = null;
+    }
+    // Re-arm the idle timer with the appropriate delay
+    const doneDelay = DONE_TIMEOUT_MS;
+    state.idleTimeoutId = setTimeout(() => {
+      const s = detectors.get(sessionId);
+      if (s && s.currentStatus === "running") {
+        transitionWithDwell(sessionId, s, "done", onStatusChange);
+      }
+    }, doneDelay);
+    return;
+  }
+
+  // Compute delta: how many new lines since last read
+  let deltaLines: string[];
+  if (positionReset || state.lastProcessedCursorY < 0) {
+    // Terminal cleared, alternate buffer, or first read — process all lines
+    deltaLines = lines;
+  } else {
+    const deltaCount = cursorAbsY - state.lastProcessedCursorY;
+    const clampedDelta = Math.min(deltaCount, lines.length);
+    deltaLines = lines.slice(-clampedDelta);
+  }
+
+  state.lastProcessedCursorY = cursorAbsY;
 
   // Store callback ref for async timer use
   state.lastCallback = onStatusChange;
@@ -320,11 +364,10 @@ export function processBufferLines(
     if (!hasPrompt && PROMPT_RE.test(line)) hasPrompt = true;
   }
 
-  // Only scan the LAST few lines for waiting/error patterns.
-  // Patterns from older output (scrolled above the scan window) are
-  // considered stale — they would otherwise re-trigger on every frame
-  // until they scroll past the full buffer read window.
-  const patternLines = lines.slice(-PATTERN_SCAN_LINES);
+  // Scan delta lines for waiting/error patterns (only new content).
+  // Also limit to PATTERN_SCAN_LINES from the tail so stale patterns
+  // in the delta window don't re-trigger.
+  const patternLines = deltaLines.slice(-PATTERN_SCAN_LINES);
   let detectedWaiting = false;
   let detectedError = false;
 
@@ -410,6 +453,7 @@ export function processBufferLines(
   // Numbered list detection on the buffer lines directly
   // Use the effective current status (may have been updated by transitionWithDwell)
   if (
+    !hasTokenCounter &&
     state.currentStatus === "running" &&
     state.pendingWaitingTimerId === null &&
     hasTrailingNumberedList(nonBlankLines)
@@ -645,7 +689,6 @@ export function destroyDetector(sessionId: string): void {
     cancelPendingDwell(state);
     detectors.delete(sessionId);
   }
-  lastProcessedLines.delete(sessionId);
 }
 
 /** Exported for testing only */

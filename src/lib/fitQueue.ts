@@ -2,17 +2,12 @@
  * Unified fit/scroll pipeline for terminal sessions.
  *
  * All terminal fitting and scroll restoration funnels through enqueueFit().
- * This eliminates race conditions from multiple competing async operations
- * (double-RAF, 150ms timeouts, 5x forceViewportScrollSync loops) by
- * providing a single, ordered pipeline:
+ * Simplified pipeline (terminals stay in DOM, no reattach workarounds):
  *
  *   1. fit() — measure container, set cols/rows
- *   2. forceViewportRefresh — force xterm to recalculate scroll area
- *   3. Wait 2 RAFs — let xterm's internal syncScrollArea() complete
- *   4. Scroll restore — set the scroll position (now it sticks)
- *   5. forceViewportScrollSync — ensure DOM matches buffer state
- *   6. Wait 1 RAF — let browser paint
- *   7. Final forceViewportScrollSync — lock it in
+ *   2. Wait 1 RAF — let xterm settle
+ *   3. Scroll restore — set the scroll position
+ *   4. Reveal — show the container
  *
  * Per-session debouncing prevents rapid-fire fits during sidebar toggle,
  * window resize, and pane drag.
@@ -21,13 +16,11 @@
 import {
   fitTerminal,
   getTerminal,
-  forceViewportRefresh,
-  forceViewportScrollSync,
 } from "./terminal";
 import { resizeSession } from "./ipc";
 import { log } from "./logger";
 
-export type FitReason = "attach" | "resize" | "wake" | "visibility";
+export type FitReason = "attach" | "show" | "resize" | "wake" | "visibility";
 
 export interface FitContext {
   isFirstAttach?: boolean;
@@ -69,7 +62,7 @@ export function enqueueFit(
   debounceTimers.set(sessionId, timer);
 }
 
-/** Cancel any pending fit for a session (call on detach/cleanup). */
+/** Cancel any pending fit for a session (call on cleanup). */
 export function cancelPendingFit(sessionId: string): void {
   const pending = debounceTimers.get(sessionId);
   if (pending) {
@@ -101,22 +94,10 @@ async function runFit(
     resizeSession(sessionId, dims.cols, dims.rows).catch(console.error);
   }
 
-  // Phase 2: Force xterm to recalculate the viewport scroll area.
-  // When the buffer grew while detached but container size didn't change,
-  // fit() is a no-op (xterm skips resize for unchanged dims). The rows+1/rows
-  // cycle forces xterm through its full resize codepath.
-  if (reason === "attach" || reason === "visibility" || reason === "wake") {
-    forceViewportRefresh(sessionId);
-  }
-
-  // Phase 3: Wait 2 RAFs for xterm's internal resize handler and
-  // syncScrollArea() to complete. forceViewportRefresh triggers xterm's
-  // resize handler which queues a RAF internally. Waiting 2 frames ensures
-  // all internal updates are done before we set scroll position.
-  await raf();
+  // Phase 2: Wait 1 RAF for xterm's internal resize handler to settle
   await raf();
 
-  // Phase 4: Scroll restoration (after xterm's internal state has settled)
+  // Phase 3: Scroll restoration
   const inst = getTerminal(sessionId);
   if (!inst?.terminal.element?.parentElement) {
     context.onReveal?.();
@@ -139,24 +120,19 @@ async function runFit(
       `fitQueue: scroll restore id=${sessionId} wasAtBottom=${wasAtBottom} ` +
         `saved={vp:${savedScroll.viewportY},base:${savedScroll.baseY}} newBase=${newBaseY}`,
     );
+  } else if (reason === "show" || reason === "attach") {
+    // Terminal becoming visible — scroll to bottom (user expects to see latest)
+    inst.terminal.scrollToBottom();
   } else if (reason === "resize") {
     // On resize, maintain bottom position if user was at bottom
     const buf = inst.terminal.buffer.active;
     if (buf.viewportY >= buf.baseY) {
       inst.terminal.scrollToBottom();
     }
-  } else {
-    // Default fallback: scroll to bottom
-    inst.terminal.scrollToBottom();
   }
+  // For wake/visibility with no savedScroll: leave scroll position as-is
 
-  // Phase 5: Sync viewport DOM to match buffer state, then lock it in
-  // after one more RAF (catches any xterm-internal RAF that might overwrite).
-  forceViewportScrollSync(sessionId);
-  await raf();
-  forceViewportScrollSync(sessionId);
-
-  // Reveal the container (hidden during attach to prevent flash)
+  // Phase 4: Reveal the container
   context.onReveal?.();
 
   log.debug(`fitQueue: complete id=${sessionId}`);

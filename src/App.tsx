@@ -112,8 +112,6 @@ export default function App() {
 
   effectiveActiveIdRef.current = effectiveActiveSessionId;
 
-  const effectiveActiveSession = sessions.find((s) => s.id === effectiveActiveSessionId) ?? null;
-
   // Helper: create a session and return its info
   const doCreateSession = useCallback(
     async (name: string, repo: string, workingDir: string, repoColor?: string, group?: string) => {
@@ -758,28 +756,37 @@ export default function App() {
               isSplit
             />
           ) : (
-            // Single pane — render without PaneContainer overhead
-            effectiveActiveSession ? (
-              <div
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  flex: 1,
-                  minWidth: 0,
-                }}
-              >
-                <SessionHeader session={effectiveActiveSession} />
-                <TerminalPane
-                  session={effectiveActiveSession}
-                  searchOpen={searchOpen}
-                  onCloseSearch={() => setSearchOpen(false)}
-                  onExited={handleSessionExited}
-                  onStatusChange={handleStatusChange}
-                  onAutoTask={handleAutoTask}
-                  onResolveTask={resolveByFingerprint}
-                  onRestart={handleRestartSession}
-                />
-              </div>
+            // Single pane — render ALL sessions, toggle visibility via CSS.
+            // Keeps xterm instances mounted in the DOM so tab switches don't
+            // trigger detach/reattach (which resets scroll position).
+            sessions.length > 0 ? (
+              sessions.map((s) => {
+                const isActive = s.id === effectiveActiveSessionId;
+                return (
+                  <div
+                    key={s.id}
+                    style={{
+                      display: isActive ? "flex" : "none",
+                      flexDirection: "column",
+                      flex: 1,
+                      minWidth: 0,
+                    }}
+                  >
+                    <SessionHeader session={s} />
+                    <TerminalPane
+                      session={s}
+                      visible={isActive}
+                      searchOpen={isActive ? searchOpen : false}
+                      onCloseSearch={() => setSearchOpen(false)}
+                      onExited={handleSessionExited}
+                      onStatusChange={handleStatusChange}
+                      onAutoTask={handleAutoTask}
+                      onResolveTask={resolveByFingerprint}
+                      onRestart={handleRestartSession}
+                    />
+                  </div>
+                );
+              })
             ) : null
           )
         ) : (
