@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { Session } from "../types";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
 
@@ -6,7 +7,7 @@ interface SessionHeaderProps {
   compact?: boolean;
 }
 
-export function SessionHeader({ session, compact }: SessionHeaderProps) {
+export const SessionHeader = memo(function SessionHeader({ session, compact }: SessionHeaderProps) {
   const cfg = STATUS_CONFIGS[session.status] || STATUS_CONFIGS.running;
   const repoColor = session.repoColor || "#A78BFA";
 
@@ -17,9 +18,12 @@ export function SessionHeader({ session, compact }: SessionHeaderProps) {
         alignItems: "center",
         justifyContent: "space-between",
         padding: compact ? "4px 10px" : "8px 16px",
+        height: compact ? 25 : 33,
+        boxSizing: "border-box",
         backgroundColor: "#0F0F11",
         borderBottom: "1px solid #1E1E22",
         flexShrink: 0,
+        overflow: "hidden",
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: compact ? 6 : 10 }}>
@@ -95,4 +99,13 @@ export function SessionHeader({ session, compact }: SessionHeaderProps) {
       )}
     </div>
   );
-}
+}, (prev, next) => {
+  return (
+    prev.session.status === next.session.status &&
+    prev.session.name === next.session.name &&
+    prev.session.repo === next.session.repo &&
+    prev.session.working_dir === next.session.working_dir &&
+    prev.session.repoColor === next.session.repoColor &&
+    prev.compact === next.compact
+  );
+});

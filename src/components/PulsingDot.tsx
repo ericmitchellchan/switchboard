@@ -1,10 +1,12 @@
+import { memo } from "react";
+
 interface PulsingDotProps {
   color: string;
   pulse: boolean;
   size?: number;
 }
 
-export function PulsingDot({ color, pulse, size = 7 }: PulsingDotProps) {
+export const PulsingDot = memo(function PulsingDot({ color, pulse, size = 7 }: PulsingDotProps) {
   const outerSize = size + 3;
   return (
     <span
@@ -41,4 +43,4 @@ export function PulsingDot({ color, pulse, size = 7 }: PulsingDotProps) {
       />
     </span>
   );
-}
+});

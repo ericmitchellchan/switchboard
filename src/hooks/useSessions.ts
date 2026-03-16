@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from "react";
 import type { Session } from "../types";
+import { log } from "../lib/logger";
 
 export function useSessions() {
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -40,9 +41,12 @@ export function useSessions() {
 
   const updateSessionStatus = useCallback(
     (sessionId: string, status: Session["status"]) => {
-      setSessions((prev) =>
-        prev.map((s) => (s.id === sessionId ? { ...s, status } : s))
-      );
+      setSessions((prev) => {
+        const target = prev.find((s) => s.id === sessionId);
+        if (!target || target.status === status) return prev; // no-op: skip re-render
+        log.debug(`Session status id=${sessionId}: ${target.status} → ${status}`);
+        return prev.map((s) => (s.id === sessionId ? { ...s, status } : s));
+      });
     },
     []
   );

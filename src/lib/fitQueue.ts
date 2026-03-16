@@ -124,8 +124,17 @@ async function runFit(
     resizeSession(sessionId, dims.cols, dims.rows).catch(console.error);
   }
 
-  // Phase 1.5: Force viewport refresh (ensures xterm recalculates scroll area)
-  forceViewportRefresh(sessionId);
+  // Phase 1.5: Force viewport refresh (ensures xterm recalculates scroll area).
+  // Only needed after visibility transitions (display:none → flex) where xterm's
+  // internal scroll area goes stale.
+  // Skip for "resize" — fit() already handled dimensions and the 1-col bounce
+  //   would trigger onWriteParsed → status detector → React re-render → ResizeObserver loop.
+  // Skip for "wake" — terminal was never display:none; GPU recovery (atlas clear +
+  //   WebGL re-enable) handles the visual refresh without the cols-1 bounce that
+  //   triggers unnecessary PTY redraws and status re-evaluation.
+  if (reason !== "resize" && reason !== "wake") {
+    forceViewportRefresh(sessionId);
+  }
 
   // Phase 2: Wait 2 RAFs for xterm's resize handler + syncScrollArea
   await raf();

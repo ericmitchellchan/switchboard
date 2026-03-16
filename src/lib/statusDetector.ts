@@ -2,8 +2,9 @@ import type { AgentStatus } from "../types";
 import { log } from "./logger";
 
 /** Default idle timeout — if no output for this long while "running", transition to "done".
- *  Longer = less flickering between blue/green during multi-step agent work. */
-const DONE_TIMEOUT_MS = 8_000;
+ *  15s is long enough to cover typical agent think/API-call pauses without
+ *  false-positive "done" transitions that bounce back to "running". */
+const DONE_TIMEOUT_MS = 15_000;
 
 /** Shorter idle timeout used after a structural completion signal (checkmark + past tense + timing).
  *  Lets us show "done" faster when we're confident the agent actually finished. */
@@ -130,20 +131,26 @@ const ERROR_PATTERNS = [
   /Exception:/,
 ];
 
-/** Status priority: higher number = higher priority (transitions up are instant) */
+/** Status priority: higher number = higher priority (transitions up are instant).
+ *  done/running/error share priority 1 so ALL transitions between them use dwell,
+ *  preventing the rapid blue↔green↔red flicker from status oscillation.
+ *  Only "waiting" (needs immediate user attention) is instant-upward. */
 const STATUS_PRIORITY: Record<AgentStatus, number> = {
-  done: 0,
+  done: 1,
   running: 1,
-  error: 2,
+  error: 1,
   waiting: 3,
   exited: 4,
 };
 
 /** Minimum dwell time (ms) before transitioning TO a given status.
- *  Transitions to running require 400ms hold to prevent done→running flicker.
- *  Higher-priority transitions (waiting/error) are instant. */
+ *  All three operational statuses (running/done/error) require a hold period
+ *  so that brief fluctuations don't cause visible tab-dot color changes.
+ *  Waiting has no dwell — user needs to see it immediately. */
 const DWELL_MS: Partial<Record<AgentStatus, number>> = {
-  running: 400,
+  running: 600,
+  done: 500,
+  error: 500,
 };
 
 interface DetectorState {
@@ -218,8 +225,9 @@ export function initDetector(sessionId: string): void {
 }
 
 /** Cancel any pending dwell transition */
-function cancelPendingDwell(state: DetectorState): void {
+function cancelPendingDwell(state: DetectorState, reason?: string): void {
   if (state.pendingDwell) {
+    log.debug(`Dwell cancelled: pending ${state.pendingDwell.status}${reason ? ` (${reason})` : ""}`);
     clearTimeout(state.pendingDwell.timerId);
     state.pendingDwell = null;
   }
@@ -275,8 +283,9 @@ function transitionWithDwell(
 
   // Queue the transition if not already queued for this status
   if (state.pendingDwell?.status === newStatus) return;
-  cancelPendingDwell(state);
+  cancelPendingDwell(state, "replaced");
   const remaining = dwellMs - elapsed;
+  log.debug(`Dwell queued id=${sessionId}: ${state.currentStatus} -> ${newStatus} (${remaining}ms remaining)`);
   state.pendingDwell = {
     status: newStatus,
     timerId: setTimeout(() => {
@@ -505,6 +514,22 @@ export function processBufferLines(
     }
   } else if (detectedError) {
     newStatus = "error";
+  }
+
+  // Log what was detected for diagnostic tracing
+  if (detectedWaiting || detectedError || newStatus !== state.currentStatus) {
+    log.debug(
+      `Status eval id=${sessionId}: current=${state.currentStatus} detected={w:${detectedWaiting},e:${detectedError}} ` +
+      `signals={tok:${hasTokenCounter},comp:${hasCompletion},prompt:${hasPrompt}} → want=${newStatus}`
+    );
+  }
+
+  // Cancel stale pending dwell if we now want a different status than what's
+  // queued.  Example: idle timer queued a dwell for "done" → new output arrives
+  // and we want "running" → cancel the pending "done" dwell.
+  if (state.pendingDwell && state.pendingDwell.status !== newStatus) {
+    cancelPendingDwell(state, `want ${newStatus} instead`);
+    state.dwellStartTime = null;
   }
 
   if (newStatus !== state.currentStatus) {

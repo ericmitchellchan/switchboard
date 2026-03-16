@@ -279,7 +279,7 @@ export function TabBar({
                     fontFamily: "var(--font-mono)",
                     fontSize: 11.5,
                     color: isActive ? "#E4E4E7" : "#71717A",
-                    transition: "all 0.15s ease",
+                    transition: "background-color 0.15s ease, color 0.15s ease",
                     flexShrink: 0,
                     whiteSpace: "nowrap",
                     position: "relative",

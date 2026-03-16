@@ -216,7 +216,12 @@ pub fn run() {
     let ctrl_v = Shortcut::new(Some(Modifiers::CONTROL), Code::KeyV);
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_log::Builder::new().build())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .max_file_size(2_000_000) // 2 MB per file
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepAll)
+                .build(),
+        )
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())

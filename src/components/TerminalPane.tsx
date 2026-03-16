@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, memo } from "react";
 import type { Session, AgentStatus } from "../types";
 import {
   createTerminal,
@@ -73,7 +73,7 @@ interface TerminalPaneProps {
   isFocused?: boolean;
 }
 
-export function TerminalPane({
+export const TerminalPane = memo(function TerminalPane({
   session,
   visible = true,
   searchOpen,
@@ -284,7 +284,13 @@ export function TerminalPane({
       const wasHidden = showTerminal(sessionId);
       if (wasHidden) {
         log.debug(`Terminal becoming visible id=${sessionId}`);
-        enqueueFit(sessionId, "show", { shouldFocus: isFocused }, 0);
+        // Hide during fit pipeline to prevent scroll jump flash
+        const container = containerRef.current;
+        if (container) container.style.opacity = "0";
+        enqueueFit(sessionId, "show", {
+          shouldFocus: isFocused,
+          onReveal: () => { if (container) container.style.opacity = "1"; },
+        }, 0);
       } else if (isFocused) {
         // Already visible, just needs focus (e.g. split pane focus change)
         const instance = getTerminal(sessionId);
@@ -359,6 +365,7 @@ export function TerminalPane({
           backgroundColor: "#0C0C0E",
           overflow: "hidden",
           transition: "opacity 0.05s",
+          contain: "layout paint",
         }}
       />
       {session.status === "exited" && onRestart && (
@@ -399,4 +406,16 @@ export function TerminalPane({
       )}
     </div>
   );
-}
+}, (prev, next) => {
+  // Custom comparator: skip re-render when only unrelated session fields changed.
+  // Status changes on OTHER sessions create new sessions array → new session refs,
+  // but TerminalPane only cares about its own session's identity and visibility.
+  // Callbacks are stable (useCallback with stable deps) and synced via sessionCallbacks map.
+  return (
+    prev.session.id === next.session.id &&
+    prev.session.status === next.session.status && // restart button visibility
+    prev.visible === next.visible &&
+    prev.searchOpen === next.searchOpen &&
+    prev.isFocused === next.isFocused
+  );
+});
