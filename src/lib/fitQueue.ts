@@ -175,10 +175,16 @@ async function runFit(
   }
   // For wake/visibility with no savedScroll: leave scroll position as-is
 
-  // Phase 3.5: Viewport scroll sync (double-sync pattern from v0.1.x)
-  forceViewportScrollSync(sessionId);
-  await raf();
-  forceViewportScrollSync(sessionId);
+  // Phase 3.5: Viewport scroll sync (double-sync pattern from v0.1.x).
+  // Only needed after visibility transitions where xterm's internal scrollTop
+  // is stale. Skip for "resize" and "wake" — the scroll restore in Phase 3
+  // already set the right position, and the double-sync would fight with
+  // xterm's own viewport management during active output, causing visible jumping.
+  if (reason !== "resize" && reason !== "wake") {
+    forceViewportScrollSync(sessionId);
+    await raf();
+    forceViewportScrollSync(sessionId);
+  }
 
   // Phase 4: Reveal + Focus
   context.onReveal?.();

@@ -323,7 +323,20 @@ export const TerminalPane = memo(function TerminalPane({
     const container = containerRef.current;
     let ro: ResizeObserver | null = null;
     if (container) {
-      ro = new ResizeObserver(handleResize);
+      // Track last known size to avoid spurious resize events.
+      // xterm.js internal layout changes can trigger ResizeObserver even when
+      // the container dimensions haven't changed, causing unnecessary fits
+      // that reset the scroll position and make the terminal content jump.
+      let lastW = container.clientWidth;
+      let lastH = container.clientHeight;
+      ro = new ResizeObserver(() => {
+        const w = container.clientWidth;
+        const h = container.clientHeight;
+        if (w === lastW && h === lastH) return; // no actual size change
+        lastW = w;
+        lastH = h;
+        handleResize();
+      });
       ro.observe(container);
     }
 
