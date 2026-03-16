@@ -136,6 +136,7 @@ const ERROR_PATTERNS = [
  *  preventing the rapid blue↔green↔red flicker from status oscillation.
  *  Only "waiting" (needs immediate user attention) is instant-upward. */
 const STATUS_PRIORITY: Record<AgentStatus, number> = {
+  idle: 0,
   done: 1,
   running: 1,
   error: 1,
@@ -157,6 +158,9 @@ interface DetectorState {
   lastOutputTime: number;
   currentStatus: AgentStatus;
   idleTimeoutId: ReturnType<typeof setTimeout> | null;
+  /** True once Claude Code-specific output has been detected (token counter, completion, etc.).
+   *  Until this is set, the session stays "idle" and no pattern scanning runs. */
+  agentDetected: boolean;
   /** When true, "waiting" status persists until clearWaiting() is called or auto-expires */
   stickyWaiting: boolean;
   /** Meaningful output chunks since the last waiting pattern match.
@@ -210,8 +214,9 @@ export function initDetector(sessionId: string): void {
   destroyDetector(sessionId);
   detectors.set(sessionId, {
     lastOutputTime: Date.now(),
-    currentStatus: "running",
+    currentStatus: "idle",
     idleTimeoutId: null,
+    agentDetected: false,
     stickyWaiting: false,
     chunksSinceWaiting: 0,
     recentLines: [],
@@ -350,6 +355,25 @@ export function processBufferLines(
   // Check if any line has meaningful visible content
   const hasMeaningful = lines.some((l) => /\S/.test(l));
   if (!hasMeaningful) return;
+
+  // ── Agent detection gate ──────────────────────────────────────────
+  // Sessions start "idle". Only activate the full status state machine
+  // once we see Claude Code-specific output. Plain shell sessions never
+  // produce these signals and stay "idle" with zero detection overhead.
+  if (!state.agentDetected) {
+    const sawAgent = lines.some(
+      (l) => TOKEN_COUNTER_RE.test(l) || COMPLETION_RE.test(l) || PROMPT_RE.test(l)
+    );
+    if (sawAgent) {
+      state.agentDetected = true;
+      log.debug(`Agent detected id=${sessionId}`);
+      commitTransition(sessionId, state, "running", onStatusChange);
+    } else {
+      // Still a plain shell — update position tracking but skip all detection
+      state.lastProcessedCursorY = cursorAbsY;
+      return;
+    }
+  }
 
   // Position-based delta detection (replaces content dedup).
   // Cursor blink and internal xterm redraws fire onWriteParsed without
@@ -573,6 +597,15 @@ export function processOutput(
 ): void {
   const state = detectors.get(sessionId);
   if (!state) return;
+
+  // Legacy path: auto-activate agent mode (this function is only called
+  // from tests and was designed for agent session output)
+  if (!state.agentDetected) {
+    state.agentDetected = true;
+    if (state.currentStatus === "idle") {
+      state.currentStatus = "running";
+    }
+  }
 
   // Strip ANSI before pattern matching so escape sequences (terminal titles,
   // cursor movements, etc.) don't cause false-positive pattern matches

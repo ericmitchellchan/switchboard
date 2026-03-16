@@ -18,6 +18,14 @@ const PENDING_WAITING_DELAY_MS = 1_500;
 const DWELL_RUNNING = 600;
 const DWELL_DONE = 500;
 
+/** Activate agent detection for processBufferLines tests.
+ *  Sends a token counter signal so the detector transitions from "idle" to "running". */
+function activateAgent(cb?: ReturnType<typeof vi.fn>): void {
+  const dummy = cb ?? vi.fn();
+  processBufferLines(SID, ["(1s, 100 tokens)"], 0, dummy as any);
+  dummy.mockClear();
+}
+
 beforeEach(() => {
   vi.useFakeTimers({
     toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"],
@@ -682,11 +690,65 @@ describe("structural numbered-list detection", () => {
   });
 });
 
+// ── Idle / agent detection gate ──────────────────────────────────
+
+describe("idle / agent detection gate", () => {
+  it("starts in idle — plain shell output does not activate detection", () => {
+    const cb = vi.fn();
+    // Plain shell output: no agent signals
+    processBufferLines(SID, ["PS C:\\Users\\ericm> cd"], 1, cb);
+    processBufferLines(SID, ["PS C:\\Users\\ericm> ls"], 2, cb);
+    // Should NOT transition — stays idle
+    expect(cb).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(DONE_TIMEOUT_MS);
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it("token counter activates agent → transitions to running", () => {
+    const cb = vi.fn();
+    processBufferLines(SID, ["(3s, 1.2k tokens)"], 1, cb);
+    expect(cb).toHaveBeenCalledWith(SID, "running");
+  });
+
+  it("completion checkmark activates agent → transitions to running", () => {
+    const cb = vi.fn();
+    processBufferLines(SID, ["✓ Edited src/App.tsx (2s)"], 1, cb);
+    expect(cb).toHaveBeenCalledWith(SID, "running");
+  });
+
+  it("prompt ❯ activates agent → transitions to running", () => {
+    const cb = vi.fn();
+    processBufferLines(SID, ["❯ "], 1, cb);
+    expect(cb).toHaveBeenCalledWith(SID, "running");
+  });
+
+  it("after agent activation, full state machine works normally", () => {
+    const cb = vi.fn();
+    // Activate via token counter
+    processBufferLines(SID, ["(1s, 100 tokens)"], 1, cb);
+    expect(cb).toHaveBeenCalledWith(SID, "running");
+    cb.mockClear();
+
+    // Now waiting pattern should work
+    processBufferLines(SID, ["Do you want to proceed?"], 2, cb);
+    expect(cb).toHaveBeenCalledWith(SID, "waiting");
+  });
+
+  it("waiting pattern does NOT activate agent (prevents false positives from shell output)", () => {
+    const cb = vi.fn();
+    // Shell might output text matching a waiting pattern, but without
+    // prior agent signals, it should stay idle
+    processBufferLines(SID, ["Are you sure? (y/n)"], 1, cb);
+    expect(cb).not.toHaveBeenCalled();
+  });
+});
+
 // ── Position-based delta detection (anti-flicker) ────────────────
 
 describe("position-based delta detection", () => {
   it("same cursor position (cursor blink) resets idle timer but skips pattern matching", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     const lines = ["some output", "❯ "];
 
     // First read at cursorY=10: sets 500ms prompt-based done timeout + done dwell
@@ -704,6 +766,7 @@ describe("position-based delta detection", () => {
 
   it("advanced cursor position processes new lines normally", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     processBufferLines(SID, ["output line 1"], 10, cb);
     vi.advanceTimersByTime(500);
 
@@ -715,10 +778,12 @@ describe("position-based delta detection", () => {
 
   it("position tracking is cleared on destroyDetector", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     processBufferLines(SID, ["hello"], 10, cb);
 
     destroyDetector(SID);
     initDetector(SID);
+    activateAgent(cb);
 
     // Same cursorY should be processed again after re-init (fresh state)
     processBufferLines(SID, ["hello"], 10, cb);
@@ -728,6 +793,7 @@ describe("position-based delta detection", () => {
 
   it("cursor position reset (terminal clear) reprocesses all lines", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     processBufferLines(SID, ["some output"], 50, cb);
     vi.advanceTimersByTime(500);
 
@@ -738,6 +804,7 @@ describe("position-based delta detection", () => {
 
   it("cursor blink on running terminal resets idle timer correctly", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     // Initial output
     processBufferLines(SID, ["compiling..."], 10, cb);
 
@@ -761,6 +828,7 @@ describe("position-based delta detection", () => {
 describe("processBufferLines", () => {
   it("token counter overrides waiting pattern in same scan window", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     // Both patterns visible in the same 15-line window — token counter should win
     processBufferLines(
       SID,
@@ -777,6 +845,7 @@ describe("processBufferLines", () => {
 
   it("token counter overrides error pattern in same scan window", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     processBufferLines(
       SID,
       [
@@ -791,6 +860,7 @@ describe("processBufferLines", () => {
 
   it("waiting pattern only matches in last 3 lines", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     // (y/n) is 8 lines back — outside the 3-line pattern scan window
     const lines = [
       "(y/n)",
@@ -811,6 +881,7 @@ describe("processBufferLines", () => {
 
   it("waiting pattern in last 3 lines still triggers", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     const lines = [
       "some old output",
       "more old output",
@@ -822,6 +893,7 @@ describe("processBufferLines", () => {
 
   it("prompt ❯ triggers fast done timeout (500ms + dwell)", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     processBufferLines(SID, ["✓ Task completed (5s)", "❯ "], 10, cb);
     // 500ms idle timeout for prompt + DWELL_DONE dwell
     vi.advanceTimersByTime(500 + DWELL_DONE - 1);
@@ -832,6 +904,7 @@ describe("processBufferLines", () => {
 
   it("prompt ❯ with leading whitespace still matches", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     processBufferLines(SID, ["  ❯ "], 10, cb);
     vi.advanceTimersByTime(500 + DWELL_DONE);
     expect(cb).toHaveBeenCalledWith(SID, "done");
@@ -839,6 +912,7 @@ describe("processBufferLines", () => {
 
   it("token counter with numbered list does NOT set waiting timer", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     processBufferLines(
       SID,
       [
@@ -859,6 +933,7 @@ describe("processBufferLines", () => {
 describe("hybrid waiting detection", () => {
   it("detects waiting on cursor blink (position unchanged) only when running", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     const lines = [
       "some output",
       "Do you want to proceed?",
@@ -880,6 +955,7 @@ describe("hybrid waiting detection", () => {
 
   it("does NOT detect waiting on cursor blink when status is done (anti-false-positive)", () => {
     const cb = vi.fn();
+    activateAgent(cb);
 
     // Send output and advance to "done" state
     processBufferLines(SID, ["compiling..."], 10, cb);
@@ -899,6 +975,7 @@ describe("hybrid waiting detection", () => {
 
   it("detects waiting from done state via numbered list", () => {
     const cb = vi.fn();
+    activateAgent(cb);
 
     // Send output and advance past idle timeout + dwell to reach "done"
     processBufferLines(SID, ["compiling..."], 10, cb);
@@ -925,6 +1002,7 @@ describe("hybrid waiting detection", () => {
 
   it("detects waiting with wide prompt (6+ lines)", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     // Realistic Claude Code prompt spanning 6 lines
     const lines = [
       "I'd like to edit src/App.tsx to add the new feature.",
@@ -941,42 +1019,49 @@ describe("hybrid waiting detection", () => {
 
   it("new Claude Code patterns detected: Use the file editor", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     processBufferLines(SID, ["Use the file editor to create the file?"], 10, cb);
     expect(cb).toHaveBeenCalledWith(SID, "waiting");
   });
 
   it("new Claude Code patterns detected: Try to create a new file", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     processBufferLines(SID, ["Try to create a new file?"], 10, cb);
     expect(cb).toHaveBeenCalledWith(SID, "waiting");
   });
 
   it("new Claude Code patterns detected: Allow Read to access", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     processBufferLines(SID, ["Allow Read to access the file?"], 10, cb);
     expect(cb).toHaveBeenCalledWith(SID, "waiting");
   });
 
   it("new Claude Code patterns detected: Do you want to create", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     processBufferLines(SID, ["Do you want to create this file?"], 10, cb);
     expect(cb).toHaveBeenCalledWith(SID, "waiting");
   });
 
   it("new Claude Code patterns detected: May I proceed", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     processBufferLines(SID, ["May I proceed with the changes?"], 10, cb);
     expect(cb).toHaveBeenCalledWith(SID, "waiting");
   });
 
   it("new Claude Code patterns detected: Allow tool", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     processBufferLines(SID, ["Allow the Read tool to access this path?"], 10, cb);
     expect(cb).toHaveBeenCalledWith(SID, "waiting");
   });
 
   it("cursor blink doesn't cause running→done flicker (regression)", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     // Initial output — running
     processBufferLines(SID, ["compiling..."], 10, cb);
     expect(cb).not.toHaveBeenCalled(); // still running
@@ -997,6 +1082,7 @@ describe("hybrid waiting detection", () => {
 
   it("token counter suppresses waiting scan on cursor blink", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     // Lines contain both a token counter AND a waiting pattern
     const lines = [
       "Do you want to proceed?",
@@ -1016,6 +1102,7 @@ describe("hybrid waiting detection", () => {
 
   it("waiting pattern in 8-line window triggers (wider than 3-line error window)", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     // Place waiting pattern 6 lines back — inside 8-line window but outside 3-line error window
     const lines = [
       "old output line 1",
@@ -1034,6 +1121,7 @@ describe("hybrid waiting detection", () => {
 
   it("error pattern outside 3-line window does NOT trigger", () => {
     const cb = vi.fn();
+    activateAgent(cb);
     // Error pattern is 5 lines back — inside 8-line waiting window but outside 3-line error window
     const lines = [
       "Error: something went wrong",

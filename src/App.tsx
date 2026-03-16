@@ -116,7 +116,7 @@ export default function App() {
   const doCreateSession = useCallback(
     async (name: string, repo: string, workingDir: string, repoColor?: string, group?: string) => {
       const info = await createSession(name, repo, workingDir);
-      addSession({ ...info, status: "running", repoColor, group });
+      addSession({ ...info, status: "idle", repoColor, group });
       initTaskDetector(info.id);
       return info;
     },
@@ -287,7 +287,7 @@ export default function App() {
           session.repo,
           session.working_dir,
         );
-        updateSessionStatus(sessionId, "running");
+        updateSessionStatus(sessionId, "idle");
       } catch (err) {
         log.error(`Failed to restart session id=${sessionId}: ${err}`);
       }
@@ -490,7 +490,7 @@ export default function App() {
             idMap.set(saved.id, info.id);
             newSessions.push({
               ...info,
-              status: "running",
+              status: "idle",
               repoColor: saved.repoColor,
               group: saved.group,
               restoredFromId: saved.id,
@@ -509,7 +509,7 @@ export default function App() {
           const name = `Shell ${sessionCounterRef.current}`;
           try {
             const info = await createSession(name, "", homeDirRef.current);
-            addSession({ ...info, status: "running" });
+            addSession({ ...info, status: "idle" });
             initTaskDetector(info.id);
             paneLayout.initLayout(info.id);
           } catch (e) {
@@ -553,7 +553,7 @@ export default function App() {
         const name = `Shell ${sessionCounterRef.current}`;
         try {
           const info = await createSession(name, "", homeDirRef.current);
-          addSession({ ...info, status: "running" });
+          addSession({ ...info, status: "idle" });
           initTaskDetector(info.id);
           paneLayout.initLayout(info.id);
         } catch (err) {
