@@ -50,6 +50,10 @@ const COMPLETION_RE = /[✓✔]\s+\w+.*\(\d+(\.\d+)?s\)/;
  *  Only matches when ❯ appears alone on a line (possibly with whitespace). */
 const PROMPT_RE = /^\s*❯\s*$/;
 
+/** Matches Claude Code's startup banner: "Claude Code vX.Y.Z".
+ *  This is the earliest reliable signal that an agent session has started. */
+const STARTUP_BANNER_RE = /Claude Code v\d/;
+
 // Matches ANSI escape sequences: CSI (ESC[...letter), OSC (ESC]...BEL), and 2-char escapes
 const ANSI_RE = /\x1b(?:\[[^a-zA-Z@]*[a-zA-Z@]|\][^\x07]*\x07?|[^[\]])/g;
 
@@ -154,6 +158,11 @@ const DWELL_MS: Partial<Record<AgentStatus, number>> = {
   error: 500,
 };
 
+/** Grace period after clearWaiting where waiting patterns are suppressed.
+ *  Prevents the yellow→blue→yellow flicker when Claude Code redraws its UI
+ *  after the user approves a tool (the old prompt text lingers briefly in the buffer). */
+const CLEAR_WAITING_GRACE_MS = 1_500;
+
 interface DetectorState {
   lastOutputTime: number;
   currentStatus: AgentStatus;
@@ -163,6 +172,8 @@ interface DetectorState {
   agentDetected: boolean;
   /** When true, "waiting" status persists until clearWaiting() is called or auto-expires */
   stickyWaiting: boolean;
+  /** Timestamp of the last clearWaiting call — suppresses waiting re-detection during grace period */
+  lastClearWaitingTime: number;
   /** Meaningful output chunks since the last waiting pattern match.
    *  Once this reaches STICKY_EXPIRY_CHUNKS, stickyWaiting auto-clears. */
   chunksSinceWaiting: number;
@@ -218,6 +229,7 @@ export function initDetector(sessionId: string): void {
     idleTimeoutId: null,
     agentDetected: false,
     stickyWaiting: false,
+    lastClearWaitingTime: 0,
     chunksSinceWaiting: 0,
     recentLines: [],
     pendingWaitingTimerId: null,
@@ -362,7 +374,7 @@ export function processBufferLines(
   // produce these signals and stay "idle" with zero detection overhead.
   if (!state.agentDetected) {
     const sawAgent = lines.some(
-      (l) => TOKEN_COUNTER_RE.test(l) || COMPLETION_RE.test(l) || PROMPT_RE.test(l)
+      (l) => TOKEN_COUNTER_RE.test(l) || COMPLETION_RE.test(l) || PROMPT_RE.test(l) || STARTUP_BANNER_RE.test(l)
     );
     if (sawAgent) {
       state.agentDetected = true;
@@ -468,13 +480,19 @@ export function processBufferLines(
   // Token counter is a strong "running" signal — if the agent is actively
   // counting tokens, any waiting/error pattern in the same window is stale
   // output from a previous step.  Skip pattern matching entirely.
+  // Also suppress waiting detection during the grace period after clearWaiting —
+  // Claude Code redraws its UI after approval, and the old prompt text lingers
+  // briefly in the buffer, causing yellow→blue→yellow flicker.
+  const inClearGrace = (Date.now() - state.lastClearWaitingTime) < CLEAR_WAITING_GRACE_MS;
   if (!hasTokenCounter) {
-    for (const line of waitingPatternLines) {
-      if (!detectedWaiting) {
-        for (const p of WAITING_PATTERNS) {
-          if (p.test(line)) {
-            detectedWaiting = true;
-            break;
+    if (!inClearGrace) {
+      for (const line of waitingPatternLines) {
+        if (!detectedWaiting) {
+          for (const p of WAITING_PATTERNS) {
+            if (p.test(line)) {
+              detectedWaiting = true;
+              break;
+            }
           }
         }
       }
@@ -765,6 +783,7 @@ export function clearWaiting(
     state.currentStatus !== "waiting"
   ) return;
   state.stickyWaiting = false;
+  state.lastClearWaitingTime = Date.now();
   cancelPendingWaiting(state);
   cancelPendingDwell(state);
   if (state.currentStatus === "waiting" && onStatusChange) {
