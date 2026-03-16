@@ -374,9 +374,13 @@ export function processBufferLines(
       }
     }, doneDelay);
 
-    // Even on cursor blink, scan for waiting patterns on visible lines.
-    // Prompts persist on screen and must be detected even when cursor hasn't moved.
-    if (state.currentStatus !== "waiting" && !state.stickyWaiting) {
+    // Scan for waiting patterns on same-line output (cursor row unchanged but
+    // content may have changed — e.g., prompt being built up character by character).
+    // ONLY scan when "running" — when "done" or "error", the session has been idle
+    // long enough that any persistent text is a shell prompt or old scrollback, not
+    // an agent waiting prompt. This prevents false "done → waiting" transitions
+    // on idle shells (e.g., PowerShell prompt with restored scrollback content).
+    if (state.currentStatus === "running" && !state.stickyWaiting) {
       const hasTokenCounter = lines.some((l) => TOKEN_COUNTER_RE.test(l));
       if (!hasTokenCounter) {
         const waitingScan = lines.slice(-WAITING_SCAN_LINES);

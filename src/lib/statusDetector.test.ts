@@ -857,25 +857,44 @@ describe("processBufferLines", () => {
 // ── Hybrid waiting detection (cursor blink + wide scan) ─────────
 
 describe("hybrid waiting detection", () => {
-  it("detects waiting on cursor blink (position unchanged)", () => {
+  it("detects waiting on cursor blink (position unchanged) only when running", () => {
     const cb = vi.fn();
     const lines = [
       "some output",
       "Do you want to proceed?",
     ];
 
-    // First call at cursorAbsY=10
+    // First call at cursorAbsY=10 — status is "running", detects waiting
     processBufferLines(SID, lines, 10, cb);
     expect(cb).toHaveBeenCalledWith(SID, "waiting");
     cb.mockClear();
 
-    // Clear waiting to reset state
+    // Clear waiting → back to "running"
     clearWaiting(SID, cb);
     cb.mockClear();
 
-    // Second call with same cursorAbsY=10 (cursor blink) — should still detect waiting
+    // Second call with same cursorAbsY=10 (cursor blink) while "running" — detects waiting
     processBufferLines(SID, lines, 10, cb);
     expect(cb).toHaveBeenCalledWith(SID, "waiting");
+  });
+
+  it("does NOT detect waiting on cursor blink when status is done (anti-false-positive)", () => {
+    const cb = vi.fn();
+
+    // Send output and advance to "done" state
+    processBufferLines(SID, ["compiling..."], 10, cb);
+    vi.advanceTimersByTime(DONE_TIMEOUT_MS + DWELL_DONE);
+    expect(cb).toHaveBeenCalledWith(SID, "done");
+    cb.mockClear();
+
+    // Cursor blink with waiting pattern visible in buffer — should NOT trigger
+    // because we're "done" (idle shell prompt, not an agent waiting for input)
+    const linesWithPrompt = [
+      "PS C:\\Users\\ericm> cd",
+      "Do you want to proceed?", // old scrollback content
+    ];
+    processBufferLines(SID, linesWithPrompt, 10, cb);
+    expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
   });
 
   it("detects waiting from done state via numbered list", () => {
