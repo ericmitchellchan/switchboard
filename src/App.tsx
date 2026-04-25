@@ -16,7 +16,7 @@ import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
 import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify } from "./lib/ipc";
-import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition } from "./lib/terminal";
+import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty } from "./lib/terminal";
 import { enqueueFit } from "./lib/fitQueue";
 import {
   loadWorkspaceFromStorage,
@@ -275,6 +275,9 @@ export default function App() {
       if (inst) {
         inst.terminal.clear();
       }
+      // Clear stale dirty flag so the next periodic save doesn't write
+      // pre-restart scrollback for a now-cleared terminal.
+      clearSessionDirty(sessionId);
 
       // Re-init task detector for fresh detection
       destroyTaskDetector(sessionId);

@@ -344,6 +344,8 @@ function startNumberedListTimer(
       s.pendingWaitingTimerId = null;
       s.stickyWaiting = true;
       s.chunksSinceWaiting = 0;
+      // s.lastCallback is set at the top of processBufferLines on every call,
+      // so it's always the latest callback by the time this timer fires.
       transitionWithDwell(sessionId, s, "waiting", s.lastCallback ?? onStatusChange);
     }
   }, PENDING_WAITING_DELAY_MS);
@@ -363,6 +365,11 @@ export function processBufferLines(
 ): void {
   const state = detectors.get(sessionId);
   if (!state) return;
+
+  // Capture latest callback up front so async timers (idle, numbered-list)
+  // armed below always fire against the freshest reference, regardless of
+  // which code path armed them.
+  state.lastCallback = onStatusChange;
 
   // Check if any line has meaningful visible content
   const hasMeaningful = lines.some((l) => /\S/.test(l));

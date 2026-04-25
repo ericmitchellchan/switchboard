@@ -116,6 +116,8 @@ async function runFit(
       context.onReveal?.();
       return;
     }
+    // Session may have been disposed during waitForLayout's RAFs.
+    if (!getTerminal(sessionId)) return;
   }
 
   // Phase 1: Fit terminal to container dimensions
@@ -183,6 +185,8 @@ async function runFit(
   if (reason !== "resize" && reason !== "wake") {
     forceViewportScrollSync(sessionId);
     await raf();
+    // Session may have been disposed between syncs.
+    if (!getTerminal(sessionId)) return;
     forceViewportScrollSync(sessionId);
   }
 

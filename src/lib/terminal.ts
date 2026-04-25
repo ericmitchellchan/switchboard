@@ -292,6 +292,7 @@ export function disposeTerminal(sessionId: string): void {
   terminalMap.delete(sessionId);
   savedScrollPositions.delete(sessionId);
   hiddenSessionIds.delete(sessionId);
+  dirtySessionIds.delete(sessionId);
 }
 
 export function serializeTerminal(sessionId: string): string | null {
