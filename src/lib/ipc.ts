@@ -93,6 +93,22 @@ export async function writeFile(path: string, content: string): Promise<void> {
   return invoke("write_file", { path, content });
 }
 
+export async function confirmAppClose(): Promise<void> {
+  return invoke("confirm_app_close");
+}
+
+export async function openPipWindow(sessionId: string): Promise<void> {
+  return invoke("open_pip_window", { sessionId });
+}
+
+export async function closePipWindow(): Promise<void> {
+  return invoke("close_pip_window");
+}
+
+export async function isPipWindowOpen(): Promise<boolean> {
+  return invoke("is_pip_window_open");
+}
+
 export function onSessionOutput(
   sessionId: string,
   callback: (data: string) => void

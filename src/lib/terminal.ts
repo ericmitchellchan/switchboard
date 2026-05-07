@@ -65,31 +65,25 @@ export function setTerminalConfig(cfg: { fontSize?: number; fontFamily?: string 
   if (cfg.fontFamily !== undefined) terminalConfig.fontFamily = `'${cfg.fontFamily}', 'Cascadia Code', 'SF Mono', monospace`;
 }
 
-export function createTerminal(
-  sessionId: string,
-  opts?: { cols?: number; rows?: number }
-): TerminalInstance {
-  // Return existing if already created
-  const existing = terminalMap.get(sessionId);
-  if (existing) return existing;
-
-  log.debug(`Creating terminal for session id=${sessionId} cols=${opts?.cols} rows=${opts?.rows}`);
-
-  const terminal = new Terminal({
+function buildTerminalOptions(opts?: { cols?: number; rows?: number; documentOverride?: Document }) {
+  return {
     fontFamily: terminalConfig.fontFamily,
     fontSize: terminalConfig.fontSize,
     lineHeight: 1.3,
     theme: THEME,
     cursorBlink: true,
-    cursorStyle: "bar",
+    cursorStyle: "bar" as const,
     scrollback: 10000,
     allowProposedApi: true,
     convertEol: true,
     screenReaderMode: false,
     ...(opts?.cols ? { cols: opts.cols } : {}),
     ...(opts?.rows ? { rows: opts.rows } : {}),
-  });
+    ...(opts?.documentOverride ? { documentOverride: opts.documentOverride } : {}),
+  };
+}
 
+function buildInstance(terminal: Terminal): TerminalInstance {
   const fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
 
@@ -104,7 +98,7 @@ export function createTerminal(
   });
   terminal.loadAddon(webLinksAddon);
 
-  const instance: TerminalInstance = {
+  return {
     terminal,
     fitAddon,
     webglAddon: null,
@@ -112,7 +106,20 @@ export function createTerminal(
     serializeAddon,
     webLinksAddon,
   };
+}
 
+export function createTerminal(
+  sessionId: string,
+  opts?: { cols?: number; rows?: number }
+): TerminalInstance {
+  // Return existing if already created
+  const existing = terminalMap.get(sessionId);
+  if (existing) return existing;
+
+  log.debug(`Creating terminal for session id=${sessionId} cols=${opts?.cols} rows=${opts?.rows}`);
+
+  const terminal = new Terminal(buildTerminalOptions(opts));
+  const instance = buildInstance(terminal);
   terminalMap.set(sessionId, instance);
   return instance;
 }
@@ -285,6 +292,10 @@ export function disposeTerminal(sessionId: string): void {
   if (!instance) return;
 
   log.debug(`Disposing terminal for session id=${sessionId}`);
+  // Drop wiring before terminal.dispose() so we don't try to dispose listeners
+  // that the terminal has already torn down.
+  wiringRegistry.delete(sessionId);
+  wiringDisposables.delete(sessionId);
   if (instance.webglAddon) {
     instance.webglAddon.dispose();
   }
@@ -295,6 +306,147 @@ export function disposeTerminal(sessionId: string): void {
   dirtySessionIds.delete(sessionId);
 }
 
+// ---------------------------------------------------------------------------
+// xterm-level wiring registry
+//
+// Persists per-session callback definitions so that disposing and recreating
+// a Terminal (e.g. when popping a session into a Picture-in-Picture window)
+// can re-attach the same listeners to the new instance automatically.
+// ---------------------------------------------------------------------------
+
+export type XtermWiring = {
+  /** User typed/pasted into terminal — typically forwards to PTY stdin. */
+  onUserData: (sessionId: string, data: string) => void;
+  /** Fires after xterm parses written output — typically for status detection. */
+  onWriteParsed: (sessionId: string, terminal: Terminal) => void;
+  /** Alt-screen buffer change (vim/htop entry/exit). Optional. */
+  onBufferChange?: (sessionId: string, terminal: Terminal) => void;
+  /** Terminal resize — typically forwards new dims to PTY. */
+  onResize: (sessionId: string, dims: { cols: number; rows: number }) => void;
+};
+
+const wiringRegistry = new Map<string, XtermWiring>();
+const wiringDisposables = new Map<string, Array<() => void>>();
+
+function attachWiring(sessionId: string): void {
+  const wiring = wiringRegistry.get(sessionId);
+  const instance = terminalMap.get(sessionId);
+  if (!wiring || !instance) return;
+
+  const { terminal } = instance;
+  const disposables: Array<() => void> = [];
+
+  const onDataD = terminal.onData((data) => wiring.onUserData(sessionId, data));
+  disposables.push(() => onDataD.dispose());
+
+  const onWriteParsedD = terminal.onWriteParsed(() => wiring.onWriteParsed(sessionId, terminal));
+  disposables.push(() => onWriteParsedD.dispose());
+
+  if (wiring.onBufferChange) {
+    const onBufferChangeD = terminal.buffer.onBufferChange(() =>
+      wiring.onBufferChange!(sessionId, terminal)
+    );
+    disposables.push(() => onBufferChangeD.dispose());
+  }
+
+  const onResizeD = terminal.onResize((dims) => wiring.onResize(sessionId, dims));
+  disposables.push(() => onResizeD.dispose());
+
+  wiringDisposables.set(sessionId, disposables);
+}
+
+function detachWiring(sessionId: string): void {
+  const disposables = wiringDisposables.get(sessionId);
+  if (!disposables) return;
+  for (const d of disposables) {
+    try { d(); } catch { /* terminal may already be disposed */ }
+  }
+  wiringDisposables.delete(sessionId);
+}
+
+/**
+ * Register the xterm-level event callbacks for a session and attach them to
+ * the current Terminal instance. Idempotent — calling again replaces the
+ * previous wiring. The wiring persists across `recreateTerminalInDocument`
+ * calls, so callers don't need to re-register after PiP open/close.
+ */
+export function setXtermWiring(sessionId: string, wiring: XtermWiring): void {
+  detachWiring(sessionId);
+  wiringRegistry.set(sessionId, wiring);
+  attachWiring(sessionId);
+}
+
+/** Remove a session's wiring (call on session close). */
+export function unsetXtermWiring(sessionId: string): void {
+  detachWiring(sessionId);
+  wiringRegistry.delete(sessionId);
+}
+
+/**
+ * Dispose the existing Terminal for a session and create a fresh one bound
+ * to a different document — used to move a terminal between the main window
+ * and a Picture-in-Picture window. Scrollback is preserved via SerializeAddon.
+ * Wiring registered via `setXtermWiring` is re-attached automatically.
+ *
+ * The caller is responsible for ensuring `targetContainer` is already inserted
+ * into `targetDoc` before this is called (xterm.open() requires the container
+ * to be in the document).
+ */
+export function recreateTerminalInDocument(
+  sessionId: string,
+  targetDoc: Document,
+  targetContainer: HTMLElement,
+  options: { withWebGL: boolean }
+): void {
+  const existing = terminalMap.get(sessionId);
+  if (!existing) {
+    log.warn(`recreateTerminalInDocument: no terminal for session id=${sessionId}`);
+    return;
+  }
+
+  log.debug(`Recreating terminal id=${sessionId} in new document withWebGL=${options.withWebGL}`);
+
+  // Capture state from the existing terminal
+  const serialized = (() => {
+    try { return existing.serializeAddon.serialize(); }
+    catch (e) { log.warn(`Serialize failed for id=${sessionId}: ${e}`); return ""; }
+  })();
+  const cols = existing.terminal.cols;
+  const rows = existing.terminal.rows;
+
+  // Detach wiring before disposing so disposables don't fire on a dead terminal.
+  // Keep wiringRegistry intact — we'll re-attach to the new terminal below.
+  detachWiring(sessionId);
+
+  // Tear down old
+  if (existing.webglAddon) {
+    existing.webglAddon.dispose();
+  }
+  existing.terminal.dispose();
+  terminalMap.delete(sessionId);
+
+  // Build new with documentOverride
+  const terminal = new Terminal(buildTerminalOptions({ cols, rows, documentOverride: targetDoc }));
+  const instance = buildInstance(terminal);
+  terminalMap.set(sessionId, instance);
+
+  // Open in target container (must already be in targetDoc)
+  terminal.open(targetContainer);
+
+  // Replay scrollback
+  if (serialized) {
+    terminal.write(serialized, () => terminal.scrollToBottom());
+  }
+
+  // Re-attach wiring to the new terminal
+  attachWiring(sessionId);
+
+  // WebGL is per-document — main path opts in, PiP path opts out
+  if (options.withWebGL) {
+    enableWebGL(sessionId);
+  }
+}
+
 export function serializeTerminal(sessionId: string): string | null {
   const instance = terminalMap.get(sessionId);
   if (!instance) return null;
@@ -302,6 +454,38 @@ export function serializeTerminal(sessionId: string): string | null {
     return instance.serializeAddon.serialize();
   } catch (e) {
     log.warn(`Failed to serialize terminal for session id=${sessionId}: ${e}`);
+    return null;
+  }
+}
+
+/**
+ * Snapshot main's terminal for PiP handoff: full buffer (scrollback + visible)
+ * plus dimensions so PiP can match before writing.
+ *
+ * Why full serialize (not a range up to the cursor): PSReadLine and TUI redraws
+ * issue absolute cursor-position sequences (`\x1b[ROW;COLH`) sized to the live
+ * screen. For those to land at the same row in PiP as in main, both buffers
+ * must have the same baseY (scrollback length) AND the same cols/rows. A
+ * range-trimmed snapshot puts content at `baseY=0` in PiP while main's cursor
+ * is at `baseY+cursorY` — and the same `\x1b[N H` sequence resolves to a
+ * different row in each window. Full serialize (with the trailing
+ * cursor-position sequence preserved) plus a matching `terminal.resize` keeps
+ * the two buffers byte-identical.
+ */
+export function serializeForPip(
+  sessionId: string
+): { text: string; cols: number; rows: number } | null {
+  const instance = terminalMap.get(sessionId);
+  if (!instance) return null;
+  try {
+    const text = instance.serializeAddon.serialize();
+    return {
+      text,
+      cols: instance.terminal.cols,
+      rows: instance.terminal.rows,
+    };
+  } catch (e) {
+    log.warn(`Failed to serialize for PiP id=${sessionId}: ${e}`);
     return null;
   }
 }

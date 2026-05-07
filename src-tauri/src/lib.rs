@@ -207,6 +207,62 @@ async fn write_file(path: String, content: String) -> Result<(), String> {
     std::fs::write(&path, content.as_bytes()).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn confirm_app_close(app_handle: tauri::AppHandle) {
+    log::info!("App close confirmed by user, exiting");
+    app_handle.exit(0);
+}
+
+const PIP_WINDOW_LABEL: &str = "pip";
+
+#[tauri::command]
+async fn open_pip_window(
+    app_handle: tauri::AppHandle,
+    session_id: String,
+) -> Result<(), String> {
+    if app_handle.get_webview_window(PIP_WINDOW_LABEL).is_some() {
+        log::debug!("PiP window already open, no-op");
+        return Ok(());
+    }
+
+    log::info!("Opening PiP window for session id={}", session_id);
+
+    let url = format!("pip.html?session={}", session_id);
+    tauri::WebviewWindowBuilder::new(
+        &app_handle,
+        PIP_WINDOW_LABEL,
+        tauri::WebviewUrl::App(url.into()),
+    )
+    .title("Switchboard — Floating")
+    .inner_size(800.0, 500.0)
+    .always_on_top(true)
+    .decorations(false)
+    .skip_taskbar(true)
+    .resizable(true)
+    .focused(true)
+    .build()
+    .map_err(|e| {
+        log::error!("Failed to open PiP window: {}", e);
+        e.to_string()
+    })?;
+
+    Ok(())
+}
+
+#[tauri::command]
+fn close_pip_window(app_handle: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app_handle.get_webview_window(PIP_WINDOW_LABEL) {
+        log::info!("Closing PiP window");
+        window.close().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn is_pip_window_open(app_handle: tauri::AppHandle) -> bool {
+    app_handle.get_webview_window(PIP_WINDOW_LABEL).is_some()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app_state = Arc::new(AppState {
@@ -262,15 +318,20 @@ pub fn run() {
         })
         .on_window_event(move |window, event| {
             match event {
-                // Register the global shortcut only while our window is focused
-                // so we don't steal Ctrl+V from other applications.
+                // Register the global shortcut only while our MAIN window is
+                // focused so we don't steal Ctrl+V from other applications.
+                // The PiP window's focus events are intentionally ignored here
+                // — PiP Ctrl+V routing is handled separately (see SWIT-36/37).
                 tauri::WindowEvent::Focused(focused) => {
+                    if window.label() != "main" {
+                        return;
+                    }
                     let app = window.app_handle();
                     if *focused {
-                        log::debug!("Window focused, registering Ctrl+V shortcut");
+                        log::debug!("Main window focused, registering Ctrl+V shortcut");
                         let _ = app.global_shortcut().register(ctrl_v);
                     } else {
-                        log::debug!("Window unfocused, unregistering Ctrl+V shortcut");
+                        log::debug!("Main window unfocused, unregistering Ctrl+V shortcut");
                         let _ = app.global_shortcut().unregister(ctrl_v);
                     }
                 }
@@ -284,6 +345,27 @@ pub fn run() {
                         if !path_strings.is_empty() {
                             let _ = window.emit("file-drop", path_strings);
                         }
+                    }
+                }
+                // Intercept the OS close request on the MAIN window so the
+                // frontend can prompt for confirmation. The PiP window closes
+                // normally — its label is checked here.
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    if window.label() == "main" {
+                        log::debug!("Main window close requested, deferring to frontend confirmation");
+                        api.prevent_close();
+                        let _ = window.emit("app-close-requested", ());
+                    }
+                }
+                // PiP window destroyed — fires for OS-level closes (Alt+F4,
+                // taskbar close) as well as our in-window X button. Emits the
+                // same `pip:closing` event the X button does so main tears
+                // down its router and clears pipSessionId, instead of leaving
+                // the listener subscribed and forwarding to a dead window.
+                tauri::WindowEvent::Destroyed => {
+                    if window.label() == PIP_WINDOW_LABEL {
+                        log::debug!("PiP window destroyed, notifying main");
+                        let _ = window.app_handle().emit("pip:closing", ());
                     }
                 }
                 _ => {}
@@ -304,6 +386,10 @@ pub fn run() {
             clear_session_scrollback,
             get_home_dir,
             write_file,
+            confirm_app_close,
+            open_pip_window,
+            close_pip_window,
+            is_pip_window_open,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

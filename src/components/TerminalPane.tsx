@@ -8,6 +8,8 @@ import {
   showTerminal,
   hideTerminal,
   markSessionDirty,
+  setXtermWiring,
+  unsetXtermWiring,
 } from "../lib/terminal";
 import {
   writeToSession,
@@ -55,6 +57,7 @@ export function cleanupSessionListeners(sessionId: string) {
     fns.forEach((fn) => fn());
     listenerCleanups.delete(sessionId);
   }
+  unsetXtermWiring(sessionId);
   sessionDecoders.delete(sessionId);
   wiredSessions.delete(sessionId);
   sessionCallbacks.delete(sessionId);
@@ -115,18 +118,13 @@ export const TerminalPane = memo(function TerminalPane({
     // Callback accessors that read from the module-level map
     const getCbs = () => sessionCallbacks.get(sessionId);
 
-    // User input -> PTY
-    const onDataDisposable = instance.terminal.onData((data: string) => {
-      const cbs = getCbs();
-      if (cbs) clearWaiting(sessionId, cbs.onStatusChange);
-      writeToSession(sessionId, data).catch(console.error);
-    });
-    pushCleanup(() => onDataDisposable.dispose());
-
-    // Helper: process a single PTY output chunk (write + task detect)
-    // Status detection is handled by onWriteParsed (buffer-based, not raw chunks)
+    // Helper: process a single PTY output chunk (write + task detect).
+    // Looks up the terminal per-call so it survives recreate-in-document
+    // (e.g. when the session is moved to/from a Picture-in-Picture window).
     const processPtyChunk = (bytes: Uint8Array) => {
-      instance.terminal.write(bytes);
+      const inst = getTerminal(sessionId);
+      if (!inst) return;
+      inst.terminal.write(bytes);
       markSessionDirty(sessionId);
 
       const decoder = sessionDecoders.get(sessionId);
@@ -144,41 +142,47 @@ export const TerminalPane = memo(function TerminalPane({
       }
     };
 
-    // Buffer-based status detection: fires after xterm parses all buffered
-    // data (at most once per frame). Reads clean text from the terminal
-    // buffer instead of raw PTY chunks, avoiding false matches from
-    // mid-chunk ANSI splits.
+    // xterm-level wiring (onData, onWriteParsed, onBufferChange, onResize).
+    // Lives in terminal.ts so it can be re-attached automatically when the
+    // Terminal is disposed and recreated for Picture-in-Picture.
     //
-    // IMPORTANT: buf.cursorY is viewport-relative (0 to rows-1) but
-    // buf.getLine(y) indexes from the start of scrollback. We must use
-    // baseY + cursorY to get the absolute cursor position, otherwise
-    // we read old scrollback lines instead of current output.
+    // onWriteParsed reads BUFFER_READ_LINES around the cursor for status
+    // detection. baseY + cursorY converts the viewport-relative cursorY into
+    // an absolute scrollback index — without this we'd read stale lines.
     const BUFFER_READ_LINES = 15;
-    const onWriteParsedDisposable = instance.terminal.onWriteParsed(() => {
-      const cbs = getCbs();
-      if (!cbs) return;
-      const buf = instance.terminal.buffer.active;
-      const lines: string[] = [];
-      const cursorAbsY = buf.baseY + buf.cursorY;
-      const startY = Math.max(0, cursorAbsY - BUFFER_READ_LINES + 1);
-      for (let y = startY; y <= cursorAbsY; y++) {
-        const line = buf.getLine(y);
-        if (line) lines.push(line.translateToString(true));
-      }
-      processBufferLines(sessionId, lines, cursorAbsY, cbs.onStatusChange);
+    setXtermWiring(sessionId, {
+      onUserData: (sid, data) => {
+        const cbs = getCbs();
+        if (cbs) clearWaiting(sid, cbs.onStatusChange);
+        writeToSession(sid, data).catch(console.error);
+      },
+      onWriteParsed: (sid, terminal) => {
+        const cbs = getCbs();
+        if (!cbs) return;
+        const buf = terminal.buffer.active;
+        const lines: string[] = [];
+        const cursorAbsY = buf.baseY + buf.cursorY;
+        const startY = Math.max(0, cursorAbsY - BUFFER_READ_LINES + 1);
+        for (let y = startY; y <= cursorAbsY; y++) {
+          const line = buf.getLine(y);
+          if (line) lines.push(line.translateToString(true));
+        }
+        processBufferLines(sid, lines, cursorAbsY, cbs.onStatusChange);
+      },
+      onBufferChange: (sid, terminal) => {
+        // Without a refresh + texture atlas clear, WebGL can render stale
+        // glyphs from the previous buffer when an app like vim or Claude
+        // Code's plan editor switches to/from the alt screen.
+        terminal.refresh(0, terminal.rows - 1);
+        const inst = getTerminal(sid);
+        if (inst?.webglAddon) {
+          terminal.clearTextureAtlas();
+        }
+      },
+      onResize: (sid, { cols, rows }) => {
+        resizeSession(sid, cols, rows).catch(console.error);
+      },
     });
-    pushCleanup(() => onWriteParsedDisposable.dispose());
-
-    // Buffer change listener — fires when app enters/exits alternate screen buffer
-    // (e.g., vim, htop, fzf, Claude Code plan editor). Without this, WebGL can
-    // get stuck rendering stale content from the previous buffer, causing a black screen.
-    const onBufferChangeDisposable = instance.terminal.buffer.onBufferChange(() => {
-      instance.terminal.refresh(0, instance.terminal.rows - 1);
-      if (instance.webglAddon) {
-        instance.terminal.clearTextureAtlas();
-      }
-    });
-    pushCleanup(() => onBufferChangeDisposable.dispose());
 
     // Buffer PTY output while scrollback is being restored to prevent
     // the new shell's prompt from appearing before the old scrollback content.
@@ -202,21 +206,16 @@ export const TerminalPane = memo(function TerminalPane({
       }
     }).then(pushCleanup);
 
-    // Session exit
+    // Session exit — per-call lookup so it works after PiP recreate
     onSessionExited(sessionId, () => {
-      instance.terminal.write("\r\n\x1b[90m[Process exited]\x1b[0m\r\n");
+      const inst = getTerminal(sessionId);
+      if (inst) inst.terminal.write("\r\n\x1b[90m[Process exited]\x1b[0m\r\n");
       const cbs = getCbs();
       if (cbs) {
         markExited(sessionId, cbs.onStatusChange);
         cbs.onExited(sessionId);
       }
     }).then(pushCleanup);
-
-    // Resize -> PTY
-    const onResizeDisposable = instance.terminal.onResize(({ cols, rows }) => {
-      resizeSession(sessionId, cols, rows).catch(console.error);
-    });
-    pushCleanup(() => onResizeDisposable.dispose());
 
     // Restore scrollback for sessions restored from a saved workspace
     if (restoredFromId) {
