@@ -46,6 +46,11 @@ const THEME = {
 
 function PipApp({ sessionId }: { sessionId: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  // Sticky-bottom: when the PiP window is shorter than main's geometry the
+  // xterm element overflows the container. We auto-scroll the container to
+  // bottom on new output so the prompt stays visible, but stop following if
+  // the user scrolls up.
+  const stickToBottomRef = useRef(true);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -83,6 +88,20 @@ function PipApp({ sessionId }: { sessionId: string }) {
     // is the price of keeping the two views byte-identical.
     requestAnimationFrame(() => {
       terminal.focus();
+    });
+
+    const handleScroll = () => {
+      const distanceFromBottom =
+        container.scrollHeight - container.scrollTop - container.clientHeight;
+      stickToBottomRef.current = distanceFromBottom < 4;
+    };
+    container.addEventListener("scroll", handleScroll, { passive: true });
+
+    const onWriteParsedDisposable = terminal.onWriteParsed(() => {
+      if (!stickToBottomRef.current) return;
+      requestAnimationFrame(() => {
+        container.scrollTop = container.scrollHeight;
+      });
     });
 
     // User input → PTY (same channel as main window — both windows drive the same shell)
@@ -153,6 +172,8 @@ function PipApp({ sessionId }: { sessionId: string }) {
 
     return () => {
       cancelled = true;
+      container.removeEventListener("scroll", handleScroll);
+      onWriteParsedDisposable.dispose();
       onDataDisposable.dispose();
       unlistenOutput?.();
       unlistenExited?.();
@@ -170,7 +191,8 @@ function PipApp({ sessionId }: { sessionId: string }) {
         right: 0,
         bottom: 0,
         backgroundColor: "#0C0C0E",
-        overflow: "hidden",
+        overflowY: "auto",
+        overflowX: "hidden",
       }}
     />
   );
