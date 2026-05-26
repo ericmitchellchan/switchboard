@@ -269,7 +269,12 @@ pub fn run() {
         pty_manager: PtyManager::new(),
     });
 
-    let ctrl_v = Shortcut::new(Some(Modifiers::CONTROL), Code::KeyV);
+    // Paste interception modifier is platform-aware: Cmd+V on macOS, Ctrl+V everywhere else.
+    // The shortcut name stays `paste_shortcut` so the rest of the code reads naturally.
+    #[cfg(target_os = "macos")]
+    let paste_shortcut = Shortcut::new(Some(Modifiers::SUPER), Code::KeyV);
+    #[cfg(not(target_os = "macos"))]
+    let paste_shortcut = Shortcut::new(Some(Modifiers::CONTROL), Code::KeyV);
 
     tauri::Builder::default()
         .plugin(
@@ -310,29 +315,30 @@ pub fn run() {
                 power::install_power_monitor(&window, app.handle().clone());
             }
 
-            // Register Ctrl+V as a global shortcut so it fires at the OS
+            // Register the paste shortcut globally so it fires at the OS
             // level, catching both real keystrokes and simulated ones from
             // tools like Wispr Flow (which don't reach the webview).
-            app.global_shortcut().register(ctrl_v)?;
+            // Modifier is Cmd on macOS, Ctrl elsewhere (see definition above).
+            app.global_shortcut().register(paste_shortcut)?;
             Ok(())
         })
         .on_window_event(move |window, event| {
             match event {
                 // Register the global shortcut only while our MAIN window is
-                // focused so we don't steal Ctrl+V from other applications.
+                // focused so we don't steal the paste shortcut from other apps.
                 // The PiP window's focus events are intentionally ignored here
-                // — PiP Ctrl+V routing is handled separately (see SWIT-36/37).
+                // — PiP paste routing is handled separately (see SWIT-36/37).
                 tauri::WindowEvent::Focused(focused) => {
                     if window.label() != "main" {
                         return;
                     }
                     let app = window.app_handle();
                     if *focused {
-                        log::debug!("Main window focused, registering Ctrl+V shortcut");
-                        let _ = app.global_shortcut().register(ctrl_v);
+                        log::debug!("Main window focused, registering paste shortcut");
+                        let _ = app.global_shortcut().register(paste_shortcut);
                     } else {
-                        log::debug!("Main window unfocused, unregistering Ctrl+V shortcut");
-                        let _ = app.global_shortcut().unregister(ctrl_v);
+                        log::debug!("Main window unfocused, unregistering paste shortcut");
+                        let _ = app.global_shortcut().unregister(paste_shortcut);
                     }
                 }
                 // Emit file paths when files are dropped onto the window

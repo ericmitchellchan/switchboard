@@ -31,7 +31,13 @@ fn default_font_size() -> f64 {
 }
 
 fn default_shell() -> String {
-    "powershell.exe".to_string()
+    if cfg!(target_os = "macos") {
+        "/bin/zsh".to_string()
+    } else if cfg!(target_os = "linux") {
+        "/bin/bash".to_string()
+    } else {
+        "powershell.exe".to_string()
+    }
 }
 
 impl Default for Config {
