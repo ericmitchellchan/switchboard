@@ -49,7 +49,15 @@ impl PtySession {
                 format!("Failed to open PTY: {}", e)
             })?;
 
-        let shell_cmd = shell.unwrap_or_else(|| "powershell.exe".to_string());
+        let shell_cmd = shell.unwrap_or_else(|| {
+            if cfg!(target_os = "macos") {
+                "/bin/zsh".to_string()
+            } else if cfg!(target_os = "linux") {
+                "/bin/bash".to_string()
+            } else {
+                "powershell.exe".to_string()
+            }
+        });
         let mut cmd = CommandBuilder::new(&shell_cmd);
         cmd.cwd(&working_dir);
 

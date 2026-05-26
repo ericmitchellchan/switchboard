@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import type { RepoConfig } from "../types";
+import { getHomeDir } from "../lib/ipc";
 
 interface NewSessionDialogProps {
   repos: RepoConfig[];
@@ -18,14 +19,23 @@ interface RepoOption {
 export function NewSessionDialog({ repos, onCreateSession, onClose }: NewSessionDialogProps) {
   const [filter, setFilter] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [homeDir, setHomeDir] = useState<string>("");
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
+  // Resolve home dir from Rust (~ on Unix, %USERPROFILE% on Windows)
+  useEffect(() => {
+    getHomeDir()
+      .then(setHomeDir)
+      .catch(() => setHomeDir(""));
+  }, []);
+
   // Build options list: plain shell + repos
   const allOptions: RepoOption[] = [
-    { type: "plain", name: "Plain Shell", path: "C:\\Users\\ericm", color: "#6B7280", group: "" },
+    { type: "plain", name: "Plain Shell", path: homeDir, color: "#6B7280", group: "" },
     ...repos.map((r) => {
-      const parts = r.path.replace(/\//g, "\\").split("\\");
+      // Cross-platform basename: split on / OR \ so both Windows + POSIX paths work
+      const parts = r.path.split(/[/\\]/);
       const name = parts[parts.length - 1] || r.path;
       return { type: "repo" as const, name, path: r.path, color: r.color, group: r.group };
     }),
