@@ -1,0 +1,66 @@
+name: Mac bundle preview
+
+# One-shot macOS bundle build that uploads the .dmg/.app as a downloadable
+# workflow artifact. Used to sanity-check the full tauri build pipeline on
+# macOS without needing a Mac on hand. Fires on push to main and on manual
+# dispatch; does NOT run on every PR (use ci.yml's lighter `cargo check`
+# matrix for PR validation).
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "src-tauri/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "vite.config.ts"
+      - ".github/workflows/mac-bundle-preview.yml"
+  workflow_dispatch:
+
+jobs:
+  bundle:
+    runs-on: macos-14
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Tauri build
+        # Notarization secrets are intentionally not passed — produces an
+        # unsigned bundle that a Mac user can launch via right-click → Open.
+        # Wire APPLE_* secrets here once the Apple Developer Program
+        # enrollment lands.
+        run: pnpm tauri build
+
+      - name: Upload .dmg + .app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: switchboard-macos-aarch64-${{ github.sha }}
+          path: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/macos/*.app
+          if-no-files-found: error
+          retention-days: 30
