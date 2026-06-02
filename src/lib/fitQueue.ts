@@ -23,7 +23,6 @@ import {
   forceViewportRefresh,
   forceViewportScrollSync,
 } from "./terminal";
-import { resizeSession } from "./ipc";
 import { log } from "./logger";
 
 export type FitReason = "attach" | "show" | "resize" | "wake" | "visibility";
@@ -120,11 +119,12 @@ async function runFit(
     if (!getTerminal(sessionId)) return;
   }
 
-  // Phase 1: Fit terminal to container dimensions
-  const dims = fitTerminal(sessionId);
-  if (dims) {
-    resizeSession(sessionId, dims.cols, dims.rows).catch(console.error);
-  }
+  // Phase 1: Fit terminal to container dimensions.
+  // No explicit resizeSession here: fitAddon.fit() calls terminal.resize()
+  // internally, which fires the onResize wiring → resizeSession exactly when
+  // the dimensions actually change. A second resizeSession call here only ever
+  // re-sent the same dims (a redundant SIGWINCH that made TUI apps redraw).
+  fitTerminal(sessionId);
 
   // Phase 1.5: Force viewport refresh (ensures xterm recalculates scroll area).
   // Only needed after visibility transitions (display:none → flex) where xterm's

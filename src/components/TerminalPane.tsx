@@ -10,6 +10,7 @@ import {
   markSessionDirty,
   setXtermWiring,
   unsetXtermWiring,
+  isResizePropagationSuppressed,
 } from "../lib/terminal";
 import {
   writeToSession,
@@ -180,6 +181,11 @@ export const TerminalPane = memo(function TerminalPane({
         }
       },
       onResize: (sid, { cols, rows }) => {
+        // Skip the forceViewportRefresh cols-1 bounce — it's a display-only
+        // scroll-area recalc, not a real terminal size change. Forwarding it
+        // would SIGWINCH the shell and make TUI apps redraw (stranding
+        // duplicate frames in scrollback).
+        if (isResizePropagationSuppressed(sid)) return;
         resizeSession(sid, cols, rows).catch(console.error);
       },
     });
@@ -332,6 +338,9 @@ export const TerminalPane = memo(function TerminalPane({
         const w = container.clientWidth;
         const h = container.clientHeight;
         if (w === lastW && h === lastH) return; // no actual size change
+        // Logged so a recurrence of text-render corruption can be correlated
+        // with container resizes (the trigger for the fit → PTY resize path).
+        log.debug(`ResizeObserver size change id=${session.id} ${lastW}x${lastH} -> ${w}x${h}`);
         lastW = w;
         lastH = h;
         handleResize();

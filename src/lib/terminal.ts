@@ -524,10 +524,30 @@ export function fitTerminal(sessionId: string): { cols: number; rows: number } |
   }
 }
 
+// Sessions whose onResize events should NOT be forwarded to the PTY. Used to
+// fence the forceViewportRefresh cols-1 bounce: that bounce is a display-only
+// scroll-area recalc, but each terminal.resize() fires onResize synchronously,
+// which would otherwise SIGWINCH the shell. SIGWINCH makes TUI apps (Claude
+// Code) redraw their current frame; when that frame is taller than the
+// viewport, lines already scrolled into scrollback can't be cleared, leaving
+// stacked duplicate copies. Suppressing the bounce keeps the PTY at its real
+// size and stops the spurious redraws.
+const resizePropagationSuppressed = new Set<string>();
+
+/** True while a forceViewportRefresh bounce is in flight for this session. */
+export function isResizePropagationSuppressed(sessionId: string): boolean {
+  return resizePropagationSuppressed.has(sessionId);
+}
+
 /**
  * Force xterm through a full resize cycle even if cols/rows didn't change.
  * Needed because fitAddon.fit() may skip the internal resize when dimensions
  * are unchanged after a display:none -> flex transition.
+ *
+ * The cols-1 bounce is fenced so its (transient) onResize events are not
+ * forwarded to the PTY — see resizePropagationSuppressed above. xterm fires
+ * onResize synchronously within resize(), so the flag reliably covers both
+ * resize() calls.
  */
 export function forceViewportRefresh(sessionId: string): void {
   const instance = terminalMap.get(sessionId);
@@ -535,8 +555,13 @@ export function forceViewportRefresh(sessionId: string): void {
   const cols = instance.terminal.cols;
   const rows = instance.terminal.rows;
   if (cols <= 2) return; // can't shrink further
-  instance.terminal.resize(cols - 1, rows);
-  instance.terminal.resize(cols, rows);
+  resizePropagationSuppressed.add(sessionId);
+  try {
+    instance.terminal.resize(cols - 1, rows);
+    instance.terminal.resize(cols, rows);
+  } finally {
+    resizePropagationSuppressed.delete(sessionId);
+  }
 }
 
 /**

@@ -50,6 +50,8 @@ export async function resizeSession(
   cols: number,
   rows: number
 ): Promise<void> {
+  // This is the single path that SIGWINCHes the shell. Logged so a recurrence
+  // of the text-render corruption can be traced to the resize(s) that caused it.
   log.debug(`IPC resizeSession id=${sessionId} cols=${cols} rows=${rows}`);
   return invoke("resize_session", { sessionId, cols, rows });
 }
