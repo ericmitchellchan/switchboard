@@ -7,14 +7,17 @@ export default defineConfig(async () => ({
   plugins: [react()],
   clearScreen: false,
   server: {
-    port: 1420,
+    // 1620, not Tauri's default 1420 — 1420 collides with every other Tauri
+    // project's dev server (see the port-in-use conflict during the SWIT
+    // table-render debug session).
+    port: 1620,
     strictPort: true,
     host: host || false,
     hmr: host
       ? {
           protocol: "ws",
           host,
-          port: 1421,
+          port: 1621,
         }
       : undefined,
     watch: {
