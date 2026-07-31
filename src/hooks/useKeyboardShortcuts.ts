@@ -18,6 +18,9 @@ export interface ShortcutActions {
   onMoveTabLeft?: () => void;
   onMoveTabRight?: () => void;
   onTogglePip?: () => void;
+  /** Ctrl+Shift+B — toggle the LEFT workstation side menu (T4). Plain Ctrl+B
+   *  stays the right task-sidebar cycle. */
+  onToggleSideMenu?: () => void;
 }
 
 // Keys we intercept from xterm.js
@@ -140,6 +143,11 @@ export function useKeyboardShortcuts(
 
       // Ctrl+Shift shortcuts
       if (e.shiftKey) {
+        if (key === "b") {
+          e.preventDefault();
+          a.onToggleSideMenu?.();
+          return;
+        }
         if (key === "w") {
           e.preventDefault();
           a.onClosePane?.();

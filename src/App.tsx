@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useRef, useState, lazy, Suspense } from "react";
-import type { AgentStatus, RepoConfig } from "./types";
+import { useCallback, useEffect, useRef, useState, lazy, Suspense, Component } from "react";
+import type { ReactNode } from "react";
+import type { AgentStatus, RepoConfig, Route, ScreenId } from "./types";
 import { TabBar } from "./components/TabBar";
 import { SessionHeader } from "./components/SessionHeader";
 import { TerminalPane, cleanupSessionListeners } from "./components/TerminalPane";
 import { StatusBar } from "./components/StatusBar";
 import { ToastStack } from "./components/Toast";
 import { TaskSidebar } from "./components/TaskSidebar";
+import { SideMenu, useSideMenuVisibility } from "./components/SideMenu";
 import { PaneContainer } from "./components/PaneContainer";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { useSessions } from "./hooks/useSessions";
@@ -22,6 +24,7 @@ import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, on
 import { onSessionOutput } from "./lib/ipc";
 import type { Session } from "./types";
 import { enqueueFit } from "./lib/fitQueue";
+import { useRoute, navigate, readRouteFromUrl, getNavState } from "./lib/route";
 import {
   loadWorkspaceFromStorage,
   buildSavedWorkspace,
@@ -99,6 +102,29 @@ export default function App() {
   const { sidebarState, cycleSidebar: rawCycleSidebar } = useSidebarState();
   const paneLayout = usePaneLayout();
 
+  // ── Workstation navigation (T4) ──
+  // Route state lives in the URL via src/lib/route.ts; the side menu is
+  // additive chrome (hidden by default, Ctrl+Shift+B).
+  const route = useRoute();
+  const [sideMenuVisible, toggleSideMenu] = useSideMenuVisibility();
+
+  // Grow-only keep-alive activation cache: a screen mounts on its first visit
+  // and never unmounts (bounded by KEEP_ALIVE_SCREENS). Mutating a ref during
+  // render for a memo cache is a supported React pattern — the same render
+  // pass that adds a screen paints it. "terminal" is pre-seeded so the
+  // workspace (sessions, xterm instances) always mounts at boot even when a
+  // deep link lands on another screen.
+  const activatedScreensRef = useRef<Set<ScreenId>>(new Set(["terminal"]));
+  if (isKeepAliveScreen(route.screen)) activatedScreensRef.current.add(route.screen);
+  const activatedScreens = activatedScreensRef.current;
+
+  // Browser/webview back-forward (and external history mutations) → store.
+  useEffect(() => {
+    const onPop = () => navigate(readRouteFromUrl());
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
   // No wrapper needed — the fitQueue's per-session debounce (100ms) naturally
   // coalesces the ResizeObserver events that fire during sidebar width transition.
   const cycleSidebar = rawCycleSidebar;
@@ -134,6 +160,10 @@ export default function App() {
   const switchToSession = useCallback(
     (sessionId: string) => {
       log.info(`Switch to session id=${sessionId}`);
+      // Any "show me this session" intent (tab click, toast, task sidebar)
+      // implies the terminal screen (T4) — otherwise the switch would happen
+      // invisibly behind KB/Explorer.
+      if (getNavState().route.screen !== "terminal") navigate({ screen: "terminal" });
       switchToSessionDirect(sessionId);
       dismissBySessionId(sessionId);
       if (paneLayout.root) {
@@ -162,6 +192,9 @@ export default function App() {
   // Helper: create a session and return its info
   const doCreateSession = useCallback(
     async (name: string, repo: string, workingDir: string, repoColor?: string, group?: string) => {
+      // A new session always lands on the terminal screen (T4) — the new tab
+      // would otherwise be hidden behind the active KB/Explorer screen.
+      if (getNavState().route.screen !== "terminal") navigate({ screen: "terminal" });
       const info = await createSession(name, repo, workingDir);
       addSession({ ...info, status: "idle", repoColor, group });
       initTaskDetector(info.id);
@@ -560,6 +593,7 @@ export default function App() {
       onMoveTabLeft: () => { if (effectiveActiveSessionId) moveSession(effectiveActiveSessionId, -1); },
       onMoveTabRight: () => { if (effectiveActiveSessionId) moveSession(effectiveActiveSessionId, 1); },
       onTogglePip: handleTogglePip,
+      onToggleSideMenu: toggleSideMenu,
     },
     effectiveActiveSessionId
   );
@@ -1024,6 +1058,29 @@ export default function App() {
       )}
 
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+        {sideMenuVisible && <SideMenu route={route} />}
+
+        {/* ── Screen switching (T4) ──
+            Two classes of screens:
+            1. KEEP_ALIVE_SCREENS mount on their first visit and never unmount
+               — inactive ones sit at display:none so their React state (and
+               for the terminal screen, the live xterm/pane tree) survives.
+            2. Param-driven routes render fresh via renderTransientRoute.
+            Every screen gets its own ErrorBoundary so a crash in one — even a
+            hidden one — can't take down the shell or the terminals. */}
+
+        {/* Terminal — the default screen. Always mounted (pre-seeded in the
+            activation cache), so screen switches never unmount panes: the T2
+            registry's adopt path doesn't even fire on a switch back. */}
+        <div
+          style={{
+            display: route.screen === "terminal" ? "flex" : "none",
+            flex: 1,
+            minWidth: 0,
+            overflow: "hidden",
+          }}
+        >
+          <ScreenErrorBoundary resetKey="terminal">
         {paneLayout.root ? (
           paneLayout.isSplit ? (
             <PaneContainer
@@ -1120,6 +1177,46 @@ export default function App() {
           onExpand={cycleSidebar}
           onSwitchToSession={switchToSession}
         />
+          </ScreenErrorBoundary>
+        </div>
+
+        {/* Keep-alive placeholder screens — mounted on first visit only. */}
+        {activatedScreens.has("kb") && (
+          <div
+            style={{
+              display: route.screen === "kb" ? "flex" : "none",
+              flex: 1,
+              minWidth: 0,
+            }}
+          >
+            <ScreenErrorBoundary resetKey="kb">
+              <KnowledgeBaseScreen />
+            </ScreenErrorBoundary>
+          </div>
+        )}
+        {activatedScreens.has("explorer") && (
+          <div
+            style={{
+              display: route.screen === "explorer" ? "flex" : "none",
+              flex: 1,
+              minWidth: 0,
+            }}
+          >
+            <ScreenErrorBoundary resetKey="explorer">
+              <ExplorerScreen />
+            </ScreenErrorBoundary>
+          </div>
+        )}
+
+        {/* Param-driven screens render fresh (transient). None exist yet —
+            see renderTransientRoute below for the registration point. */}
+        {!isKeepAliveScreen(route.screen) && (
+          <div style={{ display: "flex", flex: 1, minWidth: 0 }}>
+            <ScreenErrorBoundary resetKey={route.screen}>
+              {renderTransientRoute(route)}
+            </ScreenErrorBoundary>
+          </div>
+        )}
       </div>
 
       <ToastStack
@@ -1167,5 +1264,144 @@ function NewSessionDialogLazy({
         onClose={onClose}
       />
     </Suspense>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Workstation screen switching (T4)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Param-less nav destinations kept mounted after first visit (inactive =
+ *  display:none). Later tasks APPEND their param-less screens here; screens
+ *  whose params are per-navigation identity (e.g. a thread) go through
+ *  renderTransientRoute instead. */
+const KEEP_ALIVE_SCREENS = ["terminal", "kb", "explorer"] as const satisfies readonly ScreenId[];
+const KEEP_ALIVE_SET: ReadonlySet<ScreenId> = new Set(KEEP_ALIVE_SCREENS);
+
+function isKeepAliveScreen(screen: ScreenId): boolean {
+  return KEEP_ALIVE_SET.has(screen);
+}
+
+/** Param-driven screens — they key off route params, so re-mounting on each
+ *  navigation is the correct behavior.
+ *  T5-REGISTRATION (transient screens): thread screens (screen:"thread",
+ *  threadId) render here in T5; keep-alive screens never reach this switch. */
+function renderTransientRoute(_route: Route): ReactNode {
+  return null;
+}
+
+type BoundaryProps = { resetKey: string; children: ReactNode };
+type BoundaryState = { error: Error | null };
+
+/** Per-screen crash isolation (T4): a throwing screen — even a hidden one —
+ *  renders a local fallback instead of unmounting the shell, so the terminal
+ *  screen and its live PTYs survive. A resetKey change clears the error. */
+class ScreenErrorBoundary extends Component<BoundaryProps, BoundaryState> {
+  state: BoundaryState = { error: null };
+
+  static getDerivedStateFromError(error: Error): BoundaryState {
+    return { error };
+  }
+
+  componentDidCatch(error: Error) {
+    log.error(`Screen crashed (resetKey=${this.props.resetKey}): ${error}`);
+  }
+
+  componentDidUpdate(prev: BoundaryProps) {
+    if (prev.resetKey !== this.props.resetKey && this.state.error) {
+      this.setState({ error: null });
+    }
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div
+          style={{
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 10,
+          }}
+        >
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--text-secondary)" }}>
+            This screen crashed.
+          </span>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-dim)", maxWidth: 480, textAlign: "center" }}>
+            {String(this.state.error)}
+          </span>
+          <button
+            type="button"
+            onClick={() => this.setState({ error: null })}
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 11,
+              color: "var(--text-primary)",
+              background: "var(--bg-active)",
+              border: "1px solid var(--border-subtle)",
+              borderRadius: 4,
+              padding: "4px 10px",
+              cursor: "pointer",
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+/** Placeholder screen chrome shared by the pre-T6/T9 stubs. */
+function PlaceholderScreen({ title, hint }: { title: string; hint: string }) {
+  return (
+    <div
+      style={{
+        flex: 1,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 8,
+      }}
+    >
+      <span
+        style={{
+          fontFamily: "var(--font-mono)",
+          fontSize: 13,
+          color: "var(--text-muted)",
+          textTransform: "uppercase",
+          letterSpacing: 1,
+        }}
+      >
+        {title}
+      </span>
+      <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-faint)" }}>
+        {hint}
+      </span>
+    </div>
+  );
+}
+
+function KnowledgeBaseScreen() {
+  return (
+    <>
+      {/* T6-REGISTRATION: the real Knowledge Base screen (personal-kb doc
+          tree + reader) replaces this placeholder panel wholesale in T6. */}
+      <PlaceholderScreen title="Knowledge Base" hint="personal-kb docs will render here" />
+    </>
+  );
+}
+
+function ExplorerScreen() {
+  return (
+    <>
+      {/* T9-REGISTRATION: the real Explorer screen (registry-driven repo
+          browser) replaces this placeholder panel wholesale in T9. */}
+      <PlaceholderScreen title="Explorer" hint="repos from the project registry will render here" />
+    </>
   );
 }

@@ -67,3 +67,23 @@ export interface SavedWorkspace {
   sessionCounter: number;
   savedAt: number;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Workstation navigation (T4) — the shell's screen/route vocabulary.
+// Later tasks APPEND here (T5 threads, T6 knowledge base, T9 explorer,
+// diagrams, board): extend ScreenId and add/extend a Route variant; the
+// exhaustive switches in src/lib/route.ts then force the param plumbing at
+// compile time. Do not disturb the existing types above.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Every screen the workstation shell can show. "terminal" is the classic
+ *  Switchboard workspace and the default route. */
+export type ScreenId = "terminal" | "kb" | "explorer";
+
+/** Discriminated route union keyed on `screen`. Param-carrying screens extend
+ *  their variant inline (params are optional deep-link state, not identity —
+ *  identity-bearing params like a future threadId are required fields). */
+export type Route =
+  | { screen: "terminal" }
+  | { screen: "kb"; doc?: string }
+  | { screen: "explorer"; project?: string };
