@@ -15,6 +15,7 @@ import { useCallback, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import type { Route, ScreenId } from "../types";
 import { navigateToScreen } from "../lib/route";
+import { ThreadsSection } from "./ThreadsSection";
 
 // ── Visibility (hidden by default) ───────────────────────────────────────────
 // Chosen default: HIDDEN — the app boots exactly as today and the menu is
@@ -113,9 +114,11 @@ export function SideMenu({ route }: { route: Route }) {
           <SectionLabel>{section.label}</SectionLabel>
           {section.id === "threads" && (
             <>
-              {/* T5-REGISTRATION: thread rows render here (T5). Until real
-                  threads land, this section is intentionally empty — today's
-                  sessions stay in the tab bar. */}
+              {/* T5-REGISTRATION: thread rows (status dot + title + repo meta
+                  / revive chip) + the "+ new thread" affordance. Data comes
+                  from the threadStore singleton; actions bridge back to App
+                  via registerThreadActions — no prop plumbing through here. */}
+              <ThreadsSection />
             </>
           )}
           {TOP_ITEMS.filter((item) => item.section === section.id).map(

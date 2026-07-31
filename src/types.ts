@@ -59,13 +59,16 @@ export interface SavedSession {
 }
 
 export interface SavedWorkspace {
-  version: 1;
+  version: 2; // v2 (T5): adds `threads`. v1 payloads are migrated on load.
   sessions: SavedSession[];
   activeSessionId: string | null;
   paneLayout: unknown; // PaneNode serialized
   focusedPaneId: string | null;
   sessionCounter: number;
   savedAt: number;
+  /** Durable thread records (T5). Sessions expire after 7 days of staleness;
+   *  threads NEVER expire with them — a thread is durable by definition. */
+  threads: Thread[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -87,3 +90,40 @@ export type Route =
   | { screen: "terminal" }
   | { screen: "kb"; doc?: string }
   | { screen: "explorer"; project?: string };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Threads (T5) — an agent session that survives app/machine restarts.
+// A thread = a Switchboard session bound to a Claude Code conversation via
+// exactly two critical fields: `chatSessionId` (the claude conversation UUID,
+// minted by US at thread creation) and `chatStarted` (gates
+// `--resume` vs `--session-id` on revive — a claude session doesn't exist on
+// disk until a real user turn happens, and resuming an unstarted one errors).
+//
+// NOTE (recorded from the Ky bug): machine-local fields on this record —
+// chatSessionId / chatStarted especially — must NEVER be bulk-replaced by any
+// wholesale record overwrite (a cloud-sync once wiped chatSessionId exactly
+// that way). We have no sync today; if one ever arrives, merge field-by-field.
+//
+// Records must stay LEAN: localStorage persistence is one shared key and quota
+// overflow silently halts persistence. No scrollback, no messages, no derived
+// UI state in here — sanitizeThread() in threadStore.ts enforces this shape.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface Thread {
+  /** Switchboard thread id (uuid). */
+  id: string;
+  title: string;
+  /** Repo working directory the thread's sessions spawn in. */
+  workingDir: string;
+  /** ★ The claude conversation UUID — WE mint it (`crypto.randomUUID()`). */
+  chatSessionId: string;
+  /** ★ True once the first REAL user turn happened (Enter in the TUI, not a
+   *  bracketed paste). Gates `--resume` (started) vs `--session-id` (not). */
+  chatStarted: boolean;
+  /** Current bound Switchboard session id — a TAB binding, null when none.
+   *  Machine-local; remapped (or severed) on workspace restore. */
+  sessionId: string | null;
+  createdAt: number;
+  lastActivityAt: number;
+  archivedAt?: number;
+}

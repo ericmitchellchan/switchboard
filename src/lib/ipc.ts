@@ -96,6 +96,17 @@ export async function clearSessionScrollback(sessionId: string): Promise<void> {
   return invoke("clear_session_scrollback", { sessionId });
 }
 
+// Thread records disk mirror (T5): localStorage is one shared key and webview
+// storage can be cleared wholesale — the JSON blob written here survives both
+// and WINS over the localStorage copy on boot (threadStore.mergeThreads).
+export async function saveThreads(data: string): Promise<void> {
+  return invoke("save_threads", { data });
+}
+
+export async function loadThreads(): Promise<string> {
+  return invoke("load_threads");
+}
+
 export async function writeFile(path: string, content: string): Promise<void> {
   return invoke("write_file", { path, content });
 }

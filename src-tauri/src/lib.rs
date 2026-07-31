@@ -213,6 +213,48 @@ async fn clear_session_scrollback(session_id: String) -> Result<(), String> {
     Ok(())
 }
 
+// Thread records disk mirror (T5). Same storage pattern as scrollback: a JSON
+// blob under the app's local data dir. The frontend owns the payload shape
+// (threadStore.serializeThreadsForDisk); this is a dumb byte store. Written
+// atomically-enough via a temp file + rename so a crash mid-write can't leave
+// a truncated threads.json (the frontend treats unparseable disk content as
+// "no disk copy" and would silently fall back to localStorage).
+fn threads_path() -> Result<std::path::PathBuf, String> {
+    let base = dirs::data_local_dir().ok_or("Cannot resolve local data dir")?;
+    Ok(base.join("switchboard").join("threads.json"))
+}
+
+#[tauri::command]
+async fn save_threads(data: String) -> Result<(), String> {
+    log::debug!("Saving threads ({} bytes)", data.len());
+    let path = threads_path()?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, data.as_bytes()).map_err(|e| {
+        log::error!("Failed to write threads tmp file: {}", e);
+        e.to_string()
+    })?;
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        log::error!("Failed to persist threads.json: {}", e);
+        e.to_string()
+    })
+}
+
+#[tauri::command]
+async fn load_threads() -> Result<String, String> {
+    let path = threads_path()?;
+    match std::fs::read_to_string(&path) {
+        Ok(content) => Ok(content),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => {
+            log::error!("Failed to load threads.json: {}", e);
+            Err(e.to_string())
+        }
+    }
+}
+
 #[tauri::command]
 async fn write_file(path: String, content: String) -> Result<(), String> {
     std::fs::write(&path, content.as_bytes()).map_err(|e| e.to_string())
@@ -399,6 +441,8 @@ pub fn run() {
             get_config,
             save_scrollback,
             load_scrollback,
+            save_threads,
+            load_threads,
             clear_scrollback,
             clear_session_scrollback,
             get_home_dir,

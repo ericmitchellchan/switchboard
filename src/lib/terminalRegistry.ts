@@ -197,6 +197,34 @@ export function setResizePropagationSuppressed(sessionId: string, on: boolean): 
   else resizePropagationSuppressed.delete(sessionId);
 }
 
+// Additive per-session INPUT listeners (T5 seam): the registry's onData →
+// PTY-write subscription is created ONCE per instance, and the single
+// SessionHooks.onUserData slot belongs to TerminalPane (status bookkeeping) —
+// last-registration-wins there. Threads need to observe the same user-input
+// stream (chatStarted detection) WITHOUT clobbering that slot, so this is a
+// multi-listener side channel: observe-only, the PTY write itself stays
+// registry-owned and unconditional. Listeners survive in-place restarts (the
+// terminal instance does too) and die with the entry on disposal.
+const sessionInputListeners = new Map<string, Set<(data: string) => void>>();
+
+export function addSessionInputListener(
+  sessionId: string,
+  listener: (data: string) => void
+): () => void {
+  let set = sessionInputListeners.get(sessionId);
+  if (!set) {
+    set = new Set();
+    sessionInputListeners.set(sessionId, set);
+  }
+  set.add(listener);
+  return () => {
+    const current = sessionInputListeners.get(sessionId);
+    if (!current) return;
+    current.delete(listener);
+    if (current.size === 0) sessionInputListeners.delete(sessionId);
+  };
+}
+
 // External per-session state cleanup (e.g. terminal.ts's saved scroll
 // positions) — run on every disposal path, including exit-while-hidden, so
 // facade-owned maps can't leak. Registered at module load, not per session.
@@ -372,6 +400,8 @@ export function acquireTerminal(
   // the session hooks (which persist across unmounts).
   terminal.onData((data) => {
     sessionHooks.get(sessionId)?.onUserData?.(data);
+    const inputListeners = sessionInputListeners.get(sessionId);
+    if (inputListeners) for (const fn of inputListeners) fn(data);
     writeToSession(sessionId, data).catch(console.error);
   });
   terminal.onResize(({ cols, rows }) => {
@@ -587,6 +617,7 @@ function disposeEntry(sessionId: string, entry: Entry): void {
   entry.container.remove();
   dirtySessionIds.delete(sessionId);
   resizePropagationSuppressed.delete(sessionId);
+  sessionInputListeners.delete(sessionId);
   sessionGenerations.delete(sessionId); // session closed — id never reused
   for (const fn of disposeCleanups) fn(sessionId);
 }

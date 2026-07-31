@@ -1,10 +1,16 @@
 import type { Session, SavedSession, SavedWorkspace } from "../types";
 import type { PaneNode } from "./paneLayout";
 import { serializeTerminal, getTerminal, isSessionDirty, clearSessionDirty } from "./terminal";
-import { saveScrollback } from "./ipc";
+import { saveScrollback, saveThreads } from "./ipc";
+import {
+  getThreads,
+  serializeThreadsForDisk,
+  migrateSavedWorkspace,
+  applyWorkspaceStaleness,
+} from "./threadStore";
 
 const STORAGE_KEY = "switchboard:workspace";
-const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days — sessions only; threads never expire
 
 // --- Build & save ---
 
@@ -30,13 +36,16 @@ export function buildSavedWorkspace(
   });
 
   return {
-    version: 1,
+    version: 2,
     sessions: savedSessions,
     activeSessionId,
     paneLayout: paneLayout as unknown,
     focusedPaneId,
     sessionCounter,
     savedAt: Date.now(),
+    // Threads ride in the same blob (records are lean by invariant — see
+    // threadStore.sanitizeThread) AND mirror to disk via saveThreadsToDisk.
+    threads: getThreads(),
   };
 }
 
@@ -79,18 +88,17 @@ export function loadWorkspaceFromStorage(): SavedWorkspace | null {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
 
-    const ws = JSON.parse(raw) as SavedWorkspace;
+    // v1 blobs migrate in place (sessions/layout preserved, threads: []);
+    // v2 passes through with threads sanitized; anything else is rejected.
+    const migrated = migrateSavedWorkspace(JSON.parse(raw));
+    if (!migrated) return null;
 
-    // Validate
-    if (ws.version !== 1 || !Array.isArray(ws.sessions) || ws.sessions.length === 0) {
-      return null;
-    }
+    // Staleness expires SESSIONS only — threads are durable by definition, so
+    // a stale workspace comes back sessionless but with its threads intact
+    // (the old loader removed the whole key here; that would delete threads).
+    const ws = applyWorkspaceStaleness(migrated, Date.now(), MAX_AGE_MS);
 
-    // Staleness check
-    if (Date.now() - ws.savedAt > MAX_AGE_MS) {
-      localStorage.removeItem(STORAGE_KEY);
-      return null;
-    }
+    if (ws.sessions.length === 0 && ws.threads.length === 0) return null;
 
     return ws;
   } catch {
@@ -100,6 +108,24 @@ export function loadWorkspaceFromStorage(): SavedWorkspace | null {
 
 export function clearWorkspaceStorage(): void {
   localStorage.removeItem(STORAGE_KEY);
+}
+
+// --- Thread disk mirror ---
+
+/**
+ * Mirror the current thread records to disk (save_threads IPC → threads.json
+ * in the app's local data dir). Fire-and-forget safe: failures are swallowed —
+ * the localStorage copy in the workspace blob still exists. Called from the
+ * periodic save, beforeunload, and App's critical-mutation flush points
+ * (create / chatStarted flip / delete — losing chatSessionId or chatStarted
+ * to a crash inside the 30s window would strand a conversation).
+ */
+export async function saveThreadsToDisk(): Promise<void> {
+  try {
+    await saveThreads(serializeThreadsForDisk(getThreads()));
+  } catch {
+    // disk mirror is best-effort; localStorage still has the records
+  }
 }
 
 // --- Periodic save ---
@@ -118,7 +144,9 @@ export function startPeriodicSave(
   stopPeriodicSave();
   periodicTimer = setInterval(() => {
     const state = getState();
-    if (state.sessions.length === 0) return;
+    // Threads make an otherwise-empty workspace worth saving (a thread with
+    // zero open sessions is exactly the durable state we must not lose).
+    if (state.sessions.length === 0 && getThreads().length === 0) return;
 
     const workspace = buildSavedWorkspace(
       state.sessions,
@@ -129,6 +157,7 @@ export function startPeriodicSave(
     );
     saveWorkspaceToStorage(workspace);
     saveAllScrollbacks(state.sessions, true).catch(() => {});
+    saveThreadsToDisk().catch(() => {});
   }, 30_000);
 }
 
