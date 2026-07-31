@@ -145,11 +145,11 @@ These are recurring problem areas from git history — be aware when working in 
 | Split vertical | Ctrl+- |
 | Move pane focus | Ctrl+Alt+Arrow |
 
-## Jira & Knowledge Routing
+## Tracker & Knowledge Routing
 
-- **Jira instance**: ericmitchellchan.atlassian.net (Cloud ID: `26513658-3895-4d82-b441-08240a277d6b`)
-- **Jira project key**: SWIT
-- **Jira tools**: Use `mcp__personal-jira__*` for all Jira operations
+- **Tracker**: Linear workspace `ericmitchell` (linear.app/ericmitchell). Personal Jira (ericmitchellchan.atlassian.net) was DEACTIVATED 2026-07 — never create/read tickets there.
+- **Linear team**: SWIT (mirrors the old Jira key; old SWIT-x ticket refs are historical)
+- **Tracker tools**: Linear MCP (`mcp__linear__*`, mcp.linear.app). `mcp__personal-jira__*` is DEAD — do not call it.
 - **Board type**: Kanban
 - **Knowledge layer**: chat-recall with `project="switchboard"`
 - **NEVER use `mcp__team-knowledge__*` tools** — those are for Cadence Labs only
