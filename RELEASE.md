@@ -1,43 +1,66 @@
 # Switchboard Release Process
 
-## 1. Generate Signing Keys (One-Time)
+## In-App Self-Update (how it works)
+
+The app checks the updater endpoint (`plugins.updater.endpoints` in
+`src-tauri/tauri.conf.json` → the GitHub release asset
+`https://github.com/ericmitchellchan/switchboard/releases/latest/download/latest.json`)
+**on launch and every 6 hours**. Nothing downloads or installs automatically.
+
+- Update available → a small chip appears in the status bar:
+  `update vX.Y.Z — restart to install`
+- Click the chip → the update downloads (progress shown on the chip), installs,
+  and the app relaunches (`tauri-plugin-process`).
+- Download/install failure → the chip dims to `update failed — retry`
+  (clickable; hover shows the error). The app is never blocked.
+- Background **check** failures are silent (logged only) — with a private repo
+  or no network the check fails every launch, and a permanent error chip would
+  be noise.
+
+Code: `src/lib/updaterState.ts` (pure state machine, unit-tested),
+`src/lib/updater.ts` (plugin calls + 6h loop), `src/components/UpdateChip.tsx`.
+
+> **IMPORTANT — repo visibility**: the repo is currently **PRIVATE**, and the
+> Tauri updater cannot authenticate against private GitHub release assets, so
+> the endpoint 404s and self-update stays dormant (silent, by design). It
+> activates as soon as either:
+> 1. **The repo goes public** — zero further work; releases just work.
+> 2. **Release assets move to a public host** (S3/R2/GitHub Pages/etc.) — repo
+>    stays private, but the release workflow must upload `latest.json`, the
+>    installer, and `.sig` there, and the endpoint in `tauri.conf.json` must
+>    change.
+>
+> Pick one; no proxy service — that's overkill for a personal app.
+
+## 1. Signing Keys (ALREADY GENERATED — do not regenerate)
+
+The keypair exists (generated Feb 2026):
+- `~/.tauri/switchboard.key` — **private key. NEVER commit it.** Regenerating
+  it would orphan every installed copy (the public key baked into shipped
+  builds would no longer match).
+- `~/.tauri/switchboard.key.pub` — public key; its contents are already in
+  `src-tauri/tauri.conf.json` → `plugins.updater.pubkey`.
+
+If you ever DO need a fresh keypair (key lost/compromised):
 
 ```powershell
 pnpm tauri signer generate -w $env:USERPROFILE\.tauri\switchboard.key
 ```
 
-This creates:
-- `~/.tauri/switchboard.key` — private key (keep secret)
-- `~/.tauri/switchboard.key.pub` — public key
+then update `pubkey` in `tauri.conf.json` and ship a manually-installed
+release, since old installs can't verify the new signature.
 
-Then add the updater config to `src-tauri/tauri.conf.json`:
+### Key custody checklist
 
-```json
-{
-  "bundle": {
-    "createUpdaterArtifacts": "v1Compatible"
-  },
-  "plugins": {
-    "updater": {
-      "pubkey": "<contents of switchboard.key.pub>",
-      "endpoints": [
-        "https://github.com/ericmitchellchan/switchboard/releases/latest/download/latest.json"
-      ]
-    }
-  }
-}
-```
-
-Add `"createUpdaterArtifacts": "v1Compatible"` inside the existing `bundle` section, and add the `plugins` section at the top level.
-
-Then uncomment the updater plugin in `src-tauri/src/lib.rs`:
-```rust
-.plugin(tauri_plugin_updater::Builder::new().build())
-```
+- [ ] Copy `~/.tauri/switchboard.key` (and its password, if one was set) into
+      the password manager — the local file is the only copy.
+- [ ] Add GitHub Actions secrets (below) so tagged releases sign in CI.
+- [ ] Confirm the key is not in any repo (`git log -p --all -- '*switchboard.key*'`).
 
 ## 2. GitHub Secrets
 
-Add these secrets to the repository at Settings → Secrets → Actions:
+Add these secrets to the repository at Settings → Secrets → Actions
+(`.github/workflows/release.yml` already reads them):
 
 | Secret | Value |
 |--------|-------|
@@ -72,9 +95,14 @@ src-tauri/target/release/bundle/nsis/Switchboard_0.1.0_x64-setup.exe
 
 1. Build and install v0.1.0
 2. Bump version in `package.json` and `src-tauri/tauri.conf.json` to v0.1.1
-3. Build, create a GitHub release with the new artifacts
-4. Launch the installed v0.1.0 — it should detect and install the update on startup
-5. After relaunch, verify the version is v0.1.1
+3. Build, create a GitHub release with the new artifacts (`latest.json`,
+   installer, `.sig`) — on a host the installed app can reach (see the repo
+   visibility note above)
+4. Launch the installed v0.1.0 — the status bar should show the
+   `update v0.1.1 — restart to install` chip
+5. Click the chip — download progress shows on the chip, then the app
+   installs and relaunches
+6. After relaunch, verify the version is v0.1.1
 
 ## Version Bumping
 

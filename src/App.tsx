@@ -68,7 +68,7 @@ import {
 import { remapSessionIds, getMaxPaneIdNumber, setPaneIdCounter, closePane, getVisibleSessionIds, findPaneBySessionId } from "./lib/paneLayout";
 import type { PaneNode } from "./lib/paneLayout";
 import { initTaskDetector, destroyTaskDetector } from "./lib/taskDetector";
-import { checkForUpdates } from "./lib/updater";
+import { startUpdater } from "./lib/updater";
 import { log, initLogger } from "./lib/logger";
 import "@xterm/xterm/css/xterm.css";
 
@@ -1217,8 +1217,10 @@ export default function App() {
         }
       }
 
-      // Check for updates after workspace init (non-blocking)
-      checkForUpdates();
+      // Start the self-update loop after workspace init (non-blocking):
+      // checks now + every 6h; an available update surfaces as a status-bar
+      // chip and installs only on click (see lib/updater.ts).
+      startUpdater();
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

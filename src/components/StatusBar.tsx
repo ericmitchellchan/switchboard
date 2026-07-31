@@ -1,5 +1,6 @@
 import type { Session, AgentStatus } from "../types";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
+import { UpdateChip } from "./UpdateChip";
 
 interface StatusBarProps {
   sessions: Session[];
@@ -43,6 +44,7 @@ export function StatusBar({ sessions, taskCount, onToggleSidebar }: StatusBarPro
             </span>
           );
         })}
+        <UpdateChip />
       </div>
       <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
         <span>Ctrl+T new</span>
