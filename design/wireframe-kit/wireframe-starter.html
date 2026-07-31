@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Switchboard wireframes — starter</title>
+<style>
+/* ===== BEGIN kit css (Switchboard — generated from src/styles/global.css + statusConfig.ts, 2026-07-31) ===== */
+:root {
+  --bg-primary: #0C0C0E;
+  --bg-secondary: #0A0A0B;
+  --bg-elevated: #0F0F11;
+  --bg-active: #151518;
+  --border: #1E1E22;
+  --border-subtle: #27272A;
+  --text-primary: #E4E4E7;
+  --text-secondary: #A1A1AA;
+  --text-muted: #71717A;
+  --text-dim: #52525B;
+  --text-faint: #3F3F46;
+  --accent-purple: #A78BFA;
+  --accent-green: #34D399;
+  --accent-blue: #3B82F6;
+  --accent-blue-light: #60A5FA;
+  --accent-yellow: #F59E0B;
+  --accent-red: #EF4444;
+  --st-idle:#3F3F46; --st-running:#3B82F6; --st-waiting:#F59E0B;
+  --st-done:#10B981; --st-error:#EF4444; --st-exited:#52525B;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', 'SF Mono', Consolas, monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background:#18181B; color:var(--text-primary); font-family:var(--font-mono); padding:28px; }
+
+/* canvas scaffolding (not app chrome) */
+.row { margin-bottom: 40px; }
+.row-label { font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:12px; }
+.frames { display:flex; gap:28px; flex-wrap:wrap; align-items:flex-start; }
+.caption { font-size:10.5px; color:var(--text-dim); margin-top:8px; max-width:560px; line-height:1.5; }
+.legend { border:1px solid var(--border); background:var(--bg-elevated); padding:16px 18px; font-size:11px; color:var(--text-secondary); line-height:1.7; max-width:760px; }
+.legend b { color:var(--text-primary); }
+
+/* the app window */
+.window { width:1060px; height:640px; background:var(--bg-primary); border:1px solid var(--border-subtle); border-radius:8px; overflow:hidden; display:flex; flex-direction:column; box-shadow:0 8px 40px rgba(0,0,0,.5); }
+.window.narrow { width:720px; }
+
+/* tab bar — h44, bg #0A0A0B (TabBar.tsx:104-106) */
+.tabbar { height:44px; background:var(--bg-secondary); border-bottom:1px solid var(--border); display:flex; align-items:center; flex:none; }
+.tab { display:flex; align-items:center; gap:7px; padding:0 14px; height:100%; font-size:12.5px; color:var(--text-muted); border-right:1px solid var(--border); cursor:default; white-space:nowrap; }
+.tab.active { background:var(--bg-primary); color:var(--text-primary); box-shadow:inset 0 2px 0 var(--accent-purple); }
+.tab .badge-wait { font-size:10px; background:var(--accent-yellow); color:#0C0C0E; border-radius:4px; padding:1px 5px; font-weight:600; }
+.tab-plus { padding:0 12px; color:var(--text-dim); font-size:14px; }
+
+/* status dots (statusConfig.ts) */
+.dot { width:8px; height:8px; border-radius:50%; flex:none; position:relative; }
+.dot.idle{background:var(--st-idle)} .dot.running{background:var(--st-running)}
+.dot.waiting{background:var(--st-waiting)} .dot.done{background:var(--st-done)}
+.dot.error{background:var(--st-error)} .dot.exited{background:var(--st-exited)}
+.dot.pulse::after { content:''; position:absolute; inset:-3px; border-radius:50%; border:1.5px solid currentColor; opacity:.35; }
+.dot.running.pulse::after{color:var(--st-running)} .dot.waiting.pulse::after{color:var(--st-waiting)}
+
+/* main area */
+.main { flex:1; display:flex; min-height:0; }
+
+/* NEW: left side menu (workstation feature) — composes tokens, 218px */
+.sidemenu { width:218px; background:var(--bg-secondary); border-right:1px solid var(--border); display:flex; flex-direction:column; font-size:11.5px; flex:none; }
+.sm-section { padding:10px 12px 4px; color:var(--text-dim); font-size:9.5px; text-transform:uppercase; letter-spacing:1px; }
+.sm-item { display:flex; align-items:center; gap:8px; padding:5px 12px; color:var(--text-secondary); cursor:default; }
+.sm-item.active { background:var(--bg-active); color:var(--text-primary); box-shadow:inset 2px 0 0 var(--accent-purple); }
+.sm-item .meta { margin-left:auto; font-size:9.5px; color:var(--text-dim); }
+.sm-item .chip { margin-left:auto; font-size:9px; border:1px solid var(--border-subtle); border-radius:4px; padding:0 5px; color:var(--text-muted); }
+.sm-item .chip.revive { color:var(--accent-green); border-color:var(--accent-green); }
+
+/* terminal pane placeholder */
+.term { flex:1; background:var(--bg-primary); padding:12px 14px; font-size:11.5px; color:var(--text-secondary); line-height:1.6; overflow:hidden; }
+.term .p { color:var(--accent-green); }
+.term .cmd { color:var(--text-primary); }
+.term .out { color:var(--text-muted); }
+
+/* content pane (KB / explorer views) */
+.content { flex:1; display:flex; flex-direction:column; min-width:0; background:var(--bg-primary); }
+.content-head { height:36px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px; padding:0 14px; font-size:11.5px; color:var(--text-secondary); flex:none; }
+.content-body { flex:1; overflow:hidden; padding:18px 22px; font-size:12px; line-height:1.7; color:var(--text-secondary); }
+.doc h1 { font-size:15px; color:var(--text-primary); margin-bottom:10px; }
+.doc h2 { font-size:12.5px; color:var(--text-primary); margin:14px 0 6px; }
+.doc p { margin-bottom:8px; }
+.doc code { background:var(--bg-active); border:1px solid var(--border); border-radius:3px; padding:0 4px; font-size:11px; }
+
+/* pin rail + note */
+.pin { font-size:10px; color:var(--accent-purple); border:1px solid var(--accent-purple); border-radius:4px; padding:1px 6px; }
+.note { border:1px solid var(--border-subtle); border-left:2px solid var(--accent-purple); background:var(--bg-elevated); padding:8px 10px; font-size:11px; color:var(--text-secondary); }
+
+/* status bar — h26, font 10 (StatusBar.tsx:25-31) */
+.statusbar { height:26px; background:var(--bg-secondary); border-top:1px solid var(--border); display:flex; align-items:center; gap:14px; padding:0 12px; font-size:10px; color:var(--text-muted); flex:none; }
+.statusbar .count { background:var(--accent-purple); color:#0C0C0E; font-size:9px; border-radius:3px; padding:0 4px; font-weight:600; }
+.statusbar .right { margin-left:auto; display:flex; gap:14px; }
+/* ===== END kit css ===== */
+</style>
+</head>
+<body>
+
+<div class="row">
+  <div class="row-label">Starter — copy this file into the feature's wireframes/ folder</div>
+  <div class="frames">
+    <div>
+      <div class="window narrow" style="height:420px">
+        <div class="tabbar">
+          <div class="tab active"><span class="dot running pulse"></span>lodestar</div>
+          <div class="tab"><span class="dot waiting pulse"></span>orbit <span class="badge-wait">!</span></div>
+          <div class="tab"><span class="dot done"></span>kb</div>
+          <div class="tab-plus">+</div>
+        </div>
+        <div class="main">
+          <div class="term">
+            <div><span class="p">➜</span> <span class="cmd">claude</span></div>
+            <div class="out">Working on desk dashboards…</div>
+          </div>
+        </div>
+        <div class="statusbar">
+          <span>SESSIONS <span class="count">3</span></span>
+          <span>TASKS <span class="count">2</span></span>
+          <span class="right"><span>v0.4.1</span></span>
+        </div>
+      </div>
+      <div class="caption">Baseline chrome: 44px tab bar, terminal center, 26px status bar. All measurements and colors from code (see design-state.md).</div>
+    </div>
+  </div>
+</div>
+
+<div class="legend">
+  <b>Kit rules</b><br>
+  · JetBrains Mono only; hierarchy via size/weight/zinc ramp.<br>
+  · Status colors from statusConfig.ts — never decorative.<br>
+  · Compose new surfaces from these classes + CSS vars; no new colors or fonts.<br>
+  · One labeled row per scenario, caption under every frame, build-notes legend at the end.
+</div>
+
+</body>
+</html>
