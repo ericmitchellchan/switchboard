@@ -139,11 +139,6 @@ export async function kbWriteDoc(relPath: string, content: string): Promise<void
   return invoke("kb_write_doc", { relPath, content });
 }
 
-/** Absolute KB root path (display form, verbatim prefix stripped). */
-export async function kbRoot(): Promise<string> {
-  return invoke("kb_root");
-}
-
 // ── Explorer (T9) ────────────────────────────────────────────────────────────
 // Registry-driven repo browsing. The browsable roots come from
 // <kb_root>/registry.json server-side; every call addresses a repo by PROJECT

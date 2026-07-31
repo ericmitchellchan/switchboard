@@ -7,13 +7,14 @@
 // never touches the main bundle. First DiagramView mount pays the load; every
 // later render reuses the initialized instance.
 //
-// TRUST ASSUMPTION (securityLevel "loose", matching the sibling app): our
-// `.mmd` files are SELF-AUTHORED KB content in the personal-kb checkout —
-// the same trust class as the wireframes T7 renders with scripts enabled.
-// "loose" keeps classDef styling and click/href definitions working;
-// `theme: "base"` lets a diagram's own classDef token block survive instead
-// of being overridden by a built-in theme. Revisit both if the KB ever holds
-// third-party diagrams.
+// SECURITY (securityLevel "strict"): disk content is untrusted by policy —
+// the same policy language as DocView's SAFETY block: a diagram must never
+// be able to script or navigate the privileged webview. "strict" makes
+// mermaid HTML-encode labels and ignore click/href interaction definitions;
+// our `.mmd` convention (kyde-diagram style) styles with classDef, not click
+// handlers, and strict keeps classDef styling working. `theme: "base"` lets
+// a diagram's own classDef token block survive instead of being overridden
+// by a built-in theme.
 //
 // Render lifecycle: mermaid.render is async and content swaps arrive on the
 // KB poll, so every render call takes a monotonic `renderSeq` ticket (also
@@ -48,8 +49,8 @@ function loadMermaid(): Promise<MermaidApi> {
   if (!mermaidPromise) {
     mermaidPromise = import("mermaid").then((mod) => {
       const mermaid = mod.default;
-      // securityLevel/theme rationale: TRUST ASSUMPTION block in the header.
-      mermaid.initialize({ startOnLoad: false, securityLevel: "loose", theme: "base" });
+      // securityLevel/theme rationale: SECURITY block in the header.
+      mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "base" });
       return mermaid;
     });
   }

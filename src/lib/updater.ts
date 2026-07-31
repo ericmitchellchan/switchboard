@@ -19,6 +19,17 @@ import {
 
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
 
+// Pre-relaunch flush: relaunch() restarts the process without a reliable
+// beforeunload delivery, so App registers the same save path its
+// beforeunload handler uses (workspace blob + scrollbacks + threads) and
+// installUpdate AWAITS it before relaunching — an accepted update must never
+// cost the workspace its last 30s of state.
+let preRelaunchFlush: (() => Promise<void>) | null = null;
+
+export function registerPreRelaunchFlush(fn: (() => Promise<void>) | null): void {
+  preRelaunchFlush = fn;
+}
+
 let state: UpdaterUiState = initialUpdaterState;
 let pendingUpdate: Update | null = null;
 let started = false;
@@ -101,7 +112,13 @@ export async function installUpdate(): Promise<void> {
           break;
       }
     });
-    log.info("Update installed, relaunching");
+    log.info("Update installed, flushing state before relaunch");
+    try {
+      await preRelaunchFlush?.();
+    } catch (e) {
+      // Flush is best-effort — a save failure must not strand the update.
+      log.warn(`Pre-relaunch flush failed: ${e}`);
+    }
     await relaunch();
   } catch (e) {
     log.warn(`Update install failed: ${e}`);

@@ -175,10 +175,23 @@ fn write_doc_at(root: &Path, rel_path: &str, content: &str) -> Result<(), String
     // Parent dirs are created as needed (pins sidecars land in nested feature
     // folders). Layer 1 already proved the joined path cannot step outside the
     // root, so create_dir_all cannot either; the canonical re-check afterwards
-    // closes the pre-existing-symlink case.
+    // closes the pre-existing-symlink case for DIRECTORIES on the path (a
+    // symlinked/junctioned parent canonicalizes outside the root and is
+    // rejected). It does NOT vouch for the FINAL component: fs::write
+    // creates/truncates it without canonicalizing, so a pre-existing symlink
+    // FILE at the target would silently redirect the write outside the root —
+    // hence the explicit symlink_metadata reject below.
     fs::create_dir_all(parent).map_err(|e| format!("cannot create dirs for {:?}: {}", rel_path, e))?;
     let canon_parent = canonicalize_within(root, parent)?;
-    fs::write(canon_parent.join(file_name), content.as_bytes())
+    let final_path = canon_parent.join(&file_name);
+    if let Ok(meta) = fs::symlink_metadata(&final_path) {
+        // is_symlink() covers Windows symlink files/dirs AND junction reparse
+        // points; a directory at the target would fail fs::write anyway.
+        if meta.file_type().is_symlink() {
+            return Err(format!("refusing to write through symlink {:?}", rel_path));
+        }
+    }
+    fs::write(&final_path, content.as_bytes())
         .map_err(|e| format!("cannot write {:?}: {}", rel_path, e))
 }
 
@@ -307,6 +320,85 @@ mod kb_tests {
             fs::read_to_string(root.join("proj/nested/deep/pins.json")).unwrap(),
             "[]"
         );
+    }
+
+    /// A pre-existing symlink FILE inside the root pointing outside it must be
+    /// rejected before fs::write (parent canonicalization can't see it).
+    ///
+    /// HONESTY: creating file symlinks on Windows needs SeCreateSymbolicLink
+    /// (developer mode / admin). When the runner lacks it, this test exercises
+    /// only the reparse-DETECTION predicate the guard relies on (a junction —
+    /// creatable without privilege — must register as is_symlink) and says so,
+    /// instead of green-washing the redirect case it couldn't set up.
+    #[test]
+    fn write_rejects_pre_existing_symlink_file_target() {
+        let root = temp_root("write-symlink-file");
+        let outside = std::env::temp_dir()
+            .join(format!("switchboard-kb-outside-{}.md", std::process::id()));
+        fs::write(&outside, "outside-original").unwrap();
+        let link = root.join("link.md");
+
+        #[cfg(windows)]
+        let link_created = std::os::windows::fs::symlink_file(&outside, &link).is_ok();
+        #[cfg(unix)]
+        let link_created = std::os::unix::fs::symlink(&outside, &link).is_ok();
+
+        if link_created {
+            let err = write_doc_at(&root, "link.md", "redirected!").unwrap_err();
+            assert!(err.contains("symlink"), "unexpected error: {}", err);
+            // The redirect target must be untouched.
+            assert_eq!(fs::read_to_string(&outside).unwrap(), "outside-original");
+        } else {
+            eprintln!(
+                "symlink_file unavailable (no dev-mode privilege) — asserting \
+                 reparse detection via junction instead"
+            );
+            let target_dir = temp_root("write-symlink-file-jtarget");
+            let junction = root.join("jdir");
+            if !make_junction(&junction, &target_dir) {
+                eprintln!("junction creation failed too — skipping");
+                return;
+            }
+            // The guard's predicate: a reparse point must read as is_symlink.
+            assert!(fs::symlink_metadata(&junction).unwrap().file_type().is_symlink());
+        }
+        let _ = fs::remove_file(&outside);
+    }
+
+    /// Junction (dir reparse point) escape through the PARENT: writing to
+    /// `jdir/evil.md` where `jdir` junctions outside the root must be caught
+    /// by the parent canonical containment check. Junctions need no privilege,
+    /// so this dir-case runs everywhere on Windows.
+    #[cfg(windows)]
+    #[test]
+    fn write_rejects_junctioned_parent_dir_escape() {
+        let root = temp_root("write-junction");
+        let outside_dir = temp_root("write-junction-outside");
+        let junction = root.join("jdir");
+        if !make_junction(&junction, &outside_dir) {
+            eprintln!("junction creation failed — skipping");
+            return;
+        }
+        let err = write_doc_at(&root, "jdir/evil.md", "escape").unwrap_err();
+        assert!(err.contains("escapes KB root"), "unexpected error: {}", err);
+        assert!(!outside_dir.join("evil.md").exists());
+    }
+
+    /// Create an NTFS junction (no privilege required). Returns false if the
+    /// tool or filesystem refuses.
+    #[cfg(windows)]
+    fn make_junction(link: &Path, target: &Path) -> bool {
+        // cmd's mklink rejects `\\?\` verbatim forms — strip for the shell.
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J", &display_path(link), &display_path(target)])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(windows))]
+    fn make_junction(_link: &Path, _target: &Path) -> bool {
+        false
     }
 
     // ── List filtering ──

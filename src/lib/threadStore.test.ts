@@ -400,6 +400,19 @@ describe("revive in-flight gate", () => {
     endRevive("t1");
     expect(tryBeginRevive("t1")).toBe(true);
   });
+
+  it("create→revive interleaving: a click during the create window bails", () => {
+    // handleCreateThread takes the gate synchronously after minting the
+    // record, BEFORE its first await — the row is already rendered but
+    // unbound, so a click routes openThread → revive; that revive must see
+    // the gate held and bail instead of launching a second shell on the
+    // same chatSessionId.
+    expect(tryBeginRevive("new-thread")).toBe(true); // create path takes it
+    expect(tryBeginRevive("new-thread")).toBe(false); // mid-create click bails
+    endRevive("new-thread"); // create's finally
+    expect(tryBeginRevive("new-thread")).toBe(true); // later real revive proceeds
+    endRevive("new-thread");
+  });
 });
 
 // ─── Shell-ready wait (generation-filtered) ──────────────────────────────────

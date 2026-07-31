@@ -66,7 +66,7 @@ import {
 import { remapSessionIds, getMaxPaneIdNumber, setPaneIdCounter, closePane, getVisibleSessionIds, findPaneBySessionId } from "./lib/paneLayout";
 import type { PaneNode } from "./lib/paneLayout";
 import { initTaskDetector, destroyTaskDetector } from "./lib/taskDetector";
-import { startUpdater } from "./lib/updater";
+import { startUpdater, registerPreRelaunchFlush } from "./lib/updater";
 import { log, initLogger } from "./lib/logger";
 import "@xterm/xterm/css/xterm.css";
 
@@ -623,6 +623,14 @@ export default function App() {
       setNewThreadDialogOpen(false);
       const finalTitle = title || defaultThreadTitle(repoName);
       const thread = createThreadRecord({ title: finalTitle, workingDir });
+      // Same re-entrancy gate as handleReviveThread, taken SYNCHRONOUSLY
+      // before the first await: the row renders as soon as the record exists,
+      // but sessionId stays null until the create below resolves — clicking
+      // it in that window would route openThread → revive → tryBeginRevive
+      // succeeds → a SECOND shell on the same chatSessionId. Holding the gate
+      // through the create makes that click bail. (Always true for a fresh
+      // uuid; the check keeps the invariant explicit.) Released in finally.
+      if (!tryBeginRevive(thread.id)) return;
       log.info(`Create thread id=${thread.id} chatSessionId=${thread.chatSessionId} dir=${workingDir}`);
       try {
         const info = await doCreateSession(finalTitle, repoName, workingDir, repoColor, group);
@@ -637,6 +645,8 @@ export default function App() {
         void launchClaudeInSession(info.id, thread.id);
       } catch (err) {
         log.error(`Failed to create thread session: ${err}`);
+      } finally {
+        endRevive(thread.id);
       }
     },
     [doCreateSession, paneLayout, launchClaudeInSession]
@@ -851,8 +861,12 @@ export default function App() {
       // strictly after the snapshot in PiP's event queue.
       isReady = true;
     });
-    const unlistenPty = await onSessionOutput(sessionId, (b64data: string) => {
+    const unlistenPty = await onSessionOutput(sessionId, (b64data: string, gen: number) => {
       if (!isReady) return; // pre-snapshot chunks are already in the snapshot
+      // Mirror the registry's stale-generation drop: after an in-place
+      // restart, the dying old reader's chunks are filtered from main's
+      // terminal — PiP must not render bytes main never shows.
+      if (gen !== getSessionGeneration(sessionId)) return;
       void sendPipOutput(sessionId, { type: "pty", data: b64data }).catch((e) =>
         log.warn(`PiP pty forward failed: ${e}`)
       );
@@ -1295,6 +1309,32 @@ export default function App() {
       saveThreadsToDisk().catch(() => {});
     };
 
+    // Updater pre-relaunch flush (review gate): relaunch() restarts the
+    // process without reliable beforeunload delivery, so the installer
+    // AWAITS this — the same saves as handleBeforeUnload, but with the disk
+    // writes (scrollbacks, threads) awaited instead of fire-and-forget.
+    registerPreRelaunchFlush(async () => {
+      const state = {
+        sessions: sessionsRef2.current,
+        activeSessionId: activeIdRef2.current,
+        paneLayout: paneLayoutRef.current.root,
+        focusedPaneId: paneLayoutRef.current.focusedPaneId,
+        sessionCounter: sessionCounterRef.current,
+      };
+      if (state.sessions.length > 0) {
+        const workspace = buildSavedWorkspace(
+          state.sessions,
+          state.activeSessionId,
+          state.paneLayout,
+          state.focusedPaneId,
+          state.sessionCounter
+        );
+        saveWorkspaceToStorage(workspace);
+        await saveAllScrollbacks(state.sessions);
+      }
+      await saveThreadsToDisk();
+    });
+
     const recoverFromWake = () => {
       // Clear corrupt texture atlases (cheap, safe)
       clearAllTextureAtlases();
@@ -1368,6 +1408,7 @@ export default function App() {
     return () => {
       stopPeriodicSave();
       clearInterval(heartbeatTimer);
+      registerPreRelaunchFlush(null);
       window.removeEventListener("beforeunload", handleBeforeUnload);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       unlistenSuspend.then((fn) => fn());

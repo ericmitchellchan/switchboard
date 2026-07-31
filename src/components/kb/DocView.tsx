@@ -10,16 +10,28 @@
 //     → rehype-slug → rehype-autolink-headings({behavior:"wrap"})
 //     → rehype-stringify
 //
-// SAFETY: the rendered HTML is injected via dangerouslySetInnerHTML. That is
-// safe here because `allowDangerousHtml: false` makes remark-rehype DROP raw
-// HTML nodes from the markdown instead of passing them through — disk content
-// (untrusted by policy) can only ever become text/markdown-shaped markup, and
-// nothing in the pipeline reintroduces raw HTML. If the pipeline ever
-// changes, this invariant must be re-established before keeping the
-// innerHTML injection.
+// SAFETY: the rendered HTML is injected via dangerouslySetInnerHTML. Two
+// distinct guarantees hold, and only these:
+//   1. No raw-HTML/script injection: `allowDangerousHtml: false` makes
+//      remark-rehype DROP raw HTML nodes from the markdown — disk content
+//      (untrusted by policy; the Explorer renders THIRD-PARTY repo READMEs
+//      through this same pipeline via MarkdownDoc) can only ever become
+//      text/markdown-shaped markup, and nothing in the pipeline
+//      reintroduces raw HTML.
+//   2. Navigation containment: the pipeline does NOT sanitize link hrefs —
+//      `[x](javascript:…)` still renders as an anchor carrying that href —
+//      so MarkdownBody intercepts activation with a delegated click/auxclick
+//      handler: in-page `#` anchors keep their default jump, `http(s)`
+//      links open in the SYSTEM browser via the shell plugin, and every
+//      other href (javascript:, file:, data:, vbscript:, relative paths,
+//      unknown schemes) is blocked. The privileged webview itself never
+//      navigates from a doc link.
+// If the pipeline or the handler changes, BOTH invariants must be
+// re-established before keeping the innerHTML injection.
 
-import { useEffect, useRef, useState } from "react";
-import type { CSSProperties, ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from "react";
+import { open } from "@tauri-apps/plugin-shell";
 import { unified } from "unified";
 import remarkParse from "remark-parse";
 import remarkGfm from "remark-gfm";
@@ -28,6 +40,7 @@ import rehypeSlug from "rehype-slug";
 import rehypeAutolinkHeadings from "rehype-autolink-headings";
 import rehypeStringify from "rehype-stringify";
 import { docKind, useKbDoc } from "../../lib/kb";
+import { log } from "../../lib/logger";
 import { WireframeView } from "./WireframeView";
 import { DiagramView } from "./DiagramView";
 
@@ -176,8 +189,40 @@ function MarkdownBody({ content }: { content: string }) {
       });
   }, [content]);
 
-  // Safe: allowDangerousHtml:false upstream — see module header.
-  return <div className="kb-doc" dangerouslySetInnerHTML={{ __html: html }} />;
+  // Delegated link policy (SAFETY invariant 2, module header): the pipeline
+  // drops raw HTML but does NOT sanitize hrefs, and this div renders
+  // untrusted markdown (KB docs + third-party repo READMEs via the
+  // Explorer). `#` anchors keep their in-page default; http(s) opens in the
+  // system browser; everything else is blocked. Wired to click AND auxclick
+  // so a middle-click can't slip a navigation past the policy.
+  const handleLinkActivation = useCallback(
+    (e: ReactMouseEvent<HTMLDivElement>) => {
+      const anchor = (e.target as HTMLElement | null)?.closest?.("a");
+      if (!anchor) return;
+      const href = anchor.getAttribute("href") ?? "";
+      if (href.startsWith("#")) return; // in-page heading anchor (rehype-slug)
+      e.preventDefault();
+      if (e.type !== "click") return; // aux/middle activation never navigates
+      if (/^https?:\/\//i.test(href)) {
+        // System browser via tauri-plugin-shell — the webview never follows.
+        open(href).catch((err) => log.warn(`Failed to open link ${href}: ${err}`));
+      }
+      // Every other href (javascript:, file:, data:, vbscript:, relative,
+      // unknown schemes) is intentionally dropped.
+    },
+    []
+  );
+
+  // Safe: allowDangerousHtml:false upstream + the activation policy above —
+  // see the module header's SAFETY block.
+  return (
+    <div
+      className="kb-doc"
+      onClick={handleLinkActivation}
+      onAuxClick={handleLinkActivation}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
 }
 
 /** Kinds without a renderer yet — extension seam for later tasks (code,
