@@ -181,35 +181,58 @@ impl PtyManager {
 const OUTPUT_FLUSH_MS: u64 = 8;
 
 fn read_pty_output(mut reader: Box<dyn Read + Send>, session_id: String, app_handle: AppHandle) {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Condvar;
+
+    // Reader/flusher shared state, guarded by one mutex so the Condvar has a
+    // race-free predicate (pending non-empty, or done).
+    struct Shared {
+        pending: Vec<u8>,
+        done: bool,
+    }
 
     let mut buf = [0u8; 4096];
     let output_event = format!("session:output:{}", session_id);
     let exited_event = format!("session:exited:{}", session_id);
 
     // Coalesce output before it crosses the IPC bridge. The reader appends every
-    // read into `pending`; a flusher thread drains it on a short cadence and
-    // emits one base64 event per batch. Single producer + single consumer
-    // draining in order preserves byte order exactly; `done` + the join below
-    // guarantee the `exited` event lands strictly after the final output batch.
-    let pending: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let done = Arc::new(AtomicBool::new(false));
+    // read into `pending`; a flusher thread drains it and emits one base64 event
+    // per batch. Single producer + single consumer draining in order preserves
+    // byte order exactly; `done` + the join below guarantee the `exited` event
+    // lands strictly after the final output batch. The flusher parks on the
+    // Condvar while idle — the 8 ms cadence only runs while data is flowing, so
+    // idle sessions cost zero wakeups.
+    let sync: Arc<(Mutex<Shared>, Condvar)> = Arc::new((
+        Mutex::new(Shared {
+            pending: Vec::new(),
+            done: false,
+        }),
+        Condvar::new(),
+    ));
 
     let flusher = {
-        let pending = pending.clone();
-        let done = done.clone();
+        let sync = sync.clone();
         let handle = app_handle.clone();
         std::thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_millis(OUTPUT_FLUSH_MS));
-            let batch = match pending.lock() {
-                Ok(mut p) if !p.is_empty() => std::mem::take(&mut *p),
-                _ => {
-                    // Nothing to flush — exit once the reader has signalled EOF.
-                    if done.load(Ordering::Acquire) {
-                        break;
-                    }
-                    continue;
+            // Park until data arrives or the reader signals EOF. A poisoned
+            // lock means a panicked peer — recover the guard and carry on.
+            {
+                let (lock, cvar) = &*sync;
+                let mut st = lock.lock().unwrap_or_else(|e| e.into_inner());
+                while st.pending.is_empty() && !st.done {
+                    st = cvar.wait(st).unwrap_or_else(|e| e.into_inner());
                 }
+                // Drained empty AND done — nothing left to flush, ever.
+                if st.pending.is_empty() {
+                    break;
+                }
+            }
+            // Data is flowing — sleep one flush interval (lock released) so a
+            // burst of reads coalesces into a single batch.
+            std::thread::sleep(std::time::Duration::from_millis(OUTPUT_FLUSH_MS));
+            let batch = {
+                let (lock, _) = &*sync;
+                let mut st = lock.lock().unwrap_or_else(|e| e.into_inner());
+                std::mem::take(&mut st.pending)
             };
             let _ = handle.emit(&output_event, BASE64.encode(&batch));
         })
@@ -223,9 +246,10 @@ fn read_pty_output(mut reader: Box<dyn Read + Send>, session_id: String, app_han
                 break;
             }
             Ok(n) => {
-                if let Ok(mut p) = pending.lock() {
-                    p.extend_from_slice(&buf[..n]);
-                }
+                let (lock, cvar) = &*sync;
+                let mut st = lock.lock().unwrap_or_else(|e| e.into_inner());
+                st.pending.extend_from_slice(&buf[..n]);
+                cvar.notify_one();
             }
             Err(e) => {
                 log::error!("PTY read error for session id={}: {}", session_id, e);
@@ -234,9 +258,13 @@ fn read_pty_output(mut reader: Box<dyn Read + Send>, session_id: String, app_han
         }
     }
 
-    // EOF (or read error): let the flusher drain whatever's left, then join so
-    // the exited event is emitted only after the last output batch has gone out.
-    done.store(true, Ordering::Release);
+    // EOF (or read error): wake the flusher to drain whatever's left, then join
+    // so the exited event is emitted only after the last output batch went out.
+    {
+        let (lock, cvar) = &*sync;
+        lock.lock().unwrap_or_else(|e| e.into_inner()).done = true;
+        cvar.notify_one();
+    }
     let _ = flusher.join();
     let _ = app_handle.emit(&exited_event, ());
 }

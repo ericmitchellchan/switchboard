@@ -37,10 +37,15 @@ impl PtySession {
         // Code keys folder-trust by the EXACT path string in ~/.claude.json, so
         // the verbatim form is a DIFFERENT key than the user's trusted
         // normal-path entries — trust never sticks and the dialog re-fires on
-        // every launch. Normalized paths match.
-        let working_dir = match working_dir.strip_prefix(r"\\?\") {
-            Some(stripped) => stripped.to_string(),
-            None => working_dir,
+        // every launch. Normalized paths match. Network paths use the verbatim
+        // form `\\?\UNC\server\share`, which maps back to `\\server\share` —
+        // a bare strip would leave the invalid `UNC\server\share`.
+        let working_dir = if let Some(unc) = working_dir.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{}", unc)
+        } else if let Some(stripped) = working_dir.strip_prefix(r"\\?\") {
+            stripped.to_string()
+        } else {
+            working_dir
         };
 
         log::info!("Spawning PTY shell={:?} working_dir={:?} cols={} rows={}", shell, working_dir, cols, rows);
