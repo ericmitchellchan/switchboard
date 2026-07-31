@@ -3,6 +3,12 @@
 Append dated one-liners when Eric states a rule or corrects a mock. Delete entries
 that stop being true.
 
+- 2026-07-31 — SOFTER PALETTE (Eric, on the workstation shell mock): base is black /
+  white / zinc like Ky — color is reserved for FUNCTIONAL status only (statusConfig
+  dots, waiting badge). Brand purple is demoted: active indicators, pins, counters,
+  and chips use white/zinc emphasis, not color. Applies to all new-surface mocks;
+  the app's existing purple chrome (#A78BFA tab underline, StatusBar badges) migrates
+  to match when the workstation ships.
 - 2026-07-31 — Everything is JetBrains Mono. No second typeface, ever; hierarchy comes
   from size (9-13px range), weight (400-700), and the zinc text ramp.
 - 2026-07-31 — True-dark zinc palette only (#0A-#15 backgrounds). No blue-tinted darks,
