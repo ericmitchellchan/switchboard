@@ -1,4 +1,5 @@
 mod config;
+mod kb;
 mod power;
 mod pty;
 
@@ -596,6 +597,10 @@ pub fn run() {
             clear_scrollback,
             clear_session_scrollback,
             get_home_dir,
+            kb::kb_root,
+            kb::kb_list_docs,
+            kb::kb_read_doc,
+            kb::kb_write_doc,
             write_file,
             confirm_app_close,
             open_pip_window,

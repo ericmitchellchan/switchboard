@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, lazy, Suspense, Component } from "react";
+import { useCallback, useEffect, useRef, useState, lazy, Suspense, Component, Fragment } from "react";
 import type { ReactNode } from "react";
 import type { AgentStatus, RepoConfig, Route, ScreenId } from "./types";
 import { TabBar } from "./components/TabBar";
@@ -49,6 +49,9 @@ import {
   endRevive,
 } from "./lib/threadStore";
 import { NewThreadDialog } from "./components/NewThreadDialog";
+import { KbTree } from "./components/kb/KbTree";
+import { DocView } from "./components/kb/DocView";
+import { useKbDocList } from "./lib/kb";
 import type { Session, Thread } from "./types";
 import { enqueueFit } from "./lib/fitQueue";
 import { useRoute, navigate, readRouteFromUrl, getNavState } from "./lib/route";
@@ -160,6 +163,20 @@ export default function App() {
   const activatedScreensRef = useRef<Set<ScreenId>>(new Set(["terminal"]));
   if (isKeepAliveScreen(route.screen)) activatedScreensRef.current.add(route.screen);
   const activatedScreens = activatedScreensRef.current;
+
+  // T6: the kb screen's open doc. Route-driven while kb is active; while
+  // hidden (keep-alive display:none) the last kb route keeps the prop STABLE
+  // so the mounted screen doesn't unmount its DocView mid-hide (which would
+  // drop scroll position and force a re-read on return). getNavState() is
+  // safe to read during render — useRoute() already subscribes App to the
+  // same store, and lastByScreen only changes on navigation.
+  const lastKbRoute = getNavState().lastByScreen.kb;
+  const kbDoc =
+    route.screen === "kb"
+      ? route.doc
+      : lastKbRoute?.screen === "kb"
+        ? lastKbRoute.doc
+        : undefined;
 
   // Defensive: resync the store if something external mutates history. NOTE
   // writeRouteToUrl only ever replaceState's — no history entries are pushed,
@@ -1520,7 +1537,7 @@ export default function App() {
             }}
           >
             <ScreenErrorBoundary resetKey="kb">
-              <KnowledgeBaseScreen />
+              <KnowledgeBaseScreen active={route.screen === "kb"} doc={kbDoc} />
             </ScreenErrorBoundary>
           </div>
         )}
@@ -1716,13 +1733,84 @@ function PlaceholderScreen({ title, hint }: { title: string; hint: string }) {
   );
 }
 
-function KnowledgeBaseScreen() {
+/** T6-REGISTRATION (filled): the Knowledge Base screen — breadcrumb header +
+ *  doc tree rail + reading view over the personal-kb checkout. `active` comes
+ *  from the route (App owns it) so the data layer pauses its 2.5s doc poll
+ *  while this keep-alive screen is hidden; the doc LIST refreshes on
+ *  re-activation instead (src/lib/kb.ts). Clicking a doc navigates with the
+ *  `doc` param, so deep links and lastByScreen restoration come for free. */
+function KnowledgeBaseScreen({ active, doc }: { active: boolean; doc: string | undefined }) {
+  const { docs, error } = useKbDocList(active);
+  const crumbs = doc ? doc.split("/") : [];
   return (
-    <>
-      {/* T6-REGISTRATION: the real Knowledge Base screen (personal-kb doc
-          tree + reader) replaces this placeholder panel wholesale in T6. */}
-      <PlaceholderScreen title="Knowledge Base" hint="personal-kb docs will render here" />
-    </>
+    <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      {/* Breadcrumb header per wireframe row 2: 36px, `kb / <project> / … / file.md` —
+          project emphasized, intermediate segments dim, file name bright. */}
+      <div
+        style={{
+          height: 36,
+          flex: "none",
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          padding: "0 14px",
+          borderBottom: "1px solid var(--border)",
+          fontFamily: "var(--font-mono)",
+          fontSize: 11.5,
+          color: "var(--text-dim)",
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+        }}
+      >
+        <span>kb</span>
+        {crumbs.map((seg, i) => (
+          <Fragment key={`${i}-${seg}`}>
+            <span>/</span>
+            <span
+              style={{
+                color:
+                  i === crumbs.length - 1
+                    ? "var(--text-primary)"
+                    : i === 0
+                      ? "var(--text-secondary)"
+                      : "var(--text-dim)",
+                fontWeight: i === 0 ? 600 : 400,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {seg}
+            </span>
+          </Fragment>
+        ))}
+        {crumbs.length === 0 && <span>/</span>}
+      </div>
+      <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+        <KbTree
+          docs={docs}
+          error={error}
+          activeDoc={doc}
+          onSelect={(p) => navigate({ screen: "kb", doc: p })}
+        />
+        {doc ? (
+          <DocView path={doc} active={active} />
+        ) : (
+          <div
+            style={{
+              flex: 1,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontFamily: "var(--font-mono)",
+              fontSize: 11,
+              color: "var(--text-dim)",
+            }}
+          >
+            select a doc from the tree
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 

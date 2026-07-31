@@ -117,6 +117,33 @@ export async function claudeSessionExists(
   return invoke("claude_session_exists", { workingDir, sessionId });
 }
 
+// ── Knowledge Base (T6) ──────────────────────────────────────────────────────
+// All KB commands are rooted at the personal-kb checkout (env
+// SWITCHBOARD_KB_PATH → config kb_path → built-in default) and traversal-
+// guarded in Rust: relative paths only, `..`/absolute/drive/verbatim forms
+// rejected, canonical containment enforced. See src-tauri/src/kb.rs.
+
+/** Flat recursive doc listing — relative paths, forward-slash normalized,
+ *  sorted. `.`/`_`-prefixed dirs and node_modules are skipped server-side. */
+export async function kbListDocs(): Promise<string[]> {
+  return invoke("kb_list_docs");
+}
+
+export async function kbReadDoc(relPath: string): Promise<string> {
+  return invoke("kb_read_doc", { relPath });
+}
+
+/** Write a doc (parent dirs created). Exists now for the T7 pins sidecars —
+ *  guarded now so it never ships unguarded. */
+export async function kbWriteDoc(relPath: string, content: string): Promise<void> {
+  return invoke("kb_write_doc", { relPath, content });
+}
+
+/** Absolute KB root path (display form, verbatim prefix stripped). */
+export async function kbRoot(): Promise<string> {
+  return invoke("kb_root");
+}
+
 export async function writeFile(path: string, content: string): Promise<void> {
   return invoke("write_file", { path, content });
 }
