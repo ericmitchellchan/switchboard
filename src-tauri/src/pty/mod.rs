@@ -46,10 +46,12 @@ impl PtyManager {
 
         log::info!("Session created id={}, spawning reader thread", id);
 
-        // Spawn background reader thread
+        // Spawn background reader on a plain OS thread — NOT tokio::spawn_blocking,
+        // which panics outside a Tokio runtime context and would abort the whole
+        // app if this is ever called from a sync path.
         let session_id = id.clone();
         let handle = app_handle.clone();
-        tokio::task::spawn_blocking(move || {
+        std::thread::spawn(move || {
             read_pty_output(reader, session_id, handle);
         });
 
@@ -93,9 +95,10 @@ impl PtyManager {
 
         log::info!("Session restarted id={}, spawning reader thread", id);
 
+        // Plain OS thread — see the note in create_session.
         let session_id = id.clone();
         let handle = app_handle.clone();
-        tokio::task::spawn_blocking(move || {
+        std::thread::spawn(move || {
             read_pty_output(reader, session_id, handle);
         });
 
@@ -169,30 +172,73 @@ impl PtyManager {
     }
 }
 
+/// Flush cadence for coalesced PTY output. Fast producers (builds, agent TUIs)
+/// write in bursts of many small chunks; at one Tauri event per 4 KB read that
+/// floods the webview's single UI thread (hundreds of events/sec) and makes the
+/// terminal feel sluggish. Accumulating reads and flushing every ~8 ms turns a
+/// burst into a handful of larger events — imperceptible added latency, far
+/// less UI-thread churn. xterm absorbs large writes cheaply.
+const OUTPUT_FLUSH_MS: u64 = 8;
+
 fn read_pty_output(mut reader: Box<dyn Read + Send>, session_id: String, app_handle: AppHandle) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     let mut buf = [0u8; 4096];
     let output_event = format!("session:output:{}", session_id);
     let exited_event = format!("session:exited:{}", session_id);
+
+    // Coalesce output before it crosses the IPC bridge. The reader appends every
+    // read into `pending`; a flusher thread drains it on a short cadence and
+    // emits one base64 event per batch. Single producer + single consumer
+    // draining in order preserves byte order exactly; `done` + the join below
+    // guarantee the `exited` event lands strictly after the final output batch.
+    let pending: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let done = Arc::new(AtomicBool::new(false));
+
+    let flusher = {
+        let pending = pending.clone();
+        let done = done.clone();
+        let handle = app_handle.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(OUTPUT_FLUSH_MS));
+            let batch = match pending.lock() {
+                Ok(mut p) if !p.is_empty() => std::mem::take(&mut *p),
+                _ => {
+                    // Nothing to flush — exit once the reader has signalled EOF.
+                    if done.load(Ordering::Acquire) {
+                        break;
+                    }
+                    continue;
+                }
+            };
+            let _ = handle.emit(&output_event, BASE64.encode(&batch));
+        })
+    };
 
     loop {
         match reader.read(&mut buf) {
             Ok(0) => {
                 // EOF — process exited
                 log::debug!("PTY reader EOF for session id={}", session_id);
-                let _ = app_handle.emit(&exited_event, ());
                 break;
             }
             Ok(n) => {
-                let encoded = BASE64.encode(&buf[..n]);
-                let _ = app_handle.emit(&output_event, encoded);
+                if let Ok(mut p) = pending.lock() {
+                    p.extend_from_slice(&buf[..n]);
+                }
             }
             Err(e) => {
                 log::error!("PTY read error for session id={}: {}", session_id, e);
-                let _ = app_handle.emit(&exited_event, ());
                 break;
             }
         }
     }
+
+    // EOF (or read error): let the flusher drain whatever's left, then join so
+    // the exited event is emitted only after the last output batch has gone out.
+    done.store(true, Ordering::Release);
+    let _ = flusher.join();
+    let _ = app_handle.emit(&exited_event, ());
 }
 
 #[derive(serde::Serialize, Clone)]

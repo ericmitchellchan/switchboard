@@ -33,6 +33,16 @@ impl PtySession {
             SetConsoleOutputCP(65001);
         }
 
+        // Strip the Windows verbatim `\\?\` prefix from the spawn cwd. Claude
+        // Code keys folder-trust by the EXACT path string in ~/.claude.json, so
+        // the verbatim form is a DIFFERENT key than the user's trusted
+        // normal-path entries — trust never sticks and the dialog re-fires on
+        // every launch. Normalized paths match.
+        let working_dir = match working_dir.strip_prefix(r"\\?\") {
+            Some(stripped) => stripped.to_string(),
+            None => working_dir,
+        };
+
         log::info!("Spawning PTY shell={:?} working_dir={:?} cols={} rows={}", shell, working_dir, cols, rows);
 
         let pty_system = native_pty_system();
