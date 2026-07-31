@@ -25,11 +25,16 @@ export async function restartSession(
   name: string,
   repo: string,
   working_dir: string,
-  cols?: number,
-  rows?: number
+  cols: number | undefined,
+  rows: number | undefined,
+  // Client-generated spawn generation for this restart. The caller MUST have
+  // bumped the registry's expectation to this value BEFORE invoking (see
+  // bumpSessionGeneration) — that ordering is what makes the old reader
+  // thread's dying events droppable and the new spawn's first output safe.
+  gen: number
 ): Promise<SessionInfo> {
-  log.debug(`IPC restartSession id=${sessionId} name=${name}`);
-  return invoke("restart_session", { sessionId, name, repo, workingDir: working_dir, cols, rows });
+  log.debug(`IPC restartSession id=${sessionId} name=${name} cols=${cols} rows=${rows} gen=${gen}`);
+  return invoke("restart_session", { sessionId, name, repo, workingDir: working_dir, cols, rows, gen });
 }
 
 export async function closeSession(sessionId: string): Promise<void> {
@@ -111,21 +116,37 @@ export async function isPipWindowOpen(): Promise<boolean> {
   return invoke("is_pip_window_open");
 }
 
+// PTY event payloads are structured: every event carries the spawn generation
+// stamped by the Rust reader thread that emitted it. Event names are keyed
+// only by session id, and a restart REUSES the id — the generation is how the
+// terminal registry tells the restarted PTY's stream apart from the old
+// (unjoined) reader thread's dying output/exited events and drops the latter.
+
+export interface SessionOutputPayload {
+  gen: number;
+  /** Base64-encoded raw PTY bytes. */
+  data: string;
+}
+
+export interface SessionExitedPayload {
+  gen: number;
+}
+
 export function onSessionOutput(
   sessionId: string,
-  callback: (data: string) => void
+  callback: (data: string, gen: number) => void
 ): Promise<UnlistenFn> {
-  return listen<string>(`session:output:${sessionId}`, (event) => {
-    callback(event.payload);
+  return listen<SessionOutputPayload>(`session:output:${sessionId}`, (event) => {
+    callback(event.payload.data, event.payload.gen);
   });
 }
 
 export function onSessionExited(
   sessionId: string,
-  callback: () => void
+  callback: (gen: number) => void
 ): Promise<UnlistenFn> {
-  return listen(`session:exited:${sessionId}`, () => {
-    callback();
+  return listen<SessionExitedPayload>(`session:exited:${sessionId}`, (event) => {
+    callback(event.payload.gen);
   });
 }
 

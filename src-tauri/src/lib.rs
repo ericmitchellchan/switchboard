@@ -32,6 +32,10 @@ async fn create_session(
 
     log::info!("Creating session id={} name={:?} repo={:?} working_dir={:?} cols={} rows={}", id, name, repo, working_dir, c, r);
 
+    // A freshly created session always starts at spawn generation 1: its id is
+    // a brand-new UUID, so no stale reader thread can exist for it — the race
+    // that generations guard against only arises on restart, where the id is
+    // reused. The frontend registry defaults its expectation to 1 accordingly.
     state.pty_manager.create_session(
         id.clone(),
         name.clone(),
@@ -39,6 +43,7 @@ async fn create_session(
         working_dir.clone(),
         c,
         r,
+        1,
         Some(cfg.shell),
         app_handle,
     ).map_err(|e| {
@@ -64,12 +69,17 @@ async fn restart_session(
     working_dir: String,
     cols: Option<u16>,
     rows: Option<u16>,
+    // Client-generated spawn generation. The frontend bumps its expectation
+    // BEFORE invoking this command — the old PTY dies inside this call, so by
+    // the time any new-gen event can exist the registry already expects it,
+    // and the old reader thread's dying events (previous gen) are dropped.
+    gen: u64,
 ) -> Result<SessionInfo, String> {
     let c = cols.unwrap_or(120);
     let r = rows.unwrap_or(30);
     let cfg = load_config();
 
-    log::info!("Restarting session id={} name={:?} repo={:?} working_dir={:?}", session_id, name, repo, working_dir);
+    log::info!("Restarting session id={} name={:?} repo={:?} working_dir={:?} cols={} rows={} gen={}", session_id, name, repo, working_dir, c, r, gen);
 
     state.pty_manager.restart_session(
         session_id.clone(),
@@ -78,6 +88,7 @@ async fn restart_session(
         working_dir.clone(),
         c,
         r,
+        gen,
         Some(cfg.shell),
         app_handle,
     ).map_err(|e| {

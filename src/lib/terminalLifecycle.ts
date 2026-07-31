@@ -95,3 +95,42 @@ export function markExited(l: KeepAliveLifecycle): KeepAliveLifecycle {
 export function revive(l: KeepAliveLifecycle): KeepAliveLifecycle {
   return { ...l, exited: false };
 }
+
+// ── Spawn generations ────────────────────────────────────────────────────────
+// A restart kills the old PTY but does NOT join its reader thread; that thread
+// proceeds to EOF, drains, and emits its dying session:output/session:exited
+// events under names keyed only by the session id — which the restarted
+// session REUSES. Every event therefore carries the generation of the spawn
+// that produced it, and the registry drops events whose generation doesn't
+// match its expectation.
+//
+// The expectation is CLIENT-generated and bumped BEFORE the restart invoke is
+// sent (bump-expectation-then-spawn). Tauri delivers events and invoke
+// results on the same IPC into the same JS event loop, so a new-generation
+// event can overtake the invoke's own resolution — setting the expectation
+// from the invoke RESULT would leave a window where the new spawn's first
+// output is dropped. Bumping first closes it: the old PTY dies inside the
+// invoke (strictly after the bump), so by the time any new-gen event can
+// exist the expectation already matches it, and every stale event carries a
+// previous generation regardless of when it trickles in.
+
+/** Generation of a session's first spawn. Fresh sessions get brand-new UUIDs,
+ *  so no stale reader thread can exist for them — gen 1 needs no handshake. */
+export const FIRST_SPAWN_GEN = 1;
+
+/** The expectation for the NEXT spawn of a session (call before the restart
+ *  invoke; pass the result to the backend so it stamps the new reader). */
+export function nextGeneration(current: number | undefined): number {
+  return (current ?? FIRST_SPAWN_GEN) + 1;
+}
+
+/** Should an event stamped `eventGen` be applied to a session whose expected
+ *  generation is `expectedGen`? Undefined expectation rejects: listeners only
+ *  exist alongside a registry entry, which records its generation at creation
+ *  — an event with no recorded expectation is targeting a closed session. */
+export function acceptsGeneration(
+  expectedGen: number | undefined,
+  eventGen: number
+): boolean {
+  return expectedGen !== undefined && eventGen === expectedGen;
+}

@@ -22,6 +22,7 @@ import { createSession, closeSession, restartSession, renameSession, clearSessio
 import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty, isSessionDirty, serializeForPip } from "./lib/terminal";
 import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing } from "./lib/pipBridge";
 import { onSessionOutput } from "./lib/ipc";
+import { bumpSessionGeneration } from "./lib/terminalRegistry";
 import type { Session } from "./types";
 import { enqueueFit } from "./lib/fitQueue";
 import { useRoute, navigate, readRouteFromUrl, getNavState } from "./lib/route";
@@ -118,14 +119,17 @@ export default function App() {
   if (isKeepAliveScreen(route.screen)) activatedScreensRef.current.add(route.screen);
   const activatedScreens = activatedScreensRef.current;
 
-  // Browser/webview back-forward (and external history mutations) → store.
+  // Defensive: resync the store if something external mutates history. NOTE
+  // writeRouteToUrl only ever replaceState's — no history entries are pushed,
+  // so browser/webview back-forward (Alt+Left etc.) has nothing to pop and
+  // this listener does not give you back/forward navigation today.
   useEffect(() => {
     const onPop = () => navigate(readRouteFromUrl());
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  // No wrapper needed — the fitQueue's per-session debounce (100ms) naturally
+  // No wrapper needed — the fitQueue's per-session debounce (150ms) naturally
   // coalesces the ResizeObserver events that fire during sidebar width transition.
   const cycleSidebar = rawCycleSidebar;
 
@@ -419,12 +423,26 @@ export default function App() {
       destroyTaskDetector(sessionId);
       initTaskDetector(sessionId);
 
+      // Bump the expected spawn generation BEFORE the invoke: the old PTY is
+      // killed inside restart_session, so by the time any new-generation
+      // event can exist the registry already expects it — and the old reader
+      // thread's dying output/exited events (stamped with the previous gen)
+      // are dropped whenever they trickle in, instead of stamping garbage
+      // above the new prompt or re-latching the fresh session as exited.
+      const gen = bumpSessionGeneration(sessionId);
+
       try {
+        // Spawn the new PTY at the live terminal's grid — xterm keeps its
+        // real cols/rows across restart, and omitting them spawned the shell
+        // at the 120x30 default until the next fit SIGWINCHed it.
         await restartSession(
           sessionId,
           session.name,
           session.repo,
           session.working_dir,
+          inst?.terminal.cols,
+          inst?.terminal.rows,
+          gen,
         );
         updateSessionStatus(sessionId, "idle");
       } catch (err) {

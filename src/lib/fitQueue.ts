@@ -233,7 +233,10 @@ async function runFit(
   // Skip for "wake" — terminal was never display:none; GPU recovery (atlas clear +
   //   WebGL re-enable) handles the visual refresh without the cols-1 bounce that
   //   triggers unnecessary PTY redraws and status re-evaluation.
-  if (reason !== "resize" && reason !== "wake") {
+  // Skip after a reflow — its write() is still parsing asynchronously, and the
+  //   cols-1 bounce would mutate the grid mid-parse (the duplicated-frame bug
+  //   class); the reflow's own write callback finishes with a full refresh.
+  if (reason !== "resize" && reason !== "wake" && !reflowed) {
     forceViewportRefresh(sessionId);
   }
 

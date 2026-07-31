@@ -10,6 +10,9 @@ import {
   release,
   markExited,
   revive,
+  FIRST_SPAWN_GEN,
+  nextGeneration,
+  acceptsGeneration,
   type KeepAliveLifecycle,
 } from "./terminalLifecycle";
 
@@ -170,5 +173,71 @@ describe("re-attach refresh requirement", () => {
 
   it("adopting a parked EXITED instance demands a refresh as well", () => {
     expect(adopt({ attachedTo: null, exited: true }, 2).refresh).toBe(true);
+  });
+});
+
+describe("spawn generations", () => {
+  it("matching generation is accepted; any other is dropped", () => {
+    expect(acceptsGeneration(1, 1)).toBe(true);
+    expect(acceptsGeneration(2, 1)).toBe(false); // stale spawn's dying event
+    expect(acceptsGeneration(1, 2)).toBe(false); // never valid: expectation is bumped pre-spawn
+  });
+
+  it("no recorded expectation rejects — the session is closed", () => {
+    expect(acceptsGeneration(undefined, 1)).toBe(false);
+  });
+
+  it("nextGeneration increments from the current spawn (first spawn is 1)", () => {
+    expect(FIRST_SPAWN_GEN).toBe(1);
+    expect(nextGeneration(undefined)).toBe(2);
+    expect(nextGeneration(1)).toBe(2);
+    expect(nextGeneration(2)).toBe(3);
+  });
+
+  it("bump-expectation-then-spawn: stale events drop, the new spawn's first output never does", () => {
+    // Simulates the restart ordering contract: the expectation is bumped
+    // BEFORE the restart invoke; the old PTY dies inside the invoke, so any
+    // event from the new spawn can only exist after the bump.
+    let expected: number | undefined = FIRST_SPAWN_GEN; // running session, gen 1
+    expect(acceptsGeneration(expected, 1)).toBe(true); // live output flows
+
+    expected = nextGeneration(expected); // user clicks Restart — bump FIRST
+    // The old reader thread's dying output/exited events (gen 1) may arrive
+    // before OR after the invoke resolves — dropped either way.
+    expect(acceptsGeneration(expected, 1)).toBe(false);
+    // The new spawn's very first output (gen 2) can even overtake the invoke
+    // resolution on the shared IPC — the expectation already matches it.
+    expect(acceptsGeneration(expected, 2)).toBe(true);
+  });
+
+  it("revive round-trip with a stale exited arriving late: no Restart button over a running shell", () => {
+    // Full script of the reported race, combining lifecycle + generations the
+    // way the registry does: apply markExited ONLY when the exited event's
+    // generation is accepted.
+    let expected: number | undefined = FIRST_SPAWN_GEN;
+    let l = attachedLifecycle(1);
+
+    const exitedArrives = (gen: number) => {
+      if (acceptsGeneration(expected, gen)) l = markExited(l);
+    };
+
+    // Gen-1 PTY genuinely dies while shown → latch, Restart button appears.
+    exitedArrives(1);
+    expect(l.exited).toBe(true);
+
+    // User clicks Restart: bump expectation, then revive (App's handler runs
+    // cleanupSessionListeners → reviveSession before/around the invoke).
+    expected = nextGeneration(expected); // 2
+    l = revive(l);
+    expect(l.exited).toBe(false);
+
+    // The old reader thread's dying exited event trickles in AFTER the
+    // revive — stamped gen 1, dropped: the fresh session is NOT re-latched.
+    exitedArrives(1);
+    expect(l.exited).toBe(false);
+
+    // The restarted (gen 2) PTY exiting later still latches normally.
+    exitedArrives(2);
+    expect(l.exited).toBe(true);
   });
 });

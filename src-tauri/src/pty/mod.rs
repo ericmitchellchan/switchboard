@@ -27,6 +27,7 @@ impl PtyManager {
         working_dir: String,
         cols: u16,
         rows: u16,
+        gen: u64,
         shell: Option<String>,
         app_handle: AppHandle,
     ) -> Result<(), String> {
@@ -44,7 +45,7 @@ impl PtyManager {
             sessions.insert(id.clone(), session);
         }
 
-        log::info!("Session created id={}, spawning reader thread", id);
+        log::info!("Session created id={} gen={}, spawning reader thread", id, gen);
 
         // Spawn background reader on a plain OS thread — NOT tokio::spawn_blocking,
         // which panics outside a Tokio runtime context and would abort the whole
@@ -52,7 +53,7 @@ impl PtyManager {
         let session_id = id.clone();
         let handle = app_handle.clone();
         std::thread::spawn(move || {
-            read_pty_output(reader, session_id, handle);
+            read_pty_output(reader, session_id, gen, handle);
         });
 
         Ok(())
@@ -66,10 +67,20 @@ impl PtyManager {
         working_dir: String,
         cols: u16,
         rows: u16,
+        gen: u64,
         shell: Option<String>,
         app_handle: AppHandle,
     ) -> Result<(), String> {
-        // Close old PTY if it exists (ignore errors — it may already be dead)
+        // Close old PTY if it exists (ignore errors — it may already be dead).
+        //
+        // NOTE the old reader thread is NOT joined here: it proceeds to EOF on
+        // its own schedule, drains its coalescing buffer, and emits its dying
+        // session:output / session:exited events — event names keyed only by
+        // session id, which the restarted session REUSES. That is why every
+        // event carries a spawn generation: the frontend registry drops events
+        // whose gen doesn't match its expectation (bumped before this command
+        // was invoked), so the stale thread's output can't stamp garbage above
+        // the new prompt and its exited event can't re-latch the fresh session.
         {
             let mut sessions = self
                 .sessions
@@ -93,13 +104,13 @@ impl PtyManager {
             sessions.insert(id.clone(), session);
         }
 
-        log::info!("Session restarted id={}, spawning reader thread", id);
+        log::info!("Session restarted id={} gen={}, spawning reader thread", id, gen);
 
         // Plain OS thread — see the note in create_session.
         let session_id = id.clone();
         let handle = app_handle.clone();
         std::thread::spawn(move || {
-            read_pty_output(reader, session_id, handle);
+            read_pty_output(reader, session_id, gen, handle);
         });
 
         Ok(())
@@ -180,7 +191,27 @@ impl PtyManager {
 /// less UI-thread churn. xterm absorbs large writes cheaply.
 const OUTPUT_FLUSH_MS: u64 = 8;
 
-fn read_pty_output(mut reader: Box<dyn Read + Send>, session_id: String, app_handle: AppHandle) {
+/// Per-spawn generation stamp on every event this reader emits. Event names
+/// are keyed only by session id; a restart reuses the id, so without the gen
+/// the old (unjoined) reader thread's dying events are indistinguishable from
+/// the new spawn's. The frontend drops mismatching generations.
+#[derive(serde::Serialize, Clone)]
+struct OutputPayload {
+    gen: u64,
+    data: String,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct ExitedPayload {
+    gen: u64,
+}
+
+fn read_pty_output(
+    mut reader: Box<dyn Read + Send>,
+    session_id: String,
+    gen: u64,
+    app_handle: AppHandle,
+) {
     use std::sync::Condvar;
 
     // Reader/flusher shared state, guarded by one mutex so the Condvar has a
@@ -234,7 +265,13 @@ fn read_pty_output(mut reader: Box<dyn Read + Send>, session_id: String, app_han
                 let mut st = lock.lock().unwrap_or_else(|e| e.into_inner());
                 std::mem::take(&mut st.pending)
             };
-            let _ = handle.emit(&output_event, BASE64.encode(&batch));
+            let _ = handle.emit(
+                &output_event,
+                OutputPayload {
+                    gen,
+                    data: BASE64.encode(&batch),
+                },
+            );
         })
     };
 
@@ -266,7 +303,7 @@ fn read_pty_output(mut reader: Box<dyn Read + Send>, session_id: String, app_han
         cvar.notify_one();
     }
     let _ = flusher.join();
-    let _ = app_handle.emit(&exited_event, ());
+    let _ = app_handle.emit(&exited_event, ExitedPayload { gen });
 }
 
 #[derive(serde::Serialize, Clone)]

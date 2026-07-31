@@ -91,7 +91,12 @@ export function applyRouteToParams(
 }
 
 /** Sync a route into the window URL via replaceState. Non-route params on the
- *  live URL survive; stale router-owned params do not. */
+ *  live URL survive; stale router-owned params do not.
+ *
+ *  NOTE: replaceState never creates a history entry, so navigation builds no
+ *  back/forward stack — the webview's back/forward (Alt+Left etc.) has
+ *  nothing to pop, and App's popstate listener is purely defensive resync
+ *  against external history mutations, not a working back button. */
 export function writeRouteToUrl(route: Route): void {
   if (typeof window === "undefined") return;
   const params = applyRouteToParams(

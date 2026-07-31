@@ -40,13 +40,21 @@ import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { open } from "@tauri-apps/plugin-shell";
-import { listen } from "@tauri-apps/api/event";
-import { writeToSession, resizeSession, loadScrollback } from "./ipc";
+import {
+  writeToSession,
+  resizeSession,
+  loadScrollback,
+  onSessionOutput,
+  onSessionExited,
+} from "./ipc";
 import { log } from "./logger";
 import {
+  FIRST_SPAWN_GEN,
+  acceptsGeneration,
   adopt,
   attachedLifecycle,
   markExited,
+  nextGeneration,
   release,
   revive,
   type KeepAliveLifecycle,
@@ -145,6 +153,26 @@ function keepAliveRoot(): HTMLDivElement {
     document.body.appendChild(hiddenRoot);
   }
   return hiddenRoot;
+}
+
+// Spawn generations: the generation this frontend currently expects a
+// session's PTY events to carry. Events stamped with any other generation
+// come from a PREVIOUS spawn's unjoined reader thread (restart reuses the
+// session id) and are dropped. Defaults to FIRST_SPAWN_GEN when the entry is
+// created; bumped by bumpSessionGeneration BEFORE each restart invoke.
+const sessionGenerations = new Map<string, number>();
+
+/** Bump the session's expected spawn generation and return it. MUST be called
+ *  BEFORE the restart invoke is sent: the old PTY dies inside that invoke, so
+ *  bumping first guarantees (a) every dying old-reader event carries a stale
+ *  generation and is dropped whenever it arrives, and (b) the new spawn's
+ *  very first output — which can overtake the invoke's own resolution, since
+ *  Tauri delivers events and invoke results on the same IPC — already matches
+ *  the expectation and can never be dropped. */
+export function bumpSessionGeneration(sessionId: string): number {
+  const next = nextGeneration(sessionGenerations.get(sessionId));
+  sessionGenerations.set(sessionId, next);
+  return next;
 }
 
 // Dirty tracking: sessions that received new PTY data since last serialization.
@@ -391,16 +419,35 @@ export function acquireTerminal(
     return true;
   });
 
+  // The generation this entry's events must carry. Set synchronously at entry
+  // creation — before the listeners below even register — so the first output
+  // of a fresh session can never be generation-dropped. A fresh session id is
+  // a brand-new UUID (no stale reader threads possible), hence gen 1; after a
+  // restart the expectation was already bumped pre-invoke and must be kept.
+  if (!sessionGenerations.has(sessionId)) {
+    sessionGenerations.set(sessionId, FIRST_SPAWN_GEN);
+  }
+
   // Registry-owned Tauri listeners — they outlive any mount, which is the
   // point: output keeps flowing into the terminal while detached, so its
   // render model is correct at every moment and reattach has nothing to
-  // reconcile. They die only with the entry (session close / PTY exit).
+  // reconcile. They die only with the entry (session close). Both drop events
+  // stamped with a stale spawn generation: after an in-place restart the old
+  // reader thread's dying output would stamp garbage above the new prompt,
+  // and its exited event would re-latch the fresh session (Restart button
+  // over a running shell).
   void (async () => {
-    const unOut = await listen<string>(`session:output:${sessionId}`, (event) => {
+    const unOut = await onSessionOutput(sessionId, (data, gen) => {
       if (entry.disposed) return;
+      if (!acceptsGeneration(sessionGenerations.get(sessionId), gen)) {
+        log.debug(
+          `Dropping stale-gen output id=${sessionId} gen=${gen} expected=${sessionGenerations.get(sessionId)}`
+        );
+        return;
+      }
       let bytes: Uint8Array;
       try {
-        bytes = b64ToBytes(event.payload);
+        bytes = b64ToBytes(data);
       } catch (e) {
         log.warn(`Base64 decode error for session id=${sessionId}: ${e}`);
         return;
@@ -413,8 +460,14 @@ export function acquireTerminal(
       }
       writeChunk(entry, sessionId, bytes);
     });
-    const unExit = await listen(`session:exited:${sessionId}`, () => {
+    const unExit = await onSessionExited(sessionId, (gen) => {
       if (entry.disposed) return;
+      if (!acceptsGeneration(sessionGenerations.get(sessionId), gen)) {
+        log.debug(
+          `Dropping stale-gen exited id=${sessionId} gen=${gen} expected=${sessionGenerations.get(sessionId)}`
+        );
+        return;
+      }
       entry.terminal.write("\r\n\x1b[90m[Process exited]\x1b[0m\r\n");
       sessionHooks.get(sessionId)?.onExited?.();
       // Exit never disposes — shown or parked, the entry survives so the
@@ -534,5 +587,6 @@ function disposeEntry(sessionId: string, entry: Entry): void {
   entry.container.remove();
   dirtySessionIds.delete(sessionId);
   resizePropagationSuppressed.delete(sessionId);
+  sessionGenerations.delete(sessionId); // session closed — id never reused
   for (const fn of disposeCleanups) fn(sessionId);
 }

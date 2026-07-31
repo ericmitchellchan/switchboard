@@ -225,6 +225,11 @@ export function fitTerminal(
         // place as distance-from-bottom (0 = pinned at the prompt) and
         // restore it in the write CALLBACK — xterm's parse is async, and
         // restoring before the callback races the parse.
+        //
+        // Honest limits: the snapshot serializes only the last 3000 scrollback
+        // lines (of the 10k cap), so a widen reflow TRUNCATES older history;
+        // and fromBottom is measured in PRE-reflow row units, so the restored
+        // viewport is approximate when re-wrapping changes line counts.
         const buf = term.buffer.active;
         const fromBottom = Math.max(0, buf.baseY - buf.viewportY);
         const snap = instance.serializeAddon.serialize({ scrollback: 3000 });
