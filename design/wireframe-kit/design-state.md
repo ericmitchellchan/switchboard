@@ -1,6 +1,7 @@
 # Switchboard — Design State
 
-Generated 2026-07-31 from repo code. Regenerate when `src/styles/global.css`,
+Generated 2026-07-31, regenerated 2026-08-01 (soft-palette chrome migration)
+from repo code. Regenerate when `src/styles/global.css`,
 `src/lib/statusConfig.ts`, or the chrome components change (see README).
 
 ## Tokens (src/styles/global.css:33-52)
@@ -18,7 +19,7 @@ Generated 2026-07-31 from repo code. Regenerate when `src/styles/global.css`,
 | `--text-muted` | `#71717A` | muted labels |
 | `--text-dim` | `#52525B` | dim/meta |
 | `--text-faint` | `#3F3F46` | faintest (idle icon) |
-| `--accent-purple` | `#A78BFA` | brand accent, counters/badges (StatusBar.tsx:84) |
+| `--accent-purple` | `#A78BFA` | terminal theme only (cursor, ANSI magenta, selection tint) — chrome demoted to white/zinc 2026-08-01 |
 | `--accent-green` | `#34D399` | positive accents |
 | `--accent-blue` | `#3B82F6` | running |
 | `--accent-blue-light` | `#60A5FA` | links/hover on blue |
@@ -46,14 +47,15 @@ Pulse = `pulse-ring` keyframes (global.css:54-57): expanding fading ring.
 
 | Surface | Facts | Source |
 |---|---|---|
-| Tab bar | h 44px, bg `#0A0A0B`, border-bottom `#1E1E22`, tab pad `0 14px`, title 12.5px, waiting badge 10px `#F59E0B` pill `1px 5px`, group divider 1px `#27272A` | TabBar.tsx:104-141,247 |
-| Status bar | h 26px, bg `#0A0A0B`, font 10px, purple count badges `#A78BFA` 9px | StatusBar.tsx:25-84 |
+| Tab bar | h 44px, bg `#0A0A0B`, border-bottom `#1E1E22`, tab pad `0 14px`, title 12.5px, waiting badge 10px `#F59E0B` pill `1px 5px`, group divider 1px `#27272A`, active-tab top border = status color, drag-over insert line 2px `--text-primary` | TabBar.tsx:104-141,247 |
+| Status bar | h 26px, bg `#0A0A0B`, font 10px, count badge 9px outlined zinc (bg `#151518`, 1px `#27272A`, text `#E4E4E7`) | StatusBar.tsx:25-84 |
 | Task sidebar | full 280px / collapsed 38px / hidden (right side) | TaskSidebar.tsx:68,139 |
 | Scrollbars | 5px, thumb `#27272A`, hover `#3F3F46` | global.css:84-99 |
 | Terminal | xterm.js, bg `--bg-primary` | terminal.ts |
 
 ## Structural model (today)
 
-Top tab bar → center pane tree (terminals, binary splits) → optional RIGHT task
-sidebar → bottom status bar. There is NO left side menu yet — the workstation
-feature introduces it (see personal-kb spec personal-workstation).
+Top tab bar → optional LEFT side menu (Ctrl+Shift+B: threads + screen nav,
+shipped with the workstation feature) → center screen area (terminal pane tree
+/ KB / Explorer, route-switched) → optional RIGHT task sidebar
+(terminal screen only) → bottom status bar.

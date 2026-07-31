@@ -45,8 +45,11 @@ export function ConfirmDialog({
 
   if (!open) return null;
 
-  const confirmBg = destructive ? "#EF4444" : "var(--accent-purple)";
-  const confirmHoverBg = destructive ? "#DC2626" : "var(--accent-purple-hover, #9333EA)";
+  // Soft palette: the non-destructive primary action is a white button
+  // (zinc chrome, no brand color); destructive stays functional red.
+  const confirmBg = destructive ? "#EF4444" : "#E4E4E7";
+  const confirmHoverBg = destructive ? "#DC2626" : "#FAFAFA";
+  const confirmFg = destructive ? "#FFFFFF" : "#0C0C0E";
 
   return (
     <>
@@ -126,7 +129,7 @@ export function ConfirmDialog({
               outline: "none",
             }}
             onFocus={(e) => {
-              e.currentTarget.style.borderColor = "var(--accent-purple)";
+              e.currentTarget.style.borderColor = "var(--text-secondary)";
             }}
             onBlur={(e) => {
               e.currentTarget.style.borderColor = "var(--border)";
@@ -139,7 +142,7 @@ export function ConfirmDialog({
             style={{
               fontFamily: "var(--font-mono)",
               fontSize: 12,
-              color: "#FFFFFF",
+              color: confirmFg,
               backgroundColor: confirmBg,
               border: "1px solid transparent",
               borderRadius: 4,

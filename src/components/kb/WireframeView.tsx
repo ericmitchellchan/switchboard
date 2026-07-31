@@ -96,7 +96,7 @@ const INSTRUMENT = `
       (function (p, n) {
         var b = document.createElement("div");
         b.textContent = String(n);
-        b.style.cssText = "position:absolute;transform:translate(-50%,-50%);min-width:18px;height:18px;line-height:18px;text-align:center;border-radius:9px;padding:0 4px;background:#A78BFA;color:#0C0C0E;font:600 11px monospace;cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,0.45);user-select:none;";
+        b.style.cssText = "position:absolute;transform:translate(-50%,-50%);min-width:18px;height:18px;line-height:18px;text-align:center;border-radius:9px;padding:0 4px;background:#E4E4E7;color:#0C0C0E;font:600 11px monospace;cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,0.45);user-select:none;";
         b.style.left = (w * p.xPct / 100 - offX) + "px";
         b.style.top = (h * p.yPct / 100 - offY) + "px";
         b.addEventListener("click", function (e) {
@@ -447,7 +447,7 @@ export function WireframeView({ path, content }: { path: string; content: string
             style={{
               ...BTN_STYLE,
               ...(pinMode
-                ? { color: "var(--accent-purple)", borderColor: "var(--accent-purple)" }
+                ? { color: "var(--text-primary)", borderColor: "var(--text-secondary)" }
                 : {}),
             }}
             disabled={pinsFile === null}
@@ -483,7 +483,7 @@ export function WireframeView({ path, content }: { path: string; content: string
       </div>
       <div style={RAIL_STYLE}>
         <div style={{ fontSize: 10, color: "var(--text-muted)", letterSpacing: 0.5 }}>
-          PINS <span style={{ color: "var(--accent-purple)" }}>{docPins.length}</span>
+          PINS <span style={{ color: "var(--text-primary)" }}>{docPins.length}</span>
         </div>
         {docPins.length === 0 ? (
           <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6 }}>
@@ -502,7 +502,7 @@ export function WireframeView({ path, content }: { path: string; content: string
                     lineHeight: "16px",
                     textAlign: "center",
                     borderRadius: 8,
-                    background: "var(--accent-purple)",
+                    background: "var(--text-primary)",
                     color: "var(--bg-primary)",
                     fontSize: 10,
                     fontWeight: 600,

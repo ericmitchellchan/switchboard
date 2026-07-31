@@ -185,7 +185,7 @@ export function NewThreadDialog({ repos, onCreate, onClose }: NewThreadDialogPro
                 backgroundColor: i === selectedIndex ? "var(--bg-elevated)" : "transparent",
                 borderLeft:
                   i === selectedIndex
-                    ? "2px solid var(--accent-purple)"
+                    ? "2px solid var(--text-primary)"
                     : "2px solid transparent",
               }}
             >

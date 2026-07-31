@@ -82,8 +82,9 @@ export function StatusBar({ sessions, taskCount, onToggleSidebar }: StatusBarPro
                   style={{
                     fontSize: 9,
                     fontWeight: 700,
-                    color: "#0A0A0B",
-                    backgroundColor: "#A78BFA",
+                    color: "#E4E4E7",
+                    backgroundColor: "#151518",
+                    border: "1px solid #27272A",
                     borderRadius: 3,
                     padding: "0 4px",
                   }}

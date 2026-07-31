@@ -197,7 +197,7 @@ export function NewSessionDialog({ repos, onCreateSession, onClose }: NewSession
                     padding: "6px 12px",
                     cursor: "pointer",
                     backgroundColor: i === selectedIndex ? "var(--bg-elevated)" : "transparent",
-                    borderLeft: i === selectedIndex ? "2px solid var(--accent-purple)" : "2px solid transparent",
+                    borderLeft: i === selectedIndex ? "2px solid var(--text-primary)" : "2px solid transparent",
                   }}
                 >
                   {/* Color dot */}

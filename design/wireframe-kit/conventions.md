@@ -24,3 +24,11 @@ that stop being true.
 - 2026-07-31 — (from global conventions) Wireframes live in the feature's KB folder
   (personal-kb/switchboard/features/<feature>/wireframes/), one self-contained HTML
   file per surface with inline kit CSS.
+- 2026-08-01 — The purple-chrome migration LANDED with the workstation (T11): tab
+  drag-over indicator, StatusBar/TaskSidebar count badges (now outlined zinc: bg
+  `#151518`, 1px `#27272A`, text `#E4E4E7`), restart button, focused-pane border,
+  divider drag highlight, dialog selection bars, non-destructive confirm button
+  (white), and KB pin badges/counters are all white/zinc. `#A78BFA` survives ONLY
+  inside the terminal theme (cursor, ANSI magenta, selection tint) and as the
+  default repo-identity fallback; functional colors (statusConfig, waiting badge,
+  task category/priority) untouched.

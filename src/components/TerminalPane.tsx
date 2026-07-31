@@ -407,9 +407,9 @@ export const TerminalPane = memo(function TerminalPane({
           <button
             onClick={() => onRestart(session.id)}
             style={{
-              background: "#A78BFA22",
-              border: "1px solid #A78BFA66",
-              color: "#A78BFA",
+              background: "#151518",
+              border: "1px solid #27272A",
+              color: "#E4E4E7",
               fontFamily: "var(--font-mono)",
               fontSize: 13,
               padding: "6px 16px",
@@ -418,12 +418,12 @@ export const TerminalPane = memo(function TerminalPane({
               transition: "background 0.15s, border-color 0.15s",
             }}
             onMouseEnter={(e) => {
-              e.currentTarget.style.background = "#A78BFA33";
-              e.currentTarget.style.borderColor = "#A78BFA99";
+              e.currentTarget.style.background = "#1E1E22";
+              e.currentTarget.style.borderColor = "#3F3F46";
             }}
             onMouseLeave={(e) => {
-              e.currentTarget.style.background = "#A78BFA22";
-              e.currentTarget.style.borderColor = "#A78BFA66";
+              e.currentTarget.style.background = "#151518";
+              e.currentTarget.style.borderColor = "#27272A";
             }}
           >
             Restart Session

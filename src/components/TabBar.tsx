@@ -237,7 +237,7 @@ export function TabBar({
                   flexShrink: 0,
                   opacity: draggedId === session.id ? 0.4 : 1,
                   borderLeft: dragOverIdx === idx && draggedId && draggedId !== session.id
-                    ? "2px solid #A78BFA"
+                    ? "2px solid var(--text-primary)"
                     : "none",
                   transition: "opacity 0.15s",
                 }}
