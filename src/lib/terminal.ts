@@ -9,6 +9,7 @@
 // keep their import surface unchanged.
 
 import { log } from "./logger";
+import { resizeDecision } from "./resizePolicy";
 import {
   getTerminal,
   getAllTerminalIds,
@@ -158,30 +159,95 @@ export function serializeForPip(
   }
 }
 
-export function fitTerminal(sessionId: string): { cols: number; rows: number } | null {
+export type FitOutcome =
+  /** Nothing to do: grid already right, or the container isn't measurable. */
+  | { outcome: "none" }
+  /** A grid change is needed but the session is streaming — the caller
+   *  (fitQueue) flags a pending refit and re-runs after output settles. */
+  | { outcome: "deferred" }
+  /** The grid changed. `reflowed` = the widen path ran (snapshot → reset →
+   *  resize → async write): scroll restoration happens in the write callback,
+   *  so the caller must NOT restore scroll itself for this fit. */
+  | { outcome: "applied"; cols: number; rows: number; reflowed: boolean };
+
+/**
+ * Fit the terminal to its container under the settled resize policy
+ * (resizePolicy.ts): grow-only width capped at MAX_TERMINAL_COLS, rows follow
+ * the pane, widen = snapshot-reflow, mid-stream changes deferred.
+ *
+ * Never calls fitAddon.fit() — fit() applies proposeDimensions() verbatim,
+ * which would shrink cols on a narrowed pane (re-wrapping content the policy
+ * says must horizontal-scroll instead). We propose, decide, then resize()
+ * ourselves; xterm's onResize wiring forwards the one genuine PTY resize.
+ */
+export function fitTerminal(
+  sessionId: string,
+  opts?: { streaming?: boolean; initial?: boolean }
+): FitOutcome {
   const instance = getTerminal(sessionId);
-  if (!instance) return null;
+  if (!instance) return { outcome: "none" };
 
   // Guard: skip fit if container has zero or very small dimensions (detached,
-  // not yet laid out, or mid-layout-transition).  fit() with tiny containers
-  // produces cols=2/rows=1, causing xterm to reflow the entire scrollback to
-  // 2 columns — corrupting all wrapped lines irreversibly.  A terminal parked
-  // in the keep-alive root (display:none) measures 0x0 and is skipped here.
+  // not yet laid out, or mid-layout-transition).  Tiny containers propose
+  // cols=2/rows=1; grow-only width blocks the col shrink, but the initial fit
+  // doesn't, and rows=1 is wrong for everyone.  A terminal parked in the
+  // keep-alive root (display:none) measures 0x0 and is skipped here.
   const container = instance.terminal.element?.parentElement;
   if (container && (container.clientWidth < 10 || container.clientHeight < 10)) {
     log.debug(`Skipping fit for session id=${sessionId}: container too small (${container.clientWidth}x${container.clientHeight})`);
-    return null;
+    return { outcome: "none" };
   }
 
   try {
-    instance.fitAddon.fit();
-    return {
-      cols: instance.terminal.cols,
-      rows: instance.terminal.rows,
-    };
+    const term = instance.terminal;
+    const proposed = instance.fitAddon.proposeDimensions();
+    const decision = resizeDecision(
+      { cols: term.cols, rows: term.rows },
+      proposed ?? null,
+      { streaming: !!opts?.streaming, initial: !!opts?.initial }
+    );
+
+    switch (decision.kind) {
+      case "none":
+        return { outcome: "none" };
+      case "defer":
+        log.debug(`fit deferred (streaming) id=${sessionId}`);
+        return { outcome: "deferred" };
+      case "resize":
+        // Height-only / initial / capped-legacy shrink: no reflow, no
+        // conflict window. onResize forwards the one genuine PTY resize.
+        term.resize(decision.cols, decision.rows);
+        return { outcome: "applied", cols: decision.cols, rows: decision.rows, reflowed: false };
+      case "reflow": {
+        // Widen: reflow to the wider grid via snapshot + rewrite so the PTY's
+        // async SIGWINCH repaint lands on content matching its cursor model
+        // (a WIDER grid can't wrap-break existing lines). Keep the reader's
+        // place as distance-from-bottom (0 = pinned at the prompt) and
+        // restore it in the write CALLBACK — xterm's parse is async, and
+        // restoring before the callback races the parse.
+        const buf = term.buffer.active;
+        const fromBottom = Math.max(0, buf.baseY - buf.viewportY);
+        const snap = instance.serializeAddon.serialize({ scrollback: 3000 });
+        term.reset();
+        term.resize(decision.cols, decision.rows);
+        term.write(snap, () => {
+          // The parse window is async — the session can be disposed (or the
+          // instance replaced) before this fires.
+          const live = getTerminal(sessionId);
+          if (!live || live.terminal !== term) return;
+          term.scrollToBottom();
+          if (fromBottom > 0) term.scrollLines(-fromBottom);
+          term.refresh(0, term.rows - 1);
+        });
+        log.debug(
+          `fit reflow id=${sessionId} -> ${decision.cols}x${decision.rows} fromBottom=${fromBottom}`
+        );
+        return { outcome: "applied", cols: decision.cols, rows: decision.rows, reflowed: true };
+      }
+    }
   } catch (e) {
     log.warn(`Failed to fit terminal for session id=${sessionId}: ${e}`);
-    return null;
+    return { outcome: "none" };
   }
 }
 

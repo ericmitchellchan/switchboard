@@ -12,7 +12,7 @@ import {
   unregisterSessionHooks,
   reviveSession,
 } from "../lib/terminalRegistry";
-import { enqueueFit, cancelPendingFit } from "../lib/fitQueue";
+import { enqueueFit, cancelPendingFit, noteSessionOutput } from "../lib/fitQueue";
 import {
   initDetector,
   processBufferLines,
@@ -98,6 +98,10 @@ function wireSession(sessionId: string) {
       processBufferLines(sessionId, lines, cursorAbsY, cbs.onStatusChange);
     },
     onOutput: (bytes) => {
+      // Streaming signal for the resize policy: stamp last-output-at so fits
+      // that land mid-stream defer to output settle (fitQueue). Runs for
+      // every chunk, mounted or hidden — registry-dispatched.
+      noteSessionOutput(sessionId);
       // Task detection over the raw UTF-8 text (streaming decoder handles
       // multi-byte chars split across chunks). The term.write + dirty-marking
       // are registry-owned and already happened.
@@ -257,12 +261,18 @@ export const TerminalPane = memo(function TerminalPane({
     }
   }, [visible, session.id, isFocused]);
 
-  // Handle window/container resize via unified fit pipeline (100ms debounce).
+  // Handle window/container resize via unified fit pipeline (150ms debounce),
+  // plus a ~400ms TRAILING settle pass: both timers re-arm on every resize
+  // event, so after a divider drag ends the debounced fit lands first and the
+  // settle pass follows with a full viewport refresh — the PTY app (claude)
+  // only repaints its live frame on SIGWINCH, so rows above it would keep the
+  // drag's stale wrap without that refresh.
   // Skip resize when hidden — the "show" fit handles re-measuring when visible.
   useEffect(() => {
     if (!visible) return;
 
     let mounted = true;
+    let settleTimer: ReturnType<typeof setTimeout> | null = null;
 
     const handleResize = () => {
       if (!mounted || stolenRef.current) return;
@@ -271,7 +281,19 @@ export const TerminalPane = memo(function TerminalPane({
       const buf = inst.terminal.buffer.active;
       enqueueFit(session.id, "resize", {
         savedScroll: { viewportY: buf.viewportY, baseY: buf.baseY },
-      }, 100);
+      }, 150);
+      if (settleTimer) clearTimeout(settleTimer);
+      settleTimer = setTimeout(() => {
+        settleTimer = null;
+        if (!mounted || stolenRef.current) return;
+        const settleInst = getTerminal(session.id);
+        if (!settleInst?.terminal.element?.parentElement) return;
+        const settleBuf = settleInst.terminal.buffer.active;
+        enqueueFit(session.id, "resize", {
+          savedScroll: { viewportY: settleBuf.viewportY, baseY: settleBuf.baseY },
+          fullRefresh: true,
+        }, 0);
+      }, 400);
     };
 
     window.addEventListener("resize", handleResize);
@@ -301,6 +323,7 @@ export const TerminalPane = memo(function TerminalPane({
 
     return () => {
       mounted = false;
+      if (settleTimer) clearTimeout(settleTimer);
       cancelPendingFit(session.id);
       window.removeEventListener("resize", handleResize);
       if (ro) ro.disconnect();
@@ -335,7 +358,12 @@ export const TerminalPane = memo(function TerminalPane({
           width: "100%",
           height: "100%",
           backgroundColor: "#0C0C0E",
-          overflow: "hidden",
+          // Grow-only width (see resizePolicy.ts): when the pane is narrower
+          // than the terminal's columns, scroll horizontally rather than
+          // re-wrap/break already-rendered content. Vertical stays clipped —
+          // xterm scrolls itself.
+          overflowX: "auto",
+          overflowY: "hidden",
           transition: "opacity 0.05s",
           contain: "layout paint",
         }}
