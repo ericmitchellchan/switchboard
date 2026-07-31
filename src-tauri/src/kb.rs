@@ -36,12 +36,12 @@ const DEFAULT_KB_PATH: &str = "C:/Users/ericm/projects/personal-kb";
 /// File extensions that count as KB documents. The KB holds markdown specs,
 /// HTML wireframes, JSX/TSX wireframe sources, Mermaid diagrams, and the
 /// project registry JSON.
-const DOC_EXTENSIONS: &[&str] = &["md", "html", "jsx", "tsx", "mmd", "json"];
+const DOC_EXTENSIONS: &[&str] = &["md", "html", "htm", "jsx", "tsx", "mmd", "json"];
 
 /// Resolve + canonicalize the KB root. Errors if the resolved directory does
 /// not exist (canonicalize requires existence — that is the point: no command
 /// operates relative to a phantom root).
-fn resolve_kb_root() -> Result<PathBuf, String> {
+pub(crate) fn resolve_kb_root() -> Result<PathBuf, String> {
     let raw = std::env::var("SWITCHBOARD_KB_PATH")
         .ok()
         .filter(|s| !s.trim().is_empty())

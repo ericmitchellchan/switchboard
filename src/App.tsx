@@ -51,6 +51,7 @@ import {
 import { NewThreadDialog } from "./components/NewThreadDialog";
 import { KbTree } from "./components/kb/KbTree";
 import { DocView } from "./components/kb/DocView";
+import { ExplorerView } from "./components/ExplorerView";
 import { useKbDocList } from "./lib/kb";
 import type { Session, Thread } from "./types";
 import { enqueueFit } from "./lib/fitQueue";
@@ -1702,36 +1703,8 @@ class ScreenErrorBoundary extends Component<BoundaryProps, BoundaryState> {
   }
 }
 
-/** Placeholder screen chrome shared by the pre-T6/T9 stubs. */
-function PlaceholderScreen({ title, hint }: { title: string; hint: string }) {
-  return (
-    <div
-      style={{
-        flex: 1,
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 8,
-      }}
-    >
-      <span
-        style={{
-          fontFamily: "var(--font-mono)",
-          fontSize: 13,
-          color: "var(--text-muted)",
-          textTransform: "uppercase",
-          letterSpacing: 1,
-        }}
-      >
-        {title}
-      </span>
-      <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-faint)" }}>
-        {hint}
-      </span>
-    </div>
-  );
-}
+// (The shared PlaceholderScreen stub chrome was removed with T9 — both
+// pre-T6/T9 stubs are now real screens.)
 
 /** T6-REGISTRATION (filled): the Knowledge Base screen — breadcrumb header +
  *  doc tree rail + reading view over the personal-kb checkout. `active` comes
@@ -1814,12 +1787,22 @@ function KnowledgeBaseScreen({ active, doc }: { active: boolean; doc: string | u
   );
 }
 
+/** T9-REGISTRATION (filled): the Explorer screen — registry-driven repo
+ *  browser (left project rail from registry.json, breadcrumb + file listing +
+ *  inline viewer). Route handling mirrors the kb screen's kbDoc rule: while
+ *  this keep-alive screen is hidden, the last explorer route keeps the
+ *  `project` prop STABLE so the mounted browser doesn't reset mid-hide.
+ *  Reading useRoute()/getNavState() here (instead of plumbing through App)
+ *  keeps the registration confined to this block; both are safe during
+ *  render (useRoute subscribes; lastByScreen only changes on navigation). */
 function ExplorerScreen() {
-  return (
-    <>
-      {/* T9-REGISTRATION: the real Explorer screen (registry-driven repo
-          browser) replaces this placeholder panel wholesale in T9. */}
-      <PlaceholderScreen title="Explorer" hint="repos from the project registry will render here" />
-    </>
-  );
+  const route = useRoute();
+  const active = route.screen === "explorer";
+  const lastExplorerRoute = getNavState().lastByScreen.explorer;
+  const project = active
+    ? route.project
+    : lastExplorerRoute?.screen === "explorer"
+      ? lastExplorerRoute.project
+      : undefined;
+  return <ExplorerView active={active} project={project} />;
 }

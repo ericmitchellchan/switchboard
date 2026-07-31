@@ -144,6 +144,51 @@ export async function kbRoot(): Promise<string> {
   return invoke("kb_root");
 }
 
+// ── Explorer (T9) ────────────────────────────────────────────────────────────
+// Registry-driven repo browsing. The browsable roots come from
+// <kb_root>/registry.json server-side; every call addresses a repo by PROJECT
+// KEY + relative path and is traversal-guarded in Rust (component validation
+// + canonical containment inside that project's repo root — explorer.rs).
+
+export interface ExplorerProject {
+  key: string;
+  /** Registry status ("active"/"paused"/…); archived entries come back with
+   *  status "archived". Missing statuses default to "active" server-side. */
+  status: string;
+  /** Absolute repo paths (forward slashes) — matched against live thread
+   *  workingDirs by explorer.annotateProjects. */
+  repos: string[];
+  /** Registry `notes` free text, when present. */
+  note: string | null;
+}
+
+export interface ExplorerEntry {
+  name: string;
+  is_dir: boolean;
+}
+
+export async function explorerProjects(): Promise<ExplorerProject[]> {
+  return invoke("explorer_projects");
+}
+
+/** Entries of a directory inside a project's repo(s) — dirs first, sorted.
+ *  Multi-repo projects list their repo names at relDir "". */
+export async function explorerList(
+  projectKey: string,
+  relDir: string
+): Promise<ExplorerEntry[]> {
+  return invoke("explorer_list", { projectKey, relDir });
+}
+
+/** Read a repo file (UTF-8, capped at 512KB server-side — larger files
+ *  reject with a readable error string). */
+export async function explorerRead(
+  projectKey: string,
+  relPath: string
+): Promise<string> {
+  return invoke("explorer_read", { projectKey, relPath });
+}
+
 export async function writeFile(path: string, content: string): Promise<void> {
   return invoke("write_file", { path, content });
 }

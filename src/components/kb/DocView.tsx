@@ -1,8 +1,9 @@
-// KB document reading view (T6/T7) — renders the open doc. Markdown goes
+// KB document reading view (T6/T7/T9) — renders the open doc. Markdown goes
 // through ONE shared unified processor; .html/.htm wireframes render live in
-// WireframeView's sandboxed iframe (T7); the remaining kinds (.mmd diagrams,
-// .jsx/.tsx sources, .json data) show a placeholder until their task lands —
-// the docKind switch below is the seam they plug into.
+// WireframeView's sandboxed iframe (T7); .mmd diagrams render in DiagramView
+// with pan/zoom + the verification strip (T9); the remaining kinds (.jsx/.tsx
+// sources, .json data) show a placeholder until their task lands — the
+// docKind switch below is the seam they plug into.
 //
 // Pipeline (architecture.md KB section — exactly this, in this order):
 //   remark-parse → remark-gfm → remark-rehype({allowDangerousHtml:false})
@@ -28,6 +29,7 @@ import rehypeAutolinkHeadings from "rehype-autolink-headings";
 import rehypeStringify from "rehype-stringify";
 import { docKind, useKbDoc } from "../../lib/kb";
 import { WireframeView } from "./WireframeView";
+import { DiagramView } from "./DiagramView";
 
 // One shared processor instance — unified processors are immutable-after-
 // freeze and reusable; building it per render would re-run plugin setup on
@@ -131,10 +133,28 @@ export function DocView({ path, active }: { path: string; active: boolean }) {
         // switch instead of leaking across docs. .jsx/.tsx wireframe SOURCES
         // stay on the placeholder (kind "code") — deferred per architecture.
         <WireframeView key={path} path={path} content={content} />
+      ) : kind === "diagram" ? (
+        // T9: mermaid rendering with hand-rolled pan/zoom. keyed by path for
+        // the same reason as WireframeView — the Transform is per-doc state
+        // and must reset on doc SWITCH (it survives live reloads, where the
+        // path is unchanged and only `content` swaps).
+        <DiagramView key={path} path={path} content={content} />
       ) : (
         <PlaceholderBody kind={kind} path={path} />
       )}
     </div>
+  );
+}
+
+/** The markdown rendering path as a self-contained unit (pipeline + doc CSS).
+ *  T9's Explorer reuses THIS for repo `.md` files instead of duplicating the
+ *  unified pipeline — one processor, one typography block, everywhere. */
+export function MarkdownDoc({ content }: { content: string }) {
+  return (
+    <>
+      <style>{DOC_CSS}</style>
+      <MarkdownBody content={content} />
+    </>
   );
 }
 
@@ -160,11 +180,10 @@ function MarkdownBody({ content }: { content: string }) {
   return <div className="kb-doc" dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
-/** Kinds without a renderer yet — extension seam for later tasks (diagrams,
- *  code, data). Centered dim placeholder until then. */
-function PlaceholderBody({ kind, path }: { kind: Exclude<ReturnType<typeof docKind>, "markdown" | "wireframe">; path: string }) {
+/** Kinds without a renderer yet — extension seam for later tasks (code,
+ *  data). Centered dim placeholder until then. */
+function PlaceholderBody({ kind, path }: { kind: Exclude<ReturnType<typeof docKind>, "markdown" | "wireframe" | "diagram">; path: string }) {
   const label: Record<typeof kind, string> = {
-    diagram: "Mermaid diagram — rendered by a later task",
     code: "JSX/TSX source — rendered by a later task",
     data: "JSON document — rendered by a later task",
     unknown: "unsupported document type",

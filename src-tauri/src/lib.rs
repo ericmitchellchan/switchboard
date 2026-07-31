@@ -1,4 +1,5 @@
 mod config;
+mod explorer;
 mod kb;
 mod power;
 mod pty;
@@ -601,6 +602,9 @@ pub fn run() {
             kb::kb_list_docs,
             kb::kb_read_doc,
             kb::kb_write_doc,
+            explorer::explorer_projects,
+            explorer::explorer_list,
+            explorer::explorer_read,
             write_file,
             confirm_app_close,
             open_pip_window,
