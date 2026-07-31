@@ -1,8 +1,8 @@
-// KB document reading view (T6) — renders the open doc. Markdown goes through
-// ONE shared unified processor; every other KB doc kind (.mmd diagrams, .html
-// wireframes, .jsx/.tsx sources, .json data) shows a placeholder until its
-// task lands (T7 wireframes, T7/T9 the rest) — the docKind switch below is
-// the seam they plug into.
+// KB document reading view (T6/T7) — renders the open doc. Markdown goes
+// through ONE shared unified processor; .html/.htm wireframes render live in
+// WireframeView's sandboxed iframe (T7); the remaining kinds (.mmd diagrams,
+// .jsx/.tsx sources, .json data) show a placeholder until their task lands —
+// the docKind switch below is the seam they plug into.
 //
 // Pipeline (architecture.md KB section — exactly this, in this order):
 //   remark-parse → remark-gfm → remark-rehype({allowDangerousHtml:false})
@@ -27,6 +27,7 @@ import rehypeSlug from "rehype-slug";
 import rehypeAutolinkHeadings from "rehype-autolink-headings";
 import rehypeStringify from "rehype-stringify";
 import { docKind, useKbDoc } from "../../lib/kb";
+import { WireframeView } from "./WireframeView";
 
 // One shared processor instance — unified processors are immutable-after-
 // freeze and reusable; building it per render would re-run plugin setup on
@@ -124,6 +125,12 @@ export function DocView({ path, active }: { path: string; active: boolean }) {
         <CenteredNote>cannot read {path}: {error}</CenteredNote>
       ) : content === null ? null : kind === "markdown" ? (
         <MarkdownBody content={content} />
+      ) : kind === "wireframe" ? (
+        // T7: live sandboxed rendering for .html/.htm. keyed by path so all
+        // per-doc state (zoom, pins file, pin-mode) re-initializes on doc
+        // switch instead of leaking across docs. .jsx/.tsx wireframe SOURCES
+        // stay on the placeholder (kind "code") — deferred per architecture.
+        <WireframeView key={path} path={path} content={content} />
       ) : (
         <PlaceholderBody kind={kind} path={path} />
       )}
@@ -153,11 +160,10 @@ function MarkdownBody({ content }: { content: string }) {
   return <div className="kb-doc" dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
-/** Non-markdown kinds — clean extension seam for T7 (wireframes) and T7/T9
- *  (diagrams, code, data). Centered dim placeholder until then. */
-function PlaceholderBody({ kind, path }: { kind: Exclude<ReturnType<typeof docKind>, "markdown">; path: string }) {
+/** Kinds without a renderer yet — extension seam for later tasks (diagrams,
+ *  code, data). Centered dim placeholder until then. */
+function PlaceholderBody({ kind, path }: { kind: Exclude<ReturnType<typeof docKind>, "markdown" | "wireframe">; path: string }) {
   const label: Record<typeof kind, string> = {
-    wireframe: "HTML wireframe — rendered by a later task (T7)",
     diagram: "Mermaid diagram — rendered by a later task",
     code: "JSX/TSX source — rendered by a later task",
     data: "JSON document — rendered by a later task",

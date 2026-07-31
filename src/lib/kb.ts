@@ -120,6 +120,7 @@ export function docKind(path: string): DocKind {
     case "md":
       return "markdown";
     case "html":
+    case "htm":
       return "wireframe";
     case "mmd":
       return "diagram";
