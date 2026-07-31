@@ -26,10 +26,8 @@ export {
   enableWebGL,
   disableWebGL,
   setTerminalConfig,
-  markSessionDirty,
   isSessionDirty,
   clearSessionDirty,
-  isResizePropagationSuppressed,
   disposeTerminal,
 } from "./terminalRegistry";
 
@@ -42,8 +40,8 @@ const savedScrollPositions = new Map<string, { viewportY: number; baseY: number 
 // panes' terminals).
 const hiddenSessionIds = new Set<string>();
 
-// The registry owns all disposal paths (session close, PTY exit while
-// hidden); clear this module's per-session state on every one of them.
+// The registry owns all disposal paths (session close / kill, app teardown);
+// clear this module's per-session state on every one of them.
 registerDisposeCleanup((sessionId) => {
   savedScrollPositions.delete(sessionId);
   hiddenSessionIds.delete(sessionId);
@@ -55,9 +53,14 @@ registerDisposeCleanup((sessionId) => {
  * terminal element in the DOM — no scroll reset, no reattach needed.
  */
 export function hideTerminal(sessionId: string): void {
+  // WebGL drop BEFORE the already-hidden guard (disableWebGL is idempotent):
+  // a remount while CSS-hidden — hide tab B → split unmounts its pane
+  // (parked, still in hiddenSessionIds) → back to single → B remounts with
+  // visible=false — has acquireTerminal re-enable WebGL, and the guard alone
+  // would leave that GPU context alive behind display:none.
+  disableWebGL(sessionId);
   if (hiddenSessionIds.has(sessionId)) return;
   hiddenSessionIds.add(sessionId);
-  disableWebGL(sessionId);
   log.debug(`Terminal hidden id=${sessionId}`);
 }
 

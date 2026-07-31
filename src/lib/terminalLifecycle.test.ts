@@ -4,7 +4,6 @@
 import { describe, it, expect } from "vitest";
 import {
   attachedLifecycle,
-  canReattach,
   attach,
   isSteal,
   adopt,
@@ -36,14 +35,16 @@ describe("ownership tokens: grant and steal", () => {
   it("adopting a detached (hidden) instance is not a steal", () => {
     const hidden: KeepAliveLifecycle = { attachedTo: null, exited: false };
     expect(isSteal(hidden, 3)).toBe(false);
-    const outcome = adopt(hidden, 3);
-    expect(outcome).toMatchObject({ action: "adopt", steal: false });
+    expect(adopt(hidden, 3)).toMatchObject({ steal: false });
   });
 
+  // NOTE: this test SIMULATES the registry's bookkeeping (terminalRegistry.ts
+  // acquireTerminal: fire the loser's onStolen, then null `mount`, then commit
+  // the adopted lifecycle). If that sequence changes in the registry, this
+  // harness must be updated to match — it can drift silently otherwise.
   it("steal sequence A→B→C fires the loser's onStolen exactly once per steal", () => {
-    // Simulates the registry's bookkeeping: `mount` holds the current owner's
-    // handlers and is nulled on every steal, so a mount that already lost can
-    // never be notified (or notify) twice.
+    // `mount` holds the current owner's handlers and is nulled on every steal,
+    // so a mount that already lost can never be notified (or notify) twice.
     const stolenCalls: number[] = [];
     let lifecycle = attachedLifecycle(1);
     let mount: { owner: number; onStolen: () => void } | null = {
@@ -53,7 +54,6 @@ describe("ownership tokens: grant and steal", () => {
 
     const adoptAs = (owner: number) => {
       const outcome = adopt(lifecycle, owner);
-      if (outcome.action !== "adopt") throw new Error("expected adopt");
       if (outcome.steal) mount?.onStolen();
       mount = { owner, onStolen: () => stolenCalls.push(owner) };
       lifecycle = outcome.next;
@@ -78,7 +78,7 @@ describe("ownership tokens: grant and steal", () => {
   });
 });
 
-describe("disposal decision matrix", () => {
+describe("disposal decision matrix (exit never disposes)", () => {
   it("release by the owner of a live instance → keep-alive, detached", () => {
     const outcome = release(attachedLifecycle(7), 7);
     expect(outcome.action).toBe("keep-alive");
@@ -93,57 +93,67 @@ describe("disposal decision matrix", () => {
     expect(release(l, 1)).toEqual({ action: "ignore" });
   });
 
-  it("PTY exit while hidden → dispose immediately", () => {
+  it("PTY exit while hidden → latch only; the parked buffer survives", () => {
     const hidden: KeepAliveLifecycle = { attachedTo: null, exited: false };
-    expect(markExited(hidden)).toEqual({ action: "dispose" });
+    const next = markExited(hidden);
+    expect(next).toEqual({ attachedTo: null, exited: true });
   });
 
-  it("PTY exit while a mount is showing → defer (keep the exit tail visible)", () => {
-    const outcome = markExited(attachedLifecycle(4));
-    expect(outcome.action).toBe("defer");
-    if (outcome.action === "defer") {
-      expect(outcome.next.exited).toBe(true);
-      expect(outcome.next.attachedTo).toBe(4);
+  it("PTY exit while a mount is showing → latch only; owner keeps the tail", () => {
+    const next = markExited(attachedLifecycle(4));
+    expect(next.exited).toBe(true);
+    expect(next.attachedTo).toBe(4);
+  });
+
+  it("release after exit → keep-alive parked, NOT disposed (tail stays readable)", () => {
+    const exited = markExited(attachedLifecycle(4));
+    const outcome = release(exited, 4);
+    expect(outcome.action).toBe("keep-alive");
+    if (outcome.action === "keep-alive") {
+      expect(outcome.next).toEqual({ attachedTo: null, exited: true });
     }
   });
 
-  it("release after a deferred exit → dispose (nothing left worth keeping)", () => {
-    const exit = markExited(attachedLifecycle(4));
-    if (exit.action !== "defer") throw new Error("expected defer");
-    expect(release(exit.next, 4)).toEqual({ action: "dispose" });
-  });
-
-  it("release after a deferred exit by a NON-owner → ignore, not dispose", () => {
-    const exit = markExited(attachedLifecycle(4));
-    if (exit.action !== "defer") throw new Error("expected defer");
-    expect(release(exit.next, 99)).toEqual({ action: "ignore" });
-  });
-
-  it("session close is unconditional — no lifecycle gate exists for it (the registry disposes directly)", () => {
-    // Documented here for the matrix: close/kill does not consult release/
-    // markExited; disposeTerminal tears down regardless of attachedTo/exited.
-    expect(true).toBe(true);
+  it("release after exit by a NON-owner → ignore", () => {
+    const exited = markExited(attachedLifecycle(4));
+    expect(release(exited, 99)).toEqual({ action: "ignore" });
   });
 });
 
-describe("exited instances are never re-adopted", () => {
-  const exited: KeepAliveLifecycle = { attachedTo: null, exited: true };
-
-  it("canReattach is false once exited", () => {
-    expect(canReattach(exited)).toBe(false);
-    expect(canReattach({ attachedTo: 5, exited: true })).toBe(false);
+describe("exited entries stay adoptable and revivable", () => {
+  it("adopting a parked exited entry works — the exit tail is what the remount shows", () => {
+    const parkedExited: KeepAliveLifecycle = { attachedTo: null, exited: true };
+    const outcome = adopt(parkedExited, 9);
+    expect(outcome.steal).toBe(false);
+    expect(outcome.next).toEqual({ attachedTo: 9, exited: true });
   });
 
-  it("adopt on an exited instance → replace (dispose + fresh terminal)", () => {
-    expect(adopt(exited, 9)).toEqual({ action: "replace" });
+  it("adopting a SHOWN exited entry is still a steal for the showing mount", () => {
+    const shownExited = markExited(attachedLifecycle(5));
+    const outcome = adopt(shownExited, 6);
+    expect(outcome.steal).toBe(true);
+    expect(outcome.next.attachedTo).toBe(6);
+    expect(outcome.next.exited).toBe(true);
   });
 
-  it("revive (in-place restart on the same session id) clears the latch", () => {
-    const revived = revive({ attachedTo: 5, exited: true });
-    expect(revived.exited).toBe(false);
-    expect(canReattach(revived)).toBe(true);
-    // ...and a later release keeps the live terminal instead of disposing it.
-    expect(release(revived, 5).action).toBe("keep-alive");
+  it("revive (in-place Restart on the same session id) clears the latch", () => {
+    const revived = revive(markExited(attachedLifecycle(5)));
+    expect(revived).toEqual({ attachedTo: 5, exited: false });
+    // ...and the restarted session's later release parks it live, as usual.
+    const outcome = release(revived, 5);
+    expect(outcome.action).toBe("keep-alive");
+    if (outcome.action === "keep-alive") expect(outcome.next.exited).toBe(false);
+  });
+
+  it("full restart round-trip: exit shown → release parked → adopt → revive", () => {
+    let l = attachedLifecycle(1);
+    l = markExited(l); // PTY died while shown
+    const rel = release(l, 1); // pane unmounts (tab switch in split mode)
+    if (rel.action !== "keep-alive") throw new Error("expected keep-alive");
+    l = rel.next; // parked, exited — buffer intact
+    l = adopt(l, 2).next; // user reopens the tab; tail is readable
+    l = revive(l); // user clicks Restart; new PTY, same terminal
+    expect(l).toEqual({ attachedTo: 2, exited: false });
   });
 });
 
@@ -151,16 +161,14 @@ describe("re-attach refresh requirement", () => {
   it("adopting a hidden instance always demands a viewport refresh", () => {
     // Hidden writes advanced the buffer but the renderer skipped them — the
     // registry must term.refresh(0, rows-1) on every adoption.
-    const outcome = adopt({ attachedTo: null, exited: false }, 2);
-    expect(outcome).toMatchObject({ action: "adopt", refresh: true });
+    expect(adopt({ attachedTo: null, exited: false }, 2).refresh).toBe(true);
   });
 
   it("a steal-adoption demands a refresh too (the element changed hosts)", () => {
-    const outcome = adopt(attachedLifecycle(1), 2);
-    expect(outcome).toMatchObject({ action: "adopt", steal: true, refresh: true });
+    expect(adopt(attachedLifecycle(1), 2)).toMatchObject({ steal: true, refresh: true });
   });
 
-  it("fresh creation carries no refresh flag — there is nothing skipped to repaint", () => {
-    expect(adopt({ attachedTo: null, exited: true }, 2)).toEqual({ action: "replace" });
+  it("adopting a parked EXITED instance demands a refresh as well", () => {
+    expect(adopt({ attachedTo: null, exited: true }, 2).refresh).toBe(true);
   });
 });

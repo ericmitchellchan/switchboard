@@ -49,9 +49,9 @@ const sessionCallbacks = new Map<
 // stream its new PTY's output into the same live terminal.
 export function cleanupSessionListeners(sessionId: string) {
   unregisterSessionHooks(sessionId);
-  // In-place restart reuses the session id: clear the exited latch so a later
-  // release keeps the live terminal instead of disposing it. Harmless on the
-  // close path — disposeTerminal follows unconditionally there.
+  // In-place restart reuses the session id: clear the exited latch so the
+  // lifecycle state stays truthful for the new PTY. Harmless on the close
+  // path — disposeTerminal follows unconditionally there.
   reviveSession(sessionId);
   sessionDecoders.delete(sessionId);
   wiredSessions.delete(sessionId);
@@ -222,7 +222,8 @@ export const TerminalPane = memo(function TerminalPane({
       unbindMountHandlers(sessionId, owner);
       // Keep-alive: the instance moves to the hidden root and keeps consuming
       // PTY output — reattach is adoption, never replay. Real teardown happens
-      // on session close (App → disposeTerminal) or PTY exit.
+      // only on session close (App → disposeTerminal) or app teardown; even an
+      // exited session's buffer stays readable until then.
       releaseTerminal(sessionId, owner);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

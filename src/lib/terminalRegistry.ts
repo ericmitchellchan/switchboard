@@ -14,11 +14,12 @@
 // keeps writing into it — the render model is correct at every moment while
 // hidden, at zero render cost. Remount adopts the SAME element back into the
 // new host and refreshes the viewport (hidden writes advanced the buffer but
-// the renderer skipped them). Real disposal happens on session close
-// (App.destroySession → disposeTerminal), PTY exit (immediately if hidden,
-// deferred while a mount shows the exit tail), or app teardown.
-// Ownership/steal/disposal decision rules live in terminalLifecycle.ts (pure,
-// unit-tested under Node).
+// the renderer skipped them). Real disposal happens ONLY on session close
+// (App.destroySession → disposeTerminal) or app teardown — a PTY exit never
+// disposes, because Switchboard keeps exited sessions in the tab bar with a
+// Restart button and the final output must stay readable (shown, parked, or
+// re-adopted later). Ownership/steal decision rules live in
+// terminalLifecycle.ts (pure, unit-tested under Node).
 //
 // Handler wiring: because the Terminal outlives any mount, the term-level
 // subscriptions (onData → PTY write, onResize → PTY resize, onWriteParsed,
@@ -45,7 +46,7 @@ import { log } from "./logger";
 import {
   adopt,
   attachedLifecycle,
-  markExited as lifecycleMarkExited,
+  markExited,
   release,
   revive,
   type KeepAliveLifecycle,
@@ -147,12 +148,10 @@ function keepAliveRoot(): HTMLDivElement {
 }
 
 // Dirty tracking: sessions that received new PTY data since last serialization.
-// Owned here because the registry's output listener is what writes the data.
+// Owned here because the registry's output listener is what writes the data
+// (and marks it dirty — there is no external marker anymore).
 const dirtySessionIds = new Set<string>();
 
-export function markSessionDirty(sessionId: string): void {
-  dirtySessionIds.add(sessionId);
-}
 export function isSessionDirty(sessionId: string): boolean {
   return dirtySessionIds.has(sessionId);
 }
@@ -165,9 +164,6 @@ export function clearSessionDirty(sessionId: string): void {
 // from SIGWINCHing the shell. See terminal.ts#forceViewportRefresh.
 const resizePropagationSuppressed = new Set<string>();
 
-export function isResizePropagationSuppressed(sessionId: string): boolean {
-  return resizePropagationSuppressed.has(sessionId);
-}
 export function setResizePropagationSuppressed(sessionId: string, on: boolean): void {
   if (on) resizePropagationSuppressed.add(sessionId);
   else resizePropagationSuppressed.delete(sessionId);
@@ -270,26 +266,24 @@ export function acquireTerminal(
 ): { instance: TerminalInstance; adopted: boolean } {
   const existing = registry.get(sessionId);
   if (existing && !existing.disposed) {
+    // Every existing entry is adoptable — including an exited one, whose
+    // buffer (the exit tail) is exactly what the remount is there to show.
     const outcome = adopt(existing.lifecycle, owner);
-    if (outcome.action === "adopt") {
-      if (outcome.steal) {
-        // Last mount wins (same session in two panes) — tell the loser its
-        // pane emptied and sever its handlers so nothing double-fires.
-        log.debug(`Terminal stolen id=${sessionId} from=${existing.mount?.owner} to=${owner}`);
-        existing.mount?.handlers.onStolen?.();
-      }
-      existing.mount = null;
-      existing.lifecycle = outcome.next;
-      host.appendChild(existing.container);
-      enableWebGL(sessionId);
-      // Hidden writes advanced the buffer but the renderer skipped them —
-      // repaint the viewport now that it's visible again.
-      existing.terminal.refresh(0, existing.terminal.rows - 1);
-      log.debug(`Terminal adopted id=${sessionId} owner=${owner}`);
-      return { instance: existing, adopted: true };
+    if (outcome.steal) {
+      // Last mount wins (same session in two panes) — tell the loser its
+      // pane emptied and sever its handlers so nothing double-fires.
+      log.debug(`Terminal stolen id=${sessionId} from=${existing.mount?.owner} to=${owner}`);
+      existing.mount?.handlers.onStolen?.();
     }
-    // Exited — dead end, never re-adopt; start fresh.
-    disposeEntry(sessionId, existing);
+    existing.mount = null;
+    existing.lifecycle = outcome.next;
+    host.appendChild(existing.container);
+    enableWebGL(sessionId);
+    // Hidden writes advanced the buffer but the renderer skipped them —
+    // repaint the viewport now that it's visible again.
+    existing.terminal.refresh(0, existing.terminal.rows - 1);
+    log.debug(`Terminal adopted id=${sessionId} owner=${owner}`);
+    return { instance: existing, adopted: true };
   }
 
   log.debug(`Creating terminal for session id=${sessionId} cols=${opts?.cols} rows=${opts?.rows} owner=${owner}`);
@@ -423,9 +417,10 @@ export function acquireTerminal(
       if (entry.disposed) return;
       entry.terminal.write("\r\n\x1b[90m[Process exited]\x1b[0m\r\n");
       sessionHooks.get(sessionId)?.onExited?.();
-      const outcome = lifecycleMarkExited(entry.lifecycle);
-      if (outcome.action === "dispose") disposeEntry(sessionId, entry);
-      else entry.lifecycle = outcome.next;
+      // Exit never disposes — shown or parked, the entry survives so the
+      // final output stays readable (Switchboard keeps exited sessions in
+      // the tab bar with a Restart button). Only session close tears down.
+      entry.lifecycle = markExited(entry.lifecycle);
     });
     entry.stop = () => {
       unOut();
@@ -486,17 +481,13 @@ export function unbindMountHandlers(sessionId: string, owner: number): void {
   if (entry && entry.mount?.owner === owner) entry.mount = null;
 }
 
-/** A mount is unmounting: detach into the keep-alive root (or dispose, if the
- *  PTY already exited — nothing left worth keeping). */
+/** A mount is unmounting: detach into the keep-alive root. Never disposes —
+ *  exited or not, the buffer stays readable until session close. */
 export function releaseTerminal(sessionId: string, owner: number): void {
   const entry = registry.get(sessionId);
   if (!entry) return;
   const outcome = release(entry.lifecycle, owner);
   if (outcome.action === "ignore") return; // a newer mount owns it now
-  if (outcome.action === "dispose") {
-    disposeEntry(sessionId, entry);
-    return;
-  }
   log.debug(`Terminal released to keep-alive id=${sessionId} owner=${owner}`);
   entry.lifecycle = outcome.next;
   entry.mount = null;
@@ -505,13 +496,14 @@ export function releaseTerminal(sessionId: string, owner: number): void {
 }
 
 /** In-place restart on the same session id (App's Restart button): clear the
- *  exited latch so the live terminal isn't disposed under the new PTY. */
+ *  exited latch so the lifecycle state stays truthful for the new PTY that is
+ *  about to stream into the same live terminal. */
 export function reviveSession(sessionId: string): void {
   const entry = registry.get(sessionId);
   if (entry) entry.lifecycle = revive(entry.lifecycle);
 }
 
-/** Tear the instance down for real: session close, PTY exit while hidden.
+/** Tear the instance down for real: session close / kill, app teardown.
  *  Unconditional — the caller has decided the session itself is over. */
 export function disposeTerminal(sessionId: string): void {
   const entry = registry.get(sessionId);
