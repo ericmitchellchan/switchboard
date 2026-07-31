@@ -66,15 +66,29 @@ export function newThread(args: {
 }
 
 /** The launch line typed into the thread's shell (without the trailing \r).
- *  chatStarted gates the flag: an unstarted claude session has nothing on
- *  disk to resume — resuming it errors — so it relaunches fresh under the
- *  SAME pinned uuid. */
-export function launchCommand(
-  thread: Pick<Thread, "chatStarted" | "chatSessionId">
-): string {
-  return thread.chatStarted
-    ? `claude --resume ${thread.chatSessionId}`
-    : `claude --session-id ${thread.chatSessionId}`;
+ *
+ *  `resume` is GROUND TRUTH from disk (claude_session_exists: does
+ *  ~/.claude/projects/<munged-cwd>/<chatSessionId>.jsonl exist?), NOT the
+ *  chatStarted hint. Decision table:
+ *
+ *    transcript exists | chatStarted | launch
+ *    ------------------+-------------+----------------------------------------
+ *    true              | true        | --resume
+ *    true              | false       | --resume     (heals the PiP bypass:
+ *                                      first turn typed in the PiP window
+ *                                      never reached the main detector)
+ *    false             | true        | --session-id (heals the shell false
+ *                                      positive: Ctrl+C claude then `git
+ *                                      status⏎` flipped the flag forever)
+ *    false             | false       | --session-id
+ *
+ *  i.e. launch = exists alone; chatStarted is a UI hint only. An unstarted
+ *  claude session has nothing on disk to resume — resuming it errors — so it
+ *  relaunches fresh under the SAME pinned uuid. */
+export function launchCommand(args: { chatSessionId: string; resume: boolean }): string {
+  return args.resume
+    ? `claude --resume ${args.chatSessionId}`
+    : `claude --session-id ${args.chatSessionId}`;
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -101,7 +115,7 @@ export function sanitizeThread(raw: unknown): Thread | null {
   ) {
     return null;
   }
-  const out: Thread = {
+  return {
     id: t.id,
     title: t.title,
     workingDir: t.workingDir,
@@ -111,8 +125,6 @@ export function sanitizeThread(raw: unknown): Thread | null {
     createdAt: typeof t.createdAt === "number" ? t.createdAt : 0,
     lastActivityAt: typeof t.lastActivityAt === "number" ? t.lastActivityAt : 0,
   };
-  if (typeof t.archivedAt === "number") out.archivedAt = t.archivedAt;
-  return out;
 }
 
 function sanitizeThreads(raw: unknown): Thread[] {
@@ -194,6 +206,68 @@ export function createChatStartDetector(): (data: string) => boolean {
     }
     return fired;
   };
+}
+
+// ── Shell-ready wait ─────────────────────────────────────────────────────────
+
+export const SHELL_READY_SETTLE_MS = 300;
+export const SHELL_READY_FALLBACK_MS = 1500;
+
+/** Wait for a thread's shell session to be ready to receive the typed claude
+ *  launch line. Definition: first ACCEPTED PTY output chunk + a short settle
+ *  (the first output is the prompt painting — proof the shell spawned and
+ *  ConPTY is delivering; the settle lets multi-chunk prompt paints like
+ *  oh-my-posh finish so the typed line isn't interleaved mid-paint). A
+ *  fallback timer covers the no-output cases: a silent shell profile, and
+ *  reviving into an ALREADY-RUNNING restored shell whose prompt painted long
+ *  ago — the fallback IS the path there. Never rejects: worst case the line
+ *  is typed early and ConPTY buffers it (accepted v1).
+ *
+ *  Chunks are FILTERED by spawn generation: on revive-into-an-exited-tab the
+ *  restart's old reader thread can emit dying chunks stamped with the
+ *  previous generation, and those must not satisfy "first output" (they'd
+ *  start the settle before the new shell even spawned). `expectedGen()` is
+ *  the registry's current expectation; undefined means no registry entry yet
+ *  (fresh session whose pane hasn't mounted) — accepted, because a fresh
+ *  session id is a brand-new UUID with no stale readers possible (this is
+ *  deliberately looser than terminalLifecycle.acceptsGeneration, whose
+ *  undefined-rejects rule targets closed sessions).
+ *
+ *  Dependencies are injected (subscribe = the session's output events,
+ *  expectedGen = registry lookup) so this stays pure-testable under Node. */
+export function waitForShellReady(opts: {
+  subscribe: (cb: (gen: number) => void) => Promise<() => void>;
+  expectedGen: () => number | undefined;
+  settleMs?: number;
+  fallbackMs?: number;
+}): Promise<void> {
+  const settleMs = opts.settleMs ?? SHELL_READY_SETTLE_MS;
+  const fallbackMs = opts.fallbackMs ?? SHELL_READY_FALLBACK_MS;
+  return new Promise((resolve) => {
+    let settled = false;
+    let sawOutput = false;
+    let unlisten: (() => void) | undefined;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      unlisten?.();
+      resolve();
+    };
+    const fallback = setTimeout(finish, fallbackMs);
+    opts
+      .subscribe((gen) => {
+        if (settled || sawOutput) return;
+        const expected = opts.expectedGen();
+        if (expected !== undefined && gen !== expected) return; // stale spawn's dying chunk
+        sawOutput = true;
+        clearTimeout(fallback);
+        setTimeout(finish, settleMs);
+      })
+      .then((fn) => {
+        if (settled) fn();
+        else unlisten = fn;
+      });
+  });
 }
 
 // ── Restore reconciliation ───────────────────────────────────────────────────
@@ -302,7 +376,15 @@ export type ThreadsView = {
   threads: readonly Thread[];
   /** Threads whose claude process was launched in THIS app run (create or
    *  revive). Transient on purpose: empty on boot, so an app restart shows
-   *  every thread as revivable — the claude processes are gone. */
+   *  every thread as revivable — the claude processes are gone.
+   *
+   *  KNOWN v1 BOUNDARY: claude exiting INSIDE a live shell (/exit, double
+   *  Ctrl+C) leaves the shell running, so nothing clears this flag — the row
+   *  keeps showing live until the tab closes / the app restarts. Detecting
+   *  that would mean parsing claude's output (out of scope v1). It is
+   *  SELF-HEALING though: revive is ground-truth (claude_session_exists
+   *  decides --resume vs --session-id from the transcript on disk), so
+   *  reviving such a thread later still does the right thing. */
   launched: ReadonlySet<string>;
   /** Threads in the ~10s revive-boot window (MCP/tool reload). */
   booting: ReadonlySet<string>;
@@ -401,6 +483,34 @@ export function bindThreadSession(threadId: string, sessionId: string): void {
 export function markThreadLaunched(threadId: string): void {
   launched.add(threadId);
   bump();
+}
+
+/** Roll back a launched mark — the launch line write failed, so no claude
+ *  process is behind the row after all (it must show revive again). */
+export function clearThreadLaunched(threadId: string): void {
+  if (!launched.delete(threadId)) return;
+  bump();
+}
+
+// ── Revive re-entrancy gate ──────────────────────────────────────────────────
+// handleReviveThread awaits session creation before it can bind/mark the
+// thread, so a second click in that window would see sessionId=null and
+// revive AGAIN — two shells resuming one conversation. This gate is
+// SYNCHRONOUS: taken at revive entry before the first await, released on
+// completion/failure.
+
+const reviveInFlight = new Set<string>();
+
+/** Take the revive gate for a thread. Returns false (bail) when a revive for
+ *  it is already in flight. */
+export function tryBeginRevive(threadId: string): boolean {
+  if (reviveInFlight.has(threadId)) return false;
+  reviveInFlight.add(threadId);
+  return true;
+}
+
+export function endRevive(threadId: string): void {
+  reviveInFlight.delete(threadId);
 }
 
 /** Flip chatStarted — the first real user turn happened; from now on revive
@@ -509,6 +619,7 @@ export function __resetThreadStoreForTests(): void {
   threads = [];
   launched.clear();
   booting.clear();
+  reviveInFlight.clear();
   sessionStatuses = {};
   activeSessionId = null;
   cachedView = null;

@@ -18,11 +18,11 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads } from "./lib/ipc";
+import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists } from "./lib/ipc";
 import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty, isSessionDirty, serializeForPip } from "./lib/terminal";
 import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing } from "./lib/pipBridge";
 import { onSessionOutput } from "./lib/ipc";
-import { bumpSessionGeneration, addSessionInputListener } from "./lib/terminalRegistry";
+import { bumpSessionGeneration, addSessionInputListener, getSessionGeneration } from "./lib/terminalRegistry";
 import {
   initThreadStore,
   remapThreadSessionsInStore,
@@ -31,6 +31,7 @@ import {
   createThreadRecord,
   bindThreadSession,
   markThreadLaunched,
+  clearThreadLaunched,
   isThreadLaunched,
   markChatStarted,
   setThreadBooting,
@@ -43,6 +44,9 @@ import {
   defaultThreadTitle,
   publishSessionStatuses,
   registerThreadActions,
+  waitForShellReady,
+  tryBeginRevive,
+  endRevive,
 } from "./lib/threadStore";
 import { NewThreadDialog } from "./components/NewThreadDialog";
 import type { Session, Thread } from "./types";
@@ -81,43 +85,17 @@ function sessionConfirmMessage(session: Session): string {
 }
 
 // ── Thread shell-ready detection (T5) ────────────────────────────────────────
-// Before typing the claude launch line into a thread's PTY we wait for the
-// shell to be READY to receive input. Definition chosen: first PTY output
-// chunk + a short settle (SHELL_READY_SETTLE_MS). Reasoning: the first output
-// is the prompt painting — proof the shell spawned and ConPTY is delivering —
-// and the settle window lets multi-chunk prompt paints (oh-my-posh, starship)
-// finish so the typed line isn't interleaved mid-paint. A fallback timer
-// (SHELL_READY_FALLBACK_MS) covers the two no-output cases: a silent shell
-// profile, and reviving into an ALREADY-RUNNING restored shell whose prompt
-// was painted long ago (no new output will ever arrive — the fallback IS the
-// path there). Never rejects: worst case we type into a shell that isn't
-// ready and the user sees the echo — v1-acceptable per the spec (no output
-// parsing).
+// The wait logic (first ACCEPTED output chunk + settle, capped fallback —
+// full reasoning and the generation-filter rules live on
+// threadStore.waitForShellReady) is pure and injected; this adapter binds it
+// to the session's Tauri output events and the registry's current spawn
+// generation, so a restart's dying old-reader chunks can't fake "shell
+// ready" on revive-into-an-exited-tab.
 
-const SHELL_READY_SETTLE_MS = 300;
-const SHELL_READY_FALLBACK_MS = 1500;
-
-function waitForShellReady(sessionId: string): Promise<void> {
-  return new Promise((resolve) => {
-    let settled = false;
-    let unlisten: (() => void) | undefined;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      unlisten?.();
-      resolve();
-    };
-    const fallback = setTimeout(finish, SHELL_READY_FALLBACK_MS);
-    let sawOutput = false;
-    onSessionOutput(sessionId, () => {
-      if (settled || sawOutput) return;
-      sawOutput = true;
-      clearTimeout(fallback);
-      setTimeout(finish, SHELL_READY_SETTLE_MS);
-    }).then((fn) => {
-      if (settled) fn();
-      else unlisten = fn;
-    });
+function waitForSessionShellReady(sessionId: string): Promise<void> {
+  return waitForShellReady({
+    subscribe: (cb) => onSessionOutput(sessionId, (_data, gen) => cb(gen)),
+    expectedGen: () => getSessionGeneration(sessionId),
   });
 }
 
@@ -209,6 +187,13 @@ export default function App() {
   // signal can never arrive before main is listening, and PTY chunks are
   // sequenced through main so PiP and main render the same byte stream.
   const pipRouterCleanupRef = useRef<(() => void) | null>(null);
+
+  // Active chatStarted detectors, keyed by session id (T5). Entries are
+  // removed when the detector fires, when a revive re-arms the same session,
+  // and in destroySession — a session closed before its first turn would
+  // otherwise leak its entry here forever (the registry's own listener set is
+  // already cleared by disposeTerminal; this map is App's bookkeeping).
+  const chatDetectorRemoversRef = useRef(new Map<string, () => void>());
 
   const closeConfirm = useCallback(() => {
     setConfirmState((prev) => ({ ...prev, open: false }));
@@ -337,6 +322,11 @@ export default function App() {
     // Closing a thread's TAB kills the session but NOT the thread — the
     // binding is severed and the side menu shows the revive chip.
     unbindThreadsForSession(id);
+    // Drop any un-fired chatStarted detector bookkeeping for the session
+    // (closed before its first turn). The registry listener itself died with
+    // disposeTerminal; calling the stale remover is a harmless no-op.
+    chatDetectorRemoversRef.current.get(id)?.();
+    chatDetectorRemoversRef.current.delete(id);
     void saveThreadsToDisk();
   }, [removeSession]);
 
@@ -533,7 +523,6 @@ export default function App() {
   // stream the PTY receives, without touching the once-only PTY wiring or
   // TerminalPane's SessionHooks slot. Our own launch line goes through
   // writeToSession (IPC), NOT xterm onData, so it can never trip the detector.
-  const chatDetectorRemoversRef = useRef(new Map<string, () => void>());
   const armChatStartDetector = useCallback((sessionId: string, threadId: string) => {
     // Disarm any previous detector on this session first — a revive that
     // reuses the bound tab (restart path) would otherwise stack listeners,
@@ -558,20 +547,48 @@ export default function App() {
   // Type the thread's claude launch line into its (shell) session once the
   // shell is ready. Never exec claude directly — the shell-then-type path is
   // the cross-platform-proven one.
+  //
+  // The --resume vs --session-id choice is GROUND TRUTH: claude_session_exists
+  // checks whether the transcript .jsonl actually exists on disk (decision
+  // table on threadStore.launchCommand). chatStarted stays a UI hint — kept
+  // in sync with disk truth here, but never the decider. This heals both
+  // detector failure directions: the shell false positive (Ctrl+C claude,
+  // then `git status⏎` flips the flag forever) and the PiP bypass false
+  // negative (first turn typed in the PiP window never reaches the main
+  // window's detector).
   const launchClaudeInSession = useCallback(
     async (sessionId: string, threadId: string) => {
       const thread = getThreadById(threadId);
       if (!thread) return;
-      await waitForShellReady(sessionId);
-      const line = launchCommand(thread);
-      log.info(`Thread launch id=${threadId} session=${sessionId}: ${line}`);
+      await waitForSessionShellReady(sessionId);
+      let resume: boolean;
+      try {
+        resume = await claudeSessionExists(thread.workingDir, thread.chatSessionId);
+      } catch (err) {
+        // Ground truth unavailable (home dir unresolvable?) — fall back to
+        // the chatStarted hint rather than failing the launch.
+        log.warn(`claude_session_exists failed id=${threadId}, falling back to chatStarted: ${err}`);
+        resume = thread.chatStarted;
+      }
+      if (resume && !thread.chatStarted) {
+        // Disk says the conversation started (e.g. its first turn happened in
+        // the PiP window) — re-sync the hint.
+        markChatStarted(threadId);
+        void saveThreadsToDisk();
+      }
+      const line = launchCommand({ chatSessionId: thread.chatSessionId, resume });
+      log.info(`Thread launch id=${threadId} session=${sessionId} exists=${resume}: ${line}`);
       try {
         await writeToSession(sessionId, line + "\r");
       } catch (err) {
+        // No claude behind the row after all — roll back liveness so the row
+        // returns to its revive chip instead of lying live.
         log.error(`Failed to type thread launch line id=${threadId}: ${err}`);
+        clearThreadLaunched(threadId);
+        setThreadBooting(threadId, false);
         return;
       }
-      if (!thread.chatStarted) armChatStartDetector(sessionId, threadId);
+      if (!resume) armChatStartDetector(sessionId, threadId);
     },
     [armChatStartDetector]
   );
@@ -615,6 +632,12 @@ export default function App() {
         if (thread.sessionId) switchToSession(thread.sessionId);
         return;
       }
+      // Re-entrancy gate, taken SYNCHRONOUSLY before the first await: the
+      // session-create await below runs with the thread still unbound and
+      // unlaunched, so a second click in that window would route through
+      // openThread → sessionId null → revive AGAIN — two shells resuming one
+      // conversation. Released in the finally.
+      if (!tryBeginRevive(threadId)) return;
       log.info(`Revive thread id=${threadId} chatStarted=${thread.chatStarted}`);
       setThreadBooting(threadId, true);
       // Booting window: ~10s of MCP/tool reload is normal on --resume. The
@@ -656,7 +679,10 @@ export default function App() {
         await launchClaudeInSession(sessionId, threadId);
       } catch (err) {
         log.error(`Failed to revive thread id=${threadId}: ${err}`);
+        clearThreadLaunched(threadId);
         setThreadBooting(threadId, false);
+      } finally {
+        endRevive(threadId);
       }
     },
     [config.repos, doCreateSession, paneLayout, switchToSession, handleRestartSession, launchClaudeInSession]
@@ -1156,7 +1182,11 @@ export default function App() {
       } else {
         // Fresh start — no sessions restored, so no thread binding can hold.
         remapThreadSessionsInStore(new Map());
-        log.info("No saved workspace, creating fresh session");
+        // A threads-only workspace (sessions expired by staleness, threads
+        // durable) still lands here: keep its session counter so fresh
+        // "Shell N" names don't restart from 1.
+        if (savedWorkspace) sessionCounterRef.current = savedWorkspace.sessionCounter;
+        log.info("No saved workspace sessions, creating fresh session");
         sessionCounterRef.current++;
         const name = `Shell ${sessionCounterRef.current}`;
         try {

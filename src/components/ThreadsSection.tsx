@@ -52,11 +52,10 @@ const CHIP_STYLE: CSSProperties = {
 
 export function ThreadsSection() {
   const view = useThreadsView();
-  const threads = view.threads.filter((t) => !t.archivedAt);
 
   return (
     <>
-      {threads.map((t) => (
+      {view.threads.map((t) => (
         <ThreadRow
           key={t.id}
           thread={t}

@@ -107,6 +107,16 @@ export async function loadThreads(): Promise<string> {
   return invoke("load_threads");
 }
 
+/** Ground truth for revive: does claude's transcript for this conversation
+ *  exist on disk (~/.claude/projects/<munged-cwd>/<sessionId>.jsonl)? Decides
+ *  --resume vs --session-id; the chatStarted flag is a UI hint only. */
+export async function claudeSessionExists(
+  workingDir: string,
+  sessionId: string
+): Promise<boolean> {
+  return invoke("claude_session_exists", { workingDir, sessionId });
+}
+
 export async function writeFile(path: string, content: string): Promise<void> {
   return invoke("write_file", { path, content });
 }

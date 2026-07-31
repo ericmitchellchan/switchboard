@@ -64,8 +64,13 @@ export function NewThreadDialog({ repos, onCreate, onClose }: NewThreadDialogPro
     item?.scrollIntoView({ block: "nearest" });
   }, [selectedIndex]);
 
+  // Single-shot submit: a double-Enter (or Enter + click) before the dialog
+  // unmounts must not create two threads.
+  const submittedRef = useRef(false);
   const select = useCallback(
     (option: RepoOption) => {
+      if (submittedRef.current) return;
+      submittedRef.current = true;
       onCreate(option.name, option.path, option.color, option.group, title.trim());
     },
     [onCreate, title]

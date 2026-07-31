@@ -175,6 +175,14 @@ export function bumpSessionGeneration(sessionId: string): number {
   return next;
 }
 
+/** The generation this frontend currently expects the session's PTY events to
+ *  carry — undefined before the registry entry exists (fresh session whose
+ *  pane hasn't mounted). Read-only seam for consumers with their own event
+ *  subscriptions (T5's shell-ready wait filters stale-spawn chunks with it). */
+export function getSessionGeneration(sessionId: string): number | undefined {
+  return sessionGenerations.get(sessionId);
+}
+
 // Dirty tracking: sessions that received new PTY data since last serialization.
 // Owned here because the registry's output listener is what writes the data
 // (and marks it dirty — there is no external marker anymore).

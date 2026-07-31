@@ -224,6 +224,13 @@ fn threads_path() -> Result<std::path::PathBuf, String> {
     Ok(base.join("switchboard").join("threads.json"))
 }
 
+// Serializes concurrent save_threads invocations: every writer shares one tmp
+// path, so an unserialized flush racing the periodic tick could rename a
+// half-written tmp over threads.json. The lock spans write+rename, making the
+// pair atomic relative to other savers (single app instance; tiny payloads,
+// so briefly blocking the async runtime thread is fine).
+static THREADS_SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[tauri::command]
 async fn save_threads(data: String) -> Result<(), String> {
     log::debug!("Saving threads ({} bytes)", data.len());
@@ -231,6 +238,9 @@ async fn save_threads(data: String) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
+    let _guard = THREADS_SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, data.as_bytes()).map_err(|e| {
         log::error!("Failed to write threads tmp file: {}", e);
@@ -252,6 +262,145 @@ async fn load_threads() -> Result<String, String> {
             log::error!("Failed to load threads.json: {}", e);
             Err(e.to_string())
         }
+    }
+}
+
+// ── Claude session ground truth (T5 review gate 3) ──────────────────────────
+// claude persists a conversation transcript at
+//   ~/.claude/projects/<munged-cwd>/<session_id>.jsonl
+// only after the first real turn. Checking that file is the GROUND TRUTH for
+// "--resume vs --session-id" at revive time — the frontend's chatStarted flag
+// is a UI hint that can false-positive (typing into the shell after claude
+// exits) and false-negative (first turn typed in the PiP window bypasses the
+// main window's detector). Disk truth heals both directions.
+//
+// Munging convention, verified against the real directory names in
+// ~/.claude/projects/ on this machine (e.g. C:\Users\ericm\projects\orbit →
+// C--Users-ericm-projects-orbit, C:\Users\ericm → C--Users-ericm): every
+// non-alphanumeric character becomes '-' (drive colon included: "C:" → "C-"),
+// CASE PRESERVED (…-Antigravity-… and …-antigravity coexist as distinct
+// dirs). Separators and colons are the cases proven by those dirs; the
+// broader non-alphanumeric rule matches claude-code's implementation for
+// characters (dots, underscores) that no local project path exercises.
+
+/// Munge an absolute cwd into claude's project-directory name. Accepts either
+/// slash style, a verbatim prefix (\\?\C:\… or \\?\UNC\server\share), and
+/// trailing separators.
+fn munge_claude_project_dir(cwd: &str) -> String {
+    // Verbatim prefixes: \\?\UNC\server\share is really \\server\share;
+    // \\?\C:\… is really C:\… (same normalization create_session applies).
+    let normalized: String = if let Some(rest) = cwd.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{}", rest)
+    } else if let Some(rest) = cwd.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        cwd.to_string()
+    };
+    let trimmed = normalized.trim_end_matches(['\\', '/']);
+    trimmed
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+#[tauri::command]
+async fn claude_session_exists(working_dir: String, session_id: String) -> Result<bool, String> {
+    // session_id is interpolated into a filename — hold it to uuid shape.
+    if session_id.is_empty()
+        || !session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err("invalid session id".to_string());
+    }
+    let home = dirs::home_dir().ok_or("Cannot resolve home directory")?;
+    let path = home
+        .join(".claude")
+        .join("projects")
+        .join(munge_claude_project_dir(&working_dir))
+        .join(format!("{}.jsonl", session_id));
+    let exists = path.is_file();
+    log::debug!(
+        "claude_session_exists dir={} id={} -> {}",
+        working_dir,
+        session_id,
+        exists
+    );
+    Ok(exists)
+}
+
+#[cfg(test)]
+mod claude_munge_tests {
+    use super::munge_claude_project_dir;
+
+    #[test]
+    fn windows_path_with_drive_colon() {
+        // Verified against the real dir C--Users-ericm-projects-orbit
+        assert_eq!(
+            munge_claude_project_dir(r"C:\Users\ericm\projects\orbit"),
+            "C--Users-ericm-projects-orbit"
+        );
+    }
+
+    #[test]
+    fn short_path() {
+        // Verified against the real dir C--Users-ericm
+        assert_eq!(munge_claude_project_dir(r"C:\Users\ericm"), "C--Users-ericm");
+    }
+
+    #[test]
+    fn forward_slashes_equivalent() {
+        assert_eq!(
+            munge_claude_project_dir("C:/Users/ericm/projects/orbit"),
+            "C--Users-ericm-projects-orbit"
+        );
+    }
+
+    #[test]
+    fn case_preserved() {
+        // …-Antigravity-… and …-antigravity exist as DISTINCT real dirs
+        assert_eq!(
+            munge_claude_project_dir(r"C:\Users\ericm\projects\Antigravity\nba-jarvis"),
+            "C--Users-ericm-projects-Antigravity-nba-jarvis"
+        );
+    }
+
+    #[test]
+    fn trailing_separators_trimmed() {
+        assert_eq!(
+            munge_claude_project_dir(r"C:\Users\ericm\projects\orbit\"),
+            "C--Users-ericm-projects-orbit"
+        );
+        assert_eq!(
+            munge_claude_project_dir("C:/Users/ericm/projects/orbit/"),
+            "C--Users-ericm-projects-orbit"
+        );
+    }
+
+    #[test]
+    fn verbatim_prefix_stripped() {
+        assert_eq!(
+            munge_claude_project_dir(r"\\?\C:\Users\ericm\projects\orbit"),
+            "C--Users-ericm-projects-orbit"
+        );
+    }
+
+    #[test]
+    fn verbatim_unc_prefix() {
+        assert_eq!(
+            munge_claude_project_dir(r"\\?\UNC\server\share\repo"),
+            "--server-share-repo"
+        );
+    }
+
+    #[test]
+    fn dots_and_underscores_munge_to_dashes() {
+        // No local project path exercises these; rule follows claude-code's
+        // non-alphanumeric convention.
+        assert_eq!(
+            munge_claude_project_dir(r"C:\repos\my_app.v2"),
+            "C--repos-my-app-v2"
+        );
     }
 }
 
@@ -443,6 +592,7 @@ pub fn run() {
             load_scrollback,
             save_threads,
             load_threads,
+            claude_session_exists,
             clear_scrollback,
             clear_session_scrollback,
             get_home_dir,

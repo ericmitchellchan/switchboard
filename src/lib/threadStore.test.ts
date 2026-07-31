@@ -1,8 +1,12 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { Thread } from "../types";
 import {
   newThread,
   launchCommand,
+  waitForShellReady,
+  tryBeginRevive,
+  endRevive,
+  clearThreadLaunched,
   defaultThreadTitle,
   sanitizeThread,
   createChatStartDetector,
@@ -83,16 +87,18 @@ describe("defaultThreadTitle", () => {
 });
 
 // ─── Launch command gating (--resume vs --session-id) ────────────────────────
+// `resume` is disk ground truth (claude_session_exists), never the
+// chatStarted hint — see the decision table on launchCommand.
 
 describe("launchCommand", () => {
-  it("uses --session-id before the first real turn", () => {
-    expect(launchCommand({ chatStarted: false, chatSessionId: "abc-123" })).toBe(
+  it("no transcript on disk → --session-id (same pinned uuid)", () => {
+    expect(launchCommand({ chatSessionId: "abc-123", resume: false })).toBe(
       "claude --session-id abc-123"
     );
   });
 
-  it("uses --resume once chatStarted", () => {
-    expect(launchCommand({ chatStarted: true, chatSessionId: "abc-123" })).toBe(
+  it("transcript exists → --resume", () => {
+    expect(launchCommand({ chatSessionId: "abc-123", resume: true })).toBe(
       "claude --resume abc-123"
     );
   });
@@ -216,9 +222,11 @@ describe("sanitizeThread (lean-record invariant)", () => {
     expect("messages" in clean).toBe(false);
   });
 
-  it("preserves archivedAt when present", () => {
-    const t = mkThread({ archivedAt: 123 });
-    expect(sanitizeThread(t)).toEqual(t);
+  it("drops legacy archivedAt like any other unknown field", () => {
+    const t = mkThread();
+    const clean = sanitizeThread({ ...t, archivedAt: 123 })!;
+    expect(clean).toEqual(t);
+    expect("archivedAt" in clean).toBe(false);
   });
 
   it("rejects records missing critical fields", () => {
@@ -349,6 +357,14 @@ describe("thread store", () => {
     expect(getThreadsView().booting.size).toBe(0);
   });
 
+  it("clearThreadLaunched rolls the row back to revivable (write failure)", () => {
+    const t = createThreadRecord({ title: "x", workingDir: "C:/r" });
+    markThreadLaunched(t.id);
+    expect(isThreadLaunched(t.id)).toBe(true);
+    clearThreadLaunched(t.id);
+    expect(isThreadLaunched(t.id)).toBe(false);
+  });
+
   it("publishSessionStatuses is change-detected (no notify churn)", () => {
     let notifies = 0;
     // subscribe via the view path
@@ -367,5 +383,101 @@ describe("thread store", () => {
     publishSessionStatuses({ a: "waiting" }, "a");
     expect(getThreadsView()).not.toBe(v1);
     expect(getThreadsView().sessionStatuses.a).toBe("waiting");
+  });
+});
+
+// ─── Revive re-entrancy gate ─────────────────────────────────────────────────
+
+describe("revive in-flight gate", () => {
+  it("second begin bails while the first is in flight", () => {
+    expect(tryBeginRevive("t1")).toBe(true);
+    expect(tryBeginRevive("t1")).toBe(false); // double-click window
+    expect(tryBeginRevive("t2")).toBe(true); // independent threads unaffected
+  });
+
+  it("end releases the gate (completion AND failure paths)", () => {
+    expect(tryBeginRevive("t1")).toBe(true);
+    endRevive("t1");
+    expect(tryBeginRevive("t1")).toBe(true);
+  });
+});
+
+// ─── Shell-ready wait (generation-filtered) ──────────────────────────────────
+
+describe("waitForShellReady", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function harness(expectedGen: () => number | undefined) {
+    let emit: (gen: number) => void = () => {};
+    const unsub = vi.fn();
+    let resolved = false;
+    const promise = waitForShellReady({
+      subscribe: (cb) => {
+        emit = cb;
+        return Promise.resolve(unsub);
+      },
+      expectedGen,
+      settleMs: 300,
+      fallbackMs: 1500,
+    });
+    void promise.then(() => {
+      resolved = true;
+    });
+    return { emit: (gen: number) => emit(gen), unsub, isResolved: () => resolved };
+  }
+
+  it("first accepted chunk + settle resolves (before the fallback)", async () => {
+    const h = harness(() => 2);
+    await vi.advanceTimersByTimeAsync(0); // flush subscribe
+    h.emit(2);
+    await vi.advanceTimersByTimeAsync(299);
+    expect(h.isResolved()).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.isResolved()).toBe(true);
+    expect(h.unsub).toHaveBeenCalled();
+  });
+
+  it("a stale-generation dying chunk does NOT start the settle", async () => {
+    // Revive-into-exited-tab: the restart's old reader thread emits chunks
+    // stamped with the previous generation. They must not fake "first
+    // output" — the wait holds until the fallback (or a real chunk).
+    const h = harness(() => 2);
+    await vi.advanceTimersByTimeAsync(0);
+    h.emit(1); // old spawn's dying output
+    await vi.advanceTimersByTimeAsync(400); // past settleMs — must NOT resolve
+    expect(h.isResolved()).toBe(false);
+    await vi.advanceTimersByTimeAsync(1100); // fallback at 1500 total
+    expect(h.isResolved()).toBe(true);
+  });
+
+  it("a stale chunk then the new spawn's chunk resolves on the settle", async () => {
+    const h = harness(() => 2);
+    await vi.advanceTimersByTimeAsync(0);
+    h.emit(1); // ignored
+    h.emit(2); // real first output
+    await vi.advanceTimersByTimeAsync(300);
+    expect(h.isResolved()).toBe(true);
+  });
+
+  it("undefined expectation accepts any chunk (fresh session, pane not mounted yet)", async () => {
+    const h = harness(() => undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    h.emit(1);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(h.isResolved()).toBe(true);
+  });
+
+  it("no output at all → fallback resolves (silent profile / already-live shell)", async () => {
+    const h = harness(() => 2);
+    await vi.advanceTimersByTimeAsync(1499);
+    expect(h.isResolved()).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.isResolved()).toBe(true);
+    expect(h.unsub).toHaveBeenCalled();
   });
 });

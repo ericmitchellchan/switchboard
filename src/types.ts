@@ -94,10 +94,12 @@ export type Route =
 // ─────────────────────────────────────────────────────────────────────────────
 // Threads (T5) — an agent session that survives app/machine restarts.
 // A thread = a Switchboard session bound to a Claude Code conversation via
-// exactly two critical fields: `chatSessionId` (the claude conversation UUID,
-// minted by US at thread creation) and `chatStarted` (gates
-// `--resume` vs `--session-id` on revive — a claude session doesn't exist on
-// disk until a real user turn happens, and resuming an unstarted one errors).
+// `chatSessionId` (the claude conversation UUID, minted by US at thread
+// creation) plus `chatStarted`, a UI HINT that the first real turn happened.
+// The `--resume` vs `--session-id` choice at revive time is decided by disk
+// GROUND TRUTH (claude_session_exists — does the transcript .jsonl exist?),
+// not by chatStarted: a claude session doesn't exist on disk until a real
+// user turn happens, and resuming an unstarted one errors.
 //
 // NOTE (recorded from the Ky bug): machine-local fields on this record —
 // chatSessionId / chatStarted especially — must NEVER be bulk-replaced by any
@@ -117,13 +119,13 @@ export interface Thread {
   workingDir: string;
   /** ★ The claude conversation UUID — WE mint it (`crypto.randomUUID()`). */
   chatSessionId: string;
-  /** ★ True once the first REAL user turn happened (Enter in the TUI, not a
-   *  bracketed paste). Gates `--resume` (started) vs `--session-id` (not). */
+  /** ★ UI hint: the first REAL user turn happened (Enter in the TUI, not a
+   *  bracketed paste). The revive launch decision itself comes from disk
+   *  ground truth (claude_session_exists), which also re-syncs this hint. */
   chatStarted: boolean;
   /** Current bound Switchboard session id — a TAB binding, null when none.
    *  Machine-local; remapped (or severed) on workspace restore. */
   sessionId: string | null;
   createdAt: number;
   lastActivityAt: number;
-  archivedAt?: number;
 }
