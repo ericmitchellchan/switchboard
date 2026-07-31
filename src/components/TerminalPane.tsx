@@ -1,24 +1,17 @@
-import { useEffect, useRef, useCallback, memo } from "react";
+import { useEffect, useRef, useState, useCallback, memo } from "react";
+import type { Terminal } from "@xterm/xterm";
 import type { Session, AgentStatus } from "../types";
+import { getTerminal, showTerminal, hideTerminal } from "../lib/terminal";
 import {
-  createTerminal,
-  attachToDOM,
-  getTerminal,
-  writeRestoreContent,
-  showTerminal,
-  hideTerminal,
-  markSessionDirty,
-  setXtermWiring,
-  unsetXtermWiring,
-  isResizePropagationSuppressed,
-} from "../lib/terminal";
-import {
-  writeToSession,
-  resizeSession,
-  onSessionOutput,
-  onSessionExited,
-  loadScrollback,
-} from "../lib/ipc";
+  newOwnerToken,
+  acquireTerminal,
+  releaseTerminal,
+  bindMountHandlers,
+  unbindMountHandlers,
+  registerSessionHooks,
+  unregisterSessionHooks,
+  reviveSession,
+} from "../lib/terminalRegistry";
 import { enqueueFit, cancelPendingFit } from "../lib/fitQueue";
 import {
   initDetector,
@@ -30,17 +23,15 @@ import { detectTasks, detectResolutions } from "../lib/taskDetector";
 import { log } from "../lib/logger";
 import { SearchBar } from "./SearchBar";
 
-// Module-level map for event listener cleanup functions
-const listenerCleanups = new Map<string, (() => void)[]>();
-
 // Per-session streaming UTF-8 decoders (handles multi-byte chars split across chunks)
 const sessionDecoders = new Map<string, TextDecoder>();
 
-// Module-level wiring guard: prevents duplicate listeners when React
-// unmounts/remounts TerminalPane for the same session (e.g. single-pane ↔ split)
+// Module-level wiring guard: the session hooks + status detector are per
+// SESSION, not per mount — registered once and kept across unmount/remount
+// (background sessions keep status/task detection while their pane is gone).
 const wiredSessions = new Set<string>();
 
-// Module-level callback refs so listener closures always see the latest
+// Module-level callback refs so hook closures always see the latest
 // callbacks regardless of which component instance last rendered.
 const sessionCallbacks = new Map<
   string,
@@ -52,16 +43,86 @@ const sessionCallbacks = new Map<
   }
 >();
 
+// Called by App on session close AND on in-place restart. The registry's own
+// Tauri/PTY listeners are NOT touched here — they live and die with the
+// terminal instance (disposeTerminal), which is what lets an in-place restart
+// stream its new PTY's output into the same live terminal.
 export function cleanupSessionListeners(sessionId: string) {
-  const fns = listenerCleanups.get(sessionId);
-  if (fns) {
-    fns.forEach((fn) => fn());
-    listenerCleanups.delete(sessionId);
-  }
-  unsetXtermWiring(sessionId);
+  unregisterSessionHooks(sessionId);
+  // In-place restart reuses the session id: clear the exited latch so a later
+  // release keeps the live terminal instead of disposing it. Harmless on the
+  // close path — disposeTerminal follows unconditionally there.
+  reviveSession(sessionId);
   sessionDecoders.delete(sessionId);
   wiredSessions.delete(sessionId);
   sessionCallbacks.delete(sessionId);
+}
+
+// Register the session-level hooks the registry dispatches from its once-only
+// term subscriptions and PTY listeners. Guarded per session; re-runs after
+// cleanupSessionListeners (restart) to re-init detection fresh.
+function wireSession(sessionId: string) {
+  if (wiredSessions.has(sessionId)) return;
+  wiredSessions.add(sessionId);
+
+  log.debug(`Wiring session id=${sessionId}`);
+
+  // Init status detector and per-session UTF-8 decoder
+  initDetector(sessionId);
+  sessionDecoders.set(sessionId, new TextDecoder("utf-8"));
+
+  // Callback accessors that read from the module-level map
+  const getCbs = () => sessionCallbacks.get(sessionId);
+
+  // onWriteParsed reads BUFFER_READ_LINES around the cursor for status
+  // detection. baseY + cursorY converts the viewport-relative cursorY into
+  // an absolute scrollback index — without this we'd read stale lines.
+  const BUFFER_READ_LINES = 15;
+
+  registerSessionHooks(sessionId, {
+    onUserData: (_data) => {
+      const cbs = getCbs();
+      if (cbs) clearWaiting(sessionId, cbs.onStatusChange);
+    },
+    onWriteParsed: (terminal: Terminal) => {
+      const cbs = getCbs();
+      if (!cbs) return;
+      const buf = terminal.buffer.active;
+      const lines: string[] = [];
+      const cursorAbsY = buf.baseY + buf.cursorY;
+      const startY = Math.max(0, cursorAbsY - BUFFER_READ_LINES + 1);
+      for (let y = startY; y <= cursorAbsY; y++) {
+        const line = buf.getLine(y);
+        if (line) lines.push(line.translateToString(true));
+      }
+      processBufferLines(sessionId, lines, cursorAbsY, cbs.onStatusChange);
+    },
+    onOutput: (bytes) => {
+      // Task detection over the raw UTF-8 text (streaming decoder handles
+      // multi-byte chars split across chunks). The term.write + dirty-marking
+      // are registry-owned and already happened.
+      const decoder = sessionDecoders.get(sessionId);
+      const text = decoder ? decoder.decode(bytes, { stream: true }) : new TextDecoder().decode(bytes);
+      const cbs = getCbs();
+      if (cbs) {
+        if (cbs.onAutoTask) {
+          const detected = detectTasks(sessionId, text);
+          for (const task of detected) cbs.onAutoTask(task, sessionId);
+        }
+        if (cbs.onResolveTask) {
+          const resolved = detectResolutions(sessionId, text);
+          for (const prefix of resolved) cbs.onResolveTask(prefix);
+        }
+      }
+    },
+    onExited: () => {
+      const cbs = getCbs();
+      if (cbs) {
+        markExited(sessionId, cbs.onStatusChange);
+        cbs.onExited(sessionId);
+      }
+    },
+  });
 }
 
 interface TerminalPaneProps {
@@ -90,201 +151,90 @@ export const TerminalPane = memo(function TerminalPane({
   isFocused = true,
 }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  // True after a newer mount adopted this session's live terminal (one xterm
+  // per session — e.g. the same session shown in two split panes). This pane
+  // goes inert behind a hand-off notice; remounting takes the terminal back.
+  const [stolen, setStolen] = useState(false);
+  const stolenRef = useRef(false);
 
-  // Update module-level callback refs on every render so listener closures
-  // always invoke the latest callbacks from whichever component instance is active.
+  // Update module-level callback refs on every render so hook closures always
+  // invoke the latest callbacks from whichever component instance is active.
   sessionCallbacks.set(session.id, { onStatusChange, onExited, onAutoTask, onResolveTask });
+  // Re-wire if needed (no-op when already wired). Runs in render (not just the
+  // mount effect) so an in-place restart — which clears the wiring via
+  // cleanupSessionListeners without remounting — re-registers hooks and
+  // re-inits detection on its next render.
+  wireSession(session.id);
 
-  // Set up terminal data wiring (once per session, module-level guard)
-  const wireSession = useCallback((sessionId: string, restoredFromId?: string) => {
-    if (wiredSessions.has(sessionId)) return;
-    wiredSessions.add(sessionId);
-
-    log.debug(`Wiring session id=${sessionId}`);
-
-    const instance = getTerminal(sessionId);
-    if (!instance) return;
-
-    // Init status detector and per-session UTF-8 decoder
-    initDetector(sessionId);
-    sessionDecoders.set(sessionId, new TextDecoder("utf-8"));
-
-    // Helper to store unlisten functions
-    const pushCleanup = (unlisten: () => void) => {
-      const arr = listenerCleanups.get(sessionId) ?? [];
-      arr.push(unlisten);
-      listenerCleanups.set(sessionId, arr);
-    };
-
-    // Callback accessors that read from the module-level map
-    const getCbs = () => sessionCallbacks.get(sessionId);
-
-    // Helper: process a single PTY output chunk (write + task detect).
-    // Looks up the terminal per-call so it survives recreate-in-document
-    // (e.g. when the session is moved to/from a Picture-in-Picture window).
-    const processPtyChunk = (bytes: Uint8Array) => {
-      const inst = getTerminal(sessionId);
-      if (!inst) return;
-      inst.terminal.write(bytes);
-      markSessionDirty(sessionId);
-
-      const decoder = sessionDecoders.get(sessionId);
-      const text = decoder ? decoder.decode(bytes, { stream: true }) : new TextDecoder().decode(bytes);
-      const cbs = getCbs();
-      if (cbs) {
-        if (cbs.onAutoTask) {
-          const detected = detectTasks(sessionId, text);
-          for (const task of detected) cbs.onAutoTask(task, sessionId);
-        }
-        if (cbs.onResolveTask) {
-          const resolved = detectResolutions(sessionId, text);
-          for (const prefix of resolved) cbs.onResolveTask(prefix);
-        }
-      }
-    };
-
-    // xterm-level wiring (onData, onWriteParsed, onBufferChange, onResize).
-    // Lives in terminal.ts so it can be re-attached automatically when the
-    // Terminal is disposed and recreated for Picture-in-Picture.
-    //
-    // onWriteParsed reads BUFFER_READ_LINES around the cursor for status
-    // detection. baseY + cursorY converts the viewport-relative cursorY into
-    // an absolute scrollback index — without this we'd read stale lines.
-    const BUFFER_READ_LINES = 15;
-    setXtermWiring(sessionId, {
-      onUserData: (sid, data) => {
-        const cbs = getCbs();
-        if (cbs) clearWaiting(sid, cbs.onStatusChange);
-        writeToSession(sid, data).catch(console.error);
-      },
-      onWriteParsed: (sid, terminal) => {
-        const cbs = getCbs();
-        if (!cbs) return;
-        const buf = terminal.buffer.active;
-        const lines: string[] = [];
-        const cursorAbsY = buf.baseY + buf.cursorY;
-        const startY = Math.max(0, cursorAbsY - BUFFER_READ_LINES + 1);
-        for (let y = startY; y <= cursorAbsY; y++) {
-          const line = buf.getLine(y);
-          if (line) lines.push(line.translateToString(true));
-        }
-        processBufferLines(sid, lines, cursorAbsY, cbs.onStatusChange);
-      },
-      onBufferChange: (sid, terminal) => {
-        // Without a refresh + texture atlas clear, WebGL can render stale
-        // glyphs from the previous buffer when an app like vim or Claude
-        // Code's plan editor switches to/from the alt screen.
-        terminal.refresh(0, terminal.rows - 1);
-        const inst = getTerminal(sid);
-        if (inst?.webglAddon) {
-          terminal.clearTextureAtlas();
-        }
-      },
-      onResize: (sid, { cols, rows }) => {
-        // Skip the forceViewportRefresh cols-1 bounce — it's a display-only
-        // scroll-area recalc, not a real terminal size change. Forwarding it
-        // would SIGWINCH the shell and make TUI apps redraw (stranding
-        // duplicate frames in scrollback).
-        if (isResizePropagationSuppressed(sid)) return;
-        resizeSession(sid, cols, rows).catch(console.error);
-      },
-    });
-
-    // Buffer PTY output while scrollback is being restored to prevent
-    // the new shell's prompt from appearing before the old scrollback content.
-    let pendingOutput: Uint8Array[] | null = restoredFromId ? [] : null;
-
-    // PTY output -> terminal + status detector + task detector
-    onSessionOutput(sessionId, (b64data: string) => {
-      try {
-        const binaryStr = atob(b64data);
-        const bytes = new Uint8Array(binaryStr.length);
-        for (let i = 0; i < binaryStr.length; i++) {
-          bytes[i] = binaryStr.charCodeAt(i);
-        }
-        if (pendingOutput !== null) {
-          pendingOutput.push(bytes);
-          return;
-        }
-        processPtyChunk(bytes);
-      } catch (e) {
-        log.warn(`Base64 decode error for session id=${sessionId}: ${e}`);
-      }
-    }).then(pushCleanup);
-
-    // Session exit — per-call lookup so it works after PiP recreate
-    onSessionExited(sessionId, () => {
-      const inst = getTerminal(sessionId);
-      if (inst) inst.terminal.write("\r\n\x1b[90m[Process exited]\x1b[0m\r\n");
-      const cbs = getCbs();
-      if (cbs) {
-        markExited(sessionId, cbs.onStatusChange);
-        cbs.onExited(sessionId);
-      }
-    }).then(pushCleanup);
-
-    // Restore scrollback for sessions restored from a saved workspace
-    if (restoredFromId) {
-      log.debug(`Restoring scrollback for session id=${sessionId} from=${restoredFromId}`);
-      loadScrollback(restoredFromId).then((content) => {
-        if (content) writeRestoreContent(sessionId, content);
-        log.debug(`Scrollback restored for session id=${sessionId}`);
-        const buffered = pendingOutput;
-        pendingOutput = null;
-        if (buffered) for (const chunk of buffered) processPtyChunk(chunk);
-      }).catch((e) => {
-        log.warn(`Failed to restore scrollback for session id=${sessionId}: ${e}`);
-        const buffered = pendingOutput;
-        pendingOutput = null;
-        if (buffered) for (const chunk of buffered) processPtyChunk(chunk);
-      });
-    }
-  }, []);
-
-  // Mount-once: create terminal, attach to DOM, wire data listeners.
-  // The terminal element stays in the DOM for the lifetime of the component —
-  // visibility is toggled via CSS (display:none on the parent wrapper) and
-  // the showTerminal/hideTerminal helpers manage WebGL context.
+  // Mount: acquire the session's live terminal from the keep-alive registry
+  // (adopting its DOM subtree if it already exists — buffer already rendered
+  // and current, nothing to replay) or create it there on first mount.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     const sessionId = session.id;
+    const owner = newOwnerToken();
+    stolenRef.current = false;
+    setStolen(false);
 
-    // Create terminal if it doesn't exist (pass saved dims for restored sessions)
-    createTerminal(sessionId, { cols: session.cols, rows: session.rows });
-    wireSession(sessionId, session.restoredFromId);
+    const { instance, adopted } = acquireTerminal(sessionId, container, owner, {
+      cols: session.cols,
+      rows: session.rows,
+      restoredFromId: session.restoredFromId,
+    });
 
-    log.info(`Mount terminal id=${sessionId}`);
+    bindMountHandlers(sessionId, owner, {
+      onStolen: () => {
+        // Another mount adopted the terminal — our pane just emptied. Go
+        // inert: no more fits from this mount (they'd race the winner's), and
+        // show the hand-off notice.
+        stolenRef.current = true;
+        cancelPendingFit(sessionId);
+        setStolen(true);
+      },
+    });
+
+    log.info(`Mount terminal id=${sessionId} owner=${owner} adopted=${adopted}`);
 
     // Hide until first fit completes to prevent flash at wrong size/position
     container.style.opacity = "0";
 
-    // Attach to DOM (only opens terminal.open() on first call)
-    attachToDOM(sessionId, container);
+    // For an adopted terminal, capture the pre-fit scroll position so the
+    // fit pipeline can put the reader back (bottom-pinned stays pinned).
+    const buf = instance.terminal.buffer.active;
+    const savedScroll = adopted ? { viewportY: buf.viewportY, baseY: buf.baseY } : null;
 
     // Double-RAF so the browser fully computes layout before measuring.
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        enqueueFit(sessionId, "attach", {
-          isFirstAttach: true,
+        if (stolenRef.current) return;
+        enqueueFit(sessionId, adopted ? "show" : "attach", {
+          isFirstAttach: !adopted,
+          savedScroll,
           onReveal: () => { container.style.opacity = "1"; },
         }, 0);
       });
     });
 
-    // Cleanup only runs when the component unmounts (session close)
     return () => {
       cancelPendingFit(sessionId);
+      unbindMountHandlers(sessionId, owner);
+      // Keep-alive: the instance moves to the hidden root and keeps consuming
+      // PTY output — reattach is adoption, never replay. Real teardown happens
+      // on session close (App → disposeTerminal) or PTY exit.
+      releaseTerminal(sessionId, owner);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id]);
 
-  // Visibility effect: show/hide terminal when the visible prop changes.
-  // When becoming visible, re-enable WebGL and fit to (potentially new) container size.
-  // When becoming hidden, disable WebGL to free GPU context.
+  // Visibility effect: show/hide terminal when the visible prop changes
+  // (single-pane mode keeps every tab mounted and toggles CSS display).
+  // When becoming visible, re-enable WebGL and fit to (potentially new)
+  // container size. When becoming hidden, disable WebGL to free GPU context.
   useEffect(() => {
     const sessionId = session.id;
+    if (stolenRef.current) return;
     if (visible) {
       const wasHidden = showTerminal(sessionId);
       if (wasHidden) {
@@ -314,7 +264,7 @@ export const TerminalPane = memo(function TerminalPane({
     let mounted = true;
 
     const handleResize = () => {
-      if (!mounted) return;
+      if (!mounted || stolenRef.current) return;
       const inst = getTerminal(session.id);
       if (!inst?.terminal.element?.parentElement) return;
       const buf = inst.terminal.buffer.active;
@@ -389,6 +339,32 @@ export const TerminalPane = memo(function TerminalPane({
           contain: "layout paint",
         }}
       />
+      {stolen && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            zIndex: 10,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            backgroundColor: "#0C0C0E",
+          }}
+        >
+          <span
+            style={{
+              maxWidth: 360,
+              padding: "0 16px",
+              textAlign: "center",
+              fontFamily: "var(--font-mono)",
+              fontSize: 12,
+              color: "#52525B",
+            }}
+          >
+            This session moved to another pane (one live terminal per session).
+          </span>
+        </div>
+      )}
       {session.status === "exited" && onRestart && (
         <div
           style={{
