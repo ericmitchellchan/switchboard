@@ -388,6 +388,19 @@ mod explorer_tests {
     }
 
     #[test]
+    fn parse_preserves_registry_file_order() {
+        // serde_json's `preserve_order` feature (Cargo.toml) keeps JSON maps
+        // in file order — the Explorer rail lists projects as the registry
+        // orders them, active projects before the archived section.
+        let projects = parse_registry(FIXTURE).unwrap();
+        let keys: Vec<&str> = projects.iter().map(|p| p.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec!["switchboard", "chat-recall", "no-status", "weird-repos", "nba-jarvis"]
+        );
+    }
+
+    #[test]
     fn parse_multi_repo_project_keeps_all_repos() {
         let p = fixture_project("chat-recall");
         assert_eq!(p.status, "paused");

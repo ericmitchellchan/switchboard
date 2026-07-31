@@ -275,12 +275,31 @@ export function b64ToBytes(b64: string): Uint8Array {
   return bytes;
 }
 
+// Screen-level WebGL gate (T11): when the workstation shell shows a
+// non-terminal screen, the WHOLE terminal screen sits behind a screen-level
+// display:none that neither TerminalPane's visible prop nor the keep-alive
+// root sees — every attached pane would keep its GPU context while KB or the
+// Explorer is up. terminal.ts#setTerminalScreenVisible owns the toggle (and
+// the re-show repaint); while the gate is closed, enableWebGL is a no-op so
+// the acquire/adopt/show/recover paths can't create contexts behind the
+// hidden screen either.
+let screenWebGLEnabled = true;
+
+/** Flip the gate. Returns true when the value actually changed (the caller
+ *  only walks the registry on a real transition). */
+export function setScreenWebGLGate(visible: boolean): boolean {
+  if (screenWebGLEnabled === visible) return false;
+  screenWebGLEnabled = visible;
+  return true;
+}
+
 /** WebGL renderer, loaded per ATTACH and disposed on detach, so hidden
  *  terminals don't pile up GPU contexts — browsers cap live WebGL contexts
  *  and evict the oldest, which could be the one on screen (the likely root of
  *  the sleep/wake texture corruption). Falls back to the DOM renderer if the
  *  context can't be created or is lost. */
 export function enableWebGL(sessionId: string): void {
+  if (!screenWebGLEnabled) return; // terminal screen hidden — no GPU contexts
   const entry = registry.get(sessionId);
   if (!entry || entry.webglAddon) return;
   try {

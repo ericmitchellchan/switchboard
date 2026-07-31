@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, lazy, Suspense, Component, Fragment } from "react";
 import type { ReactNode } from "react";
-import type { AgentStatus, RepoConfig, Route, ScreenId } from "./types";
+import type { AgentStatus, RepoConfig, ScreenId, Session, Thread } from "./types";
 import { TabBar } from "./components/TabBar";
 import { SessionHeader } from "./components/SessionHeader";
 import { TerminalPane, cleanupSessionListeners } from "./components/TerminalPane";
@@ -18,10 +18,9 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists } from "./lib/ipc";
-import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty, isSessionDirty, serializeForPip } from "./lib/terminal";
+import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, onSessionOutput } from "./lib/ipc";
+import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty, isSessionDirty, serializeForPip, setTerminalScreenVisible } from "./lib/terminal";
 import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing } from "./lib/pipBridge";
-import { onSessionOutput } from "./lib/ipc";
 import { bumpSessionGeneration, addSessionInputListener, getSessionGeneration } from "./lib/terminalRegistry";
 import {
   initThreadStore,
@@ -53,7 +52,6 @@ import { KbTree } from "./components/kb/KbTree";
 import { DocView } from "./components/kb/DocView";
 import { ExplorerView } from "./components/ExplorerView";
 import { useKbDocList } from "./lib/kb";
-import type { Session, Thread } from "./types";
 import { enqueueFit } from "./lib/fitQueue";
 import { useRoute, navigate, readRouteFromUrl, getNavState } from "./lib/route";
 import {
@@ -188,6 +186,15 @@ export default function App() {
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
+
+  // Screen-level WebGL policy (T11): a non-terminal route hides the whole
+  // pane tree behind a screen-level display:none that TerminalPane's visible
+  // prop never sees — treat every pane as hidden for WebGL purposes so KB /
+  // Explorer visits don't keep GPU contexts alive; returning re-enables and
+  // repaints (terminal.ts#setTerminalScreenVisible).
+  useEffect(() => {
+    setTerminalScreenVisible(route.screen === "terminal");
+  }, [route.screen]);
 
   // No wrapper needed — the fitQueue's per-session debounce (150ms) naturally
   // coalesces the ResizeObserver events that fire during sidebar width transition.
@@ -1411,13 +1418,15 @@ export default function App() {
         {sideMenuVisible && <SideMenu route={route} />}
 
         {/* ── Screen switching (T4) ──
-            Two classes of screens:
-            1. KEEP_ALIVE_SCREENS mount on their first visit and never unmount
-               — inactive ones sit at display:none so their React state (and
-               for the terminal screen, the live xterm/pane tree) survives.
-            2. Param-driven routes render fresh via renderTransientRoute.
-            Every screen gets its own ErrorBoundary so a crash in one — even a
-            hidden one — can't take down the shell or the terminals. */}
+            Every screen is keep-alive: KEEP_ALIVE_SCREENS mount on their
+            first visit and never unmount — inactive ones sit at display:none
+            so their React state (and for the terminal screen, the live
+            xterm/pane tree) survives. A future screen whose params are
+            per-navigation identity would instead render fresh outside this
+            cache (threads ended up as tab bindings, not a screen, so none
+            exist today). Every screen gets its own ErrorBoundary so a crash
+            in one — even a hidden one — can't take down the shell or the
+            terminals. */}
 
         {/* Terminal — the default screen. Always mounted (pre-seeded in the
             activation cache), so screen switches never unmount panes: the T2
@@ -1514,6 +1523,8 @@ export default function App() {
           </div>
         )}
 
+        {/* Terminal-screen-only BY DESIGN — the approved workstation
+            wireframe shows no right task sidebar on the KB/Explorer screens. */}
         <TaskSidebar
           state={sidebarState}
           activeTasks={activeTasks}
@@ -1530,7 +1541,7 @@ export default function App() {
           </ScreenErrorBoundary>
         </div>
 
-        {/* Keep-alive placeholder screens — mounted on first visit only. */}
+        {/* Keep-alive screens — mounted on first visit only. */}
         {activatedScreens.has("kb") && (
           <div
             style={{
@@ -1558,15 +1569,6 @@ export default function App() {
           </div>
         )}
 
-        {/* Param-driven screens render fresh (transient). None exist yet —
-            see renderTransientRoute below for the registration point. */}
-        {!isKeepAliveScreen(route.screen) && (
-          <div style={{ display: "flex", flex: 1, minWidth: 0 }}>
-            <ScreenErrorBoundary resetKey={route.screen}>
-              {renderTransientRoute(route)}
-            </ScreenErrorBoundary>
-          </div>
-        )}
       </div>
 
       <ToastStack
@@ -1622,22 +1624,15 @@ function NewSessionDialogLazy({
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Param-less nav destinations kept mounted after first visit (inactive =
- *  display:none). Later tasks APPEND their param-less screens here; screens
- *  whose params are per-navigation identity (e.g. a thread) go through
- *  renderTransientRoute instead. */
+ *  display:none). New param-less screens APPEND here; a screen whose params
+ *  are per-navigation identity would instead render fresh (re-mount per
+ *  navigation) outside the activation cache — none exist today (threads
+ *  became tab bindings on the terminal screen, not a screen of their own). */
 const KEEP_ALIVE_SCREENS = ["terminal", "kb", "explorer"] as const satisfies readonly ScreenId[];
 const KEEP_ALIVE_SET: ReadonlySet<ScreenId> = new Set(KEEP_ALIVE_SCREENS);
 
 function isKeepAliveScreen(screen: ScreenId): boolean {
   return KEEP_ALIVE_SET.has(screen);
-}
-
-/** Param-driven screens — they key off route params, so re-mounting on each
- *  navigation is the correct behavior.
- *  T5-REGISTRATION (transient screens): thread screens (screen:"thread",
- *  threadId) render here in T5; keep-alive screens never reach this switch. */
-function renderTransientRoute(_route: Route): ReactNode {
-  return null;
 }
 
 type BoundaryProps = { resetKey: string; children: ReactNode };
@@ -1708,7 +1703,7 @@ class ScreenErrorBoundary extends Component<BoundaryProps, BoundaryState> {
 // (The shared PlaceholderScreen stub chrome was removed with T9 — both
 // pre-T6/T9 stubs are now real screens.)
 
-/** T6-REGISTRATION (filled): the Knowledge Base screen — breadcrumb header +
+/** The Knowledge Base screen (T6) — breadcrumb header +
  *  doc tree rail + reading view over the personal-kb checkout. `active` comes
  *  from the route (App owns it) so the data layer pauses its 2.5s doc poll
  *  while this keep-alive screen is hidden; the doc LIST refreshes on
@@ -1789,7 +1784,7 @@ function KnowledgeBaseScreen({ active, doc }: { active: boolean; doc: string | u
   );
 }
 
-/** T9-REGISTRATION (filled): the Explorer screen — registry-driven repo
+/** The Explorer screen (T9) — registry-driven repo
  *  browser (left project rail from registry.json, breadcrumb + file listing +
  *  inline viewer). Route handling mirrors the kb screen's kbDoc rule: while
  *  this keep-alive screen is hidden, the last explorer route keeps the

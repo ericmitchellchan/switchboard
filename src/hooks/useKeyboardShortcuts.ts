@@ -68,7 +68,15 @@ export function useKeyboardShortcuts(
   const actionsRef = useRef(actions);
   actionsRef.current = actions;
 
-  // Register the custom key handler on the active terminal
+  // Register the custom key handler on the active terminal.
+  //
+  // Handler-slot interplay: xterm has a SINGLE custom-key-handler slot. The
+  // registry installs a baseline handler (Ctrl+C copy / Ctrl+V skip) at
+  // instance creation — this effect REPLACES it the first time the session
+  // becomes active and never restores it, so both handlers must carry the
+  // same clipboard rules (this one adds the shortcut interception on top).
+  // TODO: centralize the clipboard rules in the registry's handler with a
+  // pluggable shortcut hook so there's one handler instead of two copies.
   useEffect(() => {
     if (!activeSessionId) return;
 
@@ -86,6 +94,14 @@ export function useKeyboardShortcuts(
             return false; // don't send to PTY
           }
           return true; // no selection → send SIGINT as normal
+        }
+
+        // Ctrl+V: skip xterm's keydown mapping (^V) so the browser's default
+        // paste proceeds — xterm's own `paste` listener does the bracketed
+        // paste into the PTY. Same rule as the registry's baseline handler
+        // (terminalRegistry.ts); writing the clipboard here would double-paste.
+        if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "v" && e.type === "keydown") {
+          return false;
         }
 
         if (isOurShortcut(e)) {

@@ -8,7 +8,7 @@
 // Data flows from the threadStore singleton (useThreadsView); actions flow
 // back through the registered ThreadActions bridge (App owns session
 // creation/revival). SideMenu itself only renders <ThreadsSection /> in its
-// T5-REGISTRATION block — no prop plumbing through it.
+// threads section — no prop plumbing through it.
 
 import { useState } from "react";
 import type { CSSProperties } from "react";

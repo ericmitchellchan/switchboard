@@ -1,7 +1,7 @@
 # Switchboard
 
 ## Project Overview
-Tabbed terminal multiplexer desktop app for managing AI coding agent sessions. Split panes, PTY management, agent status detection, and auto-task extraction. Built with Tauri v2 + React 18 + xterm.js v5.
+Personal workstation desktop app: tabbed terminal multiplexer for AI coding agent sessions (split panes, PTY management, agent status detection, auto-task extraction) plus route-switched Knowledge Base, diagram, and repo Explorer screens with durable agent threads. Built with Tauri v2 + React 18 + xterm.js v5.
 
 ## Architecture
 
@@ -15,10 +15,21 @@ src/
 │   ├── PaneContainer.tsx        → Recursive binary tree pane renderer
 │   ├── PaneDivider.tsx          → Drag-to-resize between panes
 │   ├── SessionHeader.tsx        → Per-session info bar (repo, cwd, restart)
-│   ├── TaskSidebar.tsx          → Auto/manual task list (full/collapsed/hidden)
+│   ├── TaskSidebar.tsx          → Auto/manual task list (full/collapsed/hidden; terminal screen only)
 │   ├── SearchBar.tsx            → Ctrl+F terminal search
-│   ├── StatusBar.tsx            → Bottom bar (task count, session count)
+│   ├── StatusBar.tsx            → Bottom bar (task count, session count, update chip)
+│   ├── SideMenu.tsx             → Left workstation menu (Ctrl+Shift+B): threads + screen nav
+│   ├── ThreadsSection.tsx       → Thread rows in the side menu (status dot, revive chip)
+│   ├── NewThreadDialog.tsx      → Repo picker for creating a thread
 │   ├── NewSessionDialog.tsx     → Repo picker / new session config (lazy-loaded)
+│   ├── ExplorerView.tsx         → Registry-driven repo browser (rail + listing + viewer)
+│   ├── UpdateChip.tsx           → In-app updater chip (consent-based install flow)
+│   ├── ConfirmDialog.tsx        → Modal confirm (close/destructive actions)
+│   ├── kb/                      → Knowledge Base screen views
+│   │   ├── KbTree.tsx             → Doc tree rail over the personal-kb checkout
+│   │   ├── DocView.tsx            → Markdown reading view (routes to wireframe/diagram views)
+│   │   ├── WireframeView.tsx      → Sandboxed iframe wireframe rendering + pin/note markup
+│   │   └── DiagramView.tsx        → Mermaid diagram surface (lazy chunk, pan/zoom)
 │   ├── Toast.tsx                → Notification toasts
 │   └── PulsingDot.tsx           → Animated status indicator
 ├── hooks/
@@ -30,23 +41,37 @@ src/
 │   ├── useSidebarState.ts       → Sidebar visibility cycle (full/collapsed/hidden)
 │   └── useToasts.ts             → Toast queue with auto-dismiss
 ├── lib/
-│   ├── terminal.ts              → xterm.js instance pool, attach/detach, WebGL, scroll sync
+│   ├── terminalRegistry.ts      → Keep-alive registry: xterm instances survive unmount, once-only PTY wiring, WebGL attach/detach, spawn generations
+│   ├── terminalLifecycle.ts     → Pure ownership/steal/park/revive rules for the registry (owner tokens)
+│   ├── terminal.ts              → Facade over the registry + measurement/serialize/scroll/fit helpers
+│   ├── resizePolicy.ts          → Settled resize policy (grow-only width, snapshot-reflow on widen, mid-stream defer)
+│   ├── fitQueue.ts              → Debounced per-session fit pipeline (show/resize coalescing)
+│   ├── route.ts                 → URL-backed route model + nav store (screen switching)
+│   ├── threadStore.ts           → Durable agent threads: records, revive decisions, shell-ready wait, action bridge
+│   ├── kb.ts                    → KB doc list/read data layer (poll while active)
+│   ├── pins.ts                  → Wireframe pin/note file model (pure ops over pins JSON)
+│   ├── explorer.ts              → Explorer data layer (projects/listing/read via IPC, live-thread annotation)
+│   ├── diagramZoom.ts           → Pure pan/zoom math for the diagram surface
+│   ├── diagramMeta.ts           → Diagram metadata parsing (.mmd frontmatter/title)
+│   ├── updaterState.ts          → Updater state machine (check/consent/progress/install)
 │   ├── statusDetector.ts        → Agent status state machine (pattern match + dwell hysteresis)
 │   ├── taskDetector.ts          → Auto-detect build/test/git errors from PTY output
 │   ├── paneLayout.ts            → Immutable binary tree operations
-│   ├── workspace.ts             → Periodic save/restore to localStorage + disk
+│   ├── workspace.ts             → Periodic save/restore to localStorage + disk (v2 adds threads)
 │   ├── ipc.ts                   → Tauri invoke() wrappers for all backend commands
 │   ├── statusConfig.ts          → Status colors, icons, labels (single source of truth)
 │   ├── logger.ts                → Frontend structured logging
 │   ├── updater.ts               → Auto-update check
 │   └── export.ts                → Export session to file
-└── lib/*.test.ts              → 3 Vitest test suites (paneLayout, statusDetector, taskDetector)
+└── lib/*.test.ts              → 12 Vitest test suites (paneLayout, statusDetector, taskDetector, resizePolicy, terminalLifecycle, route, threadStore, kb, pins, explorer, diagramZoom, updaterState)
 
 src-tauri/
 ├── src/
 │   ├── main.rs                  → Entry point (calls lib::run)
 │   ├── lib.rs                   → Tauri commands, plugin setup, event dispatch
 │   ├── config.rs                → Config load from %APPDATA%/switchboard/config.json
+│   ├── kb.rs                    → KB backend: traversal-guarded doc tree/read over the personal-kb checkout
+│   ├── explorer.rs              → Explorer backend: registry.json-driven repo listing/read (same guard posture)
 │   ├── power.rs                 → Win32 power monitor (sleep/wake events)
 │   └── pty/
 │       ├── mod.rs               → PtyManager: session registry + reader thread
@@ -101,8 +126,12 @@ pnpm test:watch        # Vitest (watch mode)
 - **Dwell-time hysteresis** for status transitions — prevents flickering on rapid output
 - **Fingerprint dedup** for auto-detected tasks — same error doesn't create duplicate tasks
 - **Base64 encoding** for PTY ↔ frontend data — safe for JSON serialization over Tauri events
-- **Single WebGL context** — only the focused pane gets WebGL in split mode; detach on tab switch
-- **Lazy loading** — NewSessionDialog loaded via `React.lazy` + Suspense only when repos configured
+- **WebGL per attach/detach** — every ATTACHED, visible pane gets its own WebGL context; contexts are dropped on detach/park/CSS-hide and NEVER exist for hidden terminals (keep-alive root, hidden tabs, non-terminal screens); re-show re-enables + repaints
+- **Keep-alive registry, never replay** — xterm instances survive React unmount in a hidden DOM root and keep receiving PTY writes; remount adopts the same element back (a snapshot/replay cycle garbles claude's repaint-based TUI). Exit never disposes; only session close does
+- **Spawn generations** — every PTY event carries the spawn's generation; the expectation is bumped BEFORE each restart invoke so a dying old reader thread's output/exit events are dropped, never rendered
+- **Grow-only resize policy** — terminal cols never shrink on pane narrow (horizontal scroll instead); widen = snapshot-reflow; mid-stream grid changes deferred until output settles (`resizePolicy.ts`)
+- **Threads** — a thread binds a tab to a claude conversation via `chatSessionId` (minted by us) + `chatStarted` (UI hint); the revive `--resume` vs `--session-id` choice comes from disk GROUND TRUTH (`claude_session_exists`), never from the hint
+- **Lazy loading** — NewSessionDialog loaded via `React.lazy` + Suspense only when repos configured; mermaid is its own lazy chunk (DiagramView)
 - **`portable-pty = "=0.8.1"`** — pinned, v0.9 has Windows ConPTY bug
 - **CLAUDECODE env var** stripped from PTY sessions
 

@@ -18,6 +18,7 @@ import {
   setResizePropagationSuppressed,
   registerDisposeCleanup,
   isTerminalDetached,
+  setScreenWebGLGate,
 } from "./terminalRegistry";
 
 export type { TerminalInstance } from "./terminalRegistry";
@@ -81,6 +82,34 @@ export function showTerminal(sessionId: string): boolean {
 /** Check if a terminal is currently hidden */
 export function isTerminalHidden(sessionId: string): boolean {
   return hiddenSessionIds.has(sessionId);
+}
+
+/**
+ * Screen-level visibility (T11): the workstation shell hides the ENTIRE
+ * terminal screen with display:none while a non-terminal route (KB, Explorer)
+ * is active — a hide that TerminalPane's visible prop (tab visibility WITHIN
+ * the screen) never observes, so panes kept their GPU contexts behind it.
+ * App calls this on route changes. Hide = drop WebGL on every attached,
+ * non-CSS-hidden pane (same policy hideTerminal applies per tab); show =
+ * re-enable + repaint exactly like the adopt/show paths (hidden writes
+ * advanced the buffer while the renderer skipped them). CSS-hidden tabs and
+ * keep-alive-parked terminals stay WebGL-less on both transitions; the
+ * registry-side gate also keeps acquire/adopt/show/recover from creating
+ * contexts while the screen is hidden.
+ */
+export function setTerminalScreenVisible(visible: boolean): void {
+  if (!setScreenWebGLGate(visible)) return; // no transition
+  for (const sessionId of getAllTerminalIds()) {
+    if (isTerminalDetached(sessionId)) continue;
+    if (hiddenSessionIds.has(sessionId)) continue;
+    if (visible) {
+      enableWebGL(sessionId);
+      const instance = getTerminal(sessionId);
+      instance?.terminal.refresh(0, instance.terminal.rows - 1);
+    } else {
+      disableWebGL(sessionId);
+    }
+  }
 }
 
 /** Retrieve saved scroll position without deleting (non-destructive read) */

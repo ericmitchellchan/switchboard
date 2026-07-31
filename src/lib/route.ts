@@ -9,7 +9,7 @@
 // store initializer reads the URL at module load, and const bindings would hit
 // a TDZ error if referenced before their declaration runs.
 //
-// Later tasks (threads T5, KB T6, explorer T9, diagrams, board) APPEND:
+// A new screen (e.g. a future diagrams or board surface) APPENDS:
 //   1. a ScreenId + Route variant in src/types.ts,
 //   2. its param keys to ROUTE_PARAM_KEYS below,
 //   3. cases in parseRoute / routeToParams (exhaustive switches make a missed
@@ -30,7 +30,9 @@ const VALID_SCREENS: ReadonlySet<ScreenId> = new Set<ScreenId>([
 /** Every query-param key the router owns. applyRouteToParams deletes ALL of
  *  these before applying a route, so stale values from a prior route can never
  *  leak into the next one — while non-route params survive untouched.
- *  T5/T6/T9-REGISTRATION: append your screen's param keys here. */
+ *  New screens append their param keys here (must stay in sync with the
+ *  Route union in src/types.ts — currently screen + kb's doc + explorer's
+ *  project). */
 export const ROUTE_PARAM_KEYS = ["screen", "doc", "project"] as const;
 
 /** Parse a route from query params. Pure: unknown screens and malformed or

@@ -114,10 +114,10 @@ export function SideMenu({ route }: { route: Route }) {
           <SectionLabel>{section.label}</SectionLabel>
           {section.id === "threads" && (
             <>
-              {/* T5-REGISTRATION: thread rows (status dot + title + repo meta
-                  / revive chip) + the "+ new thread" affordance. Data comes
-                  from the threadStore singleton; actions bridge back to App
-                  via registerThreadActions — no prop plumbing through here. */}
+              {/* Thread rows (T5): status dot + title + repo meta / revive
+                  chip, plus the "+ new thread" affordance. Data comes from
+                  the threadStore singleton; actions bridge back to App via
+                  registerThreadActions — no prop plumbing through here. */}
               <ThreadsSection />
             </>
           )}

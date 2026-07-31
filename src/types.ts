@@ -73,10 +73,10 @@ export interface SavedWorkspace {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Workstation navigation (T4) — the shell's screen/route vocabulary.
-// Later tasks APPEND here (T5 threads, T6 knowledge base, T9 explorer,
-// diagrams, board): extend ScreenId and add/extend a Route variant; the
-// exhaustive switches in src/lib/route.ts then force the param plumbing at
-// compile time. Do not disturb the existing types above.
+// A new screen (e.g. a future diagrams or board surface) APPENDS here:
+// extend ScreenId and add/extend a Route variant; the exhaustive switches in
+// src/lib/route.ts then force the param plumbing at compile time. Do not
+// disturb the existing types above.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Every screen the workstation shell can show. "terminal" is the classic
