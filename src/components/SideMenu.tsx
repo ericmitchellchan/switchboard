@@ -14,6 +14,7 @@
 import { useCallback, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import type { Route } from "../types";
+import { navigateToScreen } from "../lib/route";
 import { ThreadsSection } from "./ThreadsSection";
 import { KbTreeSection } from "./KbTreeSection";
 import { ExplorerTreeSection } from "./ExplorerTreeSection";
@@ -76,27 +77,33 @@ export function SideMenu({ route }: { route: Route }) {
       <SectionLabel>Threads</SectionLabel>
       <ThreadsSection />
 
-      {/* The KB doc tree, inline — clicking a doc navigates the kb screen. */}
-      <SectionLabel>Knowledge Base</SectionLabel>
+      {/* The KB doc tree, inline — clicking a doc navigates the kb screen.
+          The section label itself jumps back to the kb screen (lastByScreen
+          restores the last open doc) — interim affordance until the artifact
+          panel makes docs co-present with shells. */}
+      <SectionLabel onClick={() => navigateToScreen("kb")}>Knowledge Base</SectionLabel>
       <KbTreeSection route={route} />
 
       {/* Registry projects with inline IDE-style file browsing — clicking a
-          file navigates the explorer screen to it. */}
-      <SectionLabel>Explorer</SectionLabel>
+          file navigates the explorer screen to it. Label jumps back likewise. */}
+      <SectionLabel onClick={() => navigateToScreen("explorer")}>Explorer</SectionLabel>
       <ExplorerTreeSection route={route} />
     </div>
   );
 }
 
-function SectionLabel({ children }: { children: ReactNode }) {
+function SectionLabel({ children, onClick }: { children: ReactNode; onClick?: () => void }) {
   return (
     <div
+      onClick={onClick}
+      title={onClick ? "Open this screen (restores your last selection)" : undefined}
       style={{
         padding: "10px 12px 4px",
         color: "var(--text-dim)",
         fontSize: 9.5,
         textTransform: "uppercase",
         letterSpacing: 1,
+        cursor: onClick ? "pointer" : undefined,
       }}
     >
       {children}
