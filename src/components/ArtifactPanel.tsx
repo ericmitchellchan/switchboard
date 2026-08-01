@@ -1,9 +1,15 @@
 // Artifact panel host (workstation v2, phase A2) — the co-present right-side
-// surface INSIDE the terminal screen. The workspace row becomes
+// surface INSIDE the terminal screen. The WORKSPACE CONTAINER becomes
 // `[pane tree | divider | ArtifactPanel]`; this component renders the divider
 // and the panel as SIBLINGS of the pane tree (a Fragment of two flex children),
 // never as a wrapper around it — the terminal screen's DOM has to stay
 // structurally intact so the keep-alive registry never sees a remount.
+//
+// GEOMETRY: every measurement here is against that container, which App.tsx
+// nests INSIDE the terminal-screen row so the TaskSidebar (0/38/280px) stays
+// outside it. That is what makes the panel's right edge the container's right
+// edge — the divider tracks the cursor, the MIN_TERMINAL_WIDTH floor is real,
+// and overlay's `right: 0` lands on the pane tree instead of the sidebar.
 //
 // It is chrome + lifecycle, NOT a viewer: the body is the same DocView the KB
 // screen renders (its internal switch already covers markdown / wireframe —
@@ -18,9 +24,9 @@
 // on its own.
 //
 // Layout rules live in panelStore.ts (panelLayoutFor / panelWidthFromDrag) so
-// they are pure and tested; this file only measures the row and paints.
+// they are pure and tested; this file only measures the container and paints.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import type { Artifact } from "../types";
 import { navigate } from "../lib/route";
@@ -31,6 +37,7 @@ import {
   panelLayoutFor,
   panelWidthFromDrag,
   setPanelWidth,
+  DIVIDER_WIDTH,
   usePanelsView,
   type ArtifactCrumb,
 } from "../lib/panelStore";
@@ -73,41 +80,59 @@ const ACTION_STYLE: CSSProperties = {
 /** Panel-vs-pane-tree divider. Reuses PaneDivider's interaction pattern —
  *  document-level mousemove/mouseup, body cursor + userSelect lock, and the
  *  `data-pane-pointer-block` sweep that stops terminals from swallowing the
- *  drag — but writes a WIDTH (panelStore) instead of a pane ratio. */
+ *  drag — but writes a WIDTH (panelStore) instead of a pane ratio.
+ *
+ *  All of that global state is wired inside an EFFECT keyed on the drag, so
+ *  its teardown runs on unmount too. This divider unmounts during ordinary
+ *  interactions (Ctrl+Shift+P closes the panel, a resize flips to overlay, a
+ *  tab switch lands on a panel-less tab) and a mouseup delivered outside the
+ *  WebView2 window never arrives at all — an onMouseUp-only teardown would
+ *  strand every pane at `pointer-events: none` with the cursor stuck at
+ *  col-resize, permanently. */
 function PanelDivider() {
-  const [dragging, setDragging] = useState(false);
+  const [dragBox, setDragBox] = useState<{ left: number; width: number } | null>(null);
+  const dragging = dragBox !== null;
   const dividerRef = useRef<HTMLDivElement>(null);
 
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const parent = dividerRef.current?.parentElement;
-    if (!parent) return;
-    const rect = parent.getBoundingClientRect();
-    setDragging(true);
+  useEffect(() => {
+    if (!dragBox) return;
 
     const onMouseMove = (ev: MouseEvent) => {
-      setPanelWidth(panelWidthFromDrag(rect.left, rect.width, ev.clientX));
+      setPanelWidth(panelWidthFromDrag(dragBox.left, dragBox.width, ev.clientX));
     };
+    const onMouseUp = () => setDragBox(null);
 
-    const onMouseUp = () => {
-      setDragging(false);
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-      document.querySelectorAll("[data-pane-pointer-block]").forEach((el) => {
-        (el as HTMLElement).style.pointerEvents = "";
-      });
-    };
-
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
     document.querySelectorAll("[data-pane-pointer-block]").forEach((el) => {
       (el as HTMLElement).style.pointerEvents = "none";
     });
 
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
+    return () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      // Re-query rather than reusing the mousedown NodeList: panes can mount
+      // or unmount mid-drag, and a node that appeared during the drag would
+      // otherwise keep whatever pointerEvents it inherited.
+      document.querySelectorAll("[data-pane-pointer-block]").forEach((el) => {
+        (el as HTMLElement).style.pointerEvents = "";
+      });
+    };
+  }, [dragBox]);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    // The workspace container — `[pane tree | divider | panel]`, TaskSidebar
+    // excluded by construction (App.tsx). Snapshotting it at mousedown is
+    // safe: nothing resizes the container mid-drag.
+    const parent = dividerRef.current?.parentElement;
+    if (!parent) return;
+    const rect = parent.getBoundingClientRect();
+    setDragBox({ left: rect.left, width: rect.width });
   }, []);
 
   return (
@@ -116,7 +141,7 @@ function PanelDivider() {
       onMouseDown={handleMouseDown}
       style={{
         flexShrink: 0,
-        width: 4,
+        width: DIVIDER_WIDTH,
         height: "100%",
         cursor: "col-resize",
         backgroundColor: dragging ? "#E4E4E766" : "var(--border)",
@@ -160,18 +185,22 @@ export function ArtifactPanel({
   const artifact: Artifact | null = sessionId ? panels.get(sessionId) ?? null : null;
   const open = artifact !== null;
 
-  // Measure the workspace ROW (our flex parent) to decide docked vs overlay.
-  // A hidden terminal screen (display:none on a non-terminal route) measures
-  // 0 — keep the last non-zero width so a screen switch never flips the mode
-  // and re-lays out the panel behind the user's back.
+  // Measure the WORKSPACE CONTAINER (our flex parent — pane tree + divider +
+  // panel, TaskSidebar excluded by construction in App.tsx) to decide docked
+  // vs overlay. A hidden terminal screen (display:none on a non-terminal
+  // route) measures 0 — keep the last non-zero width so a screen switch never
+  // flips the mode and re-lays out the panel behind the user's back.
+  //
+  // useLayoutEffect, not useEffect: the first paint would otherwise use the
+  // initial 0 (→ docked) and flip to overlay a frame later on a narrow window.
   const asideRef = useRef<HTMLElement>(null);
-  const [rowWidth, setRowWidth] = useState(0);
-  useEffect(() => {
+  const [containerWidth, setContainerWidth] = useState(0);
+  useLayoutEffect(() => {
     const parent = asideRef.current?.parentElement;
     if (!parent) return;
     const update = () => {
       const w = parent.getBoundingClientRect().width;
-      if (w > 0) setRowWidth((prev) => (prev === w ? prev : w));
+      if (w > 0) setContainerWidth((prev) => (prev === w ? prev : w));
     };
     update();
     const observer = new ResizeObserver(update);
@@ -181,7 +210,7 @@ export function ArtifactPanel({
 
   if (!open || !sessionId) return null;
 
-  const layout = panelLayoutFor(rowWidth, panelWidth);
+  const layout = panelLayoutFor(containerWidth, panelWidth);
   const overlay = layout.mode === "overlay";
   const { glyph, crumbs, title } = describeArtifact(artifact);
 

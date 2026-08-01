@@ -27,8 +27,12 @@ import {
   panelLayoutFor,
   panelWidthFromDrag,
   describeArtifact,
+  paneTreeWidthFor,
+  artifactIdentity,
+  panelIdentityFor,
   MIN_TERMINAL_WIDTH,
   OVERLAY_BREAKPOINT,
+  DIVIDER_WIDTH,
 } from "./panelStore";
 // The workspace migration + staleness rules live in threadStore.ts (so tests
 // can import them without dragging in the xterm-backed terminal facade); the
@@ -384,19 +388,34 @@ describe("panel store", () => {
     expect(getPanelWidth()).toBe(500);
   });
 });
-
 // ─── A2: host layout policy ──────────────────────────────────────────────────
+//
+// GEOMETRY CONTRACT: every width below is the WORKSPACE CONTAINER
+// `[pane tree | divider | panel]`, which App.tsx nests inside the
+// terminal-screen row so the TaskSidebar sits OUTSIDE it. These tests encode
+// that contract by deriving the container from a row width minus the sidebar,
+// which is exactly the term the pre-review code was missing.
+
+/** TaskSidebar widths (hidden / collapsed / full) — a sibling of the workspace
+ *  container, so its width is subtracted BEFORE the panel does any math. */
+const SIDEBAR_W = { hidden: 0, collapsed: 38, full: 280 } as const;
+type SidebarWidthState = keyof typeof SIDEBAR_W;
+
+const workspaceWidth = (rowWidth: number, sidebar: SidebarWidthState) =>
+  rowWidth - SIDEBAR_W[sidebar];
+
+const ROW_WIDTHS = [880, 1100, 1280, 1600];
+const SIDEBAR_STATES: SidebarWidthState[] = ["hidden", "collapsed", "full"];
 
 describe("panelLayoutFor (docked vs overlay)", () => {
-  it("docks at the requested width on a roomy row", () => {
+  it("docks at the requested width on a roomy container", () => {
     expect(panelLayoutFor(1600, 420)).toEqual({ mode: "docked", width: 420 });
   });
 
-  it("never lets the pane tree fall below MIN_TERMINAL_WIDTH while docked", () => {
-    // 1100px row, user dragged the panel to its 960 ceiling → capped at 780.
+  it("the docked cap reserves the divider's own 4px on top of the terminal floor", () => {
     expect(panelLayoutFor(1100, MAX_PANEL_WIDTH)).toEqual({
       mode: "docked",
-      width: 1100 - MIN_TERMINAL_WIDTH,
+      width: 1100 - MIN_TERMINAL_WIDTH - DIVIDER_WIDTH,
     });
   });
 
@@ -406,18 +425,18 @@ describe("panelLayoutFor (docked vs overlay)", () => {
     expect(layout.width).toBe(420);
   });
 
-  it("docks exactly AT the breakpoint (and the cap still clears the panel floor)", () => {
+  it("docks exactly AT the breakpoint, and the cap still clears the panel floor", () => {
     const layout = panelLayoutFor(OVERLAY_BREAKPOINT, MAX_PANEL_WIDTH);
     expect(layout.mode).toBe("docked");
-    expect(layout.width).toBe(OVERLAY_BREAKPOINT - MIN_TERMINAL_WIDTH);
+    expect(layout.width).toBe(OVERLAY_BREAKPOINT - MIN_TERMINAL_WIDTH - DIVIDER_WIDTH); // 556
     expect(layout.width).toBeGreaterThanOrEqual(MIN_PANEL_WIDTH);
   });
 
-  it("an overlay is never wider than the row it floats over", () => {
+  it("an overlay is never wider than the container it floats over", () => {
     expect(panelLayoutFor(300, 420)).toEqual({ mode: "overlay", width: 300 });
   });
 
-  it("an unmeasured row (hidden screen / first paint) docks at the requested width", () => {
+  it("an unmeasured container (hidden screen / first paint) docks at the requested width", () => {
     expect(panelLayoutFor(0, 500)).toEqual({ mode: "docked", width: 500 });
     expect(panelLayoutFor(NaN, 500)).toEqual({ mode: "docked", width: 500 });
   });
@@ -429,17 +448,71 @@ describe("panelLayoutFor (docked vs overlay)", () => {
   });
 });
 
+describe("terminal floor holds across row width x sidebar state", () => {
+  // The regression matrix. Pre-review the panel measured the whole row (the
+  // TaskSidebar included), so at row 1100 / sidebar full the pane tree was
+  // left with 36px. Every cell below must leave the shell >= MIN_TERMINAL_WIDTH.
+  for (const rowWidth of ROW_WIDTHS) {
+    for (const sidebar of SIDEBAR_STATES) {
+      it(`row ${rowWidth} / sidebar ${sidebar}: shell keeps >= ${MIN_TERMINAL_WIDTH}px at max drag`, () => {
+        const container = workspaceWidth(rowWidth, sidebar);
+        const layout = panelLayoutFor(container, MAX_PANEL_WIDTH);
+        const paneTree = paneTreeWidthFor(container, layout);
+        expect(paneTree).toBeGreaterThanOrEqual(MIN_TERMINAL_WIDTH);
+        // Overlay leaves the tree untouched; docked hands back exactly the
+        // floor whenever the cap binds.
+        if (layout.mode === "overlay") expect(paneTree).toBe(container);
+      });
+    }
+  }
+
+  it("the specific cell the reviewer computed: row 1100, sidebar full", () => {
+    const container = workspaceWidth(1100, "full"); // 820
+    const layout = panelLayoutFor(container, MAX_PANEL_WIDTH);
+    // 820 < 880 → the panel floats rather than leaving the shell 36px.
+    expect(layout).toEqual({ mode: "overlay", width: 820 });
+    expect(paneTreeWidthFor(container, layout)).toBe(820);
+  });
+
+  it("row 1100, sidebar collapsed/hidden: docked, shell lands exactly on the floor", () => {
+    for (const sidebar of ["collapsed", "hidden"] as SidebarWidthState[]) {
+      const container = workspaceWidth(1100, sidebar);
+      const layout = panelLayoutFor(container, MAX_PANEL_WIDTH);
+      expect(layout.mode).toBe("docked");
+      expect(paneTreeWidthFor(container, layout)).toBe(MIN_TERMINAL_WIDTH);
+    }
+  });
+
+  it("a wide row is unaffected by sidebar state beyond the width it consumes", () => {
+    for (const sidebar of SIDEBAR_STATES) {
+      const container = workspaceWidth(1600, sidebar);
+      const layout = panelLayoutFor(container, 420);
+      expect(layout).toEqual({ mode: "docked", width: 420 });
+      expect(paneTreeWidthFor(container, layout)).toBe(container - DIVIDER_WIDTH - 420);
+    }
+  });
+});
+
 describe("panelWidthFromDrag", () => {
-  // Row spans x=100..1700 (1600 wide).
-  it("width is the distance from the pointer to the row's right edge", () => {
-    expect(panelWidthFromDrag(100, 1600, 1300)).toBe(400);
+  it("puts the DIVIDER's left edge exactly under the cursor", () => {
+    // Container spans x=218..1320 (1102 wide) — window 1600, side menu 218,
+    // and a full 280px TaskSidebar that is OUTSIDE the container. Pre-review
+    // the same drag was computed against the row's right edge (1600), so the
+    // divider trailed the cursor by exactly the sidebar's 280px.
+    // Cursor range kept inside the unclamped band ([260, 778] panel width).
+    const left = 218;
+    const width = 1102;
+    for (const clientX of [600, 700, 900, 1000]) {
+      const w = panelWidthFromDrag(left, width, clientX);
+      const dividerLeft = left + width - w - DIVIDER_WIDTH;
+      expect(dividerLeft).toBe(clientX); // no trailing, whatever the sidebar does
+    }
   });
 
   it("dragging past the terminal-side floor stops at the cap", () => {
-    // 1200px row: the floor (1200-320=880) binds BEFORE MAX_PANEL_WIDTH, so a
-    // pointer at the row's left edge — asking for the whole row — yields 880.
-    expect(panelWidthFromDrag(100, 1200, 100)).toBe(1200 - MIN_TERMINAL_WIDTH);
-    // 1600px row: the floor would allow 1280, so MAX_PANEL_WIDTH binds first.
+    // 1200px container: the floor (1200-320-4=876) binds before MAX_PANEL_WIDTH.
+    expect(panelWidthFromDrag(100, 1200, 100)).toBe(1200 - MIN_TERMINAL_WIDTH - DIVIDER_WIDTH);
+    // 1600px container: the floor would allow 1276, so MAX_PANEL_WIDTH binds.
     expect(panelWidthFromDrag(100, 1600, 100)).toBe(MAX_PANEL_WIDTH);
   });
 
@@ -447,14 +520,49 @@ describe("panelWidthFromDrag", () => {
     expect(panelWidthFromDrag(100, 1600, 1699)).toBe(MIN_PANEL_WIDTH);
   });
 
-  it("never exceeds MAX_PANEL_WIDTH on a very wide row", () => {
+  it("never exceeds MAX_PANEL_WIDTH on a very wide container", () => {
     expect(panelWidthFromDrag(0, 3000, 0)).toBe(MAX_PANEL_WIDTH);
   });
 
-  it("a drag result feeds panelLayoutFor without further clamping (docked)", () => {
-    const w = panelWidthFromDrag(0, 1200, 0); // asks for everything → 880
-    expect(w).toBe(1200 - MIN_TERMINAL_WIDTH);
+  it("a drag result feeds panelLayoutFor without further clamping", () => {
+    const w = panelWidthFromDrag(0, 1200, 0); // asks for everything → 876
+    expect(w).toBe(1200 - MIN_TERMINAL_WIDTH - DIVIDER_WIDTH);
     expect(panelLayoutFor(1200, w)).toEqual({ mode: "docked", width: w });
+    expect(paneTreeWidthFor(1200, panelLayoutFor(1200, w))).toBe(MIN_TERMINAL_WIDTH);
+  });
+
+  it("an unmeasured container still clamps (no NaN width reaches the store)", () => {
+    expect(panelWidthFromDrag(0, 0, 0)).toBe(MIN_PANEL_WIDTH);
+    expect(panelWidthFromDrag(0, NaN, 0)).toBe(DEFAULT_PANEL_WIDTH);
+  });
+});
+
+// ─── A2: panel identity (boundary reset key + narrow-selector snapshot) ───────
+
+describe("artifactIdentity / panelIdentityFor", () => {
+  it("distinguishes kind, project and path", () => {
+    expect(artifactIdentity(KB_DOC)).not.toBe(artifactIdentity(REPO_FILE));
+    expect(artifactIdentity({ kind: "kb-doc", path: "a.md" })).not.toBe(
+      artifactIdentity({ kind: "kb-doc", path: "b.md" })
+    );
+    expect(artifactIdentity({ kind: "repo-file", project: "x", path: "a" })).not.toBe(
+      artifactIdentity({ kind: "repo-file", project: "y", path: "a" })
+    );
+  });
+
+  it("is stable for equal content, so a reset key does not churn per render", () => {
+    expect(artifactIdentity({ ...KB_DOC })).toBe(artifactIdentity(KB_DOC));
+  });
+
+  it("panelIdentityFor: empty string when the tab has no panel", () => {
+    expect(panelIdentityFor(null)).toBe("");
+    expect(panelIdentityFor("sess-1")).toBe("");
+    openInPanel("sess-1", KB_DOC);
+    expect(panelIdentityFor("sess-1")).toBe(artifactIdentity(KB_DOC));
+    openInPanel("sess-1", REPO_FILE);
+    expect(panelIdentityFor("sess-1")).toBe(artifactIdentity(REPO_FILE));
+    closePanel("sess-1");
+    expect(panelIdentityFor("sess-1")).toBe("");
   });
 });
 

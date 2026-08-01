@@ -8,7 +8,7 @@ import {
   migrateSavedWorkspace,
   applyWorkspaceStaleness,
 } from "./threadStore";
-import { getPanelsRecord, getPanelWidth } from "./panelStore";
+import { getPanelsRecord, getPanelWidth, DEFAULT_PANEL_WIDTH } from "./panelStore";
 
 const STORAGE_KEY = "switchboard:workspace";
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days — sessions only; threads never expire
@@ -104,7 +104,18 @@ export function loadWorkspaceFromStorage(): SavedWorkspace | null {
     // (the old loader removed the whole key here; that would delete threads).
     const ws = applyWorkspaceStaleness(migrated, Date.now(), MAX_AGE_MS);
 
-    if (ws.sessions.length === 0 && ws.threads.length === 0) return null;
+    // Nothing worth restoring: no sessions, no threads. Returning the blob
+    // anyway would make App treat it as a real restore. But `panelWidth` is
+    // GLOBAL chrome preference, not session state — dropping it here silently
+    // reset a dragged panel to 420px whenever the workspace aged out. Hand
+    // back a minimal blob that carries the width and nothing else. (Panel
+    // BINDINGS are correctly dropped: they key on sessions that are gone, and
+    // App's restore path remaps survivors through an empty idMap regardless.)
+    if (ws.sessions.length === 0 && ws.threads.length === 0) {
+      return ws.panelWidth === DEFAULT_PANEL_WIDTH
+        ? null
+        : { ...ws, sessions: [], threads: [], panels: {}, activeSessionId: null };
+    }
 
     return ws;
   } catch {

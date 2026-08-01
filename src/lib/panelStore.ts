@@ -58,10 +58,22 @@ export function clampPanelWidth(w: number): number {
 
 // ── Panel host layout policy (A2) ────────────────────────────────────────────
 // Pure so the host component carries no layout math beyond "how wide is my
-// row" — and so the two rules that actually matter (never crush the shell,
+// container" — and so the rules that actually matter (never crush the shell,
 // overlay instead of squeezing when there's no room) are unit-testable.
+//
+// GEOMETRY CONTRACT — every width below is measured against the WORKSPACE
+// container `[pane tree | divider | panel]`, NOT the whole terminal-screen
+// row. The TaskSidebar is a sibling of that container, outside it, so its
+// width (0 hidden / 38 collapsed / 280 full) never enters this arithmetic and
+// the panel's right edge IS the container's right edge. App.tsx owns that
+// nesting; if the panel is ever re-parented next to the sidebar again, these
+// functions become wrong by exactly the sidebar's width.
 
-/** How the panel occupies the workspace row for a given row width. */
+/** Divider thickness in px — real layout space between the pane tree and the
+ *  panel, so it counts against the terminal-side floor. */
+export const DIVIDER_WIDTH = 4;
+
+/** How the panel occupies the workspace container for a given container width. */
 export type PanelLayout = {
   /** "docked" = a real flex column beside the pane tree (divider draggable);
    *  "overlay" = absolutely positioned over it (pane tree keeps its width). */
@@ -70,39 +82,63 @@ export type PanelLayout = {
   width: number;
 };
 
-/** Decide the panel's mode + painted width.
- *
- *  - Unmeasured row (0 / non-finite, e.g. the terminal screen sitting at
- *    display:none) → dock at the requested width; the ResizeObserver corrects
- *    it the moment the row is real.
- *  - Row narrower than OVERLAY_BREAKPOINT → OVERLAY, capped at the row width.
- *  - Otherwise DOCK, capped so the pane tree keeps MIN_TERMINAL_WIDTH. (At the
- *    breakpoint that cap is 560px, comfortably above MIN_PANEL_WIDTH, so a
- *    docked panel is never squeezed below its own floor.) */
-export function panelLayoutFor(rowWidth: number, requestedWidth: number): PanelLayout {
-  const want = clampPanelWidth(requestedWidth);
-  if (!Number.isFinite(rowWidth) || rowWidth <= 0) return { mode: "docked", width: want };
-  const row = Math.round(rowWidth);
-  if (row < OVERLAY_BREAKPOINT) return { mode: "overlay", width: Math.min(want, row) };
-  return { mode: "docked", width: Math.min(want, row - MIN_TERMINAL_WIDTH) };
+/** Space the pane tree is left with for a given container width + layout.
+ *  The inverse of panelLayoutFor's cap, exported so the invariant "the shell
+ *  never drops below MIN_TERMINAL_WIDTH" is assertable directly. */
+export function paneTreeWidthFor(containerWidth: number, layout: PanelLayout): number {
+  if (layout.mode === "overlay") return Math.round(containerWidth); // panel floats; tree keeps its width
+  return Math.round(containerWidth) - DIVIDER_WIDTH - layout.width;
 }
 
-/** Divider drag → new stored width. The panel is right-anchored, so the width
- *  is the distance from the pointer to the row's right edge, capped by the
- *  same terminal-side floor panelLayoutFor enforces and then clamped into
+/** Decide the panel's mode + painted width.
+ *
+ *  - Unmeasured container (0 / non-finite, e.g. the terminal screen sitting at
+ *    display:none) → dock at the requested width; the ResizeObserver corrects
+ *    it the moment the container is real.
+ *  - Container narrower than OVERLAY_BREAKPOINT → OVERLAY, capped at the
+ *    container width.
+ *  - Otherwise DOCK, capped so the pane tree keeps MIN_TERMINAL_WIDTH *after*
+ *    the divider's own 4px. (At the breakpoint that cap is 556px, comfortably
+ *    above MIN_PANEL_WIDTH, so a docked panel is never squeezed below its own
+ *    floor.) */
+export function panelLayoutFor(containerWidth: number, requestedWidth: number): PanelLayout {
+  const want = clampPanelWidth(requestedWidth);
+  if (!Number.isFinite(containerWidth) || containerWidth <= 0) {
+    return { mode: "docked", width: want };
+  }
+  const box = Math.round(containerWidth);
+  if (box < OVERLAY_BREAKPOINT) return { mode: "overlay", width: Math.min(want, box) };
+  return { mode: "docked", width: Math.min(want, box - MIN_TERMINAL_WIDTH - DIVIDER_WIDTH) };
+}
+
+/** Divider drag → new stored width. The panel is right-anchored to the
+ *  workspace container, and the divider sits immediately left of it, so the
+ *  width that puts the divider's left edge under the cursor is
+ *  `containerRight - clientX - DIVIDER_WIDTH`. Capped by the same
+ *  terminal-side floor panelLayoutFor enforces, then clamped into
  *  [MIN_PANEL_WIDTH, MAX_PANEL_WIDTH]. */
-export function panelWidthFromDrag(rowLeft: number, rowWidth: number, clientX: number): number {
-  const raw = rowLeft + rowWidth - clientX;
-  if (!Number.isFinite(rowWidth) || rowWidth <= 0) return clampPanelWidth(raw);
-  const cap = Math.max(MIN_PANEL_WIDTH, Math.round(rowWidth) - MIN_TERMINAL_WIDTH);
+export function panelWidthFromDrag(
+  containerLeft: number,
+  containerWidth: number,
+  clientX: number
+): number {
+  const raw = containerLeft + containerWidth - clientX - DIVIDER_WIDTH;
+  if (!Number.isFinite(containerWidth) || containerWidth <= 0) return clampPanelWidth(raw);
+  const cap = Math.max(
+    MIN_PANEL_WIDTH,
+    Math.round(containerWidth) - MIN_TERMINAL_WIDTH - DIVIDER_WIDTH
+  );
   return clampPanelWidth(Math.min(raw, cap));
 }
 
 // ── Header presentation (A2) ─────────────────────────────────────────────────
 
-/** One breadcrumb segment. `lead` = the root (kb / project) — emphasized;
- *  `dim` = intermediate ancestors; `bright` = the artifact itself. Mirrors the
- *  KB screen's breadcrumb tones so the panel header reads the same. */
+/** One breadcrumb segment tone, mirroring the KB screen's breadcrumb exactly:
+ *  `bright` = the artifact itself (always the last crumb) · `lead` = the
+ *  emphasized OWNER of the path — for repo-file that's the project, for kb-doc
+ *  it's the first path segment (the kb project), NOT the literal `kb` prefix,
+ *  which stays `dim` · `dim` = the literal `kb` prefix and every intermediate
+ *  ancestor. */
 export type ArtifactCrumb = { text: string; tone: "lead" | "dim" | "bright" };
 
 export type ArtifactDescription = {
@@ -270,7 +306,11 @@ function subscribe(listener: () => void): () => void {
 
 export function getPanelsView(): PanelsView {
   if (!cachedView) {
-    cachedView = { panels: new Map(panels), panelWidth };
+    // No defensive copy: every mutator below REPLACES `panels` with a fresh
+    // Map rather than mutating in place, so the map a cached view holds is
+    // already frozen in practice — copying it again just doubled the
+    // allocation on every store change.
+    cachedView = { panels, panelWidth };
   }
   return cachedView;
 }
@@ -280,14 +320,34 @@ export function usePanelsView(): PanelsView {
   return useSyncExternalStore(subscribe, getPanelsView);
 }
 
-/** Narrow selector: does this session (tab) have a panel open? Boolean
- *  snapshot, so a subscriber re-renders only when the answer FLIPS — App uses
- *  it for the status-bar hint without re-rendering the whole shell on every
- *  divider-drag frame (which mutates panelWidth ~60x/sec). */
-export function useHasPanel(sessionId: string | null): boolean {
-  return useSyncExternalStore(subscribe, () =>
-    sessionId !== null && sessionId.length > 0 ? panels.has(sessionId) : false
-  );
+/** Stable identity string for an artifact — equal strings mean "the same
+ *  content is open". Used as a React reset key and as a narrow-selector
+ *  snapshot (primitives compare by value under Object.is, so a subscriber
+ *  re-renders only when the CONTENT changes). */
+export function artifactIdentity(artifact: Artifact): string {
+  switch (artifact.kind) {
+    case "kb-doc":
+      return `kb-doc:${artifact.path}`;
+    case "repo-file":
+      return `repo-file:${artifact.project}:${artifact.path}`;
+    case "localhost":
+      return `localhost:${artifact.project}:${artifact.url}`;
+  }
+}
+
+/** A session's panel identity, or `""` when the tab has no panel open. */
+export function panelIdentityFor(sessionId: string | null): string {
+  if (!sessionId) return "";
+  const artifact = panels.get(sessionId);
+  return artifact ? artifactIdentity(artifact) : "";
+}
+
+/** Narrow selector: WHAT is open in this session's (tab's) panel, as an
+ *  identity string (`""` = nothing). App subscribes through this so it
+ *  re-renders when the content changes or the panel opens/closes — but NOT on
+ *  every divider-drag frame, which mutates panelWidth ~60x/sec. */
+export function usePanelIdentity(sessionId: string | null): string {
+  return useSyncExternalStore(subscribe, () => panelIdentityFor(sessionId));
 }
 
 /** The artifact open in a session's (tab's) panel, or null when closed. */

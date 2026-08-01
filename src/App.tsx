@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, lazy, Suspense, Component, Fragment } from "react";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import type { AgentStatus, RepoConfig, ScreenId, Session, Thread } from "./types";
 import { TabBar } from "./components/TabBar";
 import { SessionHeader } from "./components/SessionHeader";
@@ -53,7 +53,8 @@ import {
   removeSessionPanel,
   artifactFor,
   closePanel,
-  useHasPanel,
+  getPanelWidth,
+  usePanelIdentity,
 } from "./lib/panelStore";
 import { ArtifactPanel } from "./components/ArtifactPanel";
 import { NewThreadDialog } from "./components/NewThreadDialog";
@@ -919,20 +920,28 @@ export default function App() {
   }, [setupPipRouter]);
 
   // ── Artifact panel (workstation v2) ──
-  // Ctrl+Shift+P toggles the ACTIVE TAB's panel. With an artifact open it
-  // closes; with none it does nothing — there is no UI path to OPEN one until
-  // A3's routing lands, and inventing a "last artifact" memory here would be
-  // guessing. The status-bar hint below is shown ONLY when the tab has an
-  // artifact, so the shortcut never advertises a no-op.
-  const handleTogglePanel = useCallback(() => {
-    const id = effectiveActiveIdRef.current;
+  // Panel state is per-TAB (Decision 1), so everything here keys on
+  // `activeSessionId` — the TAB — and deliberately NOT on
+  // effectiveActiveSessionId, which follows the focused PANE in a split.
+  // Requirements: a split terminal + panel "just shares the width"; moving
+  // pane focus must not swap or blank the panel, and persistence must not
+  // fork one binding per pane.
+  //
+  // Ctrl+Shift+P CLOSES the active tab's panel. It is not a toggle: there is
+  // no UI path to OPEN one until A3's routing lands, and inventing a
+  // "last artifact" memory here would be guessing. The status-bar chip is
+  // shown ONLY when the tab has an artifact, so it never advertises a no-op.
+  const handleClosePanel = useCallback(() => {
+    const id = activeIdRef.current;
     if (!id) return;
     if (artifactFor(id)) closePanel(id);
   }, []);
 
-  // Narrow boolean subscription (panelStore#useHasPanel) — App must NOT
-  // re-render on every divider-drag frame; only the panel itself does.
-  const activeTabHasPanel = useHasPanel(effectiveActiveSessionId);
+  // Narrow subscription (panelStore#usePanelIdentity) — App must NOT re-render
+  // on every divider-drag frame; only the panel itself does. Doubles as the
+  // panel boundary's reset key, so a crash card clears when the artifact
+  // changes or the panel closes.
+  const activePanelIdentity = usePanelIdentity(activeSessionId);
 
   useKeyboardShortcuts(
     {
@@ -952,7 +961,7 @@ export default function App() {
       onMoveTabRight: () => { if (effectiveActiveSessionId) moveSession(effectiveActiveSessionId, 1); },
       onTogglePip: handleTogglePip,
       onToggleSideMenu: toggleSideMenu,
-      onTogglePanel: handleTogglePanel,
+      onClosePanel: handleClosePanel,
     },
     effectiveActiveSessionId
   );
@@ -1002,7 +1011,7 @@ export default function App() {
 
   // PiP X button → tear down router + clear state. Without this the router
   // would stay subscribed (harmlessly forwarding to a dead listener) until
-  // Ctrl+Shift+P toggled and reset things.
+  // Ctrl+Shift+O toggled and reset things.
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
@@ -1513,22 +1522,34 @@ export default function App() {
 
         {/* Terminal — the default screen. Always mounted (pre-seeded in the
             activation cache), so screen switches never unmount panes: the T2
-            registry's adopt path doesn't even fire on a switch back.
-
-            This div IS the workspace row (A2): `[pane tree | divider | artifact
-            panel | task sidebar]`. `position: relative` is the containing block
-            for the panel's OVERLAY mode (narrow rows) — the only structural
-            concession the panel asks of this screen. */}
+            registry's adopt path doesn't even fire on a switch back. */}
         <div
           style={{
             display: route.screen === "terminal" ? "flex" : "none",
             flex: 1,
             minWidth: 0,
             overflow: "hidden",
-            position: "relative",
           }}
         >
           <ScreenErrorBoundary resetKey="terminal">
+        {/* WORKSPACE (A2) — `[pane tree | divider | artifact panel]`.
+            The TaskSidebar is deliberately OUTSIDE this container: it is a
+            sibling utility rail, not part of the pane/panel geometry. The
+            panel measures THIS element, so (a) the divider tracks the cursor
+            regardless of sidebar state, (b) the MIN_TERMINAL_WIDTH floor is
+            computed against space the pane tree can actually occupy, and (c)
+            overlay mode's `right: 0` lands on the pane tree's right edge
+            instead of covering the sidebar. `position: relative` is the
+            containing block that makes (c) true by construction. */}
+        <div
+          style={{
+            flex: 1,
+            minWidth: 0,
+            display: "flex",
+            overflow: "hidden",
+            position: "relative",
+          }}
+        >
         {paneLayout.root ? (
           paneLayout.isSplit ? (
             <PaneContainer
@@ -1612,25 +1633,40 @@ export default function App() {
           </div>
         )}
 
-        {/* Artifact panel (workstation v2) — a SIBLING of the pane tree in this
-            row, never a wrapper: it renders a divider + a fixed-width column
-            (or an absolute overlay on narrow rows) and leaves every pane node
-            untouched. Terminal-screen-only, per-TAB content, and its own error
-            boundary so untrusted doc content can never take the live shell
-            down with it. `active` mirrors how the KB screen computes its own:
-            the panel only ever shows the ACTIVE tab's artifact, so "tab
-            active" is structural and the remaining condition is "terminal
-            screen visible" — which pauses DocView's poll exactly like the
-            keep-alive screens pause theirs. */}
-        <ScreenErrorBoundary resetKey={`panel:${effectiveActiveSessionId ?? "none"}`}>
+        {/* Artifact panel (workstation v2) — a SIBLING of the pane tree inside
+            the workspace, never a wrapper: it renders a divider + a
+            fixed-width column (or an absolute overlay on narrow workspaces)
+            and leaves every pane node untouched. Terminal-screen-only,
+            per-TAB content (keyed on activeSessionId, NOT the focused pane —
+            a split "just shares the width", Decision 1).
+
+            Its own error boundary, because untrusted doc content must never
+            take the live shell down. The fallback is width-boxed (it stands in
+            for the panel, so it must not claim flex:1 and crush the terminal),
+            and the resetKey carries the ARTIFACT identity so opening a
+            different doc — or closing the panel — clears a stale crash card
+            instead of stranding it until the next tab switch.
+
+            `active` mirrors how the KB screen computes its own: the panel only
+            ever shows the ACTIVE tab's artifact, so "tab active" is structural
+            and the remaining condition is "terminal screen visible" — which
+            pauses DocView's poll exactly like the keep-alive screens pause
+            theirs. */}
+        <ScreenErrorBoundary
+          resetKey={`panel:${activeSessionId ?? "none"}:${activePanelIdentity}`}
+          fallbackStyle={{ flex: "none", width: getPanelWidth(), borderLeft: "1px solid var(--border-subtle)" }}
+        >
           <ArtifactPanel
-            sessionId={effectiveActiveSessionId}
+            sessionId={activeSessionId}
             active={route.screen === "terminal"}
           />
         </ScreenErrorBoundary>
+        </div>
 
         {/* Terminal-screen-only BY DESIGN — the approved workstation
-            wireframe shows no right task sidebar on the KB/Explorer screens. */}
+            wireframe shows no right task sidebar on the KB/Explorer screens.
+            Sits OUTSIDE the workspace container above, so its width is never
+            part of the panel's geometry. */}
         <TaskSidebar
           state={sidebarState}
           activeTasks={activeTasks}
@@ -1688,7 +1724,7 @@ export default function App() {
         taskCount={activeTasks.length}
         onToggleSidebar={cycleSidebar}
         onToggleSideMenu={toggleSideMenu}
-        onTogglePanel={activeTabHasPanel ? handleTogglePanel : undefined}
+        onClosePanel={activePanelIdentity !== "" ? handleClosePanel : undefined}
       />
 
       <ConfirmDialog
@@ -1743,7 +1779,15 @@ function isKeepAliveScreen(screen: ScreenId): boolean {
   return KEEP_ALIVE_SET.has(screen);
 }
 
-type BoundaryProps = { resetKey: string; children: ReactNode };
+type BoundaryProps = {
+  resetKey: string;
+  /** Overrides the fallback card's box. Screens want the default `flex: 1`
+   *  (they OWN the row); a boundary standing in for a fixed-width surface —
+   *  the artifact panel — must pass `flex: "none"` + a width, or the crash
+   *  card grows into the space the live terminal was using. */
+  fallbackStyle?: CSSProperties;
+  children: ReactNode;
+};
 type BoundaryState = { error: Error | null };
 
 /** Per-screen crash isolation (T4): a throwing screen — even a hidden one —
@@ -1772,11 +1816,14 @@ class ScreenErrorBoundary extends Component<BoundaryProps, BoundaryState> {
         <div
           style={{
             flex: 1,
+            minWidth: 0,
             display: "flex",
             flexDirection: "column",
             alignItems: "center",
             justifyContent: "center",
             gap: 10,
+            padding: 12,
+            ...this.props.fallbackStyle,
           }}
         >
           <span style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--text-secondary)" }}>
