@@ -408,6 +408,32 @@ export function openInPanel(sessionId: string, artifact: Artifact): void {
   bump();
 }
 
+/** Create-path inheritance (A5): a thread created while an artifact was on
+ *  screen starts with THAT artifact in its OWN panel.
+ *
+ *  Why this exists: the spawn-time context flag (agentContext seam 1) describes
+ *  the TARGET tab's panel, and a fresh tab has none — so `+ new thread` carried
+ *  no context at all while revive carried the rich case. The honest fix is to
+ *  make the sentence TRUE rather than to let it claim a panel that isn't open:
+ *  the new thread inherits the panel you launched it from, so "panel shows X"
+ *  is a fact about the new tab.
+ *
+ *  It is a plain per-tab open, not a link: the new tab's panel is
+ *  independently closable (×, Ctrl+Shift+P) and closing either tab's panel
+ *  never touches the other. `null` (nothing was open) → no-op, so a thread
+ *  launched from a bare shell still starts clean.
+ *
+ *  Callers capture the source artifact SYNCHRONOUSLY before creating the
+ *  session — the active tab flips to the new one as soon as it exists.
+ *
+ *  Returns whether the new tab now shows the inherited artifact. */
+export function inheritPanel(artifact: Artifact | null, newSessionId: string): boolean {
+  if (!artifact || newSessionId.length === 0) return false;
+  openInPanel(newSessionId, artifact);
+  const now = panels.get(newSessionId);
+  return now !== undefined && artifactIdentity(now) === artifactIdentity(artifact);
+}
+
 /** Close a session's panel (user action — the × / toggle), REMEMBERING what it
  *  showed so the toggle can bring it back. No-op when the session has no
  *  panel. */

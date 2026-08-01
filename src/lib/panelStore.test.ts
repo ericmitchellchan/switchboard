@@ -43,6 +43,7 @@ import {
   publishActiveTabSession,
   getActiveTabSession,
   activeTabArtifact,
+  inheritPanel,
   type OpenableArtifact,
   type OpenContext,
 } from "./panelStore";
@@ -974,5 +975,65 @@ describe("panelToggleAvailableFor (status-bar chip gate)", () => {
   it("is per tab", () => {
     openInPanel("s1", KB_DOC);
     expect(panelToggleAvailableFor("s2")).toBe(false);
+  });
+});
+
+// ─── A5: create-path panel inheritance (closes the seam-1 context gap) ───────
+
+describe("inheritPanel (a new thread inherits the panel it was launched from)", () => {
+  it("the new tab really shows the artifact the source tab showed", () => {
+    publishActiveTabSession("s1");
+    openInPanel("s1", KB_DOC);
+    // Captured BEFORE the create (the active tab flips as soon as it exists).
+    const captured = activeTabArtifact();
+    publishActiveTabSession("s2"); // the new tab is now active
+    expect(inheritPanel(captured, "s2")).toBe(true);
+    expect(artifactFor("s2")).toEqual(KB_DOC);
+    // …which is exactly what resolveSpawnContext reads, so the flag's
+    // "panel shows X" is a fact about s2, not a claim about a closed panel.
+    expect(activeTabArtifact()).toEqual(KB_DOC);
+  });
+
+  it("the source tab keeps its own panel (a copy, not a move)", () => {
+    openInPanel("s1", REPO_FILE);
+    inheritPanel(artifactFor("s1"), "s2");
+    expect(artifactFor("s1")).toEqual(REPO_FILE);
+    expect(artifactFor("s2")).toEqual(REPO_FILE);
+  });
+
+  it("the inherited panel is INDEPENDENTLY closable", () => {
+    openInPanel("s1", KB_DOC);
+    inheritPanel(artifactFor("s1"), "s2");
+    closePanel("s2");
+    expect(artifactFor("s2")).toBeNull();
+    expect(artifactFor("s1")).toEqual(KB_DOC);
+    // …and it is a normal panel: the chord reopens it like any other.
+    togglePanel("s2");
+    expect(artifactFor("s2")).toEqual(KB_DOC);
+  });
+
+  it("nothing open → the new thread starts clean (no flag, no claim)", () => {
+    publishActiveTabSession("s1");
+    expect(inheritPanel(activeTabArtifact(), "s2")).toBe(false);
+    expect(artifactFor("s2")).toBeNull();
+    expect(getPanelsRecord()).toEqual({});
+  });
+
+  it("an empty target session id is a no-op (create failed before an id existed)", () => {
+    openInPanel("s1", KB_DOC);
+    expect(inheritPanel(KB_DOC, "")).toBe(false);
+    expect(getPanelsRecord()).toEqual({ s1: KB_DOC });
+  });
+
+  it("inherits through the same lean gate as any other open", () => {
+    const decorated = { ...KB_DOC, scroll: 900, junk: true } as unknown as Artifact;
+    expect(inheritPanel(decorated, "s2")).toBe(true);
+    expect(artifactFor("s2")).toEqual(KB_DOC);
+  });
+
+  it("the inherited binding persists with the workspace like any other (criterion 5)", () => {
+    openInPanel("s1", KB_DOC);
+    inheritPanel(artifactFor("s1"), "s2");
+    expect(getPanelsRecord()).toEqual({ s1: KB_DOC, s2: KB_DOC });
   });
 });

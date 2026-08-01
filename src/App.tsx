@@ -55,6 +55,8 @@ import {
   publishActiveTabSession,
   registerPanelActions,
   artifactFor,
+  activeTabArtifact,
+  inheritPanel,
   getPanelWidth,
   usePanelIdentity,
   usePanelToggleAvailable,
@@ -122,10 +124,12 @@ function waitForSessionShellReady(sessionId: string): Promise<void> {
 // What the launching tab's panel shows, as the sanitized one-liner that rides
 // in `--append-system-prompt`. Derived from the TARGET TAB's own panel
 // (panelStore is per-TAB), which is what makes the sentence TRUE by
-// construction: a fresh thread's tab has no panel, so no claim is made and the
-// flag is omitted entirely. The rich case is revive — workspace v3 restores
-// each tab's panel, so reviving a thread whose panel holds a pinned doc tells
-// the new claude process exactly what is on screen beside it.
+// construction: a tab with no panel makes no claim and the flag is omitted
+// entirely. BOTH spawn paths can be rich — revive restores the tab's panel
+// from workspace v3, and create INHERITS the panel the user launched from
+// (A5: handleCreateThread → panelStore.inheritPanel) — so a `+ new thread`
+// started beside an open spec tells the new claude process what is on screen
+// next to it, and the claim is true because the panel really is open there.
 //
 // Re-derived at EVERY spawn (never cached on the thread record): stale context
 // dies with the session instead of following a conversation around forever.
@@ -693,6 +697,12 @@ export default function App() {
       // through the create makes that click bail. (Always true for a fresh
       // uuid; the check keeps the invariant explicit.) Released in finally.
       if (!tryBeginRevive(thread.id)) return;
+      // A5: what the tab he was LOOKING AT shows, captured synchronously —
+      // creating the session flips the active tab, after which this reads the
+      // new (empty) one. The new thread inherits it below so seam 1's
+      // "panel shows X" is a fact about the new tab rather than a claim about
+      // a panel that isn't open (see panelStore.inheritPanel).
+      const inherited = activeTabArtifact();
       log.info(`Create thread id=${thread.id} chatSessionId=${thread.chatSessionId} dir=${workingDir}`);
       try {
         const info = await doCreateSession(finalTitle, repoName, workingDir, repoColor, group);
@@ -702,6 +712,10 @@ export default function App() {
           paneLayout.focusOrSwapSession(info.id);
         }
         bindThreadSession(thread.id, info.id);
+        // Before the launch below: resolveSpawnContext reads THIS tab's panel.
+        if (inheritPanel(inherited, info.id)) {
+          log.info(`Thread inherits panel id=${thread.id} session=${info.id}`);
+        }
         markThreadLaunched(thread.id);
         void saveThreadsToDisk();
         void launchClaudeInSession(info.id, thread.id);
