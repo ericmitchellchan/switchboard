@@ -24,11 +24,12 @@ export interface ShortcutActions {
   /** Ctrl+Shift+B — toggle the LEFT workstation side menu (T4). Plain Ctrl+B
    *  stays the right task-sidebar cycle. */
   onToggleSideMenu?: () => void;
-  /** Ctrl+Shift+P — CLOSE the active tab's artifact panel. Not a toggle:
-   *  there is no re-open path until A3 lands the open-in-panel routing, so the
-   *  chord is a no-op on a tab with no artifact (and the status-bar chip that
-   *  advertises it only renders when there IS one). */
-  onClosePanel?: () => void;
+  /** Ctrl+Shift+P — TOGGLE the active tab's artifact panel: close what's open,
+   *  or reopen the last artifact that tab showed (A3 gave the panel an open
+   *  path, and panelStore keeps the per-tab memory). Still a no-op on a tab
+   *  that has never had one — and the status-bar chip that advertises the
+   *  chord only renders when it would actually do something. */
+  onTogglePanel?: () => void;
 }
 
 // Keys we intercept from xterm.js
@@ -57,7 +58,7 @@ function isOurShortcut(e: KeyboardEvent): boolean {
   }
 
   // Ctrl+Shift+W (close pane), Ctrl+Shift+S (export), Ctrl+Shift+[/] (move tab),
-  // Ctrl+Shift+P (close artifact panel), Ctrl+Shift+O (toggle floating window).
+  // Ctrl+Shift+P (toggle artifact panel), Ctrl+Shift+O (toggle floating window).
   // Shift+[ produces { and Shift+] produces } on most keyboards
   if (
     e.shiftKey &&
@@ -189,7 +190,7 @@ export function useKeyboardShortcuts(
         }
         if (key === "p") {
           e.preventDefault();
-          a.onClosePanel?.();
+          a.onTogglePanel?.();
           return;
         }
         if (key === "o") {

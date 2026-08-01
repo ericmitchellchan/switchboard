@@ -4,8 +4,10 @@
 // keep the old rail's look: name + dim status meta, archived dimmed further,
 // live-thread running dot (statusConfig color — the ONLY color here).
 // Expanding a project/dir lazily fetches its listing via explorerList
-// (dirs-first, server-side skip-list); clicking a FILE navigates
-// ({screen:"explorer", project, path}) so the explorer screen shows it.
+// (dirs-first, server-side skip-list); clicking a FILE goes through
+// panelStore.openArtifact (A3) — the panel beside the running shell on the
+// terminal screen, the explorer screen full-width when that's what's showing,
+// Ctrl/⌘+click inverts. Directory/project rows only expand; they open nothing.
 //
 // Directory expansion state is side-menu-LOCAL by design (never routed);
 // like the KB section it lives at module level so toggling the menu keeps
@@ -18,7 +20,8 @@ import type { Route } from "../types";
 import { annotateProjects, explorerList, explorerProjects } from "../lib/explorer";
 import type { ExplorerEntry, ExplorerProject } from "../lib/explorer";
 import { useThreadsView } from "../lib/threadStore";
-import { navigate, getNavState } from "../lib/route";
+import { getNavState } from "../lib/route";
+import { openArtifact, useActiveTabArtifact } from "../lib/panelStore";
 import { PulsingDot } from "./PulsingDot";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
 import { TreeMessage, TreeRow } from "./KbTreeSection";
@@ -74,15 +77,26 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
     [projects, liveDirs]
   );
 
-  // Open file: routed while on explorer, else the last explorer route's —
-  // stays highlighted while you work elsewhere (same rule as the KB tree).
+  // Open file — the highlight names what is ACTUALLY on screen (A3):
+  //   · on the explorer screen, the route's file;
+  //   · on the terminal screen, the PANEL's file when it holds a repo-file
+  //     (the panel IS the visible file surface there);
+  //   · otherwise the last explorer route, so the file you were reading stays
+  //     highlighted while you work elsewhere (same rule as the KB tree).
+  const panelArtifact = useActiveTabArtifact();
+  const panelFile =
+    route.screen === "terminal" && panelArtifact?.kind === "repo-file"
+      ? { project: panelArtifact.project, path: panelArtifact.path }
+      : undefined;
   const lastExplorer = getNavState().lastByScreen.explorer;
-  const activeRoute =
+  const routeTarget =
     route.screen === "explorer"
       ? route
       : lastExplorer?.screen === "explorer"
         ? lastExplorer
         : undefined;
+  const activeRoute: { project?: string; path?: string } | undefined =
+    panelFile ?? routeTarget;
 
   const fetchListing = (project: string, dir: string) => {
     const key = nodeKey(project, dir);
@@ -150,7 +164,12 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
           label={entry.name}
           depth={depth}
           active={isActive}
-          onClick={() => navigate({ screen: "explorer", project, path: childPath })}
+          onClick={(e) =>
+            openArtifact(
+              { kind: "repo-file", project, path: childPath },
+              { modifier: e.ctrlKey || e.metaKey }
+            )
+          }
         />
       );
     });

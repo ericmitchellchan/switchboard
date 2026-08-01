@@ -7,15 +7,15 @@ interface StatusBarProps {
   taskCount?: number;
   onToggleSidebar?: () => void;
   onToggleSideMenu?: () => void;
-  /** Ctrl+Shift+P — closes the active tab's artifact panel. Passed ONLY when
-   *  that tab actually has one open: the chord cannot re-open anything (A3
-   *  owns the open path), so advertising it otherwise would be a lie. */
-  onClosePanel?: () => void;
+  /** Ctrl+Shift+P — toggles the active tab's artifact panel (close what's
+   *  open, or reopen what it last showed). Passed ONLY when the chord would
+   *  actually do something for this tab: advertising a dead chord is a lie. */
+  onTogglePanel?: () => void;
 }
 
 const DISPLAY_ORDER: AgentStatus[] = ["running", "waiting", "done", "error", "idle", "exited"];
 
-export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMenu, onClosePanel }: StatusBarProps) {
+export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMenu, onTogglePanel }: StatusBarProps) {
   const counts = new Map<AgentStatus, number>();
   for (const s of sessions) {
     counts.set(s.status, (counts.get(s.status) || 0) + 1);
@@ -71,10 +71,10 @@ export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMe
             <span style={{ color: "#3F3F46" }}>{"│"}</span>
           </>
         )}
-        {onClosePanel && (
+        {onTogglePanel && (
           <>
             <button
-              onClick={onClosePanel}
+              onClick={onTogglePanel}
               style={{
                 background: "none",
                 border: "none",
@@ -85,7 +85,7 @@ export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMe
                 padding: 0,
               }}
             >
-              <span>Ctrl+Shift+P close panel</span>
+              <span>Ctrl+Shift+P panel</span>
             </button>
             <span style={{ color: "#3F3F46" }}>{"│"}</span>
           </>

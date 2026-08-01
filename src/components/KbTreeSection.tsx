@@ -3,8 +3,13 @@
 // (deleted with this change): same buildKbTree/ancestorFolders data layer,
 // same ▸/▾ expand rows and active-doc-ancestor force-expand; what changed is
 // the host (218px side menu instead of an in-screen rail) and the indent
-// (10px/level for the tighter column). Clicking a DOC navigates
-// ({screen:"kb", doc}) exactly as the rail did. Soft palette only.
+// (10px/level for the tighter column). Soft palette only.
+//
+// Clicking a DOC goes through panelStore.openArtifact (A3): on the terminal
+// screen it opens IN THE PANEL beside the running shell, on the kb screen it
+// navigates full-width as before, and Ctrl/⌘+click inverts either one. The
+// decision itself lives in panelStore — this file only supplies the target and
+// the modifier.
 //
 // Expansion state and the doc list live at MODULE level so hiding the menu
 // (it unmounts) and reopening it keeps the tree where you left it — the same
@@ -15,7 +20,8 @@ import type { CSSProperties, ReactNode } from "react";
 import type { Route } from "../types";
 import { ancestorFolders, buildKbTree, useKbDocList } from "../lib/kb";
 import type { KbNode } from "../lib/kb";
-import { navigate, getNavState } from "../lib/route";
+import { getNavState } from "../lib/route";
+import { openArtifact, useActiveTabArtifact } from "../lib/panelStore";
 
 // Survives menu unmount (visibility toggle). Not persisted to disk — a fresh
 // launch starts collapsed, matching the wireframe's ▸ project rows.
@@ -25,12 +31,21 @@ export function KbTreeSection({ route }: { route: Route }) {
   const { docs, error } = useKbDocList(true); // menu visible = section active
   const tree = buildKbTree(docs ?? []);
 
-  // Active doc: the route's doc while on kb, else the last kb route's — the
-  // open doc stays highlighted while you work in the terminal (keep-alive
-  // keeps it mounted; the tree is the one place that shows where you are).
+  // Active doc — the highlight must name what is ACTUALLY on screen (A3):
+  //   · on the kb screen, that's the route's doc (full-width reading wins);
+  //   · on the terminal screen, the PANEL is the visible doc surface, so its
+  //     artifact wins when it holds a kb-doc;
+  //   · otherwise fall back to the last kb route, so the doc you were reading
+  //     stays highlighted while you work elsewhere (unchanged behavior).
+  const panelArtifact = useActiveTabArtifact();
+  const panelDoc =
+    route.screen === "terminal" && panelArtifact?.kind === "kb-doc"
+      ? panelArtifact.path
+      : undefined;
   const lastKb = getNavState().lastByScreen.kb;
-  const activeDoc =
+  const routeDoc =
     route.screen === "kb" ? route.doc : lastKb?.screen === "kb" ? lastKb.doc : undefined;
+  const activeDoc = panelDoc ?? routeDoc;
 
   const [expanded, setExpandedState] = useState<ReadonlySet<string>>(() => {
     // Force-expand the active doc's ancestors at mount so a deep link /
@@ -54,16 +69,16 @@ export function KbTreeSection({ route }: { route: Route }) {
     setExpanded(next);
   };
 
-  const select = (path: string) => {
+  const select = (path: string, modifier: boolean) => {
     // Reveal the selection's ancestors (mirrors the old rail's force-expand
-    // effect) and navigate.
+    // effect), then let the routing helper decide panel vs full-width.
     const needed = ancestorFolders(path);
     if (!needed.every((p) => expanded.has(p))) {
       const next = new Set(expanded);
       for (const p of needed) next.add(p);
       setExpanded(next);
     }
-    navigate({ screen: "kb", doc: path });
+    openArtifact({ kind: "kb-doc", path }, { modifier });
   };
 
   return (
@@ -99,7 +114,7 @@ function KbTreeNode({
   depth: number;
   expanded: ReadonlySet<string>;
   activeDoc: string | undefined;
-  onSelect: (path: string) => void;
+  onSelect: (path: string, modifier: boolean) => void;
   onToggle: (path: string) => void;
 }) {
   if (node.type === "folder") {
@@ -133,7 +148,9 @@ function KbTreeNode({
       label={node.name}
       depth={depth}
       active={node.path === activeDoc}
-      onClick={() => onSelect(node.path)}
+      // Ctrl/⌘+click inverts panel-vs-full-width (Decision 2); ⌘ so the chord
+      // reads native on a Mac build.
+      onClick={(e) => onSelect(node.path, e.ctrlKey || e.metaKey)}
     />
   );
 }
@@ -177,7 +194,9 @@ export function TreeRow({
   dim?: boolean;
   /** Leading inline element (e.g. the live-thread status dot). */
   leading?: ReactNode;
-  onClick: () => void;
+  /** The event is passed so opening rows can read the Ctrl/⌘ modifier
+   *  (Decision 2's inversion); expand rows ignore it. */
+  onClick: (e: React.MouseEvent) => void;
 }) {
   const [hover, setHover] = useState(false);
   const style: CSSProperties = {

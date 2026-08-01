@@ -33,7 +33,20 @@ import {
   MIN_TERMINAL_WIDTH,
   OVERLAY_BREAKPOINT,
   DIVIDER_WIDTH,
+  // A3 open path: routing decision + toggle memory + active-tab bridge
+  decideOpen,
+  applyOpenDecision,
+  openArtifact,
+  fullWidthRoute,
+  togglePanel,
+  panelToggleAvailableFor,
+  publishActiveTabSession,
+  getActiveTabSession,
+  activeTabArtifact,
+  type OpenableArtifact,
+  type OpenContext,
 } from "./panelStore";
+import { __resetNavForTests, getNavState } from "./route";
 // The workspace migration + staleness rules live in threadStore.ts (so tests
 // can import them without dragging in the xterm-backed terminal facade); the
 // PANEL half of those rules is owned here.
@@ -63,6 +76,7 @@ function mkWorkspaceV1(overrides: Record<string, unknown> = {}): Record<string, 
 
 beforeEach(() => {
   __resetPanelStoreForTests();
+  __resetNavForTests();
 });
 
 // ─── Lean-record invariant ───────────────────────────────────────────────────
@@ -617,5 +631,348 @@ describe("describeArtifact (glyph + breadcrumb)", () => {
 
   it("kb-doc and repo-file are visually distinguishable by glyph", () => {
     expect(describeArtifact(KB_DOC).glyph).not.toBe(describeArtifact(REPO_FILE).glyph);
+  });
+});
+
+// ─── A3: open-in-panel routing decision (architecture Decision 2) ────────────
+
+const OPEN_DOC: OpenableArtifact = { kind: "kb-doc", path: "switchboard/features/x.md" };
+const OPEN_FILE: OpenableArtifact = {
+  kind: "repo-file",
+  project: "switchboard",
+  path: "src/App.tsx",
+};
+
+function ctx(over: Partial<OpenContext> = {}): OpenContext {
+  return { screen: "terminal", sessionId: "s1", modifier: false, ...over };
+}
+
+describe("decideOpen — every screen x modifier x active-session cell", () => {
+  // The full truth table, spelled out rather than derived: the derivation IS
+  // the code under test.
+  const CELLS: Array<{
+    screen: OpenContext["screen"];
+    modifier: boolean;
+    session: string | null;
+    action: "panel" | "navigate";
+  }> = [
+    { screen: "terminal", modifier: false, session: "s1", action: "panel" },
+    { screen: "terminal", modifier: false, session: null, action: "navigate" },
+    { screen: "terminal", modifier: true, session: "s1", action: "navigate" },
+    { screen: "terminal", modifier: true, session: null, action: "navigate" },
+    { screen: "kb", modifier: false, session: "s1", action: "navigate" },
+    { screen: "kb", modifier: false, session: null, action: "navigate" },
+    { screen: "kb", modifier: true, session: "s1", action: "panel" },
+    { screen: "kb", modifier: true, session: null, action: "navigate" },
+    { screen: "explorer", modifier: false, session: "s1", action: "navigate" },
+    { screen: "explorer", modifier: false, session: null, action: "navigate" },
+    { screen: "explorer", modifier: true, session: "s1", action: "panel" },
+    { screen: "explorer", modifier: true, session: null, action: "navigate" },
+  ];
+
+  for (const cell of CELLS) {
+    const label = `${cell.screen} + modifier:${cell.modifier ? "on" : "off"} + session:${
+      cell.session ? "yes" : "no"
+    } -> ${cell.action}`;
+    it(label, () => {
+      const d = decideOpen(
+        OPEN_DOC,
+        ctx({ screen: cell.screen, modifier: cell.modifier, sessionId: cell.session })
+      );
+      expect(d.action).toBe(cell.action);
+    });
+  }
+
+  it("the same table holds for repo-file targets", () => {
+    for (const cell of CELLS) {
+      const d = decideOpen(
+        OPEN_FILE,
+        ctx({ screen: cell.screen, modifier: cell.modifier, sessionId: cell.session })
+      );
+      expect([cell.screen, cell.modifier, cell.session, d.action]).toEqual([
+        cell.screen,
+        cell.modifier,
+        cell.session,
+        cell.action,
+      ]);
+    }
+  });
+
+  it("a panel decision carries the hosting tab and the target verbatim", () => {
+    const d = decideOpen(OPEN_DOC, ctx({ sessionId: "tab-7" }));
+    expect(d).toEqual({
+      action: "panel",
+      sessionId: "tab-7",
+      artifact: OPEN_DOC,
+      revealTerminal: false,
+    });
+  });
+
+  it("a forced panel open from a reading screen also reveals the terminal", () => {
+    for (const screen of ["kb", "explorer"] as const) {
+      const d = decideOpen(OPEN_DOC, ctx({ screen, modifier: true }));
+      expect(d).toMatchObject({ action: "panel", revealTerminal: true });
+    }
+  });
+
+  it("no active session NEVER yields a panel decision (nothing could host it)", () => {
+    for (const screen of ["terminal", "kb", "explorer"] as const) {
+      for (const modifier of [false, true]) {
+        expect(decideOpen(OPEN_DOC, ctx({ screen, modifier, sessionId: null })).action).toBe(
+          "navigate"
+        );
+      }
+    }
+  });
+
+  it("navigate decisions carry the artifact's full-width route", () => {
+    expect(decideOpen(OPEN_DOC, ctx({ screen: "kb" }))).toEqual({
+      action: "navigate",
+      route: { screen: "kb", doc: OPEN_DOC.path },
+    });
+    expect(decideOpen(OPEN_FILE, ctx({ screen: "explorer" }))).toEqual({
+      action: "navigate",
+      route: { screen: "explorer", project: "switchboard", path: "src/App.tsx" },
+    });
+  });
+
+  it("fullWidthRoute maps each openable kind to its screen", () => {
+    expect(fullWidthRoute(OPEN_DOC)).toEqual({ screen: "kb", doc: OPEN_DOC.path });
+    expect(fullWidthRoute(OPEN_FILE)).toEqual({
+      screen: "explorer",
+      project: "switchboard",
+      path: "src/App.tsx",
+    });
+  });
+});
+
+// ─── A3: the effectful wrapper (store + navigation) ─────────────────────────
+
+describe("openArtifact / applyOpenDecision (effects)", () => {
+  it("terminal screen + active tab: writes the panel, leaves the route alone", () => {
+    publishActiveTabSession("s1");
+    const d = openArtifact(OPEN_DOC);
+    expect(d.action).toBe("panel");
+    expect(artifactFor("s1")).toEqual(OPEN_DOC);
+    expect(getNavState().route).toEqual({ screen: "terminal" });
+  });
+
+  it("kb screen: navigates full-width and opens NO panel", () => {
+    publishActiveTabSession("s1");
+    __resetNavForTests({ screen: "kb", doc: "other.md" });
+    const d = openArtifact(OPEN_DOC);
+    expect(d.action).toBe("navigate");
+    expect(getNavState().route).toEqual({ screen: "kb", doc: OPEN_DOC.path });
+    expect(artifactFor("s1")).toBeNull();
+  });
+
+  it("Ctrl+click on the terminal screen navigates full-width instead", () => {
+    publishActiveTabSession("s1");
+    openArtifact(OPEN_FILE, { modifier: true });
+    expect(artifactFor("s1")).toBeNull();
+    expect(getNavState().route).toEqual({
+      screen: "explorer",
+      project: "switchboard",
+      path: "src/App.tsx",
+    });
+  });
+
+  it("Ctrl+click on the kb screen opens the panel AND switches to the terminal", () => {
+    publishActiveTabSession("s1");
+    __resetNavForTests({ screen: "kb", doc: "other.md" });
+    openArtifact(OPEN_DOC, { modifier: true });
+    expect(artifactFor("s1")).toEqual(OPEN_DOC);
+    expect(getNavState().route).toEqual({ screen: "terminal" });
+  });
+
+  it("no tabs open: a terminal-screen click still navigates full-width", () => {
+    publishActiveTabSession(null);
+    openArtifact(OPEN_DOC);
+    expect(getNavState().route).toEqual({ screen: "kb", doc: OPEN_DOC.path });
+  });
+
+  it("opening a second artifact REPLACES the tab's panel content", () => {
+    publishActiveTabSession("s1");
+    openArtifact(OPEN_DOC);
+    openArtifact(OPEN_FILE);
+    expect(artifactFor("s1")).toEqual(OPEN_FILE);
+  });
+
+  it("each tab keeps its own artifact (criterion 3)", () => {
+    publishActiveTabSession("s1");
+    openArtifact(OPEN_DOC);
+    publishActiveTabSession("s2");
+    expect(activeTabArtifact()).toBeNull(); // s2 has nothing yet
+    openArtifact(OPEN_FILE);
+    publishActiveTabSession("s1");
+    expect(activeTabArtifact()).toEqual(OPEN_DOC);
+    publishActiveTabSession("s2");
+    expect(activeTabArtifact()).toEqual(OPEN_FILE);
+  });
+
+  it("applyOpenDecision performs a decision it was not asked to make", () => {
+    applyOpenDecision({
+      action: "panel",
+      sessionId: "s9",
+      artifact: OPEN_DOC,
+      revealTerminal: true,
+    });
+    expect(artifactFor("s9")).toEqual(OPEN_DOC);
+    expect(getNavState().route).toEqual({ screen: "terminal" });
+  });
+
+  it("opened artifacts land in the persisted record (criterion 5's source)", () => {
+    publishActiveTabSession("s1");
+    openArtifact(OPEN_DOC);
+    expect(getPanelsRecord()).toEqual({ s1: OPEN_DOC });
+  });
+});
+
+// ─── A3: active-tab bridge ──────────────────────────────────────────────────
+
+describe("active-tab bridge", () => {
+  it("starts empty and reports whatever App published", () => {
+    expect(getActiveTabSession()).toBeNull();
+    publishActiveTabSession("s1");
+    expect(getActiveTabSession()).toBe("s1");
+    publishActiveTabSession(null);
+    expect(getActiveTabSession()).toBeNull();
+  });
+
+  it("republishing the same tab does not invalidate the view snapshot", () => {
+    publishActiveTabSession("s1");
+    const v1 = getPanelsView();
+    publishActiveTabSession("s1");
+    expect(getPanelsView()).toBe(v1);
+  });
+
+  it("a tab switch DOES invalidate it (the trees re-resolve their highlight)", () => {
+    publishActiveTabSession("s1");
+    const v1 = getPanelsView();
+    publishActiveTabSession("s2");
+    expect(getPanelsView()).not.toBe(v1);
+  });
+});
+
+// ─── A3: Ctrl+Shift+P true toggle (per-tab lastArtifact memory) ─────────────
+
+describe("togglePanel (true toggle)", () => {
+  it("closes an open panel, then reopens exactly what it showed", () => {
+    openInPanel("s1", KB_DOC);
+    togglePanel("s1");
+    expect(artifactFor("s1")).toBeNull();
+    togglePanel("s1");
+    expect(artifactFor("s1")).toEqual(KB_DOC);
+  });
+
+  it("toggles repeatedly without drifting", () => {
+    openInPanel("s1", REPO_FILE);
+    for (let i = 0; i < 3; i++) {
+      togglePanel("s1");
+      expect(artifactFor("s1")).toBeNull();
+      togglePanel("s1");
+      expect(artifactFor("s1")).toEqual(REPO_FILE);
+    }
+  });
+
+  it("reopens the LAST artifact, not the first", () => {
+    openInPanel("s1", KB_DOC);
+    openInPanel("s1", REPO_FILE);
+    togglePanel("s1");
+    togglePanel("s1");
+    expect(artifactFor("s1")).toEqual(REPO_FILE);
+  });
+
+  it("the × button (closePanel) feeds the same memory as the chord", () => {
+    openInPanel("s1", KB_DOC);
+    closePanel("s1");
+    togglePanel("s1");
+    expect(artifactFor("s1")).toEqual(KB_DOC);
+  });
+
+  it("is a no-op on a tab that never had a panel", () => {
+    togglePanel("s1");
+    expect(artifactFor("s1")).toBeNull();
+    expect(getPanelsRecord()).toEqual({});
+  });
+
+  it("is a no-op with no active tab", () => {
+    expect(() => togglePanel(null)).not.toThrow();
+    expect(getPanelsRecord()).toEqual({});
+  });
+
+  it("memory is PER TAB — one tab's toggle never reopens another's artifact", () => {
+    openInPanel("s1", KB_DOC);
+    openInPanel("s2", REPO_FILE);
+    closePanel("s1");
+    closePanel("s2");
+    togglePanel("s1");
+    expect(artifactFor("s1")).toEqual(KB_DOC);
+    expect(artifactFor("s2")).toBeNull();
+  });
+
+  it("closing the TAB forgets the memory (no resurrection on a reused id)", () => {
+    openInPanel("s1", KB_DOC);
+    closePanel("s1");
+    removeSessionPanel("s1");
+    togglePanel("s1");
+    expect(artifactFor("s1")).toBeNull();
+  });
+
+  it("closing a tab with the panel still OPEN also forgets it", () => {
+    openInPanel("s1", KB_DOC);
+    removeSessionPanel("s1");
+    expect(artifactFor("s1")).toBeNull();
+    togglePanel("s1");
+    expect(artifactFor("s1")).toBeNull();
+  });
+
+  it("the memory is NOT persisted (workspace v3 holds only what is OPEN)", () => {
+    openInPanel("s1", KB_DOC);
+    closePanel("s1");
+    expect(getPanelsRecord()).toEqual({});
+  });
+
+  it("a restart starts with no memory to reopen", () => {
+    openInPanel("s1", KB_DOC);
+    closePanel("s1");
+    // Same process: the memory is still there (that IS the toggle).
+    togglePanel("s1");
+    expect(artifactFor("s1")).toEqual(KB_DOC);
+    // A real restart is a fresh module — nothing carried over.
+    __resetPanelStoreForTests();
+    initPanelStore({}, DEFAULT_PANEL_WIDTH);
+    togglePanel("s1");
+    expect(artifactFor("s1")).toBeNull();
+  });
+});
+
+describe("panelToggleAvailableFor (status-bar chip gate)", () => {
+  it("false with no tab, no panel and no memory", () => {
+    expect(panelToggleAvailableFor(null)).toBe(false);
+    expect(panelToggleAvailableFor("s1")).toBe(false);
+  });
+
+  it("true while a panel is open", () => {
+    openInPanel("s1", KB_DOC);
+    expect(panelToggleAvailableFor("s1")).toBe(true);
+  });
+
+  it("stays true after closing (the chord can reopen)", () => {
+    openInPanel("s1", KB_DOC);
+    closePanel("s1");
+    expect(panelToggleAvailableFor("s1")).toBe(true);
+  });
+
+  it("false again once the tab is gone", () => {
+    openInPanel("s1", KB_DOC);
+    closePanel("s1");
+    removeSessionPanel("s1");
+    expect(panelToggleAvailableFor("s1")).toBe(false);
+  });
+
+  it("is per tab", () => {
+    openInPanel("s1", KB_DOC);
+    expect(panelToggleAvailableFor("s2")).toBe(false);
   });
 });

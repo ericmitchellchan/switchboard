@@ -34,6 +34,7 @@ import { explorerRead } from "../lib/explorer";
 import {
   closePanel,
   describeArtifact,
+  fullWidthRoute,
   panelLayoutFor,
   panelWidthFromDrag,
   setPanelWidth,
@@ -214,10 +215,14 @@ export function ArtifactPanel({
   const overlay = layout.mode === "overlay";
   const { glyph, crumbs, title } = describeArtifact(artifact);
 
+  // Crossover to the full-width screen. Shares panelStore's `fullWidthRoute`
+  // with the routing helper's navigate branch, so "open full" and a
+  // full-width click can never drift to different routes for the same
+  // artifact. (localhost has no full-width screen — the button is hidden for
+  // it below, and the type reflects that.)
   const openFull = () => {
-    if (artifact.kind === "kb-doc") navigate({ screen: "kb", doc: artifact.path });
-    else if (artifact.kind === "repo-file")
-      navigate({ screen: "explorer", project: artifact.project, path: artifact.path });
+    if (artifact.kind === "localhost") return;
+    navigate(fullWidthRoute(artifact));
   };
 
   return (

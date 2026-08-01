@@ -51,10 +51,11 @@ import {
   initPanelStore,
   remapPanelSessions,
   removeSessionPanel,
-  artifactFor,
-  closePanel,
+  togglePanel,
+  publishActiveTabSession,
   getPanelWidth,
   usePanelIdentity,
+  usePanelToggleAvailable,
 } from "./lib/panelStore";
 import { ArtifactPanel } from "./components/ArtifactPanel";
 import { NewThreadDialog } from "./components/NewThreadDialog";
@@ -927,21 +928,32 @@ export default function App() {
   // pane focus must not swap or blank the panel, and persistence must not
   // fork one binding per pane.
   //
-  // Ctrl+Shift+P CLOSES the active tab's panel. It is not a toggle: there is
-  // no UI path to OPEN one until A3's routing lands, and inventing a
-  // "last artifact" memory here would be guessing. The status-bar chip is
-  // shown ONLY when the tab has an artifact, so it never advertises a no-op.
-  const handleClosePanel = useCallback(() => {
-    const id = activeIdRef.current;
-    if (!id) return;
-    if (artifactFor(id)) closePanel(id);
+  // Ctrl+Shift+P is a TRUE toggle now that A3's routing gives the panel an
+  // open path: it closes what's open (panelStore remembers it per tab) and
+  // reopens that memory on the next press. The status-bar chip is shown ONLY
+  // when the chord would actually do something, so it never advertises a
+  // no-op.
+  const handleTogglePanel = useCallback(() => {
+    togglePanel(activeIdRef.current);
   }, []);
+
+  // Publish the active TAB to panelStore so the side-menu trees know which
+  // session would host a panel (and which artifact to highlight) without a
+  // prop threaded through SideMenu — the same bridge ThreadsSection uses.
+  // The TAB, deliberately, not the focused pane: see the per-TAB note above.
+  useEffect(() => {
+    publishActiveTabSession(activeSessionId);
+  }, [activeSessionId]);
 
   // Narrow subscription (panelStore#usePanelIdentity) — App must NOT re-render
   // on every divider-drag frame; only the panel itself does. Doubles as the
   // panel boundary's reset key, so a crash card clears when the artifact
   // changes or the panel closes.
   const activePanelIdentity = usePanelIdentity(activeSessionId);
+  // Chip gate: a panel is open OR this tab remembers one — i.e. the chord has
+  // something to do. Boolean snapshot, so it costs one re-render per real
+  // change and none per drag frame.
+  const panelToggleAvailable = usePanelToggleAvailable(activeSessionId);
 
   useKeyboardShortcuts(
     {
@@ -961,7 +973,7 @@ export default function App() {
       onMoveTabRight: () => { if (effectiveActiveSessionId) moveSession(effectiveActiveSessionId, 1); },
       onTogglePip: handleTogglePip,
       onToggleSideMenu: toggleSideMenu,
-      onClosePanel: handleClosePanel,
+      onTogglePanel: handleTogglePanel,
     },
     effectiveActiveSessionId
   );
@@ -1724,7 +1736,7 @@ export default function App() {
         taskCount={activeTasks.length}
         onToggleSidebar={cycleSidebar}
         onToggleSideMenu={toggleSideMenu}
-        onClosePanel={activePanelIdentity !== "" ? handleClosePanel : undefined}
+        onTogglePanel={panelToggleAvailable ? handleTogglePanel : undefined}
       />
 
       <ConfirmDialog
