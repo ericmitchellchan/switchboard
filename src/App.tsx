@@ -48,10 +48,8 @@ import {
   endRevive,
 } from "./lib/threadStore";
 import { NewThreadDialog } from "./components/NewThreadDialog";
-import { KbTree } from "./components/kb/KbTree";
 import { DocView } from "./components/kb/DocView";
 import { ExplorerView } from "./components/ExplorerView";
-import { useKbDocList } from "./lib/kb";
 import { enqueueFit } from "./lib/fitQueue";
 import { useRoute, navigate, readRouteFromUrl, getNavState } from "./lib/route";
 import {
@@ -1437,6 +1435,7 @@ export default function App() {
         onRename={handleRenameTab}
         onReorder={reorderSession}
         waitingCount={waitingCount}
+        onToggleSideMenu={toggleSideMenu}
       />
 
       {newSessionDialogOpen && config.repos.length > 0 && (
@@ -1592,7 +1591,7 @@ export default function App() {
             }}
           >
             <ScreenErrorBoundary resetKey="kb">
-              <KnowledgeBaseScreen active={route.screen === "kb"} doc={kbDoc} />
+              <KnowledgeBaseScreen active={route.screen === "kb"} doc={kbDoc} menuHidden={!sideMenuVisible} />
             </ScreenErrorBoundary>
           </div>
         )}
@@ -1605,7 +1604,7 @@ export default function App() {
             }}
           >
             <ScreenErrorBoundary resetKey="explorer">
-              <ExplorerScreen />
+              <ExplorerScreen menuHidden={!sideMenuVisible} />
             </ScreenErrorBoundary>
           </div>
         )}
@@ -1745,14 +1744,14 @@ class ScreenErrorBoundary extends Component<BoundaryProps, BoundaryState> {
 // (The shared PlaceholderScreen stub chrome was removed with T9 — both
 // pre-T6/T9 stubs are now real screens.)
 
-/** The Knowledge Base screen (T6) — breadcrumb header +
- *  doc tree rail + reading view over the personal-kb checkout. `active` comes
- *  from the route (App owns it) so the data layer pauses its 2.5s doc poll
- *  while this keep-alive screen is hidden; the doc LIST refreshes on
- *  re-activation instead (src/lib/kb.ts). Clicking a doc navigates with the
- *  `doc` param, so deep links and lastByScreen restoration come for free. */
-function KnowledgeBaseScreen({ active, doc }: { active: boolean; doc: string | undefined }) {
-  const { docs, error } = useKbDocList(active);
+/** The Knowledge Base screen (T6, slimmed 2026-08-01) — breadcrumb header +
+ *  full-width reading view over the personal-kb checkout. The doc TREE moved
+ *  into the side menu's KNOWLEDGE BASE section (KbTreeSection.tsx — the menu
+ *  is the navigator now); this screen renders content only. `active` comes
+ *  from the route (App owns it) so DocView pauses its 2.5s doc poll while
+ *  this keep-alive screen is hidden. The `doc` route param keeps deep links
+ *  and lastByScreen restoration working. */
+function KnowledgeBaseScreen({ active, doc, menuHidden }: { active: boolean; doc: string | undefined; menuHidden: boolean }) {
   const crumbs = doc ? doc.split("/") : [];
   return (
     <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
@@ -1798,12 +1797,6 @@ function KnowledgeBaseScreen({ active, doc }: { active: boolean; doc: string | u
         {crumbs.length === 0 && <span>/</span>}
       </div>
       <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
-        <KbTree
-          docs={docs}
-          error={error}
-          activeDoc={doc}
-          onSelect={(p) => navigate({ screen: "kb", doc: p })}
-        />
         {doc ? (
           <DocView path={doc} active={active} />
         ) : (
@@ -1811,14 +1804,21 @@ function KnowledgeBaseScreen({ active, doc }: { active: boolean; doc: string | u
             style={{
               flex: 1,
               display: "flex",
+              flexDirection: "column",
               alignItems: "center",
               justifyContent: "center",
+              gap: 8,
               fontFamily: "var(--font-mono)",
               fontSize: 11,
               color: "var(--text-dim)",
             }}
           >
-            select a doc from the tree
+            <span>select a doc from the tree</span>
+            {menuHidden && (
+              <span style={{ color: "var(--text-faint)" }}>
+                Ctrl+Shift+B (or click SWITCHBOARD) opens the navigator
+              </span>
+            )}
           </div>
         )}
       </div>
@@ -1826,22 +1826,30 @@ function KnowledgeBaseScreen({ active, doc }: { active: boolean; doc: string | u
   );
 }
 
-/** The Explorer screen (T9) — registry-driven repo
- *  browser (left project rail from registry.json, breadcrumb + file listing +
- *  inline viewer). Route handling mirrors the kb screen's kbDoc rule: while
- *  this keep-alive screen is hidden, the last explorer route keeps the
- *  `project` prop STABLE so the mounted browser doesn't reset mid-hide.
- *  Reading useRoute()/getNavState() here (instead of plumbing through App)
- *  keeps the registration confined to this block; both are safe during
- *  render (useRoute subscribes; lastByScreen only changes on navigation). */
-function ExplorerScreen() {
+/** The Explorer screen (T9, slimmed 2026-08-01) — file VIEWER only. The
+ *  project rail + directory listing moved into the side menu's EXPLORER
+ *  section (ExplorerTreeSection.tsx); this screen shows the routed file
+ *  ({screen:"explorer", project, path}) under a breadcrumb. Route handling
+ *  mirrors the kb screen's kbDoc rule: while this keep-alive screen is
+ *  hidden, the last explorer route keeps the props STABLE so the mounted
+ *  viewer doesn't reset mid-hide. Reading useRoute()/getNavState() here
+ *  (instead of plumbing through App) keeps the wiring confined to this
+ *  block; both are safe during render (useRoute subscribes; lastByScreen
+ *  only changes on navigation). */
+function ExplorerScreen({ menuHidden }: { menuHidden: boolean }) {
   const route = useRoute();
   const active = route.screen === "explorer";
   const lastExplorerRoute = getNavState().lastByScreen.explorer;
-  const project = active
-    ? route.project
+  const effective = active
+    ? route
     : lastExplorerRoute?.screen === "explorer"
-      ? lastExplorerRoute.project
+      ? lastExplorerRoute
       : undefined;
-  return <ExplorerView active={active} project={project} />;
+  return (
+    <ExplorerView
+      project={effective?.project}
+      path={effective?.path}
+      menuHidden={menuHidden}
+    />
+  );
 }

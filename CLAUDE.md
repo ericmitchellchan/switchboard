@@ -18,15 +18,16 @@ src/
 │   ├── TaskSidebar.tsx          → Auto/manual task list (full/collapsed/hidden; terminal screen only)
 │   ├── SearchBar.tsx            → Ctrl+F terminal search
 │   ├── StatusBar.tsx            → Bottom bar (task count, session count, update chip)
-│   ├── SideMenu.tsx             → Left workstation menu (Ctrl+Shift+B): threads + screen nav
+│   ├── SideMenu.tsx             → Left navigator menu (Ctrl+Shift+B / wordmark click): threads + inline KB + explorer trees
 │   ├── ThreadsSection.tsx       → Thread rows in the side menu (status dot, revive chip)
+│   ├── KbTreeSection.tsx        → Side-menu KB doc tree (inline navigator) + shared tree row primitives
+│   ├── ExplorerTreeSection.tsx  → Side-menu registry projects + IDE-style inline file tree
 │   ├── NewThreadDialog.tsx      → Repo picker for creating a thread
 │   ├── NewSessionDialog.tsx     → Repo picker / new session config (lazy-loaded)
-│   ├── ExplorerView.tsx         → Registry-driven repo browser (rail + listing + viewer)
+│   ├── ExplorerView.tsx         → Explorer screen body: breadcrumb + file viewer (tree lives in the side menu)
 │   ├── UpdateChip.tsx           → In-app updater chip (consent-based install flow)
 │   ├── ConfirmDialog.tsx        → Modal confirm (close/destructive actions)
 │   ├── kb/                      → Knowledge Base screen views
-│   │   ├── KbTree.tsx             → Doc tree rail over the personal-kb checkout
 │   │   ├── DocView.tsx            → Markdown reading view (routes to wireframe/diagram views)
 │   │   ├── WireframeView.tsx      → Sandboxed iframe wireframe rendering + pin/note markup
 │   │   └── DiagramView.tsx        → Mermaid diagram surface (lazy chunk, pan/zoom)

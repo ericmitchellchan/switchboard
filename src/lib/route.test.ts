@@ -78,6 +78,21 @@ describe("parseRoute / routeToParams round-trips", () => {
     expect(roundTrip(route)).toEqual(route);
   });
 
+  it("round-trips explorer with a project and an open file path", () => {
+    const route: Route = { screen: "explorer", project: "lodestar", path: "src/main.rs" };
+    expect(roundTrip(route)).toEqual(route);
+  });
+
+  it("drops an explorer path without a project (orphaned param)", () => {
+    expect(parseRoute(new URLSearchParams("screen=explorer&path=src/main.rs"))).toEqual({
+      screen: "explorer",
+    });
+    // routeToParams likewise never emits an orphaned path.
+    expect([...routeToParams({ screen: "explorer", path: "src/main.rs" }).keys()]).toEqual([
+      "screen",
+    ]);
+  });
+
   it("emits only the params the route carries", () => {
     expect([...routeToParams({ screen: "terminal" }).keys()]).toEqual(["screen"]);
     expect([...routeToParams({ screen: "kb" }).keys()]).toEqual(["screen"]);
@@ -114,11 +129,12 @@ describe("parseRoute fallbacks", () => {
 
 describe("applyRouteToParams (router-owned key clearing)", () => {
   it("clears every stale router-owned param before applying the route", () => {
-    const existing = new URLSearchParams("screen=kb&doc=old.md&project=stale");
+    const existing = new URLSearchParams("screen=kb&doc=old.md&project=stale&path=old/file.rs");
     const next = applyRouteToParams(existing, { screen: "explorer", project: "orbit" });
     expect(next.get("screen")).toBe("explorer");
     expect(next.get("project")).toBe("orbit");
     expect(next.get("doc")).toBeNull(); // stale kb param did not leak
+    expect(next.get("path")).toBeNull(); // stale explorer file did not leak
   });
 
   it("preserves non-route params untouched", () => {
@@ -143,6 +159,7 @@ describe("applyRouteToParams (router-owned key clearing)", () => {
       { screen: "terminal" },
       { screen: "kb", doc: "d.md" },
       { screen: "explorer", project: "p" },
+      { screen: "explorer", project: "p", path: "src/a.ts" },
     ];
     const owned = new Set<string>(ROUTE_PARAM_KEYS);
     for (const route of variants) {

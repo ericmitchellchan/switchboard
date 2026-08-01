@@ -85,11 +85,14 @@ export type ScreenId = "terminal" | "kb" | "explorer";
 
 /** Discriminated route union keyed on `screen`. Param-carrying screens extend
  *  their variant inline (params are optional deep-link state, not identity —
- *  identity-bearing params like a future threadId are required fields). */
+ *  identity-bearing params like a future threadId are required fields).
+ *  explorer's `path` is the open FILE within the project (the side-menu
+ *  tree's directory-expansion state is menu-local, never routed); it is
+ *  meaningless without `project` and parseRoute drops it when orphaned. */
 export type Route =
   | { screen: "terminal" }
   | { screen: "kb"; doc?: string }
-  | { screen: "explorer"; project?: string };
+  | { screen: "explorer"; project?: string; path?: string };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Threads (T5) — an agent session that survives app/machine restarts.

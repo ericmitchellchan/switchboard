@@ -24,6 +24,14 @@ that stop being true.
 - 2026-07-31 — (from global conventions) Wireframes live in the feature's KB folder
   (personal-kb/switchboard/features/<feature>/wireframes/), one self-contained HTML
   file per surface with inline kit CSS.
+- 2026-08-01 — The side menu is THE navigator (Eric, on the running app): sections are
+  TREES, not nav items — KNOWLEDGE BASE renders the doc tree inline, EXPLORER renders
+  registry projects with IDE-style inline file browsing. Screens render CONTENT only
+  (breadcrumb + viewer, full width); no duplicate in-screen rails.
+- 2026-08-01 — No intermediate "browse" rows in the side menu (the old "Browse docs" /
+  "By repo" items are gone): a section header is followed directly by its tree.
+- 2026-08-01 — The SWITCHBOARD wordmark toggles the side menu on click (same action
+  as Ctrl+Shift+B). Cursor pointer only — no visual redesign of the wordmark.
 - 2026-08-01 — The purple-chrome migration LANDED with the workstation (T11): tab
   drag-over indicator, StatusBar/TaskSidebar count badges (now outlined zinc: bg
   `#151518`, 1px `#27272A`, text `#E4E4E7`), restart button, focused-pane border,

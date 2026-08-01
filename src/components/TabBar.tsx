@@ -11,6 +11,9 @@ interface TabBarProps {
   onRename: (id: string, newName: string) => void;
   onReorder?: (sessionId: string, newIndex: number) => void;
   waitingCount: number;
+  /** Clicking the SWITCHBOARD wordmark toggles the left side menu — same
+   *  action as Ctrl+Shift+B. */
+  onToggleSideMenu?: () => void;
 }
 
 export function TabBar({
@@ -21,6 +24,7 @@ export function TabBar({
   onRename,
   onReorder,
   waitingCount,
+  onToggleSideMenu,
 }: TabBarProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
@@ -119,17 +123,26 @@ export function TabBar({
           flexShrink: 0,
         }}
       >
-        <span
+        {/* Wordmark = side-menu toggle (same as Ctrl+Shift+B). Unstyled
+            button — no visual redesign, just cursor + click. */}
+        <button
+          type="button"
+          onClick={onToggleSideMenu}
+          title="Toggle side menu (Ctrl+Shift+B)"
           style={{
+            background: "none",
+            border: "none",
+            padding: 0,
             fontFamily: "var(--font-mono)",
             fontSize: 12.5,
             fontWeight: 700,
             color: "#E4E4E7",
             letterSpacing: "0.02em",
+            cursor: "pointer",
           }}
         >
           SWITCHBOARD
-        </span>
+        </button>
         {waitingCount > 0 && (
           <span
             style={{

@@ -32,8 +32,8 @@ const VALID_SCREENS: ReadonlySet<ScreenId> = new Set<ScreenId>([
  *  leak into the next one — while non-route params survive untouched.
  *  New screens append their param keys here (must stay in sync with the
  *  Route union in src/types.ts — currently screen + kb's doc + explorer's
- *  project). */
-export const ROUTE_PARAM_KEYS = ["screen", "doc", "project"] as const;
+ *  project/path). */
+export const ROUTE_PARAM_KEYS = ["screen", "doc", "project", "path"] as const;
 
 /** Parse a route from query params. Pure: unknown screens and malformed or
  *  cross-screen params fall back to the terminal / undefined — never throws. */
@@ -50,7 +50,14 @@ export function parseRoute(params: URLSearchParams): Route {
     }
     case "explorer": {
       const project = params.get("project");
-      return { screen: "explorer", project: project ? project : undefined };
+      const path = params.get("path");
+      // `path` (the open file) is meaningless without a project — an
+      // orphaned path param is dropped rather than carried.
+      return {
+        screen: "explorer",
+        project: project ? project : undefined,
+        path: project && path ? path : undefined,
+      };
     }
   }
 }
@@ -74,7 +81,10 @@ export function routeToParams(route: Route): URLSearchParams {
       if (route.doc) params.set("doc", route.doc);
       break;
     case "explorer":
-      if (route.project) params.set("project", route.project);
+      if (route.project) {
+        params.set("project", route.project);
+        if (route.path) params.set("path", route.path);
+      }
       break;
   }
   return params;
