@@ -17,10 +17,15 @@ export interface ShortcutActions {
   onExport?: () => void;
   onMoveTabLeft?: () => void;
   onMoveTabRight?: () => void;
+  /** Ctrl+Shift+O — toggle the floating PiP window. Moved off Ctrl+Shift+P in
+   *  A2, which the artifact panel toggle claimed (architecture.md §Panel
+   *  host); the two can't share a chord. */
   onTogglePip?: () => void;
   /** Ctrl+Shift+B — toggle the LEFT workstation side menu (T4). Plain Ctrl+B
    *  stays the right task-sidebar cycle. */
   onToggleSideMenu?: () => void;
+  /** Ctrl+Shift+P — toggle the RIGHT artifact panel for the active tab. */
+  onTogglePanel?: () => void;
 }
 
 // Keys we intercept from xterm.js
@@ -49,9 +54,14 @@ function isOurShortcut(e: KeyboardEvent): boolean {
   }
 
   // Ctrl+Shift+W (close pane), Ctrl+Shift+S (export), Ctrl+Shift+[/] (move tab),
-  // Ctrl+Shift+P (toggle floating window).
+  // Ctrl+Shift+P (toggle artifact panel), Ctrl+Shift+O (toggle floating window).
   // Shift+[ produces { and Shift+] produces } on most keyboards
-  if (e.shiftKey && (key === "w" || key === "s" || key === "p" || key === "{" || key === "}")) return true;
+  if (
+    e.shiftKey &&
+    (key === "w" || key === "s" || key === "p" || key === "o" || key === "{" || key === "}")
+  ) {
+    return true;
+  }
 
   // Ctrl+Alt+Arrow (move focus between panes)
   if (e.altKey && (key === "arrowup" || key === "arrowdown" || key === "arrowleft" || key === "arrowright")) {
@@ -175,6 +185,11 @@ export function useKeyboardShortcuts(
           return;
         }
         if (key === "p") {
+          e.preventDefault();
+          a.onTogglePanel?.();
+          return;
+        }
+        if (key === "o") {
           e.preventDefault();
           a.onTogglePip?.();
           return;

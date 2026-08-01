@@ -38,13 +38,126 @@ export const DEFAULT_PANEL_WIDTH = 420;
 /** Clamp floor — below this the panel is unreadable chrome. */
 export const MIN_PANEL_WIDTH = 260;
 /** Clamp ceiling — beyond this the panel crushes the terminal on any sane
- *  window (extreme narrowness is handled by overlay mode in A2, not here). */
+ *  window (extreme narrowness is handled by overlay mode, below). */
 export const MAX_PANEL_WIDTH = 960;
+
+/** Terminal-side floor (A2): the pane tree never narrows past this while the
+ *  panel is DOCKED. Below it the shell stops being a shell. */
+export const MIN_TERMINAL_WIDTH = 320;
+
+/** Workspace-row width under which the panel OVERLAYS the pane tree instead of
+ *  squeezing it (requirements: "below a sane minimum the panel overlays or
+ *  collapses rather than crushing the terminal"). */
+export const OVERLAY_BREAKPOINT = 880;
 
 /** Clamp a width into the sane range; non-finite input → default. */
 export function clampPanelWidth(w: number): number {
   if (!Number.isFinite(w)) return DEFAULT_PANEL_WIDTH;
   return Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, Math.round(w)));
+}
+
+// ── Panel host layout policy (A2) ────────────────────────────────────────────
+// Pure so the host component carries no layout math beyond "how wide is my
+// row" — and so the two rules that actually matter (never crush the shell,
+// overlay instead of squeezing when there's no room) are unit-testable.
+
+/** How the panel occupies the workspace row for a given row width. */
+export type PanelLayout = {
+  /** "docked" = a real flex column beside the pane tree (divider draggable);
+   *  "overlay" = absolutely positioned over it (pane tree keeps its width). */
+  mode: "docked" | "overlay";
+  /** Painted width in px. */
+  width: number;
+};
+
+/** Decide the panel's mode + painted width.
+ *
+ *  - Unmeasured row (0 / non-finite, e.g. the terminal screen sitting at
+ *    display:none) → dock at the requested width; the ResizeObserver corrects
+ *    it the moment the row is real.
+ *  - Row narrower than OVERLAY_BREAKPOINT → OVERLAY, capped at the row width.
+ *  - Otherwise DOCK, capped so the pane tree keeps MIN_TERMINAL_WIDTH. (At the
+ *    breakpoint that cap is 560px, comfortably above MIN_PANEL_WIDTH, so a
+ *    docked panel is never squeezed below its own floor.) */
+export function panelLayoutFor(rowWidth: number, requestedWidth: number): PanelLayout {
+  const want = clampPanelWidth(requestedWidth);
+  if (!Number.isFinite(rowWidth) || rowWidth <= 0) return { mode: "docked", width: want };
+  const row = Math.round(rowWidth);
+  if (row < OVERLAY_BREAKPOINT) return { mode: "overlay", width: Math.min(want, row) };
+  return { mode: "docked", width: Math.min(want, row - MIN_TERMINAL_WIDTH) };
+}
+
+/** Divider drag → new stored width. The panel is right-anchored, so the width
+ *  is the distance from the pointer to the row's right edge, capped by the
+ *  same terminal-side floor panelLayoutFor enforces and then clamped into
+ *  [MIN_PANEL_WIDTH, MAX_PANEL_WIDTH]. */
+export function panelWidthFromDrag(rowLeft: number, rowWidth: number, clientX: number): number {
+  const raw = rowLeft + rowWidth - clientX;
+  if (!Number.isFinite(rowWidth) || rowWidth <= 0) return clampPanelWidth(raw);
+  const cap = Math.max(MIN_PANEL_WIDTH, Math.round(rowWidth) - MIN_TERMINAL_WIDTH);
+  return clampPanelWidth(Math.min(raw, cap));
+}
+
+// ── Header presentation (A2) ─────────────────────────────────────────────────
+
+/** One breadcrumb segment. `lead` = the root (kb / project) — emphasized;
+ *  `dim` = intermediate ancestors; `bright` = the artifact itself. Mirrors the
+ *  KB screen's breadcrumb tones so the panel header reads the same. */
+export type ArtifactCrumb = { text: string; tone: "lead" | "dim" | "bright" };
+
+export type ArtifactDescription = {
+  /** Kind glyph shown left of the breadcrumb. */
+  glyph: string;
+  crumbs: ArtifactCrumb[];
+  /** Flat one-line form for tooltips / aria labels. */
+  title: string;
+};
+
+/** Build the panel header's glyph + breadcrumb for an artifact. Pure — the
+ *  host just paints the tones. */
+export function describeArtifact(artifact: Artifact): ArtifactDescription {
+  switch (artifact.kind) {
+    case "kb-doc": {
+      const segments = artifact.path.split("/").filter((s) => s.length > 0);
+      return {
+        glyph: "◆",
+        crumbs: [{ text: "kb", tone: "dim" }, ...toneSegments(segments)],
+        title: `kb / ${artifact.path}`,
+      };
+    }
+    case "repo-file": {
+      const segments = artifact.path.split("/").filter((s) => s.length > 0);
+      return {
+        glyph: "■",
+        crumbs: [{ text: artifact.project, tone: "lead" }, ...toneSegments(segments, false)],
+        title: `${artifact.project} / ${artifact.path}`,
+      };
+    }
+    case "localhost":
+      return {
+        glyph: "◉",
+        crumbs: [
+          { text: artifact.project, tone: "lead" },
+          { text: artifact.url, tone: "bright" },
+        ],
+        title: `${artifact.project} / ${artifact.url}`,
+      };
+  }
+}
+
+/** Last segment bright, first `lead` (only when it is also the root of the
+ *  path — repo-file's root is the PROJECT, so its first segment is a plain
+ *  ancestor), everything else dim. */
+function toneSegments(segments: string[], firstIsLead = true): ArtifactCrumb[] {
+  return segments.map((text, i) => ({
+    text,
+    tone:
+      i === segments.length - 1
+        ? ("bright" as const)
+        : i === 0 && firstIsLead
+          ? ("lead" as const)
+          : ("dim" as const),
+  }));
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -165,6 +278,16 @@ export function getPanelsView(): PanelsView {
 /** React hook: the panel view, re-rendering on any store change. */
 export function usePanelsView(): PanelsView {
   return useSyncExternalStore(subscribe, getPanelsView);
+}
+
+/** Narrow selector: does this session (tab) have a panel open? Boolean
+ *  snapshot, so a subscriber re-renders only when the answer FLIPS — App uses
+ *  it for the status-bar hint without re-rendering the whole shell on every
+ *  divider-drag frame (which mutates panelWidth ~60x/sec). */
+export function useHasPanel(sessionId: string | null): boolean {
+  return useSyncExternalStore(subscribe, () =>
+    sessionId !== null && sessionId.length > 0 ? panels.has(sessionId) : false
+  );
 }
 
 /** The artifact open in a session's (tab's) panel, or null when closed. */

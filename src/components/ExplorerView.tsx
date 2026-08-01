@@ -62,7 +62,10 @@ function extOf(name: string): string {
   return idx > 0 ? name.slice(idx + 1).toLowerCase() : "";
 }
 
-type OpenFile = {
+/** A read attempt for one repo file: `content` and `error` are both null while
+ *  the read is in flight. Exported for the artifact panel, which hosts the
+ *  same FileViewer over its own read. */
+export type OpenFile = {
   path: string;
   content: string | null;
   error: string | null;
@@ -171,7 +174,11 @@ export function ExplorerView({
 
 // ── Viewer ───────────────────────────────────────────────────────────────────
 
-function FileViewer({ file }: { file: OpenFile }) {
+/** The repo-file rendering path (md → DocView's markdown pipeline, everything
+ *  else → read-only mono <pre>). Exported so the artifact panel renders repo
+ *  files through the EXACT same viewer this screen uses — the panel is chrome
+ *  + lifecycle, never a second viewer. */
+export function FileViewer({ file }: { file: OpenFile }) {
   if (file.error !== null) {
     // Includes the backend's >512KB refusal — shown dimly, per spec.
     return <CenteredNote>cannot read {file.path}: {file.error}</CenteredNote>;

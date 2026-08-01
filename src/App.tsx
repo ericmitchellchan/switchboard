@@ -51,7 +51,11 @@ import {
   initPanelStore,
   remapPanelSessions,
   removeSessionPanel,
+  artifactFor,
+  closePanel,
+  useHasPanel,
 } from "./lib/panelStore";
+import { ArtifactPanel } from "./components/ArtifactPanel";
 import { NewThreadDialog } from "./components/NewThreadDialog";
 import { DocView } from "./components/kb/DocView";
 import { ExplorerView } from "./components/ExplorerView";
@@ -914,6 +918,22 @@ export default function App() {
     }
   }, [setupPipRouter]);
 
+  // ── Artifact panel (workstation v2) ──
+  // Ctrl+Shift+P toggles the ACTIVE TAB's panel. With an artifact open it
+  // closes; with none it does nothing — there is no UI path to OPEN one until
+  // A3's routing lands, and inventing a "last artifact" memory here would be
+  // guessing. The status-bar hint below is shown ONLY when the tab has an
+  // artifact, so the shortcut never advertises a no-op.
+  const handleTogglePanel = useCallback(() => {
+    const id = effectiveActiveIdRef.current;
+    if (!id) return;
+    if (artifactFor(id)) closePanel(id);
+  }, []);
+
+  // Narrow boolean subscription (panelStore#useHasPanel) — App must NOT
+  // re-render on every divider-drag frame; only the panel itself does.
+  const activeTabHasPanel = useHasPanel(effectiveActiveSessionId);
+
   useKeyboardShortcuts(
     {
       onNewTab: handleNewTab,
@@ -932,6 +952,7 @@ export default function App() {
       onMoveTabRight: () => { if (effectiveActiveSessionId) moveSession(effectiveActiveSessionId, 1); },
       onTogglePip: handleTogglePip,
       onToggleSideMenu: toggleSideMenu,
+      onTogglePanel: handleTogglePanel,
     },
     effectiveActiveSessionId
   );
@@ -1492,13 +1513,19 @@ export default function App() {
 
         {/* Terminal — the default screen. Always mounted (pre-seeded in the
             activation cache), so screen switches never unmount panes: the T2
-            registry's adopt path doesn't even fire on a switch back. */}
+            registry's adopt path doesn't even fire on a switch back.
+
+            This div IS the workspace row (A2): `[pane tree | divider | artifact
+            panel | task sidebar]`. `position: relative` is the containing block
+            for the panel's OVERLAY mode (narrow rows) — the only structural
+            concession the panel asks of this screen. */}
         <div
           style={{
             display: route.screen === "terminal" ? "flex" : "none",
             flex: 1,
             minWidth: 0,
             overflow: "hidden",
+            position: "relative",
           }}
         >
           <ScreenErrorBoundary resetKey="terminal">
@@ -1585,6 +1612,23 @@ export default function App() {
           </div>
         )}
 
+        {/* Artifact panel (workstation v2) — a SIBLING of the pane tree in this
+            row, never a wrapper: it renders a divider + a fixed-width column
+            (or an absolute overlay on narrow rows) and leaves every pane node
+            untouched. Terminal-screen-only, per-TAB content, and its own error
+            boundary so untrusted doc content can never take the live shell
+            down with it. `active` mirrors how the KB screen computes its own:
+            the panel only ever shows the ACTIVE tab's artifact, so "tab
+            active" is structural and the remaining condition is "terminal
+            screen visible" — which pauses DocView's poll exactly like the
+            keep-alive screens pause theirs. */}
+        <ScreenErrorBoundary resetKey={`panel:${effectiveActiveSessionId ?? "none"}`}>
+          <ArtifactPanel
+            sessionId={effectiveActiveSessionId}
+            active={route.screen === "terminal"}
+          />
+        </ScreenErrorBoundary>
+
         {/* Terminal-screen-only BY DESIGN — the approved workstation
             wireframe shows no right task sidebar on the KB/Explorer screens. */}
         <TaskSidebar
@@ -1644,6 +1688,7 @@ export default function App() {
         taskCount={activeTasks.length}
         onToggleSidebar={cycleSidebar}
         onToggleSideMenu={toggleSideMenu}
+        onTogglePanel={activeTabHasPanel ? handleTogglePanel : undefined}
       />
 
       <ConfirmDialog

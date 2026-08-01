@@ -23,6 +23,12 @@ import {
   MIN_PANEL_WIDTH,
   MAX_PANEL_WIDTH,
   __resetPanelStoreForTests,
+  // A2 host layout + header presentation (pure)
+  panelLayoutFor,
+  panelWidthFromDrag,
+  describeArtifact,
+  MIN_TERMINAL_WIDTH,
+  OVERLAY_BREAKPOINT,
 } from "./panelStore";
 // The workspace migration + staleness rules live in threadStore.ts (so tests
 // can import them without dragging in the xterm-backed terminal facade); the
@@ -376,5 +382,132 @@ describe("panel store", () => {
     initPanelStore(ws.panels, ws.panelWidth);
     expect(artifactFor("sess-1")).toEqual(KB_DOC);
     expect(getPanelWidth()).toBe(500);
+  });
+});
+
+// ─── A2: host layout policy ──────────────────────────────────────────────────
+
+describe("panelLayoutFor (docked vs overlay)", () => {
+  it("docks at the requested width on a roomy row", () => {
+    expect(panelLayoutFor(1600, 420)).toEqual({ mode: "docked", width: 420 });
+  });
+
+  it("never lets the pane tree fall below MIN_TERMINAL_WIDTH while docked", () => {
+    // 1100px row, user dragged the panel to its 960 ceiling → capped at 780.
+    expect(panelLayoutFor(1100, MAX_PANEL_WIDTH)).toEqual({
+      mode: "docked",
+      width: 1100 - MIN_TERMINAL_WIDTH,
+    });
+  });
+
+  it("overlays below the breakpoint instead of squeezing the shell", () => {
+    const layout = panelLayoutFor(OVERLAY_BREAKPOINT - 1, 420);
+    expect(layout.mode).toBe("overlay");
+    expect(layout.width).toBe(420);
+  });
+
+  it("docks exactly AT the breakpoint (and the cap still clears the panel floor)", () => {
+    const layout = panelLayoutFor(OVERLAY_BREAKPOINT, MAX_PANEL_WIDTH);
+    expect(layout.mode).toBe("docked");
+    expect(layout.width).toBe(OVERLAY_BREAKPOINT - MIN_TERMINAL_WIDTH);
+    expect(layout.width).toBeGreaterThanOrEqual(MIN_PANEL_WIDTH);
+  });
+
+  it("an overlay is never wider than the row it floats over", () => {
+    expect(panelLayoutFor(300, 420)).toEqual({ mode: "overlay", width: 300 });
+  });
+
+  it("an unmeasured row (hidden screen / first paint) docks at the requested width", () => {
+    expect(panelLayoutFor(0, 500)).toEqual({ mode: "docked", width: 500 });
+    expect(panelLayoutFor(NaN, 500)).toEqual({ mode: "docked", width: 500 });
+  });
+
+  it("clamps a junk requested width through the same gate as the store", () => {
+    expect(panelLayoutFor(1600, 10).width).toBe(MIN_PANEL_WIDTH);
+    expect(panelLayoutFor(2400, 5000).width).toBe(MAX_PANEL_WIDTH);
+    expect(panelLayoutFor(1600, NaN).width).toBe(DEFAULT_PANEL_WIDTH);
+  });
+});
+
+describe("panelWidthFromDrag", () => {
+  // Row spans x=100..1700 (1600 wide).
+  it("width is the distance from the pointer to the row's right edge", () => {
+    expect(panelWidthFromDrag(100, 1600, 1300)).toBe(400);
+  });
+
+  it("dragging past the terminal-side floor stops at the cap", () => {
+    // 1200px row: the floor (1200-320=880) binds BEFORE MAX_PANEL_WIDTH, so a
+    // pointer at the row's left edge — asking for the whole row — yields 880.
+    expect(panelWidthFromDrag(100, 1200, 100)).toBe(1200 - MIN_TERMINAL_WIDTH);
+    // 1600px row: the floor would allow 1280, so MAX_PANEL_WIDTH binds first.
+    expect(panelWidthFromDrag(100, 1600, 100)).toBe(MAX_PANEL_WIDTH);
+  });
+
+  it("dragging past the panel floor stops at MIN_PANEL_WIDTH", () => {
+    expect(panelWidthFromDrag(100, 1600, 1699)).toBe(MIN_PANEL_WIDTH);
+  });
+
+  it("never exceeds MAX_PANEL_WIDTH on a very wide row", () => {
+    expect(panelWidthFromDrag(0, 3000, 0)).toBe(MAX_PANEL_WIDTH);
+  });
+
+  it("a drag result feeds panelLayoutFor without further clamping (docked)", () => {
+    const w = panelWidthFromDrag(0, 1200, 0); // asks for everything → 880
+    expect(w).toBe(1200 - MIN_TERMINAL_WIDTH);
+    expect(panelLayoutFor(1200, w)).toEqual({ mode: "docked", width: w });
+  });
+});
+
+// ─── A2: header presentation ─────────────────────────────────────────────────
+
+describe("describeArtifact (glyph + breadcrumb)", () => {
+  it("kb-doc: `kb` root, ancestors dim, the doc bright", () => {
+    const d = describeArtifact(KB_DOC);
+    expect(d.crumbs).toEqual([
+      { text: "kb", tone: "dim" },
+      { text: "switchboard", tone: "lead" },
+      { text: "features", tone: "dim" },
+      { text: "artifact-panel", tone: "dim" },
+      { text: "requirements.md", tone: "bright" },
+    ]);
+    expect(d.title).toBe("kb / switchboard/features/artifact-panel/requirements.md");
+    expect(d.glyph.length).toBeGreaterThan(0);
+  });
+
+  it("repo-file: the PROJECT is the lead crumb, path segments are plain ancestors", () => {
+    const d = describeArtifact(REPO_FILE);
+    expect(d.crumbs).toEqual([
+      { text: "switchboard", tone: "lead" },
+      { text: "src", tone: "dim" },
+      { text: "App.tsx", tone: "bright" },
+    ]);
+    expect(d.title).toBe("switchboard / src/App.tsx");
+  });
+
+  it("a single-segment path is bright, not lead (the file always wins)", () => {
+    expect(describeArtifact({ kind: "kb-doc", path: "README.md" }).crumbs).toEqual([
+      { text: "kb", tone: "dim" },
+      { text: "README.md", tone: "bright" },
+    ]);
+  });
+
+  it("tolerates stray slashes without emitting empty crumbs", () => {
+    expect(describeArtifact({ kind: "kb-doc", path: "a//b.md" }).crumbs).toEqual([
+      { text: "kb", tone: "dim" },
+      { text: "a", tone: "lead" },
+      { text: "b.md", tone: "bright" },
+    ]);
+  });
+
+  it("localhost (phase B) still describes cleanly", () => {
+    const d = describeArtifact({ kind: "localhost", project: "lodestar", url: "http://localhost:5173" });
+    expect(d.crumbs).toEqual([
+      { text: "lodestar", tone: "lead" },
+      { text: "http://localhost:5173", tone: "bright" },
+    ]);
+  });
+
+  it("kb-doc and repo-file are visually distinguishable by glyph", () => {
+    expect(describeArtifact(KB_DOC).glyph).not.toBe(describeArtifact(REPO_FILE).glyph);
   });
 });

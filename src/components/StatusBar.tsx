@@ -7,11 +7,15 @@ interface StatusBarProps {
   taskCount?: number;
   onToggleSidebar?: () => void;
   onToggleSideMenu?: () => void;
+  /** Ctrl+Shift+P artifact-panel toggle. Passed ONLY when the active tab
+   *  actually has an artifact open — with nothing to show the shortcut is a
+   *  no-op, and advertising it would be a lie. */
+  onTogglePanel?: () => void;
 }
 
 const DISPLAY_ORDER: AgentStatus[] = ["running", "waiting", "done", "error", "idle", "exited"];
 
-export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMenu }: StatusBarProps) {
+export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMenu, onTogglePanel }: StatusBarProps) {
   const counts = new Map<AgentStatus, number>();
   for (const s of sessions) {
     counts.set(s.status, (counts.get(s.status) || 0) + 1);
@@ -63,6 +67,25 @@ export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMe
               }}
             >
               <span>Ctrl+Shift+B menu</span>
+            </button>
+            <span style={{ color: "#3F3F46" }}>{"│"}</span>
+          </>
+        )}
+        {onTogglePanel && (
+          <>
+            <button
+              onClick={onTogglePanel}
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                fontFamily: "var(--font-mono)",
+                fontSize: 10,
+                color: "#52525B",
+                padding: 0,
+              }}
+            >
+              <span>Ctrl+Shift+P panel</span>
             </button>
             <span style={{ color: "#3F3F46" }}>{"│"}</span>
           </>
