@@ -9,7 +9,7 @@
 //   1. Pure helpers — unit-tested under Node: record construction/sanitizing,
 //      launch-command choice, the bracketed-paste-aware chatStarted detector,
 //      restore reconciliation, disk (de)serialization + disk-wins merge, and
-//      the SavedWorkspace v1→v2 migration + staleness rules (they live here,
+//      the SavedWorkspace v1/v2→v3 migration + staleness rules (they live here,
 //      not in workspace.ts, so tests can import them without dragging in the
 //      xterm-backed terminal facade that workspace.ts depends on).
 //   2. Module-level store — same shape as route.ts / terminalRegistry.ts
@@ -29,6 +29,7 @@
 
 import { useSyncExternalStore } from "react";
 import type { AgentStatus, SavedSession, SavedWorkspace, Thread } from "../types";
+import { parsePanels, parsePanelWidth } from "./panelStore";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure helpers
@@ -328,18 +329,20 @@ export function mergeThreads(
   return diskThreads ?? localThreads;
 }
 
-// ── SavedWorkspace v1 → v2 migration + staleness ─────────────────────────────
+// ── SavedWorkspace v1/v2 → v3 migration + staleness ──────────────────────────
 
-/** Migrate a raw parsed workspace blob to v2. v1 payloads keep all their
- *  sessions/layout and gain `threads: []`; v2 payloads pass through with
- *  their threads sanitized. Anything else is rejected. */
+/** Migrate a raw parsed workspace blob to v3. Additive per version:
+ *  v1 payloads keep all their sessions/layout and gain `threads: []`;
+ *  v2 payloads pass through with their threads sanitized; both gain
+ *  `panels: {}` + the default width. v3 payloads pass through with panels
+ *  tolerant-parsed and the width clamped. Anything else is rejected. */
 export function migrateSavedWorkspace(raw: unknown): SavedWorkspace | null {
   if (!raw || typeof raw !== "object") return null;
   const ws = raw as Record<string, unknown>;
-  if (ws.version !== 1 && ws.version !== 2) return null;
+  if (ws.version !== 1 && ws.version !== 2 && ws.version !== 3) return null;
   if (!Array.isArray(ws.sessions)) return null;
   return {
-    version: 2,
+    version: 3,
     sessions: ws.sessions as SavedSession[],
     activeSessionId: typeof ws.activeSessionId === "string" ? ws.activeSessionId : null,
     paneLayout: ws.paneLayout ?? null,
@@ -347,11 +350,16 @@ export function migrateSavedWorkspace(raw: unknown): SavedWorkspace | null {
     sessionCounter: typeof ws.sessionCounter === "number" ? ws.sessionCounter : 0,
     savedAt: typeof ws.savedAt === "number" ? ws.savedAt : 0,
     threads: ws.version === 1 ? [] : sanitizeThreads(ws.threads),
+    panels: ws.version === 3 ? parsePanels(ws.panels) : {},
+    panelWidth: parsePanelWidth(ws.panelWidth),
   };
 }
 
 /** 7-day staleness applies to SESSIONS only: a stale workspace loses its
- *  sessions/layout, but threads are durable by definition and survive. */
+ *  sessions/layout, but threads are durable by definition and survive.
+ *  Panels expire WITH their sessions (a panel binding to an expired session
+ *  is meaningless — unlike a thread, there is nothing left to revive); the
+ *  global panelWidth is not session-bound and survives. */
 export function applyWorkspaceStaleness(
   ws: SavedWorkspace,
   now: number,
@@ -364,6 +372,7 @@ export function applyWorkspaceStaleness(
     activeSessionId: null,
     paneLayout: null,
     focusedPaneId: null,
+    panels: {},
   };
 }
 

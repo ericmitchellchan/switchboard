@@ -59,7 +59,7 @@ export interface SavedSession {
 }
 
 export interface SavedWorkspace {
-  version: 2; // v2 (T5): adds `threads`. v1 payloads are migrated on load.
+  version: 3; // v3 (artifact panel): adds `panels` + `panelWidth`. v1/v2 payloads are migrated on load.
   sessions: SavedSession[];
   activeSessionId: string | null;
   paneLayout: unknown; // PaneNode serialized
@@ -69,6 +69,13 @@ export interface SavedWorkspace {
   /** Durable thread records (T5). Sessions expire after 7 days of staleness;
    *  threads NEVER expire with them — a thread is durable by definition. */
   threads: Thread[];
+  /** Per-tab artifact panel content, keyed by SAVED session id; keys are
+   *  remapped through the restore idMap exactly like thread bindings. Unlike
+   *  threads, panels expire WITH their sessions — a panel binding to an
+   *  expired session is meaningless (see applyWorkspaceStaleness). */
+  panels: Record<string, Artifact>;
+  /** Global panel width (one width for all tabs — one less thing to restore). */
+  panelWidth: number;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -113,6 +120,20 @@ export type Route =
 // overflow silently halts persistence. No scrollback, no messages, no derived
 // UI state in here — sanitizeThread() in threadStore.ts enforces this shape.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Artifact panel (workstation v2) — the right-side co-present surface inside
+// the terminal screen. An Artifact is a lean REFERENCE to content rendered by
+// the existing viewers (DocView / explorer FileViewer) — never the content
+// itself. Panel state is per-TAB (keyed by sessionId in panelStore) and rides
+// in SavedWorkspace v3; sanitizeArtifact() in panelStore.ts enforces this
+// shape at every load path (lean-record invariant, same as sanitizeThread).
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type Artifact =
+  | { kind: "kb-doc"; path: string } // KB rel path (md/html/mmd/…)
+  | { kind: "repo-file"; project: string; path: string } // registry project + rel path
+  | { kind: "localhost"; project: string; url: string }; // Phase B — declared, never constructed in Phase A
 
 export interface Thread {
   /** Switchboard thread id (uuid). */

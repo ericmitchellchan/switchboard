@@ -8,6 +8,7 @@ import {
   migrateSavedWorkspace,
   applyWorkspaceStaleness,
 } from "./threadStore";
+import { getPanelsRecord, getPanelWidth } from "./panelStore";
 
 const STORAGE_KEY = "switchboard:workspace";
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days — sessions only; threads never expire
@@ -36,7 +37,7 @@ export function buildSavedWorkspace(
   });
 
   return {
-    version: 2,
+    version: 3,
     sessions: savedSessions,
     activeSessionId,
     paneLayout: paneLayout as unknown,
@@ -46,6 +47,10 @@ export function buildSavedWorkspace(
     // Threads ride in the same blob (records are lean by invariant — see
     // threadStore.sanitizeThread) AND mirror to disk via saveThreadsToDisk.
     threads: getThreads(),
+    // Artifact panel state (v3): per-tab panels keyed by session id (lean by
+    // invariant — see panelStore.sanitizeArtifact) + the global width.
+    panels: getPanelsRecord(),
+    panelWidth: getPanelWidth(),
   };
 }
 
@@ -88,8 +93,9 @@ export function loadWorkspaceFromStorage(): SavedWorkspace | null {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
 
-    // v1 blobs migrate in place (sessions/layout preserved, threads: []);
-    // v2 passes through with threads sanitized; anything else is rejected.
+    // v1/v2 blobs migrate in place (sessions/layout preserved, missing
+    // threads/panels defaulted); v3 passes through with threads + panels
+    // sanitized; anything else is rejected.
     const migrated = migrateSavedWorkspace(JSON.parse(raw));
     if (!migrated) return null;
 

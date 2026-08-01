@@ -47,6 +47,11 @@ import {
   tryBeginRevive,
   endRevive,
 } from "./lib/threadStore";
+import {
+  initPanelStore,
+  remapPanelSessions,
+  removeSessionPanel,
+} from "./lib/panelStore";
 import { NewThreadDialog } from "./components/NewThreadDialog";
 import { DocView } from "./components/kb/DocView";
 import { ExplorerView } from "./components/ExplorerView";
@@ -345,6 +350,9 @@ export default function App() {
     // Closing a thread's TAB kills the session but NOT the thread — the
     // binding is severed and the side menu shows the revive chip.
     unbindThreadsForSession(id);
+    // The tab's panel binding dies WITH the tab (per-tab state, nothing to
+    // revive) — unlike the thread record, which survives severed.
+    removeSessionPanel(id);
     // Drop any un-fired chatStarted detector bookkeeping for the session
     // (closed before its first turn). The registry listener itself died with
     // disposeTerminal; calling the stale remover is a harmless no-op.
@@ -1141,6 +1149,13 @@ export default function App() {
       }
       initThreadStore(mergeThreads(diskThreads, savedWorkspace?.threads ?? []));
 
+      // A1: seed the panel store from the SAME blob (no disk mirror — a panel
+      // binding is machine-local UI state keyed by a session id). Seeded here,
+      // remapped through the restore idMap below exactly like threads; every
+      // path below calls remapPanelSessions, so bindings whose tab did not
+      // come back are dropped rather than left pointing at nothing.
+      initPanelStore(savedWorkspace?.panels ?? {}, savedWorkspace?.panelWidth);
+
       if (savedWorkspace && savedWorkspace.sessions.length > 0) {
         log.info(`Restoring workspace with ${savedWorkspace.sessions.length} sessions`);
         const idMap = new Map<string, string>();
@@ -1169,8 +1184,10 @@ export default function App() {
 
         if (newSessions.length === 0) {
           // All restores failed — fall back to fresh session. Every thread
-          // binding is severed (no session survived to point at).
+          // binding is severed (no session survived to point at) and every
+          // panel binding is dropped for the same reason.
           remapThreadSessionsInStore(new Map());
+          remapPanelSessions(new Map());
           sessionCounterRef.current++;
           const name = `Shell ${sessionCounterRef.current}`;
           try {
@@ -1216,9 +1233,14 @@ export default function App() {
         // Threads whose sessions restored keep their tab binding (remapped to
         // the new session ids); the rest are severed → dead → revivable.
         remapThreadSessionsInStore(idMap);
+        // Panels follow the same idMap, but an unmapped panel is DROPPED, not
+        // severed — a panel binding without its tab is meaningless.
+        remapPanelSessions(idMap);
       } else {
-        // Fresh start — no sessions restored, so no thread binding can hold.
+        // Fresh start — no sessions restored, so no thread or panel binding
+        // can hold.
         remapThreadSessionsInStore(new Map());
+        remapPanelSessions(new Map());
         // A threads-only workspace (sessions expired by staleness, threads
         // durable) still lands here: keep its session counter so fresh
         // "Shell N" names don't restart from 1.
