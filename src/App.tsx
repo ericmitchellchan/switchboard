@@ -18,7 +18,7 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, onSessionOutput } from "./lib/ipc";
+import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, onSessionOutput, kbReadDoc, kbRoot } from "./lib/ipc";
 import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty, isSessionDirty, serializeForPip, setTerminalScreenVisible } from "./lib/terminal";
 import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing } from "./lib/pipBridge";
 import { bumpSessionGeneration, addSessionInputListener, getSessionGeneration } from "./lib/terminalRegistry";
@@ -53,10 +53,18 @@ import {
   removeSessionPanel,
   togglePanel,
   publishActiveTabSession,
+  registerPanelActions,
+  artifactFor,
   getPanelWidth,
   usePanelIdentity,
   usePanelToggleAvailable,
 } from "./lib/panelStore";
+import {
+  buildSpawnContext,
+  getKbRootForContext,
+  setKbRootForContext,
+} from "./lib/agentContext";
+import { docFileName, parsePinsFile, pinsForDoc, sidecarPathFor } from "./lib/pins";
 import { ArtifactPanel } from "./components/ArtifactPanel";
 import { NewThreadDialog } from "./components/NewThreadDialog";
 import { DocView } from "./components/kb/DocView";
@@ -108,6 +116,36 @@ function waitForSessionShellReady(sessionId: string): Promise<void> {
     subscribe: (cb) => onSessionOutput(sessionId, (_data, gen) => cb(gen)),
     expectedGen: () => getSessionGeneration(sessionId),
   });
+}
+
+// ── Panel context for a spawn (T8 / A4, seam 1) ──────────────────────────────
+// What the launching tab's panel shows, as the sanitized one-liner that rides
+// in `--append-system-prompt`. Derived from the TARGET TAB's own panel
+// (panelStore is per-TAB), which is what makes the sentence TRUE by
+// construction: a fresh thread's tab has no panel, so no claim is made and the
+// flag is omitted entirely. The rich case is revive — workspace v3 restores
+// each tab's panel, so reviving a thread whose panel holds a pinned doc tells
+// the new claude process exactly what is on screen beside it.
+//
+// Re-derived at EVERY spawn (never cached on the thread record): stale context
+// dies with the session instead of following a conversation around forever.
+//
+// Never throws and never blocks the launch: a missing/unreadable sidecar just
+// means zero pins.
+async function resolveSpawnContext(sessionId: string): Promise<string | null> {
+  const artifact = artifactFor(sessionId);
+  if (!artifact) return null;
+  let pinCount = 0;
+  if (artifact.kind === "kb-doc") {
+    try {
+      const text = await kbReadDoc(sidecarPathFor(artifact.path));
+      pinCount = pinsForDoc(parsePinsFile(text), docFileName(artifact.path)).length;
+    } catch {
+      // No sidecar next to this doc (kb_read_doc errors on missing files) —
+      // the artifact still gets announced, just without a pin clause.
+    }
+  }
+  return buildSpawnContext(artifact, pinCount, { kbRoot: getKbRootForContext() });
 }
 
 type ConfirmState = {
@@ -613,7 +651,19 @@ export default function App() {
         markChatStarted(threadId);
         void saveThreadsToDisk();
       }
-      const line = launchCommand({ chatSessionId: thread.chatSessionId, resume });
+      // T8 seam 1: what this tab's panel shows, re-derived HERE so every spawn
+      // carries current context and a failure degrades to no flag at all.
+      let panelContext: string | null = null;
+      try {
+        panelContext = await resolveSpawnContext(sessionId);
+      } catch (err) {
+        log.warn(`Panel context unavailable for thread id=${threadId}: ${err}`);
+      }
+      const line = launchCommand({
+        chatSessionId: thread.chatSessionId,
+        resume,
+        appendSystemPrompt: panelContext,
+      });
       log.info(`Thread launch id=${threadId} session=${sessionId} exists=${resume}: ${line}`);
       try {
         await writeToSession(sessionId, line + "\r");
@@ -936,6 +986,50 @@ export default function App() {
   const handleTogglePanel = useCallback(() => {
     togglePanel(activeIdRef.current);
   }, []);
+
+  // The KB root never changes while the app runs — fetch it once so T8's
+  // builders can emit ABSOLUTE doc paths (a thread's cwd is a repo; a
+  // KB-relative path is not resolvable from inside the conversation). On
+  // failure the refs stay KB-relative, which is weaker but still honest.
+  useEffect(() => {
+    kbRoot()
+      .then(setKbRootForContext)
+      .catch((err) => log.warn(`kb_root unavailable — agent refs stay KB-relative: ${err}`));
+  }, []);
+
+  // T8 seam 2 — send-to-thread. TYPES the reference into the terminal and
+  // STOPS: no trailing \r, because pressing Enter for the user is exactly the
+  // dishonesty this feature refuses. He reads it, edits it, sends it.
+  //
+  // Target = the FOCUSED session (the pane his keystrokes actually go to),
+  // falling back to the tab's own session; in the common unsplit case they are
+  // the same id. The terminal screen is revealed first — typing into a surface
+  // he cannot see would read as a no-op — and the terminal is focused after
+  // the write so the very next key lands in the composer.
+  //
+  // NOTE (verified against terminalRegistry): this write is IPC, not xterm
+  // onData, so it does NOT feed the chatStarted detector — see the comment on
+  // armChatStartDetector. The user's Enter DOES reach the detector, but with
+  // `hasContent` still false (the detector never saw our text), so a bare
+  // Enter on a send-to-thread line does not flip the hint. Harmless by
+  // design: chatStarted is a UI hint only and revive decides from disk ground
+  // truth (claude_session_exists), which re-syncs the hint on the next launch.
+  const handleSendToThread = useCallback((text: string) => {
+    const sessionId = effectiveActiveIdRef.current ?? activeIdRef.current;
+    if (!sessionId || text.length === 0) return;
+    if (getNavState().route.screen !== "terminal") navigate({ screen: "terminal" });
+    log.info(`Send to thread session=${sessionId}: ${text}`);
+    writeToSession(sessionId, text)
+      .then(() => getTerminal(sessionId)?.terminal.focus())
+      .catch((err) => log.error(`Failed to type reference into session=${sessionId}: ${err}`));
+  }, []);
+
+  // Bridge it to the panel header + the wireframe pin rail (module singleton —
+  // see panelStore.PanelActions).
+  useEffect(() => {
+    registerPanelActions({ sendToThread: handleSendToThread });
+    return () => registerPanelActions(null);
+  }, [handleSendToThread]);
 
   // Publish the active TAB to panelStore so the side-menu trees know which
   // session would host a panel (and which artifact to highlight) without a

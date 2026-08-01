@@ -38,10 +38,13 @@ import {
   panelLayoutFor,
   panelWidthFromDrag,
   setPanelWidth,
+  sendToThread,
+  useSendToThreadAvailable,
   DIVIDER_WIDTH,
   usePanelsView,
   type ArtifactCrumb,
 } from "../lib/panelStore";
+import { buildSendReference, refOptions } from "../lib/agentContext";
 import { DocView } from "./kb/DocView";
 import { FileViewer, type OpenFile } from "./ExplorerView";
 
@@ -185,6 +188,9 @@ export function ArtifactPanel({
   const { panels, panelWidth } = usePanelsView();
   const artifact: Artifact | null = sessionId ? panels.get(sessionId) ?? null : null;
   const open = artifact !== null;
+  // T8 seam 2 gate — no terminal to type into means the `→ thread` action is
+  // DISABLED, never a silent no-op. Hook order: before the early return below.
+  const canSend = useSendToThreadAvailable();
 
   // Measure the WORKSPACE CONTAINER (our flex parent — pane tree + divider +
   // panel, TaskSidebar excluded by construction in App.tsx) to decide docked
@@ -224,6 +230,11 @@ export function ArtifactPanel({
     if (artifact.kind === "localhost") return;
     navigate(fullWidthRoute(artifact));
   };
+
+  // T8 seam 2 (explicit, visible): TYPE a reference to this artifact into the
+  // terminal — no Enter. The user reviews/edits and sends it himself.
+  const reference = buildSendReference(artifact, null, refOptions());
+  const sendReference = () => sendToThread(reference);
 
   return (
     <>
@@ -277,6 +288,27 @@ export function ArtifactPanel({
               </span>
             ))}
           </span>
+          <button
+            type="button"
+            onClick={sendReference}
+            disabled={!canSend}
+            title={
+              canSend
+                ? `Type “${reference}” into the terminal — you press Enter`
+                : "No terminal session to type into"
+            }
+            style={{
+              ...ACTION_STYLE,
+              opacity: canSend ? 1 : 0.35,
+              cursor: canSend ? "pointer" : "default",
+            }}
+            onMouseEnter={(e) => {
+              if (canSend) e.currentTarget.style.color = "var(--text-primary)";
+            }}
+            onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-dim)")}
+          >
+            → thread
+          </button>
           {artifact.kind !== "localhost" && (
             <button
               type="button"

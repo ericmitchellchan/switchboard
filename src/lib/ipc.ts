@@ -123,6 +123,13 @@ export async function claudeSessionExists(
 // guarded in Rust: relative paths only, `..`/absolute/drive/verbatim forms
 // rejected, canonical containment enforced. See src-tauri/src/kb.rs.
 
+/** The resolved ABSOLUTE path of the KB checkout (already stripped of Windows
+ *  verbatim prefixes). Used by T8's spawn context: a thread's cwd is a REPO,
+ *  so a KB-relative doc path is not resolvable from inside the conversation. */
+export async function kbRoot(): Promise<string> {
+  return invoke("kb_root");
+}
+
 /** Flat recursive doc listing — relative paths, forward-slash normalized,
  *  sorted. `.`/`_`-prefixed dirs and node_modules are skipped server-side. */
 export async function kbListDocs(): Promise<string[]> {

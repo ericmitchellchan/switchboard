@@ -56,6 +56,8 @@ import {
   WIREFRAME_MSG_SOURCE,
 } from "../../lib/pins";
 import type { PinsFile } from "../../lib/pins";
+import { sendToThread, useSendToThreadAvailable } from "../../lib/panelStore";
+import { buildSendReference, refOptions } from "../../lib/agentContext";
 import { log } from "../../lib/logger";
 
 /** Debounce for sidecar writes — mutations batch into one kb_write_doc. */
@@ -343,6 +345,18 @@ export function WireframeView({ path, content }: { path: string; content: string
     [pinsFile, docName]
   );
 
+  // T8 seam 2 (A4): per-pin `→ thread` TYPES `Look at kb <doc>, pin N: "<note>"`
+  // into the terminal — no Enter, ever. Disabled (not silently inert) when
+  // there is no session to type into. Works from the panel AND from the
+  // full-width KB screen; App reveals the terminal before writing.
+  const canSend = useSendToThreadAvailable();
+  const sendPin = useCallback(
+    (number: number, note: string) => {
+      sendToThread(buildSendReference({ kind: "kb-doc", path }, { number, note }, refOptions()));
+    },
+    [path]
+  );
+
   // ── Iframe messaging ──
   const postToFrame = useCallback((msg: Record<string, unknown>) => {
     iframeRef.current?.contentWindow?.postMessage({ target: WIREFRAME_MSG_SOURCE, ...msg }, "*");
@@ -512,6 +526,25 @@ export function WireframeView({ path, content }: { path: string; content: string
                   {i + 1}
                 </span>
                 <span style={{ flex: 1 }} />
+                <button
+                  type="button"
+                  style={{
+                    ...BTN_STYLE,
+                    padding: "0 5px",
+                    color: "var(--text-dim)",
+                    opacity: canSend ? 1 : 0.35,
+                    cursor: canSend ? "pointer" : "default",
+                  }}
+                  disabled={!canSend}
+                  title={
+                    canSend
+                      ? "Type this pin's reference into the terminal — you press Enter"
+                      : "No terminal session to type into"
+                  }
+                  onClick={() => sendPin(i + 1, pin.note)}
+                >
+                  → thread
+                </button>
                 <button
                   type="button"
                   style={{ ...BTN_STYLE, padding: "0 5px", color: "var(--text-dim)" }}

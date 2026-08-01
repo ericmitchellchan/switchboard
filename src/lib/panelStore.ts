@@ -514,6 +514,45 @@ export function activeTabArtifact(): Artifact | null {
   return activeTabSessionId ? panels.get(activeTabSessionId) ?? null : null;
 }
 
+// ── Send-to-thread bridge (A4 / T8 seam 2) ───────────────────────────────────
+// The `→ thread` affordances live in the panel header and — deeper still — in
+// WireframeView's pin rail, while the effect (an IPC write into the terminal
+// the user is focused in, plus revealing that terminal) belongs to App. Same
+// module-singleton bridge as threadStore.registerThreadActions, for the same
+// reason: no callback threaded through DocView into a rail row.
+
+export type PanelActions = {
+  /** TYPE text into the focused terminal. The implementation MUST NOT append
+   *  a trailing \r — the Enter that sends it is the user's keystroke. */
+  sendToThread: (text: string) => void;
+};
+
+let panelActions: PanelActions | null = null;
+
+export function registerPanelActions(actions: PanelActions | null): void {
+  panelActions = actions;
+  bump();
+}
+
+/** Perform a send. No-op when nothing is registered (App unmounted) — callers
+ *  gate on `useSendToThreadAvailable` so the affordance is DISABLED rather
+ *  than silently doing nothing. */
+export function sendToThread(text: string): void {
+  panelActions?.sendToThread(text);
+}
+
+/** Is there anything to type into? Requires both the App-side handler and an
+ *  active TAB (no tabs open ⇒ no terminal, so the affordance is dead). */
+export function sendToThreadAvailable(): boolean {
+  return panelActions !== null && activeTabSessionId !== null;
+}
+
+/** React hook for the `→ thread` affordances' disabled state. Boolean
+ *  snapshot — no re-render on divider drags. */
+export function useSendToThreadAvailable(): boolean {
+  return useSyncExternalStore(subscribe, sendToThreadAvailable);
+}
+
 /** React hook: the active tab's panel artifact. The side-menu trees subscribe
  *  through this so their active-row highlight follows the PANEL (what's
  *  actually on screen beside the shell) and re-resolves on a tab switch.
@@ -635,6 +674,7 @@ export function __resetPanelStoreForTests(): void {
   panels = new Map();
   lastArtifacts = new Map();
   activeTabSessionId = null;
+  panelActions = null;
   panelWidth = DEFAULT_PANEL_WIDTH;
   cachedView = null;
   listeners.clear();

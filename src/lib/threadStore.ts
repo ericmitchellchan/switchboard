@@ -30,6 +30,7 @@
 import { useSyncExternalStore } from "react";
 import type { AgentStatus, SavedSession, SavedWorkspace, Thread } from "../types";
 import { parsePanels, parsePanelWidth } from "./panelStore";
+import { sanitizeForTypedLine, SPAWN_CONTEXT_MAX } from "./agentContext";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure helpers
@@ -85,11 +86,24 @@ export function newThread(args: {
  *
  *  i.e. launch = exists alone; chatStarted is a UI hint only. An unstarted
  *  claude session has nothing on disk to resume — resuming it errors — so it
- *  relaunches fresh under the SAME pinned uuid. */
-export function launchCommand(args: { chatSessionId: string; resume: boolean }): string {
-  return args.resume
+ *  relaunches fresh under the SAME pinned uuid.
+ *
+ *  `appendSystemPrompt` (T8/A4, seam 1) is the panel-context one-liner from
+ *  agentContext.buildSpawnContext. It is appended as a double-quoted argument
+ *  and RE-SANITIZED here — the sanitizer is idempotent, so this costs nothing
+ *  and makes it impossible for a future caller to hand this function raw text
+ *  that breaks out of the quotes or plants an Enter in the typed line. Null /
+ *  empty omits the flag ENTIRELY (never `--append-system-prompt ""`). */
+export function launchCommand(args: {
+  chatSessionId: string;
+  resume: boolean;
+  appendSystemPrompt?: string | null;
+}): string {
+  const base = args.resume
     ? `claude --resume ${args.chatSessionId}`
     : `claude --session-id ${args.chatSessionId}`;
+  const context = sanitizeForTypedLine(args.appendSystemPrompt ?? "", SPAWN_CONTEXT_MAX);
+  return context.length > 0 ? `${base} --append-system-prompt "${context}"` : base;
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
