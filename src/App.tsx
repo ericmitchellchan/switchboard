@@ -1622,6 +1622,7 @@ export default function App() {
         sessions={sessions}
         taskCount={activeTasks.length}
         onToggleSidebar={cycleSidebar}
+        onToggleSideMenu={toggleSideMenu}
       />
 
       <ConfirmDialog

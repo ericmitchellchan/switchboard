@@ -6,11 +6,12 @@ interface StatusBarProps {
   sessions: Session[];
   taskCount?: number;
   onToggleSidebar?: () => void;
+  onToggleSideMenu?: () => void;
 }
 
 const DISPLAY_ORDER: AgentStatus[] = ["running", "waiting", "done", "error", "idle", "exited"];
 
-export function StatusBar({ sessions, taskCount, onToggleSidebar }: StatusBarProps) {
+export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMenu }: StatusBarProps) {
   const counts = new Map<AgentStatus, number>();
   for (const s of sessions) {
     counts.set(s.status, (counts.get(s.status) || 0) + 1);
@@ -47,6 +48,25 @@ export function StatusBar({ sessions, taskCount, onToggleSidebar }: StatusBarPro
         <UpdateChip />
       </div>
       <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+        {onToggleSideMenu && (
+          <>
+            <button
+              onClick={onToggleSideMenu}
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                fontFamily: "var(--font-mono)",
+                fontSize: 10,
+                color: "#52525B",
+                padding: 0,
+              }}
+            >
+              <span>Ctrl+Shift+B menu</span>
+            </button>
+            <span style={{ color: "#3F3F46" }}>{"│"}</span>
+          </>
+        )}
         <span>Ctrl+T new</span>
         <span style={{ color: "#3F3F46" }}>{"\u2502"}</span>
         <span>Ctrl+W close</span>
