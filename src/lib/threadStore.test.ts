@@ -157,7 +157,7 @@ describe("migrateSavedWorkspace", () => {
     const raw = mkWorkspaceV1();
     const ws = migrateSavedWorkspace(raw);
     expect(ws).not.toBeNull();
-    expect(ws!.version).toBe(3);
+    expect(ws!.version).toBe(4);
     expect(ws!.sessions).toEqual(raw.sessions);
     expect(ws!.paneLayout).toEqual(raw.paneLayout);
     expect(ws!.activeSessionId).toBe("s1");
@@ -183,7 +183,7 @@ describe("migrateSavedWorkspace", () => {
   it("rejects unknown versions and malformed payloads", () => {
     expect(migrateSavedWorkspace(null)).toBeNull();
     expect(migrateSavedWorkspace("nope")).toBeNull();
-    expect(migrateSavedWorkspace(mkWorkspaceV1({ version: 4 }))).toBeNull();
+    expect(migrateSavedWorkspace(mkWorkspaceV1({ version: 5 }))).toBeNull();
     expect(migrateSavedWorkspace(mkWorkspaceV1({ sessions: "bad" }))).toBeNull();
   });
 });

@@ -37,7 +37,7 @@ export function buildSavedWorkspace(
   });
 
   return {
-    version: 3,
+    version: 4,
     sessions: savedSessions,
     activeSessionId,
     paneLayout: paneLayout as unknown,
@@ -47,8 +47,8 @@ export function buildSavedWorkspace(
     // Threads ride in the same blob (records are lean by invariant — see
     // threadStore.sanitizeThread) AND mirror to disk via saveThreadsToDisk.
     threads: getThreads(),
-    // Artifact panel state (v3): per-tab panels keyed by session id (lean by
-    // invariant — see panelStore.sanitizeArtifact) + the global width.
+    // Artifact panel state (v4): per-tab TAB STRIPS keyed by session id (lean
+    // by invariant — see panelStore.sanitizePanelState) + the global width.
     panels: getPanelsRecord(),
     panelWidth: getPanelWidth(),
   };
@@ -94,8 +94,9 @@ export function loadWorkspaceFromStorage(): SavedWorkspace | null {
     if (!raw) return null;
 
     // v1/v2 blobs migrate in place (sessions/layout preserved, missing
-    // threads/panels defaulted); v3 passes through with threads + panels
-    // sanitized; anything else is rejected.
+    // threads/panels defaulted); v3's single-artifact panels become one-tab
+    // strips; v4 passes through with threads + panels sanitized; anything else
+    // is rejected.
     const migrated = migrateSavedWorkspace(JSON.parse(raw));
     if (!migrated) return null;
 

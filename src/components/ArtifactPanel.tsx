@@ -25,16 +25,35 @@
 //
 // Layout rules live in panelStore.ts (panelLayoutFor / panelWidthFromDrag) so
 // they are pure and tested; this file only measures the container and paints.
+//
+// INCREMENT B — the panel holds a STRIP of artifacts, not one. Chrome is two
+// rows, in IDE order:
+//   1. the TAB STRIP (24px): one tab per open artifact, short title + `×`,
+//      plus a trailing `+` that opens the ArtifactPicker. It sits ON TOP
+//      because that is what a tab strip means everywhere else — the row below
+//      it describes the SELECTED tab, rather than a title the tabs contradict.
+//   2. the existing 36px header, unchanged in behaviour: its breadcrumb,
+//      `open full`, `→ thread` and `×` all act on the ACTIVE artifact.
+// The header is kept rather than replaced: it carries the full breadcrumb and
+// the three actions, none of which fit a 150px tab. 60px of vertical chrome is
+// affordable in a full-height column; horizontal room is the scarce axis, and
+// the strip spends none of it (the `+` lives OUTSIDE the scroller, so it stays
+// reachable at the 260px floor no matter how many tabs are open).
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
-import type { Artifact } from "../types";
+import type { Artifact, PanelState } from "../types";
 import { navigate } from "../lib/route";
 import { explorerRead } from "../lib/explorer";
 import {
+  activateArtifact,
+  artifactIdentity,
+  artifactShortTitle,
+  closeArtifactAt,
   closePanel,
   describeArtifact,
   fullWidthRoute,
+  openInPanel,
   panelLayoutFor,
   panelWidthFromDrag,
   setPanelWidth,
@@ -43,8 +62,10 @@ import {
   DIVIDER_WIDTH,
   usePanelsView,
   type ArtifactCrumb,
+  type OpenableArtifact,
 } from "../lib/panelStore";
 import { buildSendReference, refOptions } from "../lib/agentContext";
+import { ArtifactPicker } from "./ArtifactPicker";
 import { DocView } from "./kb/DocView";
 import { FileViewer, type OpenFile } from "./ExplorerView";
 
@@ -84,6 +105,172 @@ const ACTION_STYLE: CSSProperties = {
   color: "var(--text-dim)",
   cursor: "pointer",
 };
+
+/** Tab strip — one row of artifact tabs plus the `+`.
+ *
+ *  The tab list SCROLLS horizontally; the `+` is its sibling, not its last
+ *  child, so it never scrolls out of reach on a 260px panel with eight tabs
+ *  open. Active styling is the terminal TabBar's, minus the status hue it has
+ *  no equivalent of: `--bg-active` + bright text + a 2px zinc rule on top. No
+ *  new accent (Decision 4 keeps colour functional-only). */
+function TabStrip({
+  sessionId,
+  state,
+  onAdd,
+}: {
+  sessionId: string;
+  state: PanelState;
+  onAdd: () => void;
+}) {
+  const listRef = useRef<HTMLDivElement>(null);
+  const [hovered, setHovered] = useState<number | null>(null);
+
+  // Follow the active tab when it changes or the strip grows past the edge —
+  // an opened artifact whose tab is off-screen reads as "nothing happened".
+  useEffect(() => {
+    const item = listRef.current?.children[state.activeIndex] as HTMLElement | undefined;
+    item?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [state.activeIndex, state.artifacts.length]);
+
+  return (
+    <div
+      role="tablist"
+      aria-label="Open artifacts"
+      style={{
+        height: 24,
+        flex: "none",
+        display: "flex",
+        alignItems: "stretch",
+        borderBottom: "1px solid var(--border)",
+        background: "var(--bg-secondary)",
+      }}
+    >
+      <div
+        ref={listRef}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          display: "flex",
+          alignItems: "stretch",
+          overflowX: "auto",
+          overflowY: "hidden",
+          scrollbarWidth: "none",
+        }}
+      >
+        {state.artifacts.map((artifact, i) => {
+          const isActive = i === state.activeIndex;
+          const isHovered = hovered === i;
+          const { title } = describeArtifact(artifact);
+          return (
+            <div
+              // Keyed by CONTENT, not position: the dedupe invariant makes it
+              // unique, and closing a middle tab then re-keys nothing (a
+              // positional key would re-map every tab's DOM to its neighbour's).
+              key={artifactIdentity(artifact)}
+              role="tab"
+              aria-selected={isActive}
+              title={title}
+              onClick={() => activateArtifact(sessionId, i)}
+              onMouseEnter={() => setHovered(i)}
+              onMouseLeave={() => setHovered((prev) => (prev === i ? null : prev))}
+              // Middle-click closes, as everywhere else tabs exist.
+              onAuxClick={(e) => {
+                if (e.button === 1) {
+                  e.preventDefault();
+                  closeArtifactAt(sessionId, i);
+                }
+              }}
+              style={{
+                flex: "none",
+                maxWidth: 150,
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
+                padding: "0 4px 0 9px",
+                borderRight: "1px solid var(--border)",
+                boxShadow: isActive ? "inset 0 2px 0 var(--text-muted)" : "none",
+                background: isActive
+                  ? "var(--bg-active)"
+                  : isHovered
+                    ? "var(--bg-elevated)"
+                    : "transparent",
+                color: isActive
+                  ? "var(--text-primary)"
+                  : isHovered
+                    ? "var(--text-secondary)"
+                    : "var(--text-muted)",
+                fontFamily: "var(--font-mono)",
+                fontSize: 10.5,
+                fontWeight: isActive ? 600 : 400,
+                cursor: "pointer",
+                whiteSpace: "nowrap",
+                transition: "background-color 0.15s ease, color 0.15s ease",
+              }}
+            >
+              <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+                {artifactShortTitle(artifact)}
+              </span>
+              <span
+                onClick={(e) => {
+                  e.stopPropagation();
+                  closeArtifactAt(sessionId, i);
+                }}
+                title={`Close ${title}`}
+                style={{
+                  flex: "none",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: 13,
+                  height: 13,
+                  borderRadius: 2,
+                  fontSize: 11,
+                  lineHeight: 1,
+                  color: "var(--text-dim)",
+                  // Reserved space, not conditional rendering: a tab must not
+                  // resize under the cursor as you sweep the strip.
+                  visibility: isActive || isHovered ? "visible" : "hidden",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "var(--border-subtle)";
+                  e.currentTarget.style.color = "var(--text-primary)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "transparent";
+                  e.currentTarget.style.color = "var(--text-dim)";
+                }}
+              >
+                ×
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      <button
+        type="button"
+        onClick={onAdd}
+        title="Open another artifact"
+        aria-label="Open another artifact"
+        style={{
+          flex: "none",
+          width: 24,
+          background: "none",
+          border: "none",
+          borderLeft: "1px solid var(--border)",
+          fontFamily: "var(--font-mono)",
+          fontSize: 13,
+          lineHeight: 1,
+          color: "var(--text-dim)",
+          cursor: "pointer",
+        }}
+        onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-primary)")}
+        onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-dim)")}
+      >
+        +
+      </button>
+    </div>
+  );
+}
 
 /** Panel-vs-pane-tree divider. Reuses PaneDivider's interaction pattern —
  *  document-level mousemove/mouseup, body cursor + userSelect lock, and the
@@ -190,11 +377,17 @@ export function ArtifactPanel({
   active: boolean;
 }) {
   const { panels, panelWidth } = usePanelsView();
-  const artifact: Artifact | null = sessionId ? panels.get(sessionId) ?? null : null;
-  const open = artifact !== null;
+  const state: PanelState | null = sessionId ? panels.get(sessionId) ?? null : null;
+  // The ACTIVE tab is what the header, the body and every header action mean by
+  // "the artifact". The strip invariants (non-empty, in-range index) are the
+  // store's, so this index is trusted — but read defensively anyway, since a
+  // null here is the difference between an empty panel and a crash.
+  const artifact: Artifact | null = state?.artifacts[state.activeIndex] ?? null;
+  const open = artifact !== null && state !== null;
   // T8 seam 2 gate — no terminal to type into means the `→ thread` action is
   // DISABLED, never a silent no-op. Hook order: before the early return below.
   const canSend = useSendToThreadAvailable();
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   // Measure the WORKSPACE CONTAINER (our flex parent — pane tree + divider +
   // panel, TaskSidebar excluded by construction in App.tsx) to decide docked
@@ -204,6 +397,13 @@ export function ArtifactPanel({
   //
   // useLayoutEffect, not useEffect: the first paint would otherwise use the
   // initial 0 (→ docked) and flip to overlay a frame later on a narrow window.
+  // The picker belongs to the panel that opened it: a tab switch, or the panel
+  // closing under it, dismisses it rather than leaving a modal that would
+  // reappear (and open into a different tab) the next time the panel renders.
+  useEffect(() => {
+    setPickerOpen(false);
+  }, [sessionId, open]);
+
   const asideRef = useRef<HTMLElement>(null);
   const [containerWidth, setContainerWidth] = useState(0);
   useLayoutEffect(() => {
@@ -219,7 +419,7 @@ export function ArtifactPanel({
     return () => observer.disconnect();
   }, [open]);
 
-  if (!open || !sessionId) return null;
+  if (!open || !sessionId || !state || !artifact) return null;
 
   const layout = panelLayoutFor(containerWidth, panelWidth);
   const overlay = layout.mode === "overlay";
@@ -267,6 +467,7 @@ export function ArtifactPanel({
             : { flex: "none", minWidth: 0 }),
         }}
       >
+        <TabStrip sessionId={sessionId} state={state} onAdd={() => setPickerOpen(true)} />
         <header style={HEAD_STYLE}>
           <span style={{ flex: "none", color: "var(--text-faint)" }}>{glyph}</span>
           <span
@@ -328,8 +529,12 @@ export function ArtifactPanel({
           <button
             type="button"
             onClick={() => closePanel(sessionId)}
-            title="Close panel (Ctrl+Shift+P)"
-            aria-label="Close panel"
+            title={
+              state.artifacts.length > 1
+                ? `Close ${title} (Ctrl+Shift+P hides the panel)`
+                : "Close panel (Ctrl+Shift+P)"
+            }
+            aria-label="Close artifact"
             style={{ ...ACTION_STYLE, fontSize: 13, padding: "0 2px 2px" }}
             onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-primary)")}
             onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-dim)")}
@@ -353,6 +558,20 @@ export function ArtifactPanel({
           </div>
         )}
       </aside>
+      {/* The `+` picker. A SIBLING of the panel (position:fixed, out of flow)
+          so an overflow:hidden column can never clip it, and so it survives an
+          overlay/docked flip. It always ADDS TO THIS PANEL — openInPanel, not
+          openArtifact: `+` is not a click on a tree row and must never navigate
+          away from the shell it was pressed beside. */}
+      {pickerOpen && (
+        <ArtifactPicker
+          onPick={(target: OpenableArtifact) => {
+            openInPanel(sessionId, target);
+            setPickerOpen(false);
+          }}
+          onClose={() => setPickerOpen(false)}
+        />
+      )}
     </>
   );
 }

@@ -59,7 +59,7 @@ export interface SavedSession {
 }
 
 export interface SavedWorkspace {
-  version: 3; // v3 (artifact panel): adds `panels` + `panelWidth`. v1/v2 payloads are migrated on load.
+  version: 4; // v4 (panel tabs): `panels` values become PanelState. v1/v2/v3 payloads are migrated on load.
   sessions: SavedSession[];
   activeSessionId: string | null;
   paneLayout: unknown; // PaneNode serialized
@@ -72,8 +72,11 @@ export interface SavedWorkspace {
   /** Per-tab artifact panel content, keyed by SAVED session id; keys are
    *  remapped through the restore idMap exactly like thread bindings. Unlike
    *  threads, panels expire WITH their sessions — a panel binding to an
-   *  expired session is meaningless (see applyWorkspaceStaleness). */
-  panels: Record<string, Artifact>;
+   *  expired session is meaningless (see applyWorkspaceStaleness).
+   *
+   *  v4: the value is a whole TAB STRIP (PanelState), not a single Artifact.
+   *  A v3 blob's `Artifact` migrates to `{artifacts:[a], activeIndex:0}`. */
+  panels: Record<string, PanelState>;
   /** Global panel width (one width for all tabs — one less thing to restore). */
   panelWidth: number;
 }
@@ -126,7 +129,7 @@ export type Route =
 // the terminal screen. An Artifact is a lean REFERENCE to content rendered by
 // the existing viewers (DocView / explorer FileViewer) — never the content
 // itself. Panel state is per-TAB (keyed by sessionId in panelStore) and rides
-// in SavedWorkspace v3; sanitizeArtifact() in panelStore.ts enforces this
+// in SavedWorkspace v4; sanitizeArtifact() in panelStore.ts enforces this
 // shape at every load path (lean-record invariant, same as sanitizeThread).
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -134,6 +137,19 @@ export type Artifact =
   | { kind: "kb-doc"; path: string } // KB rel path (md/html/mmd/…)
   | { kind: "repo-file"; project: string; path: string } // registry project + rel path
   | { kind: "localhost"; project: string; url: string }; // Phase B — declared, never constructed in Phase A
+
+/** Increment B — ONE session's panel holds MANY artifacts (a tab strip), not
+ *  one. `activeIndex` names the tab whose body is rendered and which the
+ *  header's breadcrumb / `open full` / `→ thread` / `×` act on.
+ *
+ *  INVARIANTS (enforced by panelStore, asserted in its tests):
+ *   - `artifacts` is never empty — a strip with no tabs is no panel at all, so
+ *     closing the last tab REMOVES the session's entry entirely.
+ *   - no two entries name the same content (artifactIdentity): re-opening an
+ *     open artifact activates its tab instead of appending a duplicate.
+ *   - `activeIndex` is always a valid index into `artifacts` (clamped on every
+ *     load and after every close). */
+export type PanelState = { artifacts: Artifact[]; activeIndex: number };
 
 export interface Thread {
   /** Switchboard thread id (uuid). */

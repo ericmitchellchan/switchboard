@@ -25,7 +25,8 @@ src/
 │   ├── NewThreadDialog.tsx      → Repo picker for creating a thread
 │   ├── NewSessionDialog.tsx     → Repo picker / new session config (lazy-loaded)
 │   ├── ExplorerView.tsx         → Explorer screen body: breadcrumb + file viewer (tree lives in the side menu)
-│   ├── ArtifactPanel.tsx        → Artifact panel host: right-side co-present surface inside the terminal screen (divider, header chrome, docked/overlay); hosts DocView / FileViewer, renders no viewer of its own
+│   ├── ArtifactPanel.tsx        → Artifact panel host: right-side co-present surface inside the terminal screen (divider, tab strip + `+`, header chrome, docked/overlay); hosts DocView / FileViewer, renders no viewer of its own
+│   ├── ArtifactPicker.tsx       → The `+` picker: filterable KB docs + registry projects, repo files browsed one directory at a time (explorerList)
 │   ├── UpdateChip.tsx           → In-app updater chip (consent-based install flow)
 │   ├── ConfirmDialog.tsx        → Modal confirm (close/destructive actions)
 │   ├── kb/                      → Knowledge Base screen views
@@ -50,7 +51,7 @@ src/
 │   ├── fitQueue.ts              → Debounced per-session fit pipeline (show/resize coalescing)
 │   ├── route.ts                 → URL-backed route model + nav store (screen switching)
 │   ├── threadStore.ts           → Durable agent threads: records, revive decisions, shell-ready wait, action bridge
-│   ├── panelStore.ts            → Artifact panel state (per-TAB artifact + global width), layout/drag math, header breadcrumbs, open-in-panel decision (`decideOpen`/`fullWidthRoute`), toggle memory, active-tab + send-to-thread bridges
+│   ├── panelStore.ts            → Artifact panel state (per-TAB `PanelState` = artifact strip + activeIndex, global width), strip ops (`appendOrActivate`/`closeArtifactIn`), layout/drag math, header breadcrumbs, open-in-panel decision (`decideOpen`/`fullWidthRoute`), toggle memory, active-tab + send-to-thread bridges
 │   ├── agentContext.ts          → Agent context injection (T8): shell-safe sanitizer + the two seam builders (`buildSpawnContext`, `buildSendReference`) + KB-root cache. PURE — the effectful ends live in App/threadStore/panelStore
 │   ├── kb.ts                    → KB doc list/read data layer (poll while active)
 │   ├── pins.ts                  → Wireframe pin/note file model (pure ops over pins JSON)
@@ -62,7 +63,7 @@ src/
 │   ├── statusDetector.ts        → Agent status state machine (pattern match + dwell hysteresis)
 │   ├── taskDetector.ts          → Auto-detect build/test/git errors from PTY output
 │   ├── paneLayout.ts            → Immutable binary tree operations
-│   ├── workspace.ts             → Periodic save/restore to localStorage + disk (v2 adds threads, v3 adds per-tab `panels` + `panelWidth`)
+│   ├── workspace.ts             → Periodic save/restore to localStorage + disk (v2 adds threads, v3 adds per-tab `panels` + `panelWidth`, v4 makes each panel a tab strip)
 │   ├── ipc.ts                   → Tauri invoke() wrappers for all backend commands
 │   ├── statusConfig.ts          → Status colors, icons, labels (single source of truth)
 │   ├── logger.ts                → Frontend structured logging
@@ -140,7 +141,8 @@ pnpm test:watch        # Vitest (watch mode)
 - **Artifact panel is per-TAB, never per-pane** — `panelStore` keys on the TAB's `activeSessionId`, not `effectiveActiveSessionId` (the focused pane). A split terminal + panel just shares the width: moving pane focus never swaps or blanks the panel, and persistence never forks one binding per pane
 - **Panel geometry is measured against the WORKSPACE container** — App nests `[pane tree | divider | ArtifactPanel]` in a container that EXCLUDES the TaskSidebar, so the panel's right edge is the container's right edge. Every width rule in `panelStore` (`panelLayoutFor`, `panelWidthFromDrag`, the MIN_TERMINAL_WIDTH floor, overlay's `right: 0`) assumes that nesting; re-parenting the panel next to the sidebar makes all of them wrong by exactly the sidebar's width (0/38/280px)
 - **Two honest agent-context seams, and no third** — (1) SPAWN-TIME: `--append-system-prompt "<one-liner>"` on the thread launch line, re-derived from the target tab's panel at EVERY spawn so stale context dies with the session; a fresh thread inherits the panel it was launched from so the sentence is true. (2) SEND-TO-THREAD: `→ thread` TYPES a reference into the terminal with NO trailing `\r` — the Enter is the user's. Anything that injects mid-conversation or presses Enter for the user is out of scope. Both strings go through `agentContext.sanitizeForTypedLine` (control chars, `" \ $ % \``) because they land on a shell line
-- **Workspace v3** — `panels: Record<sessionId, Artifact>` + `panelWidth` ride inside the same localStorage blob; on restore, keys remap through the session idMap and unmapped ones are DROPPED (a panel binding without its tab is meaningless, unlike a thread, which is severed and stays revivable). Records stay LEAN via `sanitizeArtifact` on every load path
+- **Workspace v4** — `panels: Record<sessionId, PanelState>` (`{artifacts, activeIndex}`) + `panelWidth` ride inside the same localStorage blob; the v3→v4 migration wraps each single `Artifact` into a one-tab strip. On restore, keys remap through the session idMap and unmapped ones are DROPPED (a panel binding without its tab is meaningless, unlike a thread, which is severed and stays revivable). Records stay LEAN via `sanitizeArtifact`/`sanitizePanelState` on every load path
+- **One artifact, one tab** — a panel holds MANY artifacts; re-opening one already in the strip ACTIVATES its tab rather than appending a duplicate (compared by `artifactIdentity`: kind + project + path). Same lesson as the shared pins store — two tabs naming one document would mean two records of everything downstream. A strip is never empty: closing the last tab removes the session's panel, and Ctrl+Shift+P hides/restores the WHOLE strip (the strip's own `×` is what closes one artifact)
 - **Lazy loading** — NewSessionDialog loaded via `React.lazy` + Suspense only when repos configured; mermaid is its own lazy chunk (DiagramView)
 - **`portable-pty = "=0.8.1"`** — pinned, v0.9 has Windows ConPTY bug
 - **CLAUDECODE env var** stripped from PTY sessions

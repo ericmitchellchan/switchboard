@@ -1,20 +1,24 @@
-// Artifact panel store (workstation v2, phase A1) — per-TAB panel content.
+// Artifact panel store (workstation v2, phase A1; tabs in increment B) —
+// per-TAB panel content.
 //
 // The panel is a right-side surface inside the terminal screen; what it shows
-// is an Artifact REFERENCE (see src/types.ts) keyed by the owning session
-// (tab) id. Width is GLOBAL — one width for every tab, one less thing to
-// restore per-tab.
+// is a STRIP of Artifact REFERENCES (see src/types.ts — `PanelState`) keyed by
+// the owning session (tab) id. Two levels of "tab" meet here and must not be
+// confused: the app's TERMINAL tabs are the store's KEYS, and each one owns a
+// strip of ARTIFACT tabs. Width is GLOBAL — one width for every terminal tab,
+// one less thing to restore per-tab.
 //
 // Layout mirrors threadStore.ts:
 //   1. Pure helpers — unit-tested under Node: artifact sanitizing (the lean
-//      gate every load path funnels through), width clamping, tolerant
-//      (de)serialization for the SavedWorkspace v3 blob, and the restore
+//      gate every load path funnels through), the strip operations
+//      (append-or-activate / close / activate), width clamping, tolerant
+//      (de)serialization for the SavedWorkspace v4 blob, and the restore
 //      remap rule.
 //   2. Module-level store — same shape as route.ts / threadStore.ts (module
 //      singletons + useSyncExternalStore), deliberately not zustand.
 //
-// Persistence rides INSIDE the SavedWorkspace v3 localStorage blob
-// (`panels: Record<savedSessionId, Artifact>` + `panelWidth`) — no disk
+// Persistence rides INSIDE the SavedWorkspace v4 localStorage blob
+// (`panels: Record<savedSessionId, PanelState>` + `panelWidth`) — no disk
 // mirror: unlike threads, a panel binding is machine-local UI state whose key
 // is a session id that dies with the workspace anyway. On restore, keys are
 // remapped through the same session idMap threads use; unmapped keys are
@@ -24,11 +28,22 @@
 //
 // A3 adds the OPEN PATH on top of that state: `decideOpen` (pure, exhaustively
 // unit-tested) + `openArtifact` (the thin effectful wrapper both tree sections
-// call), the per-tab `lastArtifact` memory that makes Ctrl+Shift+P a real
-// toggle, and the active-TAB bridge those two need.
+// call), the per-tab toggle memory that makes Ctrl+Shift+P a real toggle, and
+// the active-TAB bridge those two need.
+//
+// INCREMENT B — one session holds MANY artifacts. The rules that come with
+// that, all enforced here rather than in the host component:
+//   - DEDUPE (acceptance 4): opening an artifact already in the strip
+//     ACTIVATES its tab instead of appending a second copy. Comparison is by
+//     `artifactIdentity` (kind + project + path), the same string the pins
+//     store's "one document, one live record" lesson is about — two tabs
+//     naming one document would mean two records of everything downstream.
+//   - A strip is never EMPTY: closing the last tab removes the session's
+//     entry, which is what "the panel collapsed" means everywhere else.
+//   - `activeIndex` is always valid: clamped on load and re-derived on close.
 
 import { useSyncExternalStore } from "react";
-import type { Artifact, Route, ScreenId } from "../types";
+import type { Artifact, PanelState, Route, ScreenId } from "../types";
 import { getNavState, navigate } from "./route";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -254,16 +269,144 @@ export function sanitizeArtifact(raw: unknown): Artifact | null {
   }
 }
 
-/** Tolerant parse of a persisted panels record (like pins: a broken entry
- *  must not eat the rest). Non-record input → empty; entries with an empty
- *  key or an invalid artifact are dropped individually. */
-export function parsePanels(raw: unknown): Record<string, Artifact> {
+// ── Strip operations (pure — increment B) ────────────────────────────────────
+// Every mutation of a session's tab strip is one of these three, so the
+// invariants (non-empty, no duplicates, valid activeIndex) live in ONE place
+// and are asserted without a store.
+
+/** Stable identity string for an artifact — equal strings mean "the same
+ *  content". THE DEDUPE KEY (kind + project + path) and also a React reset key
+ *  and a narrow-selector snapshot (primitives compare by value under
+ *  Object.is, so a subscriber re-renders only when the CONTENT changes). */
+export function artifactIdentity(artifact: Artifact): string {
+  switch (artifact.kind) {
+    case "kb-doc":
+      return `kb-doc:${artifact.path}`;
+    case "repo-file":
+      return `repo-file:${artifact.project}:${artifact.path}`;
+    case "localhost":
+      return `localhost:${artifact.project}:${artifact.url}`;
+  }
+}
+
+/** Do two references name the same content? (kind + project + path.) */
+export function sameArtifact(a: Artifact, b: Artifact): boolean {
+  return artifactIdentity(a) === artifactIdentity(b);
+}
+
+/** Position of an artifact in a strip, or -1. */
+export function indexOfArtifact(artifacts: readonly Artifact[], artifact: Artifact): number {
+  const id = artifactIdentity(artifact);
+  return artifacts.findIndex((a) => artifactIdentity(a) === id);
+}
+
+/** Force an index into `[0, length)`; a length of 0 has no valid index and
+ *  yields 0 (callers drop the strip in that case). */
+export function clampActiveIndex(length: number, index: number): number {
+  if (length <= 0) return 0;
+  if (!Number.isFinite(index)) return 0;
+  return Math.min(length - 1, Math.max(0, Math.trunc(index)));
+}
+
+/** The tab strip's label for an artifact: the LAST path segment (the file
+ *  name), which is what distinguishes co-open artifacts at a glance. The full
+ *  breadcrumb stays in the header — this is the 140px version of it. */
+export function artifactShortTitle(artifact: Artifact): string {
+  const raw = artifact.kind === "localhost" ? artifact.url : artifact.path;
+  const segments = raw.split("/").filter((s) => s.length > 0);
+  return segments[segments.length - 1] ?? raw;
+}
+
+/** ACCEPTANCE 4 — append-or-activate. An artifact already in the strip
+ *  ACTIVATES its tab (no duplicate, no reordering: the strip stays where the
+ *  user's muscle memory left it); a new one lands at the END and becomes
+ *  active. `null` state = the session has no panel yet, so this opens one. */
+export function appendOrActivate(state: PanelState | null, artifact: Artifact): PanelState {
+  if (!state || state.artifacts.length === 0) {
+    return { artifacts: [artifact], activeIndex: 0 };
+  }
+  const existing = indexOfArtifact(state.artifacts, artifact);
+  if (existing >= 0) {
+    return existing === state.activeIndex ? state : { ...state, activeIndex: existing };
+  }
+  return { artifacts: [...state.artifacts, artifact], activeIndex: state.artifacts.length };
+}
+
+/** Close one tab. Returns the new state, or NULL when that was the last tab —
+ *  "no panel" and "a panel showing nothing" are the same thing and only one of
+ *  them is representable.
+ *
+ *  Index rule (the editor convention): closing a tab LEFT of the active one
+ *  shifts the active one left so the same content stays on screen; closing the
+ *  ACTIVE one activates its right neighbour, or the new last tab when it was
+ *  rightmost. Out-of-range indices are a no-op (the state is returned
+ *  unchanged), never a silent close of the wrong tab. */
+export function closeArtifactIn(state: PanelState, index: number): PanelState | null {
+  if (!Number.isInteger(index) || index < 0 || index >= state.artifacts.length) return state;
+  if (state.artifacts.length === 1) return null;
+  const artifacts = state.artifacts.filter((_, i) => i !== index);
+  const next =
+    index < state.activeIndex
+      ? state.activeIndex - 1
+      : state.activeIndex;
+  return { artifacts, activeIndex: clampActiveIndex(artifacts.length, next) };
+}
+
+// ── Tolerant (de)serialization (SavedWorkspace v4) ───────────────────────────
+
+/** Rebuild a PanelState from unknown input: every entry through the lean
+ *  artifact gate, duplicates collapsed (the invariant holds for RESTORED
+ *  strips too, not just live ones), `activeIndex` clamped into range.
+ *
+ *  Returns null — i.e. DROP this session's entry — when nothing survives:
+ *  an empty strip is not a panel. The active tab is preserved by CONTENT, not
+ *  by number, so a dropped-out neighbour cannot silently change which artifact
+ *  comes back active. */
+export function sanitizePanelState(raw: unknown): PanelState | null {
+  if (!isRecord(raw) || !Array.isArray(raw.artifacts)) return null;
+  const wanted =
+    typeof raw.activeIndex === "number" && Number.isFinite(raw.activeIndex)
+      ? Math.trunc(raw.activeIndex)
+      : 0;
+  const artifacts: Artifact[] = [];
+  let activeIndex = 0;
+  raw.artifacts.forEach((entry, i) => {
+    const clean = sanitizeArtifact(entry);
+    if (!clean) return;
+    const existing = indexOfArtifact(artifacts, clean);
+    const at = existing >= 0 ? existing : artifacts.push(clean) - 1;
+    if (i === wanted) activeIndex = at;
+  });
+  if (artifacts.length === 0) return null;
+  return { artifacts, activeIndex: clampActiveIndex(artifacts.length, activeIndex) };
+}
+
+/** Tolerant parse of a persisted v4 panels record (like pins: a broken entry
+ *  must not eat the rest). Non-record input → empty; entries with an empty key
+ *  or an unusable state are dropped individually. */
+export function parsePanels(raw: unknown): Record<string, PanelState> {
   if (!isRecord(raw)) return {};
-  const out: Record<string, Artifact> = {};
+  const out: Record<string, PanelState> = {};
+  for (const [sessionId, value] of Object.entries(raw)) {
+    if (sessionId.length === 0) continue;
+    const state = sanitizePanelState(value);
+    if (state) out[sessionId] = state;
+  }
+  return out;
+}
+
+/** v3 → v4, additive and lossless: a v3 entry is a single `Artifact` and
+ *  becomes a one-tab strip. Same tolerance as parsePanels — a garbage entry is
+ *  dropped alone. (Kept as its own function rather than folded into
+ *  parsePanels: a v4 blob whose entry is somehow a bare Artifact is CORRUPT,
+ *  not old, and silently accepting both shapes forever would hide that.) */
+export function parsePanelsV3(raw: unknown): Record<string, PanelState> {
+  if (!isRecord(raw)) return {};
+  const out: Record<string, PanelState> = {};
   for (const [sessionId, value] of Object.entries(raw)) {
     if (sessionId.length === 0) continue;
     const artifact = sanitizeArtifact(value);
-    if (artifact) out[sessionId] = artifact;
+    if (artifact) out[sessionId] = { artifacts: [artifact], activeIndex: 0 };
   }
   return out;
 }
@@ -277,12 +420,12 @@ export function parsePanelWidth(raw: unknown): number {
  *  the way out — the lean invariant holds even if a caller ever hands us
  *  decorated records (same posture as serializeThreadsForDisk). */
 export function serializePanels(
-  panels: ReadonlyMap<string, Artifact>
-): Record<string, Artifact> {
-  const out: Record<string, Artifact> = {};
+  panels: ReadonlyMap<string, PanelState>
+): Record<string, PanelState> {
+  const out: Record<string, PanelState> = {};
   for (const [sessionId, value] of panels) {
-    const artifact = sanitizeArtifact(value);
-    if (sessionId.length > 0 && artifact) out[sessionId] = artifact;
+    const state = sanitizePanelState(value);
+    if (sessionId.length > 0 && state) out[sessionId] = state;
   }
   return out;
 }
@@ -292,13 +435,13 @@ export function serializePanels(
  *  thread (which is severed and stays revivable), a panel binding without its
  *  tab is meaningless. Pass an empty map on fresh starts to drop everything. */
 export function remapPanels(
-  panels: Record<string, Artifact>,
+  panels: Record<string, PanelState>,
   idMap: Map<string, string>
-): Record<string, Artifact> {
-  const out: Record<string, Artifact> = {};
-  for (const [oldId, artifact] of Object.entries(panels)) {
+): Record<string, PanelState> {
+  const out: Record<string, PanelState> = {};
+  for (const [oldId, state] of Object.entries(panels)) {
     const newId = idMap.get(oldId);
-    if (newId) out[newId] = artifact;
+    if (newId) out[newId] = state;
   }
   return out;
 }
@@ -309,23 +452,26 @@ export function remapPanels(
 
 /** Snapshot consumed by the panel UI (useSyncExternalStore). */
 export type PanelsView = {
-  panels: ReadonlyMap<string, Artifact>;
+  panels: ReadonlyMap<string, PanelState>;
   panelWidth: number;
 };
 
-let panels = new Map<string, Artifact>();
+let panels = new Map<string, PanelState>();
 let panelWidth = DEFAULT_PANEL_WIDTH;
 
-/** Per-tab memory of the LAST artifact a panel showed, written on close so
- *  Ctrl+Shift+P can reopen it (A3 — the chord is a real toggle now that an
- *  open path exists).
+/** Per-tab memory of the LAST STRIP a panel showed, written when the panel
+ *  goes away so Ctrl+Shift+P can bring it back (A3 — the chord is a real
+ *  toggle now that an open path exists). Increment B widens it from one
+ *  artifact to the whole PanelState: the chord hides and restores the PANEL,
+ *  so restoring one tab of the three that were open would be a lossy toggle.
  *
  *  Deliberately NOT persisted: it is session-lifetime UI memory, not workspace
- *  state. `panels` already restores what was OPEN at quit (workspace v3);
+ *  state. `panels` already restores what was OPEN at quit (workspace v4);
  *  restoring what was closed hours ago would resurrect content the user
  *  explicitly dismissed. Dies with the tab (removeSessionPanel) and with the
- *  process. */
-let lastArtifacts = new Map<string, Artifact>();
+ *  process. (Verify with `serializePanels` / `getPanelsRecord` — neither
+ *  reads this map.) */
+let lastPanelStates = new Map<string, PanelState>();
 
 /** The ACTIVE TAB's session id, published by App (§Active-tab bridge below). */
 let activeTabSessionId: string | null = null;
@@ -361,25 +507,9 @@ export function usePanelsView(): PanelsView {
   return useSyncExternalStore(subscribe, getPanelsView);
 }
 
-/** Stable identity string for an artifact — equal strings mean "the same
- *  content is open". Used as a React reset key and as a narrow-selector
- *  snapshot (primitives compare by value under Object.is, so a subscriber
- *  re-renders only when the CONTENT changes). */
-export function artifactIdentity(artifact: Artifact): string {
-  switch (artifact.kind) {
-    case "kb-doc":
-      return `kb-doc:${artifact.path}`;
-    case "repo-file":
-      return `repo-file:${artifact.project}:${artifact.path}`;
-    case "localhost":
-      return `localhost:${artifact.project}:${artifact.url}`;
-  }
-}
-
-/** A session's panel identity, or `""` when the tab has no panel open. */
+/** A session's ACTIVE panel identity, or `""` when the tab has no panel open. */
 export function panelIdentityFor(sessionId: string | null): string {
-  if (!sessionId) return "";
-  const artifact = panels.get(sessionId);
+  const artifact = sessionId ? artifactFor(sessionId) : null;
   return artifact ? artifactIdentity(artifact) : "";
 }
 
@@ -391,8 +521,22 @@ export function usePanelIdentity(sessionId: string | null): string {
   return useSyncExternalStore(subscribe, () => panelIdentityFor(sessionId));
 }
 
-/** The artifact open in a session's (tab's) panel, or null when closed. */
+/** The ACTIVE artifact in a session's (tab's) panel, or null when the panel is
+ *  closed. Unchanged name and shape on purpose: agentContext's spawn line, the
+ *  side-menu highlighting and `usePanelIdentity` all mean "what the panel is
+ *  SHOWING", which is exactly the active tab. Use `panelStateFor` for the
+ *  whole strip. */
 export function artifactFor(sessionId: string): Artifact | null {
+  const state = panels.get(sessionId);
+  if (!state || state.artifacts.length === 0) return null;
+  return state.artifacts[clampActiveIndex(state.artifacts.length, state.activeIndex)] ?? null;
+}
+
+/** A session's whole tab strip, or null when the panel is closed. The strip is
+ *  frozen by convention (every mutator REPLACES it), so callers may hold it as
+ *  a snapshot. */
+export function panelStateFor(sessionId: string | null): PanelState | null {
+  if (!sessionId) return null;
   return panels.get(sessionId) ?? null;
 }
 
@@ -401,7 +545,7 @@ export function getPanelWidth(): number {
 }
 
 /** Current panels as a lean plain record — buildSavedWorkspace's source. */
-export function getPanelsRecord(): Record<string, Artifact> {
+export function getPanelsRecord(): Record<string, PanelState> {
   return serializePanels(panels);
 }
 
@@ -409,27 +553,66 @@ export function getPanelsRecord(): Record<string, Artifact> {
  *  already tolerant-parsed by migrateSavedWorkspace, but the lean gate runs
  *  again here — every load path funnels through sanitizeArtifact). */
 export function initPanelStore(
-  initial: Record<string, Artifact>,
+  initial: Record<string, PanelState>,
   width: number = DEFAULT_PANEL_WIDTH
 ): void {
   panels = new Map(Object.entries(parsePanels(initial)));
-  // Seeding is a fresh start for the toggle memory too: `lastArtifacts` is
+  // Seeding is a fresh start for the toggle memory too: `lastPanelStates` is
   // keyed by session ids belonging to the workspace being replaced, so
   // carrying it across a re-seed could reopen an artifact into a stranger's
   // tab. (Boot calls this exactly once, before any open — this is a guard, not
   // a live path.)
-  lastArtifacts = new Map();
+  lastPanelStates = new Map();
   panelWidth = clampPanelWidth(width);
   bump();
 }
 
-/** Open (or replace) the artifact in a session's panel. */
+/** Open an artifact in a session's panel: APPEND a tab, or ACTIVATE the tab
+ *  that already holds this content (acceptance 4 — one document, one live
+ *  record). Opening into a session with no panel opens the panel.
+ *
+ *  Name and signature are unchanged from Phase A because every caller means
+ *  the same thing by it ("show me this, here"); only the "one artifact per
+ *  tab, replace" half of the old contract is gone. */
 export function openInPanel(sessionId: string, artifact: Artifact): void {
   if (sessionId.length === 0) return;
   const clean = sanitizeArtifact(artifact);
   if (!clean) return;
+  const current = panels.get(sessionId) ?? null;
+  const next = appendOrActivate(current, clean);
+  if (next === current) return; // already the active tab — no churn
   panels = new Map(panels);
-  panels.set(sessionId, clean);
+  panels.set(sessionId, next);
+  bump();
+}
+
+/** Switch which tab of a session's strip is showing. Out-of-range indices and
+ *  no-op activations are ignored (no snapshot churn). */
+export function activateArtifact(sessionId: string, index: number): void {
+  const state = panels.get(sessionId);
+  if (!state) return;
+  if (!Number.isInteger(index) || index < 0 || index >= state.artifacts.length) return;
+  if (index === state.activeIndex) return;
+  panels = new Map(panels);
+  panels.set(sessionId, { ...state, activeIndex: index });
+  bump();
+}
+
+/** Close ONE tab of a session's strip (the strip's own `×`). Closing the last
+ *  tab removes the session's panel entirely — and only THEN is the strip filed
+ *  into the toggle memory, because only then is there a panel to bring back. */
+export function closeArtifactAt(sessionId: string, index: number): void {
+  const state = panels.get(sessionId);
+  if (!state) return;
+  const next = closeArtifactIn(state, index);
+  if (next === state) return; // out of range — nothing happened
+  panels = new Map(panels);
+  if (next === null) {
+    rememberPanel(sessionId, state);
+    panels.delete(sessionId);
+  } else {
+    panels.set(sessionId, next);
+  }
   bump();
 }
 
@@ -451,46 +634,63 @@ export function openInPanel(sessionId: string, artifact: Artifact): void {
  *  Callers capture the source artifact SYNCHRONOUSLY before creating the
  *  session — the active tab flips to the new one as soon as it exists.
  *
+ *  INCREMENT B: it inherits the source tab's ACTIVE artifact ONLY, never the
+ *  whole strip. What the user was LOOKING AT is the honest thing to carry (and
+ *  the only thing the spawn one-liner claims); cloning a six-tab strip into a
+ *  brand-new thread would be a surprise, not context.
+ *
  *  Returns whether the new tab now shows the inherited artifact. */
 export function inheritPanel(artifact: Artifact | null, newSessionId: string): boolean {
   if (!artifact || newSessionId.length === 0) return false;
   openInPanel(newSessionId, artifact);
-  const now = panels.get(newSessionId);
-  return now !== undefined && artifactIdentity(now) === artifactIdentity(artifact);
+  const now = artifactFor(newSessionId);
+  return now !== null && sameArtifact(now, artifact);
 }
 
-/** Close a session's panel (user action — the × / toggle), REMEMBERING what it
- *  showed so the toggle can bring it back. No-op when the session has no
- *  panel. */
+/** File a strip into the per-tab toggle memory (see `lastPanelStates`). */
+function rememberPanel(sessionId: string, state: PanelState): void {
+  lastPanelStates = new Map(lastPanelStates);
+  lastPanelStates.set(sessionId, state);
+}
+
+/** Close the ACTIVE tab of a session's panel (the header `×`). When it was the
+ *  last tab the panel is removed entirely, REMEMBERING the strip so the toggle
+ *  can bring it back. No-op when the session has no panel. */
 export function closePanel(sessionId: string): void {
-  const current = panels.get(sessionId);
-  if (!current) return;
-  lastArtifacts = new Map(lastArtifacts);
-  lastArtifacts.set(sessionId, current);
+  const state = panels.get(sessionId);
+  if (!state) return;
+  closeArtifactAt(sessionId, clampActiveIndex(state.artifacts.length, state.activeIndex));
+}
+
+/** Ctrl+Shift+P — the true toggle (A3): hide the WHOLE panel (remembering the
+ *  strip), or bring back the last strip this TAB showed. A no-op on a tab that
+ *  has neither (which is why the status-bar chip renders only when
+ *  `panelToggleAvailableFor` is true — never advertise a dead chord).
+ *
+ *  NOT expressed via closePanel: the chord toggles the panel, and with three
+ *  artifacts open, closing one tab is not "the panel went away". */
+export function togglePanel(sessionId: string | null): void {
+  if (!sessionId) return;
+  const open = panels.get(sessionId);
+  if (open) {
+    rememberPanel(sessionId, open);
+    panels = new Map(panels);
+    panels.delete(sessionId);
+    bump();
+    return;
+  }
+  const last = lastPanelStates.get(sessionId);
+  if (!last) return;
   panels = new Map(panels);
-  panels.delete(sessionId);
+  panels.set(sessionId, last);
   bump();
 }
 
-/** Ctrl+Shift+P — the true toggle (A3): close what's open (remembering it), or
- *  reopen the last artifact this TAB showed. A no-op on a tab that has neither
- *  (which is why the status-bar chip renders only when
- *  `panelToggleAvailableFor` is true — never advertise a dead chord). */
-export function togglePanel(sessionId: string | null): void {
-  if (!sessionId) return;
-  if (panels.has(sessionId)) {
-    closePanel(sessionId);
-    return;
-  }
-  const last = lastArtifacts.get(sessionId);
-  if (last) openInPanel(sessionId, last);
-}
-
-/** Would Ctrl+Shift+P do anything for this tab? (open panel → closes it; no
- *  panel but a remembered artifact → reopens it). */
+/** Would Ctrl+Shift+P do anything for this tab? (open panel → hides it; no
+ *  panel but a remembered strip → brings it back). */
 export function panelToggleAvailableFor(sessionId: string | null): boolean {
   if (!sessionId) return false;
-  return panels.has(sessionId) || lastArtifacts.has(sessionId);
+  return panels.has(sessionId) || lastPanelStates.has(sessionId);
 }
 
 /** Narrow selector for the status-bar chip — a boolean snapshot, so App
@@ -502,19 +702,19 @@ export function usePanelToggleAvailable(sessionId: string | null): boolean {
 /** Tab-close cleanup: the session was destroyed, its panel binding AND its
  *  toggle memory go with it (called beside unbindThreadsForSession in
  *  App.destroySession). Not expressed via closePanel — that would file the
- *  artifact into `lastArtifacts` on the way out, i.e. resurrect the memory of
+ *  strip into `lastPanelStates` on the way out, i.e. resurrect the memory of
  *  a tab that no longer exists. */
 export function removeSessionPanel(sessionId: string): void {
   const hadPanel = panels.has(sessionId);
-  const hadMemory = lastArtifacts.has(sessionId);
+  const hadMemory = lastPanelStates.has(sessionId);
   if (!hadPanel && !hadMemory) return;
   if (hadPanel) {
     panels = new Map(panels);
     panels.delete(sessionId);
   }
   if (hadMemory) {
-    lastArtifacts = new Map(lastArtifacts);
-    lastArtifacts.delete(sessionId);
+    lastPanelStates = new Map(lastPanelStates);
+    lastPanelStates.delete(sessionId);
   }
   bump();
 }
@@ -560,9 +760,10 @@ export function getActiveTabSession(): string | null {
   return activeTabSessionId;
 }
 
-/** What the ACTIVE tab's panel currently shows (null = nothing / no tab). */
+/** What the ACTIVE tab's panel currently shows — its ACTIVE artifact (null =
+ *  nothing / no tab). */
 export function activeTabArtifact(): Artifact | null {
-  return activeTabSessionId ? panels.get(activeTabSessionId) ?? null : null;
+  return activeTabSessionId ? artifactFor(activeTabSessionId) : null;
 }
 
 // ── Send-to-thread bridge (A4 / T8 seam 2) ───────────────────────────────────
@@ -608,8 +809,10 @@ export function useSendToThreadAvailable(): boolean {
  *  through this so their active-row highlight follows the PANEL (what's
  *  actually on screen beside the shell) and re-resolves on a tab switch.
  *
- *  Snapshot identity is stable — artifacts are frozen records replaced only by
- *  openInPanel — so useSyncExternalStore never loops. */
+ *  Snapshot identity is stable — an artifact is a frozen record living inside
+ *  a strip that mutators REPLACE rather than edit, so reading it out of the
+ *  array twice yields the same reference and useSyncExternalStore never
+ *  loops. */
 export function useActiveTabArtifact(): Artifact | null {
   return useSyncExternalStore(subscribe, activeTabArtifact);
 }
@@ -723,7 +926,7 @@ export function openArtifact(
 /** Test-only: reset the store to a blank state. */
 export function __resetPanelStoreForTests(): void {
   panels = new Map();
-  lastArtifacts = new Map();
+  lastPanelStates = new Map();
   activeTabSessionId = null;
   panelActions = null;
   panelWidth = DEFAULT_PANEL_WIDTH;

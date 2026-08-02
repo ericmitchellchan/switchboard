@@ -29,7 +29,7 @@
 
 import { useSyncExternalStore } from "react";
 import type { AgentStatus, SavedSession, SavedWorkspace, Thread } from "../types";
-import { parsePanels, parsePanelWidth } from "./panelStore";
+import { parsePanels, parsePanelsV3, parsePanelWidth } from "./panelStore";
 import { sanitizeForTypedLine, SPAWN_CONTEXT_MAX } from "./agentContext";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -343,20 +343,27 @@ export function mergeThreads(
   return diskThreads ?? localThreads;
 }
 
-// ── SavedWorkspace v1/v2 → v3 migration + staleness ──────────────────────────
+// ── SavedWorkspace v1/v2/v3 → v4 migration + staleness ───────────────────────
 
-/** Migrate a raw parsed workspace blob to v3. Additive per version:
- *  v1 payloads keep all their sessions/layout and gain `threads: []`;
- *  v2 payloads pass through with their threads sanitized; both gain
- *  `panels: {}` + the default width. v3 payloads pass through with panels
- *  tolerant-parsed and the width clamped. Anything else is rejected. */
+/** Migrate a raw parsed workspace blob to v4. Additive per version — each new
+ *  schema EXTENDS this table rather than forking a second migrator:
+ *
+ *  | from | sessions/layout | threads             | panels                       |
+ *  |------|-----------------|---------------------|------------------------------|
+ *  | v1   | preserved       | `[]`                | `{}`                         |
+ *  | v2   | preserved       | sanitized           | `{}`                         |
+ *  | v3   | preserved       | sanitized           | `Artifact` → one-tab strip   |
+ *  | v4   | preserved       | sanitized           | tolerant-parsed strips       |
+ *
+ *  The width is clamped from whatever is present at every version (it has
+ *  existed since v3 and is not session-bound). Anything else is rejected. */
 export function migrateSavedWorkspace(raw: unknown): SavedWorkspace | null {
   if (!raw || typeof raw !== "object") return null;
   const ws = raw as Record<string, unknown>;
-  if (ws.version !== 1 && ws.version !== 2 && ws.version !== 3) return null;
+  if (ws.version !== 1 && ws.version !== 2 && ws.version !== 3 && ws.version !== 4) return null;
   if (!Array.isArray(ws.sessions)) return null;
   return {
-    version: 3,
+    version: 4,
     sessions: ws.sessions as SavedSession[],
     activeSessionId: typeof ws.activeSessionId === "string" ? ws.activeSessionId : null,
     paneLayout: ws.paneLayout ?? null,
@@ -364,7 +371,12 @@ export function migrateSavedWorkspace(raw: unknown): SavedWorkspace | null {
     sessionCounter: typeof ws.sessionCounter === "number" ? ws.sessionCounter : 0,
     savedAt: typeof ws.savedAt === "number" ? ws.savedAt : 0,
     threads: ws.version === 1 ? [] : sanitizeThreads(ws.threads),
-    panels: ws.version === 3 ? parsePanels(ws.panels) : {},
+    panels:
+      ws.version === 4
+        ? parsePanels(ws.panels)
+        : ws.version === 3
+          ? parsePanelsV3(ws.panels)
+          : {},
     panelWidth: parsePanelWidth(ws.panelWidth),
   };
 }

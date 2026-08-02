@@ -134,8 +134,10 @@ function waitForSessionShellReady(sessionId: string): Promise<void> {
 // in `--append-system-prompt`. Derived from the TARGET TAB's own panel
 // (panelStore is per-TAB), which is what makes the sentence TRUE by
 // construction: a tab with no panel makes no claim and the flag is omitted
-// entirely. BOTH spawn paths can be rich — revive restores the tab's panel
-// from workspace v3, and create INHERITS the panel the user launched from
+// entirely. It describes the tab's ACTIVE artifact (artifactFor) — with a
+// strip of several open, the honest sentence is about the one on screen.
+// BOTH spawn paths can be rich — revive restores the tab's panel
+// from workspace v4, and create INHERITS the panel the user launched from
 // (A5: handleCreateThread → panelStore.inheritPanel) — so a `+ new thread`
 // started beside an open spec tells the new claude process what is on screen
 // next to it, and the claim is true because the panel really is open there.
@@ -1022,10 +1024,11 @@ export default function App() {
   // fork one binding per pane.
   //
   // Ctrl+Shift+P is a TRUE toggle now that A3's routing gives the panel an
-  // open path: it closes what's open (panelStore remembers it per tab) and
-  // reopens that memory on the next press. The status-bar chip is shown ONLY
-  // when the chord would actually do something, so it never advertises a
-  // no-op.
+  // open path: it hides the WHOLE panel — the entire tab strip, since one
+  // session can now hold many artifacts (panelStore remembers the strip per
+  // tab) — and restores it on the next press. The status-bar chip is shown
+  // ONLY when the chord would actually do something, so it never advertises a
+  // no-op. Closing ONE artifact is the strip's own `×`, not this chord.
   const handleTogglePanel = useCallback(() => {
     const sessionId = activeIdRef.current;
     // A genuinely dead chord stays dead — no panel and no memory means no
