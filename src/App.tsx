@@ -83,6 +83,7 @@ import {
   releasePanelSession,
   publishSessionLabels,
   type NewPanelTerminal,
+  type PanelActions,
   type SessionLabel,
 } from "./lib/panelStore";
 import { clearDevServerSession, setPreviewOpenCheck } from "./lib/devServer";
@@ -1692,22 +1693,43 @@ export default function App() {
 
   // Bridge them to the panel header + the wireframe pin rail (module singleton —
   // see panelStore.PanelActions).
+  //
+  // REGISTERED ONCE, THROUGH A REF — load-bearing, not tidiness.
+  // `registerPanelActions` calls the store's `bump()`, which re-renders every
+  // panelStore subscriber, App among them (`usePanelIdentity`,
+  // `usePanelOwnedSessions`, …). An effect keyed on the HANDLERS' identities
+  // therefore closes a feedback loop the moment any one of them is unstable —
+  // and `handlePromotePanelTerminal` depends on `paneLayout`, which
+  // `usePaneLayout` rebuilds as a fresh object literal every render (it
+  // memoizes its fields, not the bag), with `handleClosePanelTerminal`
+  // inheriting the instability through its own dep list. Increment H shipped
+  // exactly that: render → new handler → effect → bump → render, until React
+  // gave up with "Maximum update depth exceeded" and threw it out of <App>,
+  // ABOVE every ScreenErrorBoundary — the tree unmounted and the app booted to
+  // a BLACK WINDOW. Registering identity-independently makes that loop
+  // impossible rather than merely absent for today's dep arrays; the ref keeps
+  // the forwarded closures current without ever re-registering.
+  const panelActionsRef = useRef<PanelActions | null>(null);
+  panelActionsRef.current = {
+    sendToThread: handleSendToThread,
+    popOutArtifact: (artifact) => void handlePopOutArtifact(artifact),
+    createPanelTerminal: handleCreatePanelTerminal,
+    promotePanelTerminal: handlePromotePanelTerminal,
+    closePanelTerminal: handleClosePanelTerminal,
+  };
   useEffect(() => {
     registerPanelActions({
-      sendToThread: handleSendToThread,
-      popOutArtifact: (artifact) => void handlePopOutArtifact(artifact),
-      createPanelTerminal: handleCreatePanelTerminal,
-      promotePanelTerminal: handlePromotePanelTerminal,
-      closePanelTerminal: handleClosePanelTerminal,
+      sendToThread: (text) => panelActionsRef.current?.sendToThread(text),
+      popOutArtifact: (artifact) => panelActionsRef.current?.popOutArtifact(artifact),
+      createPanelTerminal: (tabSessionId, target) =>
+        panelActionsRef.current?.createPanelTerminal(tabSessionId, target),
+      promotePanelTerminal: (sessionId) =>
+        panelActionsRef.current?.promotePanelTerminal(sessionId),
+      closePanelTerminal: (tabSessionId, sessionId) =>
+        panelActionsRef.current?.closePanelTerminal(tabSessionId, sessionId),
     });
     return () => registerPanelActions(null);
-  }, [
-    handleSendToThread,
-    handlePopOutArtifact,
-    handleCreatePanelTerminal,
-    handlePromotePanelTerminal,
-    handleClosePanelTerminal,
-  ]);
+  }, []);
 
   // "Bring it back" (the panel's `↙ back`, and the placeholder's button) —
   // clearing the record is the panel's half; the WINDOW is App's, so it closes

@@ -790,18 +790,53 @@ let activeTabSessionId: string | null = null;
 let parkedSessions = new Set<string>();
 
 const listeners = new Set<() => void>();
+
+// THE SNAPSHOT CONTRACT — and the black window that came of breaking it.
+//
+// `useSyncExternalStore` compares the OLD and NEW snapshot with `Object.is`.
+// A snapshot that is freshly ALLOCATED every time it is asked for is therefore
+// a snapshot that CHANGED every time it is asked for, and the store reports a
+// change on every bump whether or not anything moved.
+//
+// That was survivable while App only subscribed through snapshots that are
+// VALUES (`usePanelIdentity` returns a string). Increment H added
+// `usePanelOwnedSessions()` to App — a freshly built `Set` — at the same time
+// as `handlePromotePanelTerminal`, a `useCallback` that depends on
+// `usePaneLayout()`'s return object. The two closed a cycle:
+//
+//   render → new paneLayout object → the handler's identity changes →
+//   App's `registerPanelActions` effect re-runs → its CLEANUP calls
+//   `registerPanelActions(null)` → bump() → a brand-new owned-sessions Set →
+//   App re-renders → …
+//
+// unbounded, until React threw "Maximum update depth exceeded" from App's own
+// commit phase. That throw is ABOVE every `ScreenErrorBoundary` (they are
+// per-screen, mounted inside App), so React unmounted the entire tree and the
+// window painted nothing at all.
+//
+// `usePaneLayout` is memoized now, which breaks the cycle at the other end.
+// This end is the one that has to hold anyway: a store is not allowed to say
+// "something changed" when nothing did. So the caches below are INVALIDATED by
+// bump but REBUILT THROUGH A CONTENT COMPARE — an unchanged derivation keeps
+// its previous reference, and a bump that changed nothing is silent to React.
 let cachedView: PanelsView | null = null;
-/** Derived, cached because useSyncExternalStore demands a STABLE snapshot:
- *  recomputing the set per render would loop. Invalidated by bump() alone —
- *  every mutator goes through it. */
 let cachedOwnedSessions: ReadonlySet<string> | null = null;
 let cachedParkedSessions: readonly string[] | null = null;
+let viewDirty = true;
+let ownedSessionsDirty = true;
+let parkedSessionsDirty = true;
 
 function bump(): void {
-  cachedView = null;
-  cachedOwnedSessions = null;
-  cachedParkedSessions = null;
+  viewDirty = true;
+  ownedSessionsDirty = true;
+  parkedSessionsDirty = true;
   for (const l of listeners) l();
+}
+
+function sameStringSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const v of a) if (!b.has(v)) return false;
+  return true;
 }
 
 function subscribe(listener: () => void): () => void {
@@ -821,14 +856,27 @@ export function subscribeToPanelStore(listener: () => void): () => void {
 }
 
 export function getPanelsView(): PanelsView {
-  if (!cachedView) {
-    // No defensive copy: every mutator below REPLACES `panels` with a fresh
-    // Map rather than mutating in place, so the map a cached view holds is
-    // already frozen in practice — copying it again just doubled the
-    // allocation on every store change.
+  // No defensive copy: every mutator below REPLACES `panels` with a fresh
+  // Map rather than mutating in place, so the map a cached view holds is
+  // already frozen in practice — copying it again just doubled the
+  // allocation on every store change. That copy-on-write discipline is also
+  // what makes IDENTITY a faithful content test here (see the snapshot
+  // contract above): a bump that did not touch the map or the width returns
+  // the SAME view object, and React bails out of the re-render.
+  const prev = cachedView;
+  if (!prev) {
+    viewDirty = false;
     cachedView = { panels, panelWidth };
+    return cachedView;
   }
-  return cachedView;
+  if (viewDirty) {
+    viewDirty = false;
+    if (prev.panels !== panels || prev.panelWidth !== panelWidth) {
+      cachedView = { panels, panelWidth };
+      return cachedView;
+    }
+  }
+  return prev;
 }
 
 /** React hook: the panel view, re-rendering on any store change. */
@@ -1214,13 +1262,18 @@ export function remapPanelSessions(idMap: Map<string, string>): void {
 
 /** Every session the panel owns (see the section header). */
 export function panelOwnedSessionIds(): ReadonlySet<string> {
-  if (!cachedOwnedSessions) {
-    const out = new Set<string>(parkedSessions);
-    for (const state of panels.values()) collectSessionIds(state, out);
-    for (const state of lastPanelStates.values()) collectSessionIds(state, out);
-    cachedOwnedSessions = out;
-  }
-  return cachedOwnedSessions;
+  const prev = cachedOwnedSessions;
+  if (prev && !ownedSessionsDirty) return prev;
+  ownedSessionsDirty = false;
+  const next = new Set<string>(parkedSessions);
+  for (const state of panels.values()) collectSessionIds(state, next);
+  for (const state of lastPanelStates.values()) collectSessionIds(state, next);
+  // Same ids ⇒ same reference. App filters the tab bar and the pane tree
+  // through this set, so handing back a new one per bump re-rendered App on
+  // every store notification — see the snapshot contract above.
+  if (prev && sameStringSet(prev, next)) return prev;
+  cachedOwnedSessions = next;
+  return next;
 }
 
 function collectSessionIds(state: PanelState, into: Set<string>): void {
@@ -1244,8 +1297,13 @@ export function usePanelOwnedSessions(): ReadonlySet<string> {
 /** Panel terminals that are alive with NO view — what the `+` picker lists
  *  under RUNNING TERMINALS. Sorted for a stable row order. */
 export function parkedPanelSessions(): readonly string[] {
-  if (!cachedParkedSessions) cachedParkedSessions = Array.from(parkedSessions).sort();
-  return cachedParkedSessions;
+  const prev = cachedParkedSessions;
+  if (prev && !parkedSessionsDirty) return prev;
+  parkedSessionsDirty = false;
+  const next = Array.from(parkedSessions).sort();
+  if (prev && prev.length === next.length && prev.every((id, i) => id === next[i])) return prev;
+  cachedParkedSessions = next;
+  return next;
 }
 
 export function useParkedPanelSessions(): readonly string[] {
@@ -1787,5 +1845,8 @@ export function __resetPanelStoreForTests(): void {
   cachedView = null;
   cachedOwnedSessions = null;
   cachedParkedSessions = null;
+  viewDirty = true;
+  ownedSessionsDirty = true;
+  parkedSessionsDirty = true;
   listeners.clear();
 }

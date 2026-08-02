@@ -134,19 +134,46 @@ export function usePaneLayout() {
     [root]
   );
 
-  return {
-    root,
-    focusedPaneId,
-    focusedSessionId,
-    visibleSessionIds,
-    isSplit,
-    initLayout,
-    split,
-    close,
-    moveFocus,
-    resize,
-    focusPane,
-    focusOrSwapSession,
-    setRoot,
-  };
+  // MEMOIZED, and that is load-bearing rather than tidy. Every member above is
+  // already stable (useCallback / useMemo), but a fresh OBJECT LITERAL here
+  // still gave the hook a new identity on every render, so any
+  // `useCallback(..., [paneLayout])` in App was new on every render too — and
+  // App's `registerPanelActions` effect, which depends on one of those, re-ran
+  // on every render. Its cleanup calls into panelStore, which notifies
+  // subscribers, one of which is App: an unbounded render loop that React ends
+  // by throwing "Maximum update depth exceeded" ABOVE every ScreenErrorBoundary,
+  // i.e. a completely black window at boot. panelStore's snapshot contract is
+  // the other half of the fix; this half is what stops the effect thrashing in
+  // the first place.
+  return useMemo(
+    () => ({
+      root,
+      focusedPaneId,
+      focusedSessionId,
+      visibleSessionIds,
+      isSplit,
+      initLayout,
+      split,
+      close,
+      moveFocus,
+      resize,
+      focusPane,
+      focusOrSwapSession,
+      setRoot,
+    }),
+    [
+      root,
+      focusedPaneId,
+      focusedSessionId,
+      visibleSessionIds,
+      isSplit,
+      initLayout,
+      split,
+      close,
+      moveFocus,
+      resize,
+      focusPane,
+      focusOrSwapSession,
+    ]
+  );
 }

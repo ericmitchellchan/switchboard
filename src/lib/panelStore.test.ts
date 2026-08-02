@@ -1419,11 +1419,24 @@ describe("active-tab bridge", () => {
     expect(getPanelsView()).toBe(v1);
   });
 
-  it("a tab switch DOES invalidate it (the trees re-resolve their highlight)", () => {
+  // A tab switch does NOT change the view snapshot, and must not: `PanelsView`
+  // is `{panels, panelWidth}` and neither moved. This test used to assert the
+  // opposite, back when `getPanelsView` allocated a fresh object per bump —
+  // which is precisely the broken snapshot contract that let increment H boot
+  // to a black window (see panelStore's §"THE SNAPSHOT CONTRACT"). What the
+  // trees actually subscribe through is `useActiveTabArtifact`, and THAT is
+  // where a tab switch has to be observable — so that is what is asserted.
+  it("a tab switch leaves the view alone but IS observable to the trees", () => {
+    openInPanel("s1", KB_DOC);
+    openInPanel("s2", REPO_FILE);
     publishActiveTabSession("s1");
     const v1 = getPanelsView();
+    const a1 = activeTabArtifact();
+
     publishActiveTabSession("s2");
-    expect(getPanelsView()).not.toBe(v1);
+    expect(getPanelsView()).toBe(v1);
+    expect(activeTabArtifact()).not.toBe(a1);
+    expect(activeTabArtifact()).toEqual(REPO_FILE);
   });
 });
 
