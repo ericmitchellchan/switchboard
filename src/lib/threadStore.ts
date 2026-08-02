@@ -545,6 +545,12 @@ function subscribe(listener: () => void): () => void {
   };
 }
 
+/** Raw store subscription for DERIVED views that live in other modules (the
+ *  composer's visibility is a fact about `threads` + `launched`, not a second
+ *  detector — see lib/composer.composerAutoVisible). Exported rather than
+ *  re-implemented so there is exactly one notify channel. */
+export const subscribeThreads = subscribe;
+
 export function getThreadsView(): ThreadsView {
   if (!cachedView) {
     cachedView = {

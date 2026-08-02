@@ -30,6 +30,11 @@ export interface ShortcutActions {
    *  that has never had one — and the status-bar chip that advertises the
    *  chord only renders when it would actually do something. */
   onTogglePanel?: () => void;
+  /** Ctrl+Shift+M — toggle the FOCUSED pane's composer (increment D). It shows
+   *  itself on a tab holding a live claude conversation; this hides it, or
+   *  forces one onto a plain shell. Per-session and remembered for the app's
+   *  lifetime (lib/composer.toggleComposer). */
+  onToggleComposer?: () => void;
 }
 
 // Keys we intercept from xterm.js
@@ -58,11 +63,18 @@ function isOurShortcut(e: KeyboardEvent): boolean {
   }
 
   // Ctrl+Shift+W (close pane), Ctrl+Shift+S (export), Ctrl+Shift+[/] (move tab),
-  // Ctrl+Shift+P (toggle artifact panel), Ctrl+Shift+O (toggle floating window).
+  // Ctrl+Shift+P (toggle artifact panel), Ctrl+Shift+O (toggle floating window),
+  // Ctrl+Shift+M (toggle composer).
   // Shift+[ produces { and Shift+] produces } on most keyboards
   if (
     e.shiftKey &&
-    (key === "w" || key === "s" || key === "p" || key === "o" || key === "{" || key === "}")
+    (key === "w" ||
+      key === "s" ||
+      key === "p" ||
+      key === "o" ||
+      key === "m" ||
+      key === "{" ||
+      key === "}")
   ) {
     return true;
   }
@@ -196,6 +208,11 @@ export function useKeyboardShortcuts(
         if (key === "o") {
           e.preventDefault();
           a.onTogglePip?.();
+          return;
+        }
+        if (key === "m") {
+          e.preventDefault();
+          a.onToggleComposer?.();
           return;
         }
         // Ctrl+Shift+[ / Ctrl+Shift+] — move tab left/right

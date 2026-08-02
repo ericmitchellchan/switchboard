@@ -35,6 +35,7 @@ The full set, as bound in `src/hooks/useKeyboardShortcuts.ts` (the source of tru
 | Ctrl+B | Cycle task sidebar (full → collapsed → hidden) |
 | Ctrl+Shift+B | Toggle the side menu (navigator: threads, KB tree, explorer tree) |
 | Ctrl+Shift+P | Toggle the artifact panel for the active tab |
+| Ctrl+Shift+M | Toggle the composer on the focused pane |
 | Ctrl+Shift+O | Toggle the floating picture-in-picture terminal window |
 | Ctrl+Shift+S | Export the active session's scrollback to a file |
 | Ctrl+F | Terminal search |
@@ -48,6 +49,13 @@ The full set, as bound in `src/hooks/useKeyboardShortcuts.ts` (the source of tru
 Ctrl+Shift+P is a true toggle: it closes an open panel and reopens the last artifact
 that tab showed. It does nothing on a tab that has never had one — the status-bar
 `Ctrl+Shift+P panel` hint appears only when the chord would actually do something.
+
+The **composer** is the prose input at the bottom of a terminal pane: Enter sends,
+Shift+Enter makes a newline, ↑/↓ walk recent sends. It appears by itself on a pane whose
+session is holding a live claude conversation; Ctrl+Shift+M (or the `×` on the box)
+hides it, and the same chord forces one onto a plain shell. It sends prose only —
+Ctrl+C, Esc and arrow-key TUI navigation still belong to the terminal, so click into it
+for those (Esc from the composer hands focus back).
 
 Not a keyboard chord, but the other half of the panel: **Ctrl+click** a side-menu tree
 row to invert the open behavior — from the terminal screen a plain click opens in the

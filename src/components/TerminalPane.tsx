@@ -21,7 +21,9 @@ import {
 } from "../lib/statusDetector";
 import { detectTasks, detectResolutions } from "../lib/taskDetector";
 import { log } from "../lib/logger";
+import { clearComposerState, useComposerVisible } from "../lib/composer";
 import { SearchBar } from "./SearchBar";
+import { Composer } from "./Composer";
 
 // Per-session streaming UTF-8 decoders (handles multi-byte chars split across chunks)
 const sessionDecoders = new Map<string, TextDecoder>();
@@ -56,6 +58,10 @@ export function cleanupSessionListeners(sessionId: string) {
   sessionDecoders.delete(sessionId);
   wiredSessions.delete(sessionId);
   sessionCallbacks.delete(sessionId);
+  // The composer's draft / send history / visibility override are about the
+  // conversation this session was holding, and both callers end it (close, or
+  // in-place restart into a fresh shell).
+  clearComposerState(sessionId);
 }
 
 // Register the session-level hooks the registry dispatches from its once-only
@@ -341,10 +347,20 @@ export const TerminalPane = memo(function TerminalPane({
 
   const searchAddon = getTerminal(session.id)?.searchAddon;
 
+  // Increment D: the composer belongs to THIS pane's session (Decision 2) —
+  // in a split each pane addresses its own. Visibility is derived in
+  // lib/composer from increment C's promotion signal plus the per-session
+  // toggle; when it is false NOTHING renders, so a hidden composer costs the
+  // terminal exactly zero height.
+  const composerVisible = useComposerVisible(session.id);
+
   return (
     <div
       style={{
         flex: 1,
+        display: "flex",
+        flexDirection: "column",
+        minHeight: 0,
         position: "relative",
         overflow: "hidden",
       }}
@@ -356,7 +372,12 @@ export const TerminalPane = memo(function TerminalPane({
         ref={containerRef}
         style={{
           width: "100%",
-          height: "100%",
+          // Flex child, not height:100% — the composer is a SIBLING below, and
+          // a percentage height would ignore it and overflow the pane. Shrink
+          // and grow both land on the ResizeObserver above, which is the whole
+          // point: showing the composer is a height change like any other.
+          flex: 1,
+          minHeight: 0,
           backgroundColor: "#0C0C0E",
           // Grow-only width (see resizePolicy.ts): when the pane is narrower
           // than the terminal's columns, scroll horizontally rather than
@@ -368,6 +389,7 @@ export const TerminalPane = memo(function TerminalPane({
           contain: "layout paint",
         }}
       />
+      {composerVisible && !stolen && <Composer sessionId={session.id} />}
       {stolen && (
         <div
           style={{

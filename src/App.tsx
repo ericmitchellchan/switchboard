@@ -96,6 +96,7 @@ import {
 } from "./lib/workspace";
 import { remapSessionIds, getMaxPaneIdNumber, setPaneIdCounter, closePane, getVisibleSessionIds, findPaneBySessionId } from "./lib/paneLayout";
 import type { PaneNode } from "./lib/paneLayout";
+import { toggleComposer } from "./lib/composer";
 import { initTaskDetector, destroyTaskDetector } from "./lib/taskDetector";
 import { startUpdater, registerPreRelaunchFlush } from "./lib/updater";
 import { log, initLogger } from "./lib/logger";
@@ -1230,6 +1231,24 @@ export default function App() {
     if (getNavState().route.screen !== "terminal") navigate({ screen: "terminal" });
   }, []);
 
+  // ── Composer (increment D) ──
+  // Ctrl+Shift+M toggles the composer on the FOCUSED PANE's session, not the
+  // tab's — deliberately the opposite of the panel above, and for the same
+  // underlying reason. The panel is per-TAB because a split "just shares the
+  // width"; the composer is per-PANE because it TYPES INTO A SESSION, and in a
+  // split the session your keystrokes reach is the focused pane's (Decision 2).
+  // Same target `handleSendToThread` writes to.
+  //
+  // The terminal screen is revealed first, mirroring handleTogglePanel: the
+  // composer renders only there, so toggling from KB/Explorer would otherwise
+  // flip a surface the user cannot see.
+  const handleToggleComposer = useCallback(() => {
+    const sessionId = effectiveActiveIdRef.current ?? activeIdRef.current;
+    if (!sessionId) return;
+    toggleComposer(sessionId);
+    if (getNavState().route.screen !== "terminal") navigate({ screen: "terminal" });
+  }, []);
+
   // The KB root never changes while the app runs — fetch it once so T8's
   // builders can emit ABSOLUTE doc paths (a thread's cwd is a repo; a
   // KB-relative path is not resolvable from inside the conversation). On
@@ -1311,6 +1330,7 @@ export default function App() {
       onTogglePip: handleTogglePip,
       onToggleSideMenu: toggleSideMenu,
       onTogglePanel: handleTogglePanel,
+      onToggleComposer: handleToggleComposer,
     },
     effectiveActiveSessionId
   );
@@ -2125,6 +2145,7 @@ export default function App() {
         onToggleSidebar={cycleSidebar}
         onToggleSideMenu={toggleSideMenu}
         onTogglePanel={panelToggleAvailable ? handleTogglePanel : undefined}
+        onToggleComposer={effectiveActiveSessionId ? handleToggleComposer : undefined}
       />
 
       <ConfirmDialog

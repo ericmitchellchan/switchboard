@@ -11,11 +11,16 @@ interface StatusBarProps {
    *  open, or reopen what it last showed). Passed ONLY when the chord would
    *  actually do something for this tab: advertising a dead chord is a lie. */
   onTogglePanel?: () => void;
+  /** Ctrl+Shift+M — toggles the FOCUSED pane's composer (increment D). Unlike
+   *  the panel chip this is live whenever a session is focused: the toggle
+   *  always does something, because forcing a composer onto a plain shell is a
+   *  supported state, not a no-op. */
+  onToggleComposer?: () => void;
 }
 
 const DISPLAY_ORDER: AgentStatus[] = ["running", "waiting", "done", "error", "idle", "exited"];
 
-export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMenu, onTogglePanel }: StatusBarProps) {
+export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMenu, onTogglePanel, onToggleComposer }: StatusBarProps) {
   const counts = new Map<AgentStatus, number>();
   for (const s of sessions) {
     counts.set(s.status, (counts.get(s.status) || 0) + 1);
@@ -86,6 +91,26 @@ export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMe
               }}
             >
               <span>Ctrl+Shift+P panel</span>
+            </button>
+            <span style={{ color: "#3F3F46" }}>{"│"}</span>
+          </>
+        )}
+        {onToggleComposer && (
+          <>
+            <button
+              onClick={onToggleComposer}
+              title="Show or hide the prose composer at the bottom of the focused pane"
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                fontFamily: "var(--font-mono)",
+                fontSize: 10,
+                color: "#52525B",
+                padding: 0,
+              }}
+            >
+              <span>Ctrl+Shift+M composer</span>
             </button>
             <span style={{ color: "#3F3F46" }}>{"│"}</span>
           </>

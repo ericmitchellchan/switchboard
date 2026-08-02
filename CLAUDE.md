@@ -17,6 +17,7 @@ src/
 │   ├── SessionHeader.tsx        → Per-session info bar (repo, cwd, restart)
 │   ├── TaskSidebar.tsx          → Auto/manual task list (full/collapsed/hidden; terminal screen only)
 │   ├── SearchBar.tsx            → Ctrl+F terminal search
+│   ├── Composer.tsx             → THE COMPOSER (increment D): per-pane prose input at the bottom of a terminal pane — Enter sends, Shift+Enter newline, ↑/↓ send history, no paste handler (dictation)
 │   ├── StatusBar.tsx            → Bottom bar (task count, session count, update chip)
 │   ├── SideMenu.tsx             → Left navigator menu (Ctrl+Shift+B / wordmark click): threads + inline KB + explorer trees
 │   ├── ThreadsSection.tsx       → Thread rows in the side menu (status dot, revive chip); recent 8 + `See all (N)`
@@ -56,6 +57,7 @@ src/
 │   ├── fitQueue.ts              → Debounced per-session fit pipeline (show/resize coalescing)
 │   ├── route.ts                 → URL-backed route model + nav store (screen switching)
 │   ├── threadStore.ts           → Durable agent threads: records (explicit + promoted), revive decisions, shell-ready wait, history selection/filter/relative-time helpers, action bridge
+│   ├── composer.ts              → Composer wire format (`composeWrite`: single line vs bracketed paste), send-history + caret rules, and the per-session visibility/draft/history store. PURE helpers + module singleton
 │   ├── threadPromotion.ts       → Tab→thread promotion (increment C): what a discovery MEANS for the thread list (`planPromotion`) + the poll pass. PURE decision + injected IO; observe-only
 │   ├── panelStore.ts            → Artifact panel state (per-TAB `PanelState` = artifact strip + activeIndex, global width), strip ops (`appendOrActivate`/`closeArtifactIn`), layout/drag math, header breadcrumbs, the shared ICON NAMES (`FILE_ICON`/`folderIcon`/`describeArtifact().icon` — drawn by components/icons), open-in-panel decision (`decideOpen`/`fullWidthRoute`), toggle memory, `+`-picker request, active-tab + send-to-thread bridges
 │   ├── agentContext.ts          → Agent context injection (T8): shell-safe sanitizer + the two seam builders (`buildSpawnContext`, `buildSendReference`) + KB-root cache. PURE — the effectful ends live in App/threadStore/panelStore
@@ -76,7 +78,7 @@ src/
 │   ├── logger.ts                → Frontend structured logging
 │   ├── updater.ts               → Auto-update check
 │   └── export.ts                → Export session to file
-└── lib/*.test.ts              → 17 Vitest test suites (paneLayout, statusDetector, taskDetector, resizePolicy, terminalLifecycle, route, threadStore, threadPromotion, panelStore, agentContext, kb, pins, pinsStore, componentPreview, explorer, diagramZoom, updaterState)
+└── lib/*.test.ts              → 18 Vitest test suites (paneLayout, statusDetector, taskDetector, resizePolicy, terminalLifecycle, route, threadStore, threadPromotion, panelStore, agentContext, composer, kb, pins, pinsStore, componentPreview, explorer, diagramZoom, updaterState)
 
 src-tauri/
 ├── src/
@@ -154,6 +156,10 @@ pnpm test:watch        # Vitest (watch mode)
 - **Artifact panel is per-TAB, never per-pane** — `panelStore` keys on the TAB's `activeSessionId`, not `effectiveActiveSessionId` (the focused pane). A split terminal + panel just shares the width: moving pane focus never swaps or blanks the panel, and persistence never forks one binding per pane
 - **Panel geometry is measured against the WORKSPACE container** — App nests `[pane tree | divider | ArtifactPanel]` in a container that EXCLUDES the TaskSidebar, so the panel's right edge is the container's right edge. Every width rule in `panelStore` (`panelLayoutFor`, `panelWidthFromDrag`, the MIN_TERMINAL_WIDTH floor, overlay's `right: 0`) assumes that nesting; re-parenting the panel next to the sidebar makes all of them wrong by exactly the sidebar's width (0/38/280px)
 - **Two honest agent-context seams, and no third** — (1) SPAWN-TIME: `--append-system-prompt "<one-liner>"` on the thread launch line, re-derived from the target tab's panel at EVERY spawn so stale context dies with the session; a fresh thread inherits the panel it was launched from so the sentence is true. (2) SEND-TO-THREAD: `→ thread` TYPES a reference into the terminal with NO trailing `\r` — the Enter is the user's. Anything that injects mid-conversation or presses Enter for the user is out of scope. Both strings go through `agentContext.sanitizeForTypedLine` (control chars, `" \ $ % \``) because they land on a shell line
+- **The composer sends prose, and multi-line goes as ONE paste** — `composer.composeWrite` is THE wire-format decision and the only thing about the composer that is hard to get right: single-line content is `<text>` + one CR (`\r`), multi-line is `ESC[200~<text, newlines → CR>ESC[201~` followed by ONE trailing CR. Without the bracketing each embedded newline is its own Enter and a 4-line message becomes 4 submissions; the line breaks INSIDE the markers are CR (exactly what xterm's `prepareTextForTerminal` does), so a composer send and a Ctrl+V paste are byte-identical to the TUI, and the one CR outside the end marker is the only submit. Control characters are STRIPPED from composed text — a literal `ESC[201~` in dictated or pasted text would break OUT of the paste — which is also Decision 3: Ctrl+C, Esc and arrow-key TUI navigation stay the terminal's job and nothing proxies them. Empty/whitespace-only is a no-op, never a bare Enter
+- **Composer visibility is DERIVED from promotion, never re-detected** — a pane shows a composer when its session is bound to a thread that is in threadStore's `launched` set (increment C's signal, set by both the explicit launch and the promotion pass, cleared on PTY exit / tab close). Ctrl+Shift+M stores a per-SESSION override that wins in both directions (hide it on a live conversation; force one onto a plain shell) and lasts the app's lifetime only — nothing composer-related is persisted. Per-PANE, deliberately unlike the per-TAB artifact panel: the composer TYPES INTO A SESSION, so in a split it must address the focused pane's. It adds NO resize logic — showing it changes the container height and the pane's existing ResizeObserver → fitQueue → grow-only policy handles it exactly like a divider drag
+- **`chatStarted` on a composer send is EXPLICIT** — `writeToSession` bypasses the input detector on purpose (feeding IPC writes back in re-opens the false-positive class T5 removed), so the composer calls `markChatStarted` directly on a successful send and flushes to disk. The detector is untouched: typing into the terminal still flips the flag through it. A FAILED write leaves the text in the box and surfaces the failure — a message is never silently swallowed
+- **No paste handler on the composer, ever** — Wispr Flow dictation injects by PASTING. xterm's clipboard path needed explicit rules to avoid double-pasting because it INTERCEPTS; the composer's `<textarea>` does not, so the native paste (or App's OS-level `clipboard-paste` → `execCommand("insertText")` route for simulated keystrokes) inserts exactly once. Adding an `onPaste` would re-create the double-insert bug
 - **Workspace v4** — `panels: Record<sessionId, PanelState>` (`{artifacts, activeIndex}`) + `panelWidth` ride inside the same localStorage blob; the v3→v4 migration wraps each single `Artifact` into a one-tab strip. On restore, keys remap through the session idMap and unmapped ones are DROPPED (a panel binding without its tab is meaningless, unlike a thread, which is severed and stays revivable). Records stay LEAN via `sanitizeArtifact`/`sanitizePanelState` on every load path
 - **One artifact, one tab** — a panel holds MANY artifacts; re-opening one already in the strip ACTIVATES its tab rather than appending a duplicate (compared by `artifactIdentity`: kind + project + path). Same lesson as the shared pins store — two tabs naming one document would mean two records of everything downstream. A strip is never empty: closing the last tab removes the session's panel, and Ctrl+Shift+P hides/restores the WHOLE strip (the strip's own `×` is what closes one artifact)
 - **Lazy loading** — NewSessionDialog loaded via `React.lazy` + Suspense only when repos configured; mermaid is its own lazy chunk (DiagramView)
@@ -200,6 +206,7 @@ are reconciled against it. Adding a chord means updating both.
 | Cycle task sidebar (full/collapsed/hidden) | Ctrl+B |
 | Toggle side menu (navigator) | Ctrl+Shift+B |
 | Toggle artifact panel (active tab) | Ctrl+Shift+P |
+| Toggle composer (focused pane) | Ctrl+Shift+M |
 | Toggle floating PiP window | Ctrl+Shift+O |
 | Export session scrollback | Ctrl+Shift+S |
 | Terminal search | Ctrl+F |
@@ -215,8 +222,10 @@ Chord notes:
 - **Ctrl+Shift+W / Ctrl+Shift+S / Ctrl+Shift+O / Ctrl+Shift+[ ] / Ctrl+Alt+Arrow /
   Ctrl+- are keyboard-ONLY** — no button, hint or tooltip surfaces them anywhere in
   the UI. The StatusBar hint strip advertises Ctrl+T/W/[ ]/F/\\/1-9 as plain text plus
-  THREE clickable buttons: Ctrl+Shift+B menu, Ctrl+Shift+P panel (rendered only while
-  the chord would do something), and Ctrl+B tasks.
+  FOUR clickable buttons: Ctrl+Shift+B menu, Ctrl+Shift+P panel (rendered only while
+  the chord would do something), Ctrl+Shift+M composer (rendered whenever a session is
+  focused — forcing a composer onto a plain shell is a supported state, so this toggle
+  is never a no-op), and Ctrl+B tasks.
 - **The TAB BAR carries the two surface buttons**: the SWITCHBOARD wordmark (left end)
   toggles the side menu, and the panel button (right end) toggles the artifact panel —
   or, on a tab whose panel is EMPTY, opens the `+` picker instead, because a toggle
