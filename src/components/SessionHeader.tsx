@@ -6,6 +6,7 @@ import { explorerProjects, liveProjectFor } from "../lib/explorer";
 import { getActiveTabSession, openInPanel } from "../lib/panelStore";
 import { navigate, getNavState } from "../lib/route";
 import { log } from "../lib/logger";
+import { Icon } from "./icons";
 
 interface SessionHeaderProps {
   session: Session;
@@ -45,7 +46,30 @@ interface SessionHeaderProps {
  *   2. a URL already being previewed is never offered again — see
  *      `devServer.noteDevServerOutput`, which asks the panel store before it
  *      records an offer at all. */
-export function DevServerOffer({ session, compact }: { session: Session; compact: boolean }) {
+export function DevServerOffer({
+  session,
+  compact,
+  framed = false,
+}: {
+  session: Session;
+  compact: boolean;
+  /** BANNER MODE, for a host with no chrome of its own (2026-08-02).
+   *
+   *  In a pane this chip sits inside SessionHeader's bar, which already reads
+   *  as chrome. The artifact panel has no such bar — the chip lands directly on
+   *  terminal output — and Eric's verdict was "the chip is kinda hidden." He
+   *  was right, and it was my error twice over: the panel got `compact`, the
+   *  DENSEST variant (9px, 2px padding), designed for a cramped split-pane
+   *  header and exactly wrong for the one host where the chip has to announce
+   *  itself.
+   *
+   *  `framed` gives it its own row — elevated background, a hairline under it —
+   *  so it separates from the scrollback instead of dissolving into it. It
+   *  renders ONLY alongside a real offer (this whole component returns null
+   *  otherwise), so it still costs no layout when there is nothing to say; a
+   *  wrapper in the host would have left a permanent empty bar. */
+  framed?: boolean;
+}) {
   const offer = useDevServerOffer(session.id);
   const extras = useDevServerOfferExtras(session.id);
 
@@ -65,6 +89,15 @@ export function DevServerOffer({ session, compact }: { session: Session; compact
       log.warn(`dev-server offer: project lookup failed, falling back: ${e}`);
       project = session.repo || "local";
     }
+    // ONE LINE PER CLICK. The whole take path was silent, so "I clicked frame
+    // and nothing happened" had no evidence behind it either way — and the
+    // chip's own disappearance is ambiguous, because the clear below happens
+    // BEFORE the open and so fires whether or not the open lands. This line is
+    // what makes those two cases tell themselves apart in the log.
+    log.info(
+      `dev-server offer taken url=${offer} project=${project} ` +
+        `from=${session.id} into=${target}${target === session.id ? " (own tab)" : ""}`
+    );
     clearDevServerOffer(session.id);
     openInPanel(target, { kind: "localhost", project, url: offer });
     // The panel renders on the terminal screen only — taking an offer from the
@@ -76,7 +109,23 @@ export function DevServerOffer({ session, compact }: { session: Session; compact
   const short = offer.replace(/^https?:\/\//, "").replace(/\/$/, "");
 
   return (
-    <span style={{ display: "flex", alignItems: "center", gap: 2 }}>
+    <span
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 2,
+        ...(framed
+          ? {
+              // Its own row: the chip is the only thing in it, left-aligned,
+              // with a hairline separating it from the terminal below.
+              padding: "5px 8px",
+              background: "var(--bg-elevated)",
+              borderBottom: "1px solid var(--border-subtle)",
+              flex: "none",
+            }
+          : {}),
+      }}
+    >
       <button
         type="button"
         onClick={take}
@@ -103,15 +152,25 @@ export function DevServerOffer({ session, compact }: { session: Session; compact
           background: "var(--bg-active)",
           border: "1px solid var(--border-subtle)",
           borderRadius: 3,
-          color: "var(--text-secondary)",
+          // Framed, the chip has to be READ, not merely noticed: it is the only
+          // way to reach the preview, and Eric walked past it. Primary text is
+          // the affordance saying "I am a control", not decoration.
+          color: framed ? "var(--text-primary)" : "var(--text-secondary)",
           cursor: "pointer",
           maxWidth: 240,
           overflow: "hidden",
           whiteSpace: "nowrap",
         }}
         onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-primary)")}
-        onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-secondary)")}
+        onMouseLeave={(e) =>
+          (e.currentTarget.style.color = framed
+            ? "var(--text-primary)"
+            : "var(--text-secondary)")
+        }
       >
+        {/* The globe is the localhost artifact's own mark (shared icon module),
+            so the chip carries the same sign as the thing it opens. */}
+        <Icon name="localhost" size={compact ? 9 : 11} />
         <span style={{ color: "var(--text-dim)" }}>frame</span>
         <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{short}</span>
         {/* A full-stack boot announces several servers and only the best-ranked

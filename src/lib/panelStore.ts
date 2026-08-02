@@ -976,13 +976,23 @@ export function initPanelStore(
  *  to prevent, so opening into a hidden panel REVIVES its strip and appends
  *  to it — the same strip the chord would have brought back. */
 export function openInPanel(sessionId: string, artifact: Artifact): void {
-  if (sessionId.length === 0) return;
+  if (sessionId.length === 0) {
+    // Every caller of this is a USER GESTURE. Returning silently on a bad
+    // argument is how a click becomes "nothing happened" with no trace, which
+    // is exactly the report the removal audit above was built for — the same
+    // reasoning applies to the paths that fail to OPEN.
+    log.warn(`panel-open refused reason=no-tab artifact=${auditName(artifact)}`);
+    return;
+  }
   // Picking an artifact ENDS the pick — including the case below where the
   // chosen artifact is already the active tab and nothing else changes. Left
   // to the component, that no-op branch would strand an open modal.
   closeArtifactPicker();
   const clean = sanitizeArtifact(artifact);
-  if (!clean) return;
+  if (!clean) {
+    log.warn(`panel-open refused reason=invalid-artifact artifact=${auditName(artifact)}`);
+    return;
+  }
   if (clean.kind === "session") {
     // ONE SESSION, ONE HOME (increment H). A live shell must not be listed in
     // two strips: only one panel renders at a time, so it would not produce two

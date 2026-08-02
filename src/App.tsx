@@ -1764,7 +1764,7 @@ export default function App() {
             through the pane's existing ResizeObserver → fitQueue → grow-only
             policy like any other. Same component, same rules, same wording —
             not a second implementation that could drift. */}
-        <DevServerOffer session={session} compact />
+        <DevServerOffer session={session} compact={false} framed />
         <TerminalPane
         key={session.id}
         session={session}
