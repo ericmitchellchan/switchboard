@@ -16,11 +16,13 @@ import type { AgentStatus, Thread } from "../types";
 import {
   useThreadsView,
   getThreadActions,
+  activeThreads,
   selectMenuThreads,
   threadRepoName,
 } from "../lib/threadStore";
 import { navigate } from "../lib/route";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
+import { ThreadRowMenu, ThreadTitleEditor, threadMenuItems } from "./ThreadRowMenu";
 
 /** Dead rows use the EXITED status colour — read from statusConfig, the
  *  single source of truth, so a palette change lands here too. */
@@ -42,6 +44,18 @@ const ROW_STYLE: CSSProperties = {
   cursor: "pointer",
 };
 
+/** The `⋯` slot. Fixed width, ALWAYS rendered — increment B made the rail's
+ *  icon column exact and a hover-conditional element in the flow would undo
+ *  that by re-flowing the row under the cursor (the tab strip's `×` learned
+ *  the same lesson). Only the trigger's `visibility` toggles. */
+const MENU_SLOT_STYLE: CSSProperties = {
+  flex: "none",
+  width: 14,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+};
+
 const CHIP_STYLE: CSSProperties = {
   flex: "none",
   fontSize: 9,
@@ -59,8 +73,15 @@ export function ThreadsSection() {
   // Base and an Explorer under it. Show the most recent handful — but never
   // truncate a LIVE thread out of the list (you must always be able to reach
   // the conversation you are having), which is selectMenuThreads' whole job.
+  //
+  // ARCHIVED threads are not on this rail at all (increment E). The count on
+  // the `See all (N)` row is the ACTIVE count for the same reason — the row
+  // opens the history screen's Active tab, and a total that included put-away
+  // threads would promise rows that tab does not show. selectMenuThreads drops
+  // them itself, so `shown` and this count cannot disagree.
+  const active = activeThreads(view.threads);
   const shown = selectMenuThreads(view.threads, view.launched);
-  const hidden = view.threads.length - shown.length;
+  const hidden = active.length - shown.length;
 
   return (
     <>
@@ -74,7 +95,7 @@ export function ThreadsSection() {
           active={t.sessionId !== null && t.sessionId === view.activeSessionId}
         />
       ))}
-      {hidden > 0 && <SeeAllRow total={view.threads.length} />}
+      {hidden > 0 && <SeeAllRow total={active.length} />}
       <NewThreadRow />
     </>
   );
@@ -95,6 +116,8 @@ function ThreadRow({
   active: boolean;
 }) {
   const [hover, setHover] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
   const actions = getThreadActions();
 
   // Dead = no claude process behind the row (app restart, session exit, tab
@@ -109,10 +132,45 @@ function ThreadRow({
     else actions.openThread(thread.id);
   };
 
+  const dot = (
+    <span
+      style={{
+        width: 8,
+        height: 8,
+        borderRadius: "50%",
+        flex: "none",
+        backgroundColor: dotColor,
+      }}
+    />
+  );
+
+  // RENAME (Decision 4). A <button> may not contain an <input>, so the editing
+  // row is a plain <div> with the SAME ROW_STYLE — identical geometry, no
+  // gutter movement, and no invalid nesting. The row's click actions are
+  // deliberately absent while editing: a click inside the box is a caret
+  // placement, not "open this thread".
+  if (editing) {
+    return (
+      <div style={{ ...ROW_STYLE, cursor: "default", background: "var(--bg-active)" }}>
+        {dot}
+        <ThreadTitleEditor thread={thread} onDone={() => setEditing(false)} />
+        <span style={MENU_SLOT_STYLE} />
+      </div>
+    );
+  }
+
   return (
     <button
       type="button"
       onClick={handleClick}
+      onDoubleClick={(e) => {
+        // Double-click = rename, the fast path. The single-click that precedes
+        // it has already run (open/revive) — harmless in both directions: the
+        // thread's tab is shown, or a dead thread starts reviving while you
+        // retitle it, which is exactly what the menu's Rename would do too.
+        e.preventDefault();
+        setEditing(true);
+      }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       title={thread.workingDir}
@@ -123,15 +181,7 @@ function ThreadRow({
         color: active || hover ? "var(--text-primary)" : "var(--text-secondary)",
       }}
     >
-      <span
-        style={{
-          width: 8,
-          height: 8,
-          borderRadius: "50%",
-          flex: "none",
-          backgroundColor: dotColor,
-        }}
-      />
+      {dot}
       <span
         style={{
           flex: 1,
@@ -143,31 +193,19 @@ function ThreadRow({
       >
         {thread.title}
       </span>
-      {hover && (
-        <span
-          role="button"
-          aria-label="Delete thread"
-          onClick={(e) => {
-            e.stopPropagation();
-            actions?.deleteThread(thread.id);
-          }}
-          style={{
-            flex: "none",
-            fontSize: 10,
-            lineHeight: 1,
-            color: "var(--text-dim)",
-            padding: "0 2px",
-          }}
-          onMouseEnter={(e) => {
-            (e.currentTarget as HTMLElement).style.color = "var(--text-primary)";
-          }}
-          onMouseLeave={(e) => {
-            (e.currentTarget as HTMLElement).style.color = "var(--text-dim)";
-          }}
-        >
-          ×
+      {/* RESERVED SLOT, not conditional rendering: the `⋯` occupies its width
+          whether or not it is showing, so sweeping the rail never re-flows a
+          row's title or nudges the chip beside it. It stays visible while its
+          menu is open — the pointer is over the menu by then, not the row. */}
+      <span style={MENU_SLOT_STYLE}>
+        <span style={{ visibility: hover || menuOpen ? "visible" : "hidden" }}>
+          <ThreadRowMenu
+            ariaLabel="Thread actions"
+            onOpenChange={setMenuOpen}
+            items={threadMenuItems({ thread, live, onRename: () => setEditing(true) })}
+          />
         </span>
-      )}
+      </span>
       {booting ? (
         <span style={CHIP_STYLE}>⟳ booting…</span>
       ) : dead ? (

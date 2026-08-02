@@ -76,13 +76,36 @@ describe("planPromotion", () => {
     expect(plan.kind).toBe("skip");
   });
 
-  it("adopts when claude restarted in a tab under a new uuid — never a 2nd record", () => {
+  it("supersedes when claude restarted in a tab under a new uuid (Decision 1)", () => {
+    // Increment E reverses increment C here: the tab's OLD thread is named for
+    // release, not for rewriting. Nothing is forgotten — the caller unbinds it
+    // and creates a second record for the new conversation.
     const t = thread({ sessionId: "tab-a", chatSessionId: "uuid-old" });
     const plan = planPromotion(discovery({ chatSessionId: "uuid-new" }), [t], LIVE("tab-a"));
     expect(plan).toEqual({
-      kind: "adopt",
+      kind: "supersede",
       threadId: "t1",
       discovery: discovery({ chatSessionId: "uuid-new" }),
+    });
+  });
+
+  it("still refuses to duplicate a RE-DETECTED conversation (same uuid, same tab)", () => {
+    // The idempotency that survives Decision 1: a conversation is recorded
+    // once, however many passes see it.
+    const t = thread({ sessionId: "tab-a", chatSessionId: "uuid-1" });
+    for (let pass = 0; pass < 3; pass++) {
+      expect(planPromotion(discovery(), [t], LIVE("tab-a")).kind).toBe("skip");
+    }
+  });
+
+  it("matches ARCHIVED records like any other — never a duplicate", () => {
+    // An archived thread whose conversation turns up again must find its own
+    // record. Filtering archived threads out here would mint a second one.
+    const t = thread({ sessionId: null, archivedAt: 1234 });
+    expect(planPromotion(discovery(), [t], LIVE("tab-a"))).toEqual({
+      kind: "bind",
+      threadId: "t1",
+      discovery: discovery(),
     });
   });
 
@@ -141,7 +164,7 @@ function harness(opts: {
     startedAt: number;
   }> = [];
   const bound: Array<[string, string]> = [];
-  const adopted: Array<[string, string, boolean]> = [];
+  const unbound: string[] = [];
   const launched: string[] = [];
   const logs: string[] = [];
   const persist = vi.fn();
@@ -184,13 +207,10 @@ function harness(opts: {
       const t = threads.find((x) => x.id === threadId);
       if (t) t.sessionId = sessionId;
     },
-    adoptThread: (threadId: string, chatSessionId: string, chatStarted: boolean) => {
-      adopted.push([threadId, chatSessionId, chatStarted]);
+    unbindThread: (threadId: string) => {
+      unbound.push(threadId);
       const t = threads.find((x) => x.id === threadId);
-      if (t) {
-        t.chatSessionId = chatSessionId;
-        t.chatStarted = chatStarted;
-      }
+      if (t) t.sessionId = null;
     },
     markLaunched: (id: string) => launched.push(id),
     persist,
@@ -199,7 +219,7 @@ function harness(opts: {
     log: (m: string) => logs.push(m),
   };
 
-  return { fx, threads, created, bound, adopted, launched, logs, persist };
+  return { fx, threads, created, bound, unbound, launched, logs, persist };
 }
 
 describe("runPromotionPass", () => {
@@ -300,9 +320,10 @@ describe("runPromotionPass", () => {
     expect(h.fx.discover).not.toHaveBeenCalled();
   });
 
-  it("updates the existing record when claude restarts in a bound tab", async () => {
+  it("starts a NEW thread when claude restarts in a bound tab (acceptance 1)", async () => {
     // Two tabs: tab-b is unbound (so the pass runs), tab-a has a thread whose
-    // claude restarted under a new uuid.
+    // claude restarted under a new uuid. Thread A is released — keeping its
+    // uuid, and therefore revivable — and thread B takes the tab.
     const h = harness({
       sessions: ["tab-a", "tab-b"],
       threads: [thread({ sessionId: "tab-a", chatSessionId: "uuid-old" })],
@@ -310,8 +331,64 @@ describe("runPromotionPass", () => {
       onDisk: true,
     });
     expect(await runPromotionPass(h.fx)).toBe(1);
-    expect(h.adopted).toEqual([["t1", "uuid-new", true]]);
-    expect(h.created).toEqual([]);
+
+    expect(h.unbound).toEqual(["t1"]);
+    // A is intact: same record, same conversation id, just no tab.
+    const a = h.threads.find((t) => t.id === "t1")!;
+    expect(a.chatSessionId).toBe("uuid-old");
+    expect(a.sessionId).toBeNull();
+
+    // B is a real second record bound to the tab, with claude's new uuid.
+    expect(h.created).toEqual([
+      {
+        title: "orbit · Aug 2",
+        workingDir: "C:\\repos\\orbit",
+        chatSessionId: "uuid-new",
+        chatStarted: true,
+        sessionId: "tab-a",
+        startedAt: 5000,
+      },
+    ]);
+    expect(h.launched).toEqual(["new-1"]);
+    expect(h.threads).toHaveLength(2);
+  });
+
+  it("a superseded thread is not re-superseded on the next pass", async () => {
+    // Idempotency across passes: after the swap the tab and the conversation
+    // are the same thread again, so the next pass is a plain no-op.
+    const h = harness({
+      sessions: ["tab-a", "tab-b"],
+      threads: [thread({ sessionId: "tab-a", chatSessionId: "uuid-old" })],
+      discoveries: [discovery({ sessionId: "tab-a", chatSessionId: "uuid-new" })],
+      onDisk: true,
+    });
+    await runPromotionPass(h.fx);
+    expect(await runPromotionPass(h.fx)).toBe(0);
+    expect(h.created).toHaveLength(1);
+    expect(h.unbound).toEqual(["t1"]);
+  });
+
+  it("releases BEFORE creating, so the tab is never claimed by two records", async () => {
+    const h = harness({
+      sessions: ["tab-a", "tab-b"],
+      threads: [thread({ sessionId: "tab-a", chatSessionId: "uuid-old" })],
+      discoveries: [discovery({ sessionId: "tab-a", chatSessionId: "uuid-new" })],
+    });
+    const order: string[] = [];
+    const realUnbind = h.fx.unbindThread;
+    const realCreate = h.fx.createThread;
+    h.fx.unbindThread = (id: string) => {
+      order.push("unbind");
+      realUnbind(id);
+    };
+    h.fx.createThread = (args) => {
+      order.push("create");
+      // At this moment exactly one record may name tab-a.
+      expect(h.threads.filter((t) => t.sessionId === "tab-a")).toHaveLength(0);
+      return realCreate(args);
+    };
+    await runPromotionPass(h.fx);
+    expect(order).toEqual(["unbind", "create"]);
   });
 
   it("a bind does not re-check disk — it keeps the record's own uuid and hint", async () => {

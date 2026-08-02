@@ -35,7 +35,9 @@ import {
   markChatStarted,
   sameWorkingDir,
   promoteThreadRecord,
-  adoptChatSession,
+  unbindThread,
+  renameThread,
+  setThreadArchived,
   getThreads,
   threadRepoName,
   setThreadBooting,
@@ -195,6 +197,10 @@ type ConfirmState = {
    *  default, which is right for the session-close callers but not for a
    *  delete — the button must name what it actually does. */
   confirmLabel?: string;
+  /** Omitted = Enter confirms (the session-close default). Thread delete
+   *  passes false so the destructive button cannot be fired by reflex —
+   *  increment E, Decision 3. */
+  enterConfirms?: boolean;
   onConfirm: () => void;
 };
 
@@ -919,19 +925,34 @@ export default function App() {
     void saveThreadsToDisk();
   }, []);
 
-  // Same delete, gated by the shared ConfirmDialog (increment C's history
-  // screen). The record is the ONLY route back to the conversation — the
-  // transcript stays on disk but its uuid is gone with the row — so the
-  // message says so rather than a generic "are you sure".
+  // THE delete gate (increment E, Decision 3). ONE dialog, not two stacked
+  // ones: sequential confirmations train reflexive clicking and make the
+  // second meaningless. Its safety comes from two things instead —
+  //
+  //   · `enterConfirms: false`, so the destructive button is unreachable by
+  //     reflex (Cancel holds focus; Enter and Esc are both harmless);
+  //   · copy that says precisely what IS and IS NOT lost. claude's own
+  //     transcript on disk is not deleted and never has been; what goes is
+  //     Switchboard's record of the conversation's id, which is the only thing
+  //     the revive affordance runs on. That distinction belongs in the dialog,
+  //     not in a comment — a user deciding here cannot read this file.
+  //
+  // The last line names the reversible alternative, because a user who is
+  // hesitating usually wants archive.
   const handleConfirmDeleteThread = useCallback(
     (threadId: string) => {
       const thread = getThreadById(threadId);
       if (!thread) return;
       setConfirmState({
         open: true,
-        title: "Delete thread?",
-        confirmLabel: "Delete",
-        message: `"${thread.title}" will be removed from your thread history.\n\nThe conversation transcript stays on disk, but Switchboard will no longer know its id — this thread cannot be revived afterwards. Its terminal tab, if open, is unaffected.`,
+        title: `Delete “${thread.title}”?`,
+        confirmLabel: "Delete thread",
+        enterConfirms: false,
+        message:
+          `This deletes Switchboard's RECORD of the thread — its row, and the conversation id that "revive" needs. That cannot be undone.\n\n` +
+          `claude's own transcript on disk is NOT deleted. Nothing under ~/.claude is touched; Switchboard just stops knowing how to reach it.\n\n` +
+          `The thread's terminal tab, if one is open, keeps running.\n\n` +
+          `To put the thread away without losing any of that, archive it instead.`,
         onConfirm: () => {
           closeConfirm();
           handleDeleteThread(threadId);
@@ -941,6 +962,21 @@ export default function App() {
     [closeConfirm, handleDeleteThread]
   );
 
+  // Rename (Decision 4) and archive (Decision 5) both mutate the record and
+  // must survive a restart, so both flush the disk mirror exactly like the
+  // other critical mutations — the 30s periodic save is not a durability
+  // guarantee for something the user just typed.
+  const handleRenameThread = useCallback((threadId: string, title: string) => {
+    renameThread(threadId, title);
+    void saveThreadsToDisk();
+  }, []);
+
+  const handleSetThreadArchived = useCallback((threadId: string, archived: boolean) => {
+    log.info(`${archived ? "Archive" : "Unarchive"} thread id=${threadId}`);
+    setThreadArchived(threadId, archived);
+    void saveThreadsToDisk();
+  }, []);
+
   // Bridge App's handlers to ThreadsSection (module singleton — see
   // threadStore.ThreadActions).
   useEffect(() => {
@@ -948,11 +984,18 @@ export default function App() {
       openThread: handleOpenThread,
       reviveThread: (id) => void handleReviveThread(id),
       newThread: () => setNewThreadDialogOpen(true),
-      deleteThread: handleDeleteThread,
       confirmDeleteThread: handleConfirmDeleteThread,
+      renameThread: handleRenameThread,
+      setThreadArchived: handleSetThreadArchived,
     });
     return () => registerThreadActions(null);
-  }, [handleOpenThread, handleReviveThread, handleDeleteThread, handleConfirmDeleteThread]);
+  }, [
+    handleOpenThread,
+    handleReviveThread,
+    handleConfirmDeleteThread,
+    handleRenameThread,
+    handleSetThreadArchived,
+  ]);
 
   // ── Tab/thread parity (increment C) ────────────────────────────────────────
   // A conversation started by typing `claude` into a plain tab used to be
@@ -983,7 +1026,10 @@ export default function App() {
         chatStartedOnDisk: claudeSessionExists,
         createThread: (args) => promoteThreadRecord(args).id, // startedAt → createdAt
         bindThread: bindThreadSession,
-        adoptThread: adoptChatSession,
+        // Decision 1: a restarted claude does not overwrite the old record's
+        // uuid — the old thread is released (still revivable) and the pass
+        // creates a new one through the SAME createThread above.
+        unbindThread,
         markLaunched: markThreadLaunched,
         persist: () => void saveThreadsToDisk(),
         defaultTitle: (repoName) => defaultThreadTitle(repoName),
@@ -2153,6 +2199,7 @@ export default function App() {
         title={confirmState.title}
         message={confirmState.message}
         confirmLabel={confirmState.confirmLabel}
+        enterConfirms={confirmState.enterConfirms}
         onConfirm={confirmState.onConfirm}
         onCancel={closeConfirm}
       />

@@ -12,8 +12,8 @@
 //     exactly, and REFUSES rather than guesses when a tab or a conversation is
 //     ambiguous. It observes a process snapshot; it never types.
 //   · This module answers "what does that mean for the thread list" — create,
-//     bind, adopt, or leave alone — and is pure (planPromotion) so every one of
-//     those branches is unit-tested.
+//     bind, supersede, or leave alone — and is pure (planPromotion) so every
+//     one of those branches is unit-tested.
 //   · App owns the interval and hands the effects in.
 //
 // The whole path is OBSERVE-ONLY. There is no writeToSession here, and there
@@ -43,8 +43,10 @@ export type PromotionPlan =
    *  Bind, don't duplicate. */
   | { kind: "bind"; threadId: string; discovery: ClaudeDiscovery }
   /** This tab already has a thread, but claude is now running a DIFFERENT
-   *  conversation in it (claude restarted). Update the existing record. */
-  | { kind: "adopt"; threadId: string; discovery: ClaudeDiscovery };
+   *  conversation in it (a plain `claude` restart). `threadId` is the OLD
+   *  thread: unbind it — it keeps its uuid and stays revivable in the history
+   *  — and create a new record for the new conversation. See Decision 1. */
+  | { kind: "supersede"; threadId: string; discovery: ClaudeDiscovery };
 
 /** Decide what one discovery means for the current thread list.
  *
@@ -52,9 +54,17 @@ export type PromotionPlan =
  *  sessionId points at a closed tab is NOT considered bound, otherwise a
  *  conversation could never find its way back to a row.
  *
- *  The IDEMPOTENCY rule lives here: every branch either touches one existing
- *  record or creates exactly one. There is no path that produces a second
- *  record for a tab or for a conversation. */
+ *  The IDEMPOTENCY rule lives here, and it is about CONVERSATIONS: a
+ *  re-detected conversation (same uuid) never produces a second record, on any
+ *  pass, in any branch. What increment E's Decision 1 changes is the OTHER
+ *  axis — a tab may now accumulate several records over its life, one per
+ *  conversation that has run in it, because a conversation and a shell are
+ *  different things and only one of them is durable.
+ *
+ *  ARCHIVED records are matched here like any other (never filtered out): an
+ *  archived thread whose conversation is discovered running again must find
+ *  its own record, not spawn a duplicate. markThreadLaunched unarchives it —
+ *  a running conversation is not "not now". */
 export function planPromotion(
   discovery: ClaudeDiscovery,
   threads: readonly Thread[],
@@ -92,8 +102,10 @@ export function planPromotion(
   }
 
   if (bySession) {
-    // The tab has a record under a different uuid — claude restarted here.
-    return { kind: "adopt", threadId: bySession.id, discovery };
+    // The tab has a record under a different uuid — a plain `claude` restarted
+    // here, which is a NEW conversation and therefore a new thread. The old
+    // record is released, not rewritten (Decision 1).
+    return { kind: "supersede", threadId: bySession.id, discovery };
   }
 
   return { kind: "create", discovery };
@@ -121,7 +133,9 @@ export type PromotionEffects = {
     startedAt: number;
   }) => string;
   bindThread: (threadId: string, sessionId: string) => void;
-  adoptThread: (threadId: string, chatSessionId: string, chatStarted: boolean) => void;
+  /** Decision 1: release a thread's tab binding WITHOUT touching its uuid, so
+   *  the superseded conversation stays revivable from the history. */
+  unbindThread: (threadId: string) => void;
   markLaunched: (threadId: string) => void;
   persist: () => void;
   defaultTitle: (repoName: string) => string;
@@ -134,7 +148,15 @@ export type PromotionEffects = {
  *  This is the "stop polling when nothing is unbound" rule. When every tab is
  *  bound the tick costs ZERO IPC — no snapshot, no file reads. (A pass that
  *  does run still asks about every tab, since it is one snapshot either way,
- *  which is what makes the claude-restarted-in-a-bound-tab case free.) */
+ *  which is what makes the claude-restarted-in-a-bound-tab case free.)
+ *
+ *  KNOWN BOUNDARY, unchanged by increment E: because of this gate, the
+ *  supersede branch is opportunistic — a restart inside a bound tab is noticed
+ *  on the next pass some OTHER tab triggers, and if every tab is bound no pass
+ *  runs at all. Closing that would mean polling forever, which is exactly the
+ *  cost this gate was added to avoid, so it stays a deliberate trade rather
+ *  than a silent one. Nothing is lost meanwhile: the old thread keeps its uuid
+ *  either way, and the new conversation is recorded the moment a pass runs. */
 export function shouldRunPromotionPass(
   liveSessionIds: readonly string[],
   threads: readonly Thread[]
@@ -180,7 +202,7 @@ export async function runPromotionPass(fx: PromotionEffects): Promise<number> {
     // Only the branches that WRITE a conversation id need the transcript
     // check; "bind" keeps the record's existing uuid and hint untouched.
     let chatStarted = false;
-    if (plan.kind === "create" || plan.kind === "adopt") {
+    if (plan.kind === "create" || plan.kind === "supersede") {
       try {
         chatStarted = await fx.chatStartedOnDisk(d.cwd, d.chatSessionId);
       } catch (err) {
@@ -193,18 +215,26 @@ export async function runPromotionPass(fx: PromotionEffects): Promise<number> {
       }
     }
 
+    // The record a new conversation gets. Shared by "create" and "supersede"
+    // deliberately: a restarted claude in a bound tab produces exactly the same
+    // record a fresh tab would (Decision 1) — the only difference is the
+    // release that has to happen first.
+    const recordNewConversation = (): string => {
+      const threadId = fx.createThread({
+        title: fx.defaultTitle(fx.repoName(d.cwd)),
+        workingDir: d.cwd,
+        chatSessionId: d.chatSessionId,
+        chatStarted,
+        sessionId: d.sessionId,
+        startedAt: d.startedAt,
+      });
+      fx.markLaunched(threadId);
+      return threadId;
+    };
+
     switch (plan.kind) {
       case "create": {
-        const title = fx.defaultTitle(fx.repoName(d.cwd));
-        const threadId = fx.createThread({
-          title,
-          workingDir: d.cwd,
-          chatSessionId: d.chatSessionId,
-          chatStarted,
-          sessionId: d.sessionId,
-          startedAt: d.startedAt,
-        });
-        fx.markLaunched(threadId);
+        const threadId = recordNewConversation();
         fx.log(
           `Promoted tab ${d.sessionId} to thread ${threadId} (conversation ${d.chatSessionId}, cwd ${d.cwd}, started=${chatStarted})`
         );
@@ -218,11 +248,15 @@ export async function runPromotionPass(fx: PromotionEffects): Promise<number> {
         changed++;
         break;
       }
-      case "adopt": {
-        fx.adoptThread(plan.threadId, d.chatSessionId, chatStarted);
-        fx.markLaunched(plan.threadId);
+      case "supersede": {
+        // ORDER MATTERS: release first, then create. The other way round, both
+        // records name the same tab for an instant, and a re-read of the
+        // thread list in that window (this very loop re-reads per discovery)
+        // would see the tab as ambiguous and refuse.
+        fx.unbindThread(plan.threadId);
+        const threadId = recordNewConversation();
         fx.log(
-          `Thread ${plan.threadId} adopted restarted conversation ${d.chatSessionId}`
+          `Tab ${d.sessionId} started a NEW conversation ${d.chatSessionId} — thread ${plan.threadId} unbound (still revivable), thread ${threadId} created`
         );
         changed++;
         break;

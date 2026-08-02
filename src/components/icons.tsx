@@ -40,7 +40,15 @@ export type IconName =
   | "localhost"
   | "panel"
   | "chevron-right"
-  | "chevron-down";
+  | "chevron-down"
+  // Thread row menu (increment E). Same rules as everything above: one 16x16
+  // box, ink centred on (8,8), currentColor, stroke-drawn.
+  | "ellipsis"
+  | "open"
+  | "rename"
+  | "archive"
+  | "unarchive"
+  | "trash";
 
 /** Default box for a content icon (folder / file / localhost / panel). Rows
  *  reserve exactly this much, so the icon column is identical at every depth
@@ -61,6 +69,12 @@ const STROKE: Record<IconName, number> = {
   panel: 1.4,
   "chevron-right": 2,
   "chevron-down": 2,
+  ellipsis: 0,
+  open: 1.4,
+  rename: 1.4,
+  archive: 1.4,
+  unarchive: 1.4,
+  trash: 1.4,
 };
 
 // Every path below is centred on (8, 8) in the 16x16 box:
@@ -109,6 +123,60 @@ const PATHS: Record<IconName, ReactNode> = {
   ),
   "chevron-right": <path d="m6.25 3.5 4.5 4.5-4.5 4.5" />,
   "chevron-down": <path d="M3.5 6.25 8 10.75l4.5-4.5" />,
+  // ⋯ — the row menu's trigger. Three FILLED dots (stroke 0): at 12px a
+  // stroked circle of this radius is a grey smudge, and the trigger has to
+  // read as a control at a glance in an 11.5px rail.
+  ellipsis: (
+    <>
+      <circle cx="3.1" cy="8" r="1.15" fill="currentColor" stroke="none" />
+      <circle cx="8" cy="8" r="1.15" fill="currentColor" stroke="none" />
+      <circle cx="12.9" cy="8" r="1.15" fill="currentColor" stroke="none" />
+    </>
+  ),
+  // Open / reveal: an arrow leaving a frame — the same "go to it" metaphor the
+  // panel header's `open full` spells out in words.
+  open: (
+    <>
+      <path d="M12.75 9.4v3.35H3.25V3.25H6.6" />
+      <path d="M9.4 3.25h3.35V6.6" />
+      <path d="M12.75 3.25 7.8 8.2" />
+    </>
+  ),
+  // Rename: a pencil over a baseline.
+  rename: (
+    <>
+      <path d="m9.9 2.9 3.2 3.2-6.1 6.1-3.9.7.7-3.9z" />
+      <path d="M2.75 14.4h10.5" />
+    </>
+  ),
+  // Archive: a lidded box — the "put it away, it still exists" metaphor.
+  // Unarchive is the same box with the arrow reversed, so the pair reads as
+  // one action and its undo rather than as two unrelated marks.
+  archive: (
+    <>
+      <path d="M2.6 3.1h10.8v2.6H2.6z" />
+      <path d="M3.6 5.7v7.2h8.8V5.7" />
+      <path d="M8 7.6v3.4" />
+      <path d="M6.4 9.4 8 11l1.6-1.6" />
+    </>
+  ),
+  unarchive: (
+    <>
+      <path d="M2.6 3.1h10.8v2.6H2.6z" />
+      <path d="M3.6 5.7v7.2h8.8V5.7" />
+      <path d="M8 11V7.6" />
+      <path d="M6.4 9.2 8 7.6l1.6 1.6" />
+    </>
+  ),
+  // Delete: a bin with a lid and two staves.
+  trash: (
+    <>
+      <path d="M2.9 4.3h10.2" />
+      <path d="M6.3 4.3V2.8h3.4v1.5" />
+      <path d="M4.3 4.3v8.9h7.4V4.3" />
+      <path d="M6.7 6.6v4.4M9.3 6.6v4.4" />
+    </>
+  ),
 };
 
 /** Draw an icon. `display:block` + `flex:none` by construction: these live in

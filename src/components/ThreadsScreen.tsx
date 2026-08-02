@@ -13,19 +13,28 @@
 // Routed as `{screen:"threads"}`, param-less, so it is deep-linkable and
 // reachable with the side menu hidden — the filter box is screen-local UI
 // state, never route identity.
+//
+// INCREMENT E: two tabs, Active | Archived, each with a count and each
+// carrying the same filter. This screen is the ONLY surface archived threads
+// appear on — the rail, its `See all (N)` count and everything downstream see
+// the active list only. Each row's actions moved into the shared `⋯` menu
+// (ThreadRowMenu), and the bare `×` is gone: Delete asks first now.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import type { AgentStatus, Thread } from "../types";
 import {
   useThreadsView,
   getThreadActions,
+  activeThreads,
+  archivedThreads,
   filterThreads,
   relativeActivity,
   sortThreadsForHistory,
   threadRepoName,
 } from "../lib/threadStore";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
+import { ThreadRowMenu, ThreadTitleEditor, threadMenuItems } from "./ThreadRowMenu";
 
 /** Dead rows use the EXITED status colour — read from statusConfig, the
  *  single source of truth, so a palette change lands here too. */
@@ -101,6 +110,11 @@ const CHIP_STYLE: CSSProperties = {
   cursor: "pointer",
 };
 
+/** Which list the screen is showing (increment E). SCREEN-LOCAL state, not
+ *  route identity — exactly like the filter box, and for the same reason: the
+ *  route stays `?screen=threads`, deep-linkable and param-less. */
+type ThreadTab = "active" | "archived";
+
 export function ThreadsScreen({
   active,
   menuHidden,
@@ -112,6 +126,7 @@ export function ThreadsScreen({
 }) {
   const view = useThreadsView();
   const [query, setQuery] = useState("");
+  const [tab, setTab] = useState<ThreadTab>("active");
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -121,17 +136,35 @@ export function ThreadsScreen({
     return () => window.clearInterval(id);
   }, [active]);
 
-  const ordered = sortThreadsForHistory(view.threads, view.launched);
+  // The two lists, and their counts on the tabs. This SCREEN is the only place
+  // archived threads appear anywhere in the app (Decision 5) — the side menu,
+  // its `See all (N)` count and every other surface see the active list only.
+  const activeList = useMemo(() => activeThreads(view.threads), [view.threads]);
+  const archivedList = useMemo(() => archivedThreads(view.threads), [view.threads]);
+  const source = tab === "active" ? activeList : archivedList;
+
+  // Leaving the Archived tab empty under you (unarchiving the last one) would
+  // strand the screen on a dead tab. Fall back to Active.
+  useEffect(() => {
+    if (tab === "archived" && archivedList.length === 0) setTab("active");
+  }, [tab, archivedList.length]);
+
+  const ordered = sortThreadsForHistory(source, view.launched);
   const rows = filterThreads(ordered, query);
 
   return (
     <div style={ROOT_STYLE}>
       <div style={HEAD_STYLE}>
         <span style={{ color: "var(--text-secondary)", fontWeight: 600 }}>threads</span>
+        <Tab label="active" count={activeList.length} on={tab === "active"} onClick={() => setTab("active")} />
+        <Tab
+          label="archived"
+          count={archivedList.length}
+          on={tab === "archived"}
+          onClick={() => setTab("archived")}
+        />
         <span>
-          {rows.length === view.threads.length
-            ? `${view.threads.length}`
-            : `${rows.length} of ${view.threads.length}`}
+          {rows.length === source.length ? "" : `${rows.length} of ${source.length}`}
         </span>
         <span style={{ flex: 1 }} />
         <input
@@ -156,6 +189,7 @@ export function ThreadsScreen({
             <HistoryRow
               key={t.id}
               thread={t}
+              archived={tab === "archived"}
               live={view.launched.has(t.id)}
               booting={view.booting.has(t.id)}
               status={t.sessionId ? view.sessionStatuses[t.sessionId] : undefined}
@@ -163,25 +197,37 @@ export function ThreadsScreen({
               now={now}
             />
           ))
-        ) : view.threads.length === 0 ? (
-          // Honest empty state: no threads exist at all, and BOTH ways of
-          // getting one are named (they are genuinely equivalent now).
-          <CenteredNote>
-            <span>no threads yet</span>
-            <span style={{ color: "var(--text-faint)" }}>
-              run `claude` in any tab, or use “+ new thread” in the navigator
-            </span>
-            {menuHidden && (
+        ) : source.length === 0 ? (
+          tab === "archived" ? (
+            // Archiving is not deleting, and the empty state says so — this is
+            // where a user comes looking for a thread that "disappeared".
+            <CenteredNote>
+              <span>nothing archived</span>
               <span style={{ color: "var(--text-faint)" }}>
-                Ctrl+Shift+B (or click SWITCHBOARD) opens the navigator
+                archiving a thread hides it from the navigator; it keeps its
+                conversation and stays revivable from here
               </span>
-            )}
-          </CenteredNote>
+            </CenteredNote>
+          ) : (
+            // Honest empty state: no threads exist at all, and BOTH ways of
+            // getting one are named (they are genuinely equivalent now).
+            <CenteredNote>
+              <span>no threads yet</span>
+              <span style={{ color: "var(--text-faint)" }}>
+                run `claude` in any tab, or use “+ new thread” in the navigator
+              </span>
+              {menuHidden && (
+                <span style={{ color: "var(--text-faint)" }}>
+                  Ctrl+Shift+B (or click SWITCHBOARD) opens the navigator
+                </span>
+              )}
+            </CenteredNote>
+          )
         ) : (
           <CenteredNote>
             <span>no thread matches “{query.trim()}”</span>
             <span style={{ color: "var(--text-faint)" }}>
-              {view.threads.length} thread{view.threads.length === 1 ? "" : "s"} in history
+              {source.length} {tab} thread{source.length === 1 ? "" : "s"}
             </span>
           </CenteredNote>
         )}
@@ -190,8 +236,52 @@ export function ThreadsScreen({
   );
 }
 
+/** Active | Archived. Text tabs with counts, in the 36px header — no new
+ *  chrome row, no colour: the selected one is bright with a 2px underline,
+ *  which is the whole vocabulary the panel's tab strip uses too. */
+function Tab({
+  label,
+  count,
+  on,
+  onClick,
+}: {
+  label: string;
+  count: number;
+  on: boolean;
+  onClick: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={on}
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        background: "none",
+        border: "none",
+        borderBottom: on ? "2px solid var(--text-secondary)" : "2px solid transparent",
+        padding: "2px 2px 1px",
+        fontFamily: "var(--font-mono)",
+        fontSize: 11.5,
+        color: on
+          ? "var(--text-primary)"
+          : hover
+            ? "var(--text-secondary)"
+            : "var(--text-dim)",
+        cursor: "pointer",
+      }}
+    >
+      {label} <span style={{ color: "var(--text-dim)" }}>{count}</span>
+    </button>
+  );
+}
+
 function HistoryRow({
   thread,
+  archived,
   live,
   booting,
   status,
@@ -199,6 +289,8 @@ function HistoryRow({
   now,
 }: {
   thread: Thread;
+  /** Row on the Archived tab — its primary action is UNARCHIVE, not revive. */
+  archived: boolean;
   live: boolean;
   booting: boolean;
   status: AgentStatus | undefined;
@@ -206,6 +298,8 @@ function HistoryRow({
   now: number;
 }) {
   const [hover, setHover] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
   const actions = getThreadActions();
 
   // Dead = no claude process behind the row (app restart, session exit, tab
@@ -213,18 +307,30 @@ function HistoryRow({
   const dead = !live;
   const dotColor = live && status ? STATUS_CONFIGS[status].color : EXITED_COLOR;
 
+  // On the Archived tab EVERY affordance says "put it back" — the row, the
+  // chip and the menu all unarchive (Decision 5: archived rows offer Unarchive
+  // + Delete). Reviving is a click away once it is back, and the record is
+  // untouched meanwhile, which is what "still revivable" means.
+  const activateRow = () => {
+    if (!actions) return;
+    if (archived) actions.setThreadArchived(thread.id, false);
+    else if (dead && !booting) actions.reviveThread(thread.id);
+    else actions.openThread(thread.id);
+  };
+
   return (
     <div
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      onClick={() => {
-        if (!actions) return;
-        if (dead && !booting) actions.reviveThread(thread.id);
-        else actions.openThread(thread.id);
+      onClick={editing ? undefined : activateRow}
+      onDoubleClick={(e) => {
+        e.preventDefault();
+        setEditing(true);
       }}
       title={thread.workingDir}
       style={{
         ...ROW_STYLE,
+        cursor: editing ? "default" : "pointer",
         background: active ? "var(--bg-active)" : hover ? "var(--bg-secondary)" : "none",
         boxShadow: active ? "inset 2px 0 0 var(--text-primary)" : "none",
         color: active || hover ? "var(--text-primary)" : "var(--text-secondary)",
@@ -239,17 +345,21 @@ function HistoryRow({
           backgroundColor: dotColor,
         }}
       />
-      <span
-        style={{
-          flex: 1,
-          minWidth: 0,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-      >
-        {thread.title}
-      </span>
+      {editing ? (
+        <ThreadTitleEditor thread={thread} onDone={() => setEditing(false)} />
+      ) : (
+        <span
+          style={{
+            flex: 1,
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {thread.title}
+        </span>
+      )}
       <span
         style={{
           flex: "none",
@@ -284,44 +394,39 @@ function HistoryRow({
           color: "var(--text-dim)",
         }}
       >
-        {booting ? "booting…" : live ? "live" : "dead"}
+        {archived ? "archived" : booting ? "booting…" : live ? "live" : "dead"}
       </span>
       <button
         type="button"
         onClick={(e) => {
           e.stopPropagation();
-          if (booting) return;
-          if (dead) actions?.reviveThread(thread.id);
-          else actions?.openThread(thread.id);
+          if (booting && !archived) return;
+          activateRow();
         }}
         style={{
           ...CHIP_STYLE,
-          color: dead && !booting ? "var(--text-primary)" : "var(--text-muted)",
-          borderColor: dead && !booting ? "var(--text-secondary)" : "var(--border-subtle)",
+          color: archived || (dead && !booting) ? "var(--text-primary)" : "var(--text-muted)",
+          borderColor:
+            archived || (dead && !booting) ? "var(--text-secondary)" : "var(--border-subtle)",
         }}
       >
-        {booting ? "⟳ booting…" : dead ? "⟳ revive" : "open"}
+        {archived ? "unarchive" : booting ? "⟳ booting…" : dead ? "⟳ revive" : "open"}
       </button>
-      <button
-        type="button"
-        aria-label="Delete thread"
-        title="Delete this thread record"
-        onClick={(e) => {
-          e.stopPropagation();
-          // Destructive and unrecoverable — the record IS the only way back to
-          // the conversation, so this one asks first.
-          actions?.confirmDeleteThread(thread.id);
+      {/* The `⋯` menu — the SAME items the rail's rows carry (Decision 2).
+          The bare `×` that used to sit here is gone: Delete lives in the menu
+          and asks first. */}
+      <ThreadRowMenu
+        ariaLabel="Thread actions"
+        size={13}
+        onOpenChange={setMenuOpen}
+        triggerStyle={{
+          width: 20,
+          height: 18,
+          borderRadius: 4,
+          color: menuOpen ? "var(--text-primary)" : "var(--text-muted)",
         }}
-        style={{ ...CHIP_STYLE, padding: "1px 7px" }}
-        onMouseEnter={(e) => {
-          e.currentTarget.style.color = "var(--text-primary)";
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.color = "var(--text-muted)";
-        }}
-      >
-        ×
-      </button>
+        items={threadMenuItems({ thread, live, onRename: () => setEditing(true) })}
+      />
     </div>
   );
 }

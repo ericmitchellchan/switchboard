@@ -34,7 +34,13 @@ import {
   setThreadBooting,
   publishSessionStatuses,
   promoteThreadRecord,
-  adoptChatSession,
+  unbindThread,
+  renameThread,
+  setThreadArchived,
+  isThreadArchived,
+  activeThreads,
+  archivedThreads,
+  derivedThreadTitle,
   threadRepoName,
   sameWorkingDir,
   sortThreadsForHistory,
@@ -233,11 +239,28 @@ describe("sanitizeThread (lean-record invariant)", () => {
     expect("messages" in clean).toBe(false);
   });
 
-  it("drops legacy archivedAt like any other unknown field", () => {
+  it("keeps archivedAt when it is a real timestamp", () => {
+    // Increment E brought the field back WITH behaviour, so it is schema now.
     const t = mkThread();
     const clean = sanitizeThread({ ...t, archivedAt: 123 })!;
-    expect(clean).toEqual(t);
-    expect("archivedAt" in clean).toBe(false);
+    expect(clean.archivedAt).toBe(123);
+    expect(isThreadArchived(clean)).toBe(true);
+  });
+
+  it("omits archivedAt entirely for an active record — a lean record stays lean", () => {
+    const t = mkThread();
+    expect("archivedAt" in sanitizeThread(t)!).toBe(false);
+    // Not archived "at the epoch": 0 and garbage both mean active.
+    expect("archivedAt" in sanitizeThread({ ...t, archivedAt: 0 })!).toBe(false);
+    expect("archivedAt" in sanitizeThread({ ...t, archivedAt: "yes" })!).toBe(false);
+  });
+
+  it("round-trips an ARCHIVED record through the disk format", () => {
+    // Acceptance 5: archived threads survive a restart AS archived.
+    const t = { ...mkThread(), archivedAt: 1_700_000_000_000 };
+    const parsed = parseThreadsFromDisk(serializeThreadsForDisk([t]))!;
+    expect(parsed[0]).toEqual(t);
+    expect(isThreadArchived(parsed[0])).toBe(true);
   });
 
   it("rejects records missing critical fields", () => {
@@ -616,28 +639,125 @@ describe("promoteThreadRecord", () => {
   });
 });
 
-describe("adoptChatSession", () => {
+describe("unbindThread (Decision 1: nothing is forgotten)", () => {
   beforeEach(() => __resetThreadStoreForTests());
 
-  it("updates the existing record rather than adding a second", () => {
+  it("severs the tab binding and keeps the record whole", () => {
     const t = createThreadRecord({ title: "x", workingDir: "C:\\repos\\orbit" });
-    adoptChatSession(t.id, "restarted-uuid", true);
+    bindThreadSession(t.id, "tab-a");
+    markThreadLaunched(t.id);
+
+    unbindThread(t.id);
+
+    const after = getThreadById(t.id)!;
+    expect(after.sessionId).toBeNull();
+    // The uuid is what makes it revivable — the whole point of not adopting.
+    expect(after.chatSessionId).toBe(t.chatSessionId);
     expect(getThreads()).toHaveLength(1);
-    expect(getThreadById(t.id)?.chatSessionId).toBe("restarted-uuid");
-    expect(getThreadById(t.id)?.chatStarted).toBe(true);
+    // No claude process behind it any more.
+    expect(isThreadLaunched(t.id)).toBe(false);
   });
 
-  it("leaves the record untouched when the uuid already matches", () => {
+  it("leaves other threads alone and ignores an unknown id", () => {
+    const a = createThreadRecord({ title: "a", workingDir: "C:\\repos\\orbit" });
+    bindThreadSession(a.id, "tab-a");
+    unbindThread("nope");
+    expect(getThreadById(a.id)?.sessionId).toBe("tab-a");
+  });
+});
+
+// ── Rename (Decision 4) ──────────────────────────────────────────────────────
+
+describe("renameThread", () => {
+  beforeEach(() => __resetThreadStoreForTests());
+
+  it("renames the record and touches nothing else", () => {
+    const t = createThreadRecord({ title: "orbit", workingDir: "C:\\repos\\orbit" });
+    renameThread(t.id, "  rate limiter spike  ");
+    const after = getThreadById(t.id)!;
+    expect(after.title).toBe("rate limiter spike");
+    // A rename is LOCAL to Switchboard's record: claude's conversation id and
+    // the started hint are untouched.
+    expect(after.chatSessionId).toBe(t.chatSessionId);
+    expect(after.chatStarted).toBe(t.chatStarted);
+  });
+
+  it("falls back to the record's DERIVED default on an empty title", () => {
+    const t = createThreadRecord({ title: "spike", workingDir: "C:\\repos\\lodestar" });
+    renameThread(t.id, "   ");
+    expect(getThreadById(t.id)?.title).toBe(derivedThreadTitle(t));
+    expect(getThreadById(t.id)?.title).toContain("lodestar");
+  });
+
+  it("derives the default from the thread's OWN creation date, not today", () => {
+    const t = {
+      ...mkThread({ workingDir: "C:\\repos\\orbit" }),
+      createdAt: new Date(2026, 0, 9, 12).getTime(),
+    };
+    expect(derivedThreadTitle(t)).toBe("orbit \u00b7 Jan 9");
+  });
+
+  it("survives the sanitize gate and the disk round trip (acceptance 3b)", () => {
+    const t = createThreadRecord({ title: "x", workingDir: "C:\\repos\\orbit" });
+    renameThread(t.id, "renamed");
+    const parsed = parseThreadsFromDisk(serializeThreadsForDisk(getThreads()))!;
+    expect(parsed[0].title).toBe("renamed");
+  });
+
+  it("is a no-op for an unknown id or an unchanged title", () => {
     const t = createThreadRecord({ title: "x", workingDir: "C:\\repos\\orbit" });
     const before = getThreadById(t.id);
-    adoptChatSession(t.id, t.chatSessionId, false);
+    renameThread(t.id, "x");
+    renameThread("nope", "y");
+    expect(getThreadById(t.id)).toBe(before);
+  });
+});
+
+// ── Archive (Decision 5) ─────────────────────────────────────────────────────
+
+describe("setThreadArchived", () => {
+  beforeEach(() => __resetThreadStoreForTests());
+
+  it("archives and unarchives losslessly — only the flag moves", () => {
+    const t = createThreadRecord({ title: "x", workingDir: "C:\\repos\\orbit" });
+    bindThreadSession(t.id, "tab-a");
+
+    setThreadArchived(t.id, true);
+    const archived = getThreadById(t.id)!;
+    expect(isThreadArchived(archived)).toBe(true);
+    // Everything that makes the thread revivable is untouched — archiving is
+    // not deleting.
+    expect(archived.chatSessionId).toBe(t.chatSessionId);
+    expect(archived.sessionId).toBe("tab-a");
+
+    setThreadArchived(t.id, false);
+    const back = getThreadById(t.id)!;
+    expect(isThreadArchived(back)).toBe(false);
+    // The key is REMOVED, not zeroed — the lean-record shape comes back too.
+    expect("archivedAt" in back).toBe(false);
+  });
+
+  it("is a no-op when the state already matches, or for an unknown id", () => {
+    const t = createThreadRecord({ title: "x", workingDir: "C:\\repos\\orbit" });
+    const before = getThreadById(t.id);
+    setThreadArchived(t.id, false);
+    setThreadArchived("nope", true);
     expect(getThreadById(t.id)).toBe(before);
   });
 
-  it("ignores an unknown thread id", () => {
-    createThreadRecord({ title: "x", workingDir: "C:\\repos\\orbit" });
-    adoptChatSession("nope", "other", true);
-    expect(getThreads()).toHaveLength(1);
+  it("never touches the thread's session binding (acceptance 6)", () => {
+    const t = createThreadRecord({ title: "x", workingDir: "C:\\repos\\orbit" });
+    bindThreadSession(t.id, "tab-a");
+    setThreadArchived(t.id, true);
+    expect(findThreadBySessionId("tab-a")?.id).toBe(t.id);
+  });
+
+  it("markThreadLaunched unarchives — a running conversation is not put away", () => {
+    const t = createThreadRecord({ title: "x", workingDir: "C:\\repos\\orbit" });
+    setThreadArchived(t.id, true);
+    markThreadLaunched(t.id);
+    expect(isThreadArchived(getThreadById(t.id)!)).toBe(false);
+    expect(isThreadLaunched(t.id)).toBe(true);
   });
 });
 
@@ -670,6 +790,40 @@ describe("sortThreadsForHistory", () => {
     expect(out.map((t) => t.id)).toEqual(["a", "z"]);
     // …and does not mutate the input.
     expect(list.map((t) => t.id)).toEqual(["z", "a"]);
+  });
+});
+
+describe("archived thread selection", () => {
+  const list = [
+    ht("a", 3),
+    { ...ht("b", 2), title: "put away", archivedAt: 1_700_000_000_000 },
+    ht("c", 1),
+  ];
+
+  it("splits the two lists and never loses a record between them", () => {
+    expect(activeThreads(list).map((t) => t.id)).toEqual(["a", "c"]);
+    expect(archivedThreads(list).map((t) => t.id)).toEqual(["b"]);
+    expect(activeThreads(list).length + archivedThreads(list).length).toBe(list.length);
+  });
+
+  it("keeps archived threads off the side menu (acceptance 4)", () => {
+    expect(selectMenuThreads(list, new Set()).map((t) => t.id)).toEqual(["a", "c"]);
+  });
+
+  it("hides an archived thread from the rail even while it is LIVE", () => {
+    // Archiving is an explicit act on the record; the live-thread rule exists
+    // to stop TRUNCATION, not to override the user.
+    expect(selectMenuThreads(list, new Set(["b"])).map((t) => t.id)).toEqual(["a", "c"]);
+  });
+
+  it("leaves the history screen's own ordering alone (it partitions first)", () => {
+    // sortThreadsForHistory must NOT filter — the Archived tab sorts too.
+    expect(sortThreadsForHistory(list, new Set()).map((t) => t.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("filters within a tab, so a query never leaks the other list", () => {
+    expect(filterThreads(archivedThreads(list), "put away").map((t) => t.id)).toEqual(["b"]);
+    expect(filterThreads(activeThreads(list), "put away")).toEqual([]);
   });
 });
 

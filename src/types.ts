@@ -187,8 +187,26 @@ export interface Thread {
    *  ground truth (claude_session_exists), which also re-syncs this hint. */
   chatStarted: boolean;
   /** Current bound Switchboard session id — a TAB binding, null when none.
-   *  Machine-local; remapped (or severed) on workspace restore. */
+   *  Machine-local; remapped (or severed) on workspace restore.
+   *
+   *  Increment E, Decision 1: a claude restart in this tab under a DIFFERENT
+   *  conversation uuid severs this binding rather than overwriting
+   *  chatSessionId — the old conversation keeps its uuid and stays revivable,
+   *  and the tab is taken by a NEW record. Nothing is ever forgotten. */
   sessionId: string | null;
   createdAt: number;
   lastActivityAt: number;
+  /** ★ Archived (increment E, Decision 5) — the moment the user archived this
+   *  thread; ABSENT (not 0/false) while it is active, so the lean record stays
+   *  lean for the common case.
+   *
+   *  Archiving is a first-class state, and it is NOT deleting: an archived
+   *  thread is hidden from the side menu and from the history screen's Active
+   *  tab, listed under Archived, and otherwise entirely unchanged — still
+   *  persisted (localStorage blob + disk mirror, through sanitizeThread like
+   *  every other field), still revivable, unarchivable in one click.
+   *
+   *  This field was in T5's first draft and was cut in review as dead
+   *  speculative surface. That was right then; it has behaviour now. */
+  archivedAt?: number;
 }

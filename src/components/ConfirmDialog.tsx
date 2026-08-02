@@ -7,6 +7,15 @@ interface ConfirmDialogProps {
   confirmLabel?: string;
   cancelLabel?: string;
   destructive?: boolean;
+  /** Does Enter fire the confirm button? Default TRUE — that is right for the
+   *  session-close callers, where the dialog stands between the user and a
+   *  routine action and Enter is a courtesy.
+   *
+   *  FALSE for thread delete (increment E, Decision 3): the dialog's safety is
+   *  that the destructive button cannot be reached by reflex. Cancel already
+   *  holds focus, so with Enter unbound here the key does nothing worse than
+   *  cancel — and cancelling changes nothing. Esc still cancels either way. */
+  enterConfirms?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -18,6 +27,7 @@ export function ConfirmDialog({
   confirmLabel = "Close",
   cancelLabel = "Cancel",
   destructive = true,
+  enterConfirms = true,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -32,7 +42,7 @@ export function ConfirmDialog({
         e.preventDefault();
         e.stopPropagation();
         onCancel();
-      } else if (e.key === "Enter") {
+      } else if (e.key === "Enter" && enterConfirms) {
         e.preventDefault();
         e.stopPropagation();
         onConfirm();
@@ -41,7 +51,7 @@ export function ConfirmDialog({
 
     window.addEventListener("keydown", handleKey, true);
     return () => window.removeEventListener("keydown", handleKey, true);
-  }, [open, onCancel, onConfirm]);
+  }, [open, onCancel, onConfirm, enterConfirms]);
 
   if (!open) return null;
 

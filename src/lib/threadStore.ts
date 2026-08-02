@@ -140,6 +140,18 @@ export function threadRepoName(workingDir: string): string {
   return parts[parts.length - 1] ?? workingDir;
 }
 
+/** The title THIS record would have had if it had never been named — repo +
+ *  the day the thread was CREATED, not today. Rename falls back to it when the
+ *  box is emptied (increment E, Decision 4): recomputing from `new Date()`
+ *  would silently re-date a month-old thread to this morning, which is a
+ *  different (and false) label. */
+export function derivedThreadTitle(thread: Thread): string {
+  return defaultThreadTitle(
+    threadRepoName(thread.workingDir),
+    thread.createdAt > 0 ? new Date(thread.createdAt) : new Date()
+  );
+}
+
 /** Lean-record gate: rebuild a Thread from unknown input keeping ONLY the
  *  schema fields (drops any scrollback/messages/derived state that might have
  *  leaked into a persisted blob), or reject it. Every load path — localStorage
@@ -157,7 +169,7 @@ export function sanitizeThread(raw: unknown): Thread | null {
   ) {
     return null;
   }
-  return {
+  const out: Thread = {
     id: t.id,
     title: t.title,
     workingDir: t.workingDir,
@@ -167,6 +179,31 @@ export function sanitizeThread(raw: unknown): Thread | null {
     createdAt: typeof t.createdAt === "number" ? t.createdAt : 0,
     lastActivityAt: typeof t.lastActivityAt === "number" ? t.lastActivityAt : 0,
   };
+  // `archivedAt` is OPTIONAL surface (increment E): the key exists only while
+  // the thread is actually archived, so an active record serializes byte-for-
+  // byte as it did before archiving existed. A non-positive or non-numeric
+  // value is not "archived at the epoch", it is not archived.
+  if (typeof t.archivedAt === "number" && t.archivedAt > 0) out.archivedAt = t.archivedAt;
+  return out;
+}
+
+/** Is this thread archived? THE predicate — every surface that hides archived
+ *  threads asks this rather than testing the field itself, so "archived" has
+ *  one definition (a positive timestamp) in one place. */
+export function isThreadArchived(thread: Thread): boolean {
+  return typeof thread.archivedAt === "number" && thread.archivedAt > 0;
+}
+
+/** The threads every ordinary surface means: side-menu rows, the `See all (N)`
+ *  count, the history screen's Active tab. */
+export function activeThreads(threads: readonly Thread[]): Thread[] {
+  return threads.filter((t) => !isThreadArchived(t));
+}
+
+/** The history screen's Archived tab — the ONLY surface archived threads
+ *  appear on. */
+export function archivedThreads(threads: readonly Thread[]): Thread[] {
+  return threads.filter((t) => isThreadArchived(t));
 }
 
 function sanitizeThreads(raw: unknown): Thread[] {
@@ -359,13 +396,21 @@ export function sortThreadsForHistory(
  *  always present regardless of recency. A live thread scrolled out of the
  *  list would be a bug (you cannot reach the conversation you are having), so
  *  when more than `limit` threads are live the list grows to fit them rather
- *  than truncating. Live threads sort first, so this is a widened slice. */
+ *  than truncating. Live threads sort first, so this is a widened slice.
+ *
+ *  ARCHIVED threads are dropped here, before any of that (increment E): the
+ *  rail is the recent-work list and archiving is how you say "not now". The
+ *  filter lives INSIDE this function rather than at its two call sites so the
+ *  rail and its `See all (N)` count can never disagree about what is on it.
+ *  Archiving a thread that is still LIVE is allowed and does hide it — that is
+ *  an explicit user act on the record, not the truncation the rule above
+ *  guards against, and the thread's TAB is untouched either way. */
 export function selectMenuThreads(
   threads: readonly Thread[],
   live: ReadonlySet<string>,
   limit: number = MENU_THREAD_LIMIT
 ): Thread[] {
-  const sorted = sortThreadsForHistory(threads, live);
+  const sorted = sortThreadsForHistory(activeThreads(threads), live);
   let liveCount = 0;
   for (const t of sorted) if (live.has(t.id)) liveCount++;
   return sorted.slice(0, Math.max(limit, liveCount));
@@ -652,24 +697,55 @@ export function promoteThreadRecord(args: {
   return t;
 }
 
-/** claude restarted inside a tab that already has a thread, under a DIFFERENT
- *  conversation uuid. Per the increment-C idempotency rule this updates the
- *  EXISTING record rather than creating a second one for the same tab — the
- *  live conversation is the discovered one, so a row still pointing at the old
- *  uuid would revive the wrong history.
+/** Sever a thread's tab binding BY THREAD ID, keeping the record whole.
  *
- *  Field-level update on the existing record (never a bulk replace — see the
- *  Ky-bug note at the top of this file). */
-export function adoptChatSession(
-  threadId: string,
-  chatSessionId: string,
-  chatStarted: boolean
-): void {
-  threads = threads.map((t) =>
-    t.id === threadId && t.chatSessionId !== chatSessionId
-      ? { ...t, chatSessionId, chatStarted, lastActivityAt: Date.now() }
-      : t
-  );
+ *  This is Decision 1's half of "a plain `claude` in a bound tab starts a NEW
+ *  thread" (increment E, reversing increment C's `adoptChatSession`). Adopting
+ *  overwrote the record's chatSessionId with the restarted conversation's,
+ *  which silently rebound the row to a fresh empty conversation and FORGOT the
+ *  old uuid — the one thing that made the old conversation revivable. Now
+ *  thread A simply lets the tab go (uuid intact, still in the history, still
+ *  revivable) and the promotion pass creates thread B for that tab.
+ *
+ *  Same effect on the record as unbindThreadsForSession, keyed by thread
+ *  rather than by session because the caller is holding a plan, not an event. */
+export function unbindThread(threadId: string): void {
+  const t = getThreadById(threadId);
+  if (!t) return;
+  threads = threads.map((x) => (x.id === threadId ? { ...x, sessionId: null } : x));
+  launched.delete(threadId);
+  booting.delete(threadId);
+  bump();
+}
+
+/** Rename (increment E, Decision 4). LOCAL to Switchboard's record: claude's
+ *  session is not touched, has no title of its own, and never learns about
+ *  this. An empty/whitespace title falls back to the record's DERIVED default
+ *  rather than persisting a blank row. Rides the existing persistence (the
+ *  workspace blob + the disk mirror), so it survives a restart. */
+export function renameThread(threadId: string, title: string): void {
+  const t = getThreadById(threadId);
+  if (!t) return;
+  const next = title.trim() || derivedThreadTitle(t);
+  if (next === t.title) return;
+  threads = threads.map((x) => (x.id === threadId ? { ...x, title: next } : x));
+  bump();
+}
+
+/** Archive / unarchive (increment E, Decision 5). Nothing but the flag moves:
+ *  the record, its uuid and its tab binding are untouched, which is what makes
+ *  archiving reversible and lossless — the exact opposite of delete. */
+export function setThreadArchived(threadId: string, archived: boolean): void {
+  const t = getThreadById(threadId);
+  if (!t || isThreadArchived(t) === archived) return;
+  threads = threads.map((x) => {
+    if (x.id !== threadId) return x;
+    if (!archived) {
+      const { archivedAt: _dropped, ...rest } = x;
+      return rest;
+    }
+    return { ...x, archivedAt: Date.now() };
+  });
   bump();
 }
 
@@ -681,9 +757,20 @@ export function bindThreadSession(threadId: string, sessionId: string): void {
   bump();
 }
 
-/** Mark the thread's claude process as launched in this app run. */
+/** Mark the thread's claude process as launched in this app run.
+ *
+ *  ALSO UNARCHIVES (increment E): a conversation with a live claude process
+ *  behind it is by definition not "not now". Every path that reaches here —
+ *  an explicit revive from the Archived tab, the promotion pass binding a
+ *  rediscovered conversation — is the user putting the thread back in use, and
+ *  leaving it archived would hide a RUNNING conversation from the rail, which
+ *  is the one thing selectMenuThreads exists to prevent. This is the single
+ *  choke point for "claude is behind this row", so it is the only honest place
+ *  to put the rule. (Archiving a live thread by hand still works: that is an
+ *  explicit act, not a side effect.) */
 export function markThreadLaunched(threadId: string): void {
   launched.add(threadId);
+  setThreadArchived(threadId, false);
   bump();
 }
 
@@ -759,8 +846,10 @@ export function unbindThreadsForSession(sessionId: string): void {
   bump();
 }
 
-/** Explicit thread delete (the row's × affordance): removes the RECORD. The
- *  bound session, if any, lives on as a plain tab. */
+/** Explicit thread delete (the row menu's Delete, behind its dialog): removes
+ *  the RECORD. The bound session, if any, lives on as a plain tab — a record
+ *  and a shell are different things. claude's transcript on disk is untouched
+ *  too; what is lost is Switchboard's knowledge of its uuid. */
 export function deleteThread(threadId: string): void {
   threads = threads.filter((t) => t.id !== threadId);
   launched.delete(threadId);
@@ -802,13 +891,16 @@ export type ThreadActions = {
   reviveThread: (threadId: string) => void;
   /** "+ new thread" affordance: open the create dialog. */
   newThread: () => void;
-  /** × affordance: delete the record (session tab survives). */
-  deleteThread: (threadId: string) => void;
-  /** Same delete, behind a ConfirmDialog. Used by the history SCREEN, where a
-   *  row is a deliberate target rather than a hover affordance in a dense rail
-   *  — and where deleting the record is the only thing standing between the
-   *  user and an unreachable conversation. */
+  /** Row menu → Delete, behind the ConfirmDialog. There is no unconfirmed
+   *  delete action any more (increment E, Decision 3): the record is the only
+   *  route back to a conversation, on BOTH surfaces, so the bare `×` that used
+   *  to delete a side-menu row on one click is gone with it. */
   confirmDeleteThread: (threadId: string) => void;
+  /** Row menu → Rename, or a double-click on the row. Persists. */
+  renameThread: (threadId: string, title: string) => void;
+  /** Row menu → Archive / Unarchive. Reversible and lossless; never presented
+   *  as deleting. */
+  setThreadArchived: (threadId: string, archived: boolean) => void;
 };
 
 let threadActions: ThreadActions | null = null;
