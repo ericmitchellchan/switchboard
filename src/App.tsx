@@ -56,6 +56,7 @@ import {
   registerPanelActions,
   artifactFor,
   activeTabArtifact,
+  describeArtifact,
   inheritPanel,
   getPanelWidth,
   usePanelIdentity,
@@ -67,7 +68,7 @@ import {
   setKbRootForContext,
 } from "./lib/agentContext";
 import { docFileName, parsePinsFile, pinsForDoc, sidecarPathFor } from "./lib/pins";
-import { ArtifactPanel } from "./components/ArtifactPanel";
+import { ArtifactPanel, CRUMB_TONE } from "./components/ArtifactPanel";
 import { NewThreadDialog } from "./components/NewThreadDialog";
 import { DocView } from "./components/kb/DocView";
 import { ExplorerView } from "./components/ExplorerView";
@@ -1986,11 +1987,15 @@ class ScreenErrorBoundary extends Component<BoundaryProps, BoundaryState> {
  *  this keep-alive screen is hidden. The `doc` route param keeps deep links
  *  and lastByScreen restoration working. */
 function KnowledgeBaseScreen({ active, doc, menuHidden }: { active: boolean; doc: string | undefined; menuHidden: boolean }) {
-  const crumbs = doc ? doc.split("/") : [];
+  // ONE breadcrumb rule for the doc, shared with the panel header
+  // (panelStore.describeArtifact + ArtifactPanel.CRUMB_TONE): `kb` dim, the kb
+  // project emphasized, intermediate ancestors dim, the file bright. The panel
+  // used to promise "mirrors the KB screen exactly" in a comment — now the two
+  // read the same function and cannot drift.
+  const crumbs = doc ? describeArtifact({ kind: "kb-doc", path: doc }).crumbs : [];
   return (
     <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-      {/* Breadcrumb header per wireframe row 2: 36px, `kb / <project> / … / file.md` —
-          project emphasized, intermediate segments dim, file name bright. */}
+      {/* Breadcrumb header per wireframe row 2: 36px, `kb / <project> / … / file.md`. */}
       <div
         style={{
           height: 36,
@@ -2007,28 +2012,20 @@ function KnowledgeBaseScreen({ active, doc, menuHidden }: { active: boolean; doc
           overflow: "hidden",
         }}
       >
-        <span>kb</span>
-        {crumbs.map((seg, i) => (
-          <Fragment key={`${i}-${seg}`}>
-            <span>/</span>
-            <span
-              style={{
-                color:
-                  i === crumbs.length - 1
-                    ? "var(--text-primary)"
-                    : i === 0
-                      ? "var(--text-secondary)"
-                      : "var(--text-dim)",
-                fontWeight: i === 0 ? 600 : 400,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-              }}
-            >
-              {seg}
+        {crumbs.map((crumb, i) => (
+          <Fragment key={`${i}-${crumb.text}`}>
+            {i > 0 && <span>/</span>}
+            <span style={{ ...CRUMB_TONE[crumb.tone], overflow: "hidden", textOverflow: "ellipsis" }}>
+              {crumb.text}
             </span>
           </Fragment>
         ))}
-        {crumbs.length === 0 && <span>/</span>}
+        {crumbs.length === 0 && (
+          <>
+            <span style={CRUMB_TONE.dim}>kb</span>
+            <span>/</span>
+          </>
+        )}
       </div>
       <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
         {doc ? (

@@ -1,7 +1,7 @@
 # Switchboard
 
 ## Project Overview
-Personal workstation desktop app: tabbed terminal multiplexer for AI coding agent sessions (split panes, PTY management, agent status detection, auto-task extraction) plus route-switched Knowledge Base, diagram, and repo Explorer screens with durable agent threads. Built with Tauri v2 + React 18 + xterm.js v5.
+Personal workstation desktop app: tabbed terminal multiplexer for AI coding agent sessions (split panes, PTY management, agent status detection, auto-task extraction) plus route-switched Knowledge Base, diagram, and repo Explorer screens with durable agent threads, and a per-tab artifact panel that keeps a doc/wireframe/diagram/repo file co-present with the running shell. Built with Tauri v2 + React 18 + xterm.js v5.
 
 ## Architecture
 
@@ -25,6 +25,7 @@ src/
 │   ├── NewThreadDialog.tsx      → Repo picker for creating a thread
 │   ├── NewSessionDialog.tsx     → Repo picker / new session config (lazy-loaded)
 │   ├── ExplorerView.tsx         → Explorer screen body: breadcrumb + file viewer (tree lives in the side menu)
+│   ├── ArtifactPanel.tsx        → Artifact panel host: right-side co-present surface inside the terminal screen (divider, header chrome, docked/overlay); hosts DocView / FileViewer, renders no viewer of its own
 │   ├── UpdateChip.tsx           → In-app updater chip (consent-based install flow)
 │   ├── ConfirmDialog.tsx        → Modal confirm (close/destructive actions)
 │   ├── kb/                      → Knowledge Base screen views
@@ -49,6 +50,8 @@ src/
 │   ├── fitQueue.ts              → Debounced per-session fit pipeline (show/resize coalescing)
 │   ├── route.ts                 → URL-backed route model + nav store (screen switching)
 │   ├── threadStore.ts           → Durable agent threads: records, revive decisions, shell-ready wait, action bridge
+│   ├── panelStore.ts            → Artifact panel state (per-TAB artifact + global width), layout/drag math, header breadcrumbs, open-in-panel decision (`decideOpen`/`fullWidthRoute`), toggle memory, active-tab + send-to-thread bridges
+│   ├── agentContext.ts          → Agent context injection (T8): shell-safe sanitizer + the two seam builders (`buildSpawnContext`, `buildSendReference`) + KB-root cache. PURE — the effectful ends live in App/threadStore/panelStore
 │   ├── kb.ts                    → KB doc list/read data layer (poll while active)
 │   ├── pins.ts                  → Wireframe pin/note file model (pure ops over pins JSON)
 │   ├── explorer.ts              → Explorer data layer (projects/listing/read via IPC, live-thread annotation)
@@ -58,13 +61,13 @@ src/
 │   ├── statusDetector.ts        → Agent status state machine (pattern match + dwell hysteresis)
 │   ├── taskDetector.ts          → Auto-detect build/test/git errors from PTY output
 │   ├── paneLayout.ts            → Immutable binary tree operations
-│   ├── workspace.ts             → Periodic save/restore to localStorage + disk (v2 adds threads)
+│   ├── workspace.ts             → Periodic save/restore to localStorage + disk (v2 adds threads, v3 adds per-tab `panels` + `panelWidth`)
 │   ├── ipc.ts                   → Tauri invoke() wrappers for all backend commands
 │   ├── statusConfig.ts          → Status colors, icons, labels (single source of truth)
 │   ├── logger.ts                → Frontend structured logging
 │   ├── updater.ts               → Auto-update check
 │   └── export.ts                → Export session to file
-└── lib/*.test.ts              → 12 Vitest test suites (paneLayout, statusDetector, taskDetector, resizePolicy, terminalLifecycle, route, threadStore, kb, pins, explorer, diagramZoom, updaterState)
+└── lib/*.test.ts              → 14 Vitest test suites (paneLayout, statusDetector, taskDetector, resizePolicy, terminalLifecycle, route, threadStore, panelStore, agentContext, kb, pins, explorer, diagramZoom, updaterState)
 
 src-tauri/
 ├── src/
@@ -132,6 +135,10 @@ pnpm test:watch        # Vitest (watch mode)
 - **Spawn generations** — every PTY event carries the spawn's generation; the expectation is bumped BEFORE each restart invoke so a dying old reader thread's output/exit events are dropped, never rendered
 - **Grow-only resize policy** — terminal cols never shrink on pane narrow (horizontal scroll instead); widen = snapshot-reflow; mid-stream grid changes deferred until output settles (`resizePolicy.ts`)
 - **Threads** — a thread binds a tab to a claude conversation via `chatSessionId` (minted by us) + `chatStarted` (UI hint); the revive `--resume` vs `--session-id` choice comes from disk GROUND TRUTH (`claude_session_exists`), never from the hint
+- **Artifact panel is per-TAB, never per-pane** — `panelStore` keys on the TAB's `activeSessionId`, not `effectiveActiveSessionId` (the focused pane). A split terminal + panel just shares the width: moving pane focus never swaps or blanks the panel, and persistence never forks one binding per pane
+- **Panel geometry is measured against the WORKSPACE container** — App nests `[pane tree | divider | ArtifactPanel]` in a container that EXCLUDES the TaskSidebar, so the panel's right edge is the container's right edge. Every width rule in `panelStore` (`panelLayoutFor`, `panelWidthFromDrag`, the MIN_TERMINAL_WIDTH floor, overlay's `right: 0`) assumes that nesting; re-parenting the panel next to the sidebar makes all of them wrong by exactly the sidebar's width (0/38/280px)
+- **Two honest agent-context seams, and no third** — (1) SPAWN-TIME: `--append-system-prompt "<one-liner>"` on the thread launch line, re-derived from the target tab's panel at EVERY spawn so stale context dies with the session; a fresh thread inherits the panel it was launched from so the sentence is true. (2) SEND-TO-THREAD: `→ thread` TYPES a reference into the terminal with NO trailing `\r` — the Enter is the user's. Anything that injects mid-conversation or presses Enter for the user is out of scope. Both strings go through `agentContext.sanitizeForTypedLine` (control chars, `" \ $ % \``) because they land on a shell line
+- **Workspace v3** — `panels: Record<sessionId, Artifact>` + `panelWidth` ride inside the same localStorage blob; on restore, keys remap through the session idMap and unmapped ones are DROPPED (a panel binding without its tab is meaningless, unlike a thread, which is severed and stays revivable). Records stay LEAN via `sanitizeArtifact` on every load path
 - **Lazy loading** — NewSessionDialog loaded via `React.lazy` + Suspense only when repos configured; mermaid is its own lazy chunk (DiagramView)
 - **`portable-pty = "=0.8.1"`** — pinned, v0.9 has Windows ConPTY bug
 - **CLAUDECODE env var** stripped from PTY sessions
@@ -162,18 +169,39 @@ These are recurring problem areas from git history — be aware when working in 
 
 ## Keyboard Shortcuts
 
+`src/hooks/useKeyboardShortcuts.ts` is the SOURCE OF TRUTH — this table and README's
+are reconciled against it. Adding a chord means updating both.
+
 | Action | Shortcut |
 |--------|----------|
 | New tab | Ctrl+T |
 | Close tab + session | Ctrl+W |
 | Close pane only | Ctrl+Shift+W |
 | Prev/next tab | Ctrl+[ / Ctrl+] |
+| Move tab left/right | Ctrl+Shift+[ / Ctrl+Shift+] |
 | Jump to tab | Ctrl+1–9 |
-| Toggle sidebar | Ctrl+B |
+| Cycle task sidebar (full/collapsed/hidden) | Ctrl+B |
+| Toggle side menu (navigator) | Ctrl+Shift+B |
+| Toggle artifact panel (active tab) | Ctrl+Shift+P |
+| Toggle floating PiP window | Ctrl+Shift+O |
+| Export session scrollback | Ctrl+Shift+S |
 | Terminal search | Ctrl+F |
 | Split horizontal | Ctrl+\\ |
 | Split vertical | Ctrl+- |
 | Move pane focus | Ctrl+Alt+Arrow |
+| Reload app window | F5 or Ctrl+Shift+R |
+| Copy selection / SIGINT | Ctrl+C |
+| Paste into terminal | Ctrl+V |
+
+Chord notes:
+- **Ctrl+Shift+P moved PiP to Ctrl+Shift+O** (A2) — the two cannot share a chord.
+- **Ctrl+Shift+W / Ctrl+Shift+S / Ctrl+Shift+O / Ctrl+Shift+[ ] / Ctrl+Alt+Arrow /
+  Ctrl+- are keyboard-ONLY** — no button, hint or tooltip surfaces them anywhere in
+  the UI. The StatusBar hint strip advertises Ctrl+T/W/[ ]/F/\\/1-9 plus the two
+  clickable chips (Ctrl+Shift+B menu, Ctrl+Shift+P panel, the latter only while the
+  chord would do something).
+- **Ctrl+click** on a side-menu tree row inverts the open decision (panel ⇄ full
+  width) — mouse, not keyboard; the rule lives in `panelStore.decideOpen`.
 
 ## Tracker & Knowledge Routing
 

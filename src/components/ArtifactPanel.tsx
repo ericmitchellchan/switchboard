@@ -48,7 +48,11 @@ import { buildSendReference, refOptions } from "../lib/agentContext";
 import { DocView } from "./kb/DocView";
 import { FileViewer, type OpenFile } from "./ExplorerView";
 
-const CRUMB_TONE: Record<ArtifactCrumb["tone"], CSSProperties> = {
+/** Tone → paint. Exported because the KB SCREEN's breadcrumb renders the same
+ *  crumbs from the same `describeArtifact` — panel and screen must not drift
+ *  (that drift is exactly what the "mirrors the KB screen exactly" comment on
+ *  describeArtifact used to promise by hand). */
+export const CRUMB_TONE: Record<ArtifactCrumb["tone"], CSSProperties> = {
   lead: { color: "var(--text-secondary)", fontWeight: 600 },
   dim: { color: "var(--text-dim)", fontWeight: 400 },
   bright: { color: "var(--text-primary)", fontWeight: 400 },

@@ -108,9 +108,9 @@ export function ancestorFolders(docPath: string): string[] {
 
 // ── Doc kind (extension switch, pure) ────────────────────────────────────────
 
-/** What a doc path renders as. Only "markdown" renders in T6; "wireframe"
- *  (T7) and "diagram"/"code"/"data" (T7/T9) show placeholders until their
- *  tasks land — the switch itself is the stable seam they plug into. */
+/** What a doc path renders as. "markdown" (T6), "wireframe" (T7) and
+ *  "diagram" (T9) all have real renderers; "code"/"data"/"unknown" still show
+ *  DocView's placeholder — the switch is the stable seam they plug into. */
 export type DocKind = "markdown" | "wireframe" | "diagram" | "code" | "data" | "unknown";
 
 export function docKind(path: string): DocKind {

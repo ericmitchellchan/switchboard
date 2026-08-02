@@ -40,3 +40,14 @@ that stop being true.
   inside the terminal theme (cursor, ANSI magenta, selection tint) and as the
   default repo-identity fallback; functional colors (statusConfig, waiting badge,
   task category/priority) untouched.
+- 2026-08-02 — The PANEL is the co-present mode; SCREENS stay full-width reading. An
+  artifact (KB doc, wireframe, diagram, repo file) opens in a right-hand panel beside
+  the live shell — a click from the terminal screen opens the panel, a click from the
+  KB/Explorer screen opens full width, and Ctrl+click inverts either. Mock the panel
+  as a surface INSIDE the terminal screen (`pane tree | 4px divider | panel`), never
+  as a third top-level column beside the task sidebar; below a narrow breakpoint it
+  overlays the pane tree rather than crushing it.
+- 2026-08-02 — The soft palette holds INSIDE the panel: its chrome (header glyph +
+  breadcrumb, the `→ thread` / `open full` / `×` actions, the divider) is white/zinc
+  only, same ramp and same 1px hairlines as the rest of the app. Status colors stay
+  functional-only — nothing in the panel is colored to decorate it.
