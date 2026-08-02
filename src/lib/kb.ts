@@ -16,7 +16,7 @@
 // a poll tick never causes a re-render, flicker, or scroll reset. The doc
 // LIST refreshes on screen re-activation, not on the poll.
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { kbListDocs, kbReadDoc } from "./ipc";
 
 /** Open-doc re-read interval while the KB screen is visible. */
@@ -239,9 +239,19 @@ export function useKbDocList(active: boolean): { docs: string[] | null; error: s
  * a deep-linked doc is ready when the screen first shows, but never poll.
  * mergeDocRead guarantees state identity is preserved on unchanged content —
  * no re-render, no innerHTML swap, no scroll reset.
+ *
+ * `reload` forces the read NOW (the wireframe toolbar's ⟳). It goes through
+ * the SAME effect and the same mergeDocRead fold rather than a second read
+ * path, so an unchanged file is still a no-op re-render and a changed one is
+ * the identical clean content swap the poll performs.
  */
-export function useKbDoc(path: string | undefined, active: boolean): KbDocState {
+export function useKbDoc(
+  path: string | undefined,
+  active: boolean
+): KbDocState & { reload: () => void } {
   const [state, setState] = useState<KbDocState>(EMPTY_DOC_STATE);
+  const [nonce, setNonce] = useState(0);
+  const reload = useCallback(() => setNonce((n) => n + 1), []);
 
   useEffect(() => {
     if (!path) {
@@ -270,7 +280,7 @@ export function useKbDoc(path: string | undefined, active: boolean): KbDocState 
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [path, active]);
+  }, [path, active, nonce]);
 
-  return state;
+  return { ...state, reload };
 }

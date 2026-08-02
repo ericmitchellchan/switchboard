@@ -47,9 +47,14 @@ const NOTE_STYLE: CSSProperties = {
 export function ComponentPreview({
   artifact,
   content,
+  onReload,
 }: {
   artifact: FileArtifact;
   content: string;
+  /** Host's re-read (see ArtifactBody). Passed straight through: a reload
+   *  produces new SOURCE, this effect recompiles it, and the frame swaps —
+   *  the compile step needs no reload logic of its own. */
+  onReload?: () => void;
 }) {
   const [doc, setDoc] = useState<string | null>(null);
   const fileName = docFileName(artifact.path);
@@ -83,7 +88,7 @@ export function ComponentPreview({
   // The compiled document goes through the wireframe surface unchanged:
   // sandbox="allow-scripts" with no allow-same-origin, the contentWindow
   // identity guard on messages, srcDoc memoized on content, zoom + pins.
-  return <WireframeView artifact={artifact} content={doc} />;
+  return <WireframeView artifact={artifact} content={doc} onReload={onReload} />;
 }
 
 /** Chunk-load failure. Same look as componentPreview's own notes, inlined

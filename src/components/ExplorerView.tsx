@@ -24,7 +24,7 @@
 // surface the backend's error string dimly. Reads are one-shot per
 // (project, path) — no polling, matching the old behavior.
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import type { FileArtifact } from "../types";
 import { explorerRead } from "../lib/explorer";
@@ -87,6 +87,12 @@ export function ExplorerView({
   menuHidden: boolean;
 }) {
   const [openFile, setOpenFile] = useState<OpenFile | null>(null);
+  // Repo reads are ONE-SHOT — there is no poll to wait for, so a repo file
+  // opened before an edit would otherwise show the old text until you closed
+  // and reopened it. `reload` re-runs this same effect; nothing else about the
+  // read changes.
+  const [reloadNonce, setReloadNonce] = useState(0);
+  const reload = useCallback(() => setReloadNonce((n) => n + 1), []);
 
   useEffect(() => {
     if (!project || !path) {
@@ -105,7 +111,7 @@ export function ExplorerView({
     return () => {
       cancelled = true;
     };
-  }, [project, path]);
+  }, [project, path, reloadNonce]);
 
   const segments = path ? path.split("/") : [];
   const fileName = segments[segments.length - 1];
@@ -159,7 +165,7 @@ export function ExplorerView({
 
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", background: "var(--bg-primary)" }}>
         {openFile && project ? (
-          <FileViewer project={project} file={openFile} />
+          <FileViewer project={project} file={openFile} onReload={reload} />
         ) : (
           <CenteredNote>
             <span>select a file from the explorer tree</span>
@@ -184,7 +190,17 @@ export function ExplorerView({
  *  the route/props path, so the identity and the content on screen always
  *  name the same file even in the render where a new read is still in flight
  *  (the same rule DocView's `ready` gate enforces for the KB poll). */
-export function FileViewer({ project, file }: { project: string; file: OpenFile }) {
+export function FileViewer({
+  project,
+  file,
+  onReload,
+}: {
+  project: string;
+  file: OpenFile;
+  /** Re-read this file from disk. The HOST owns the read (this screen and the
+   *  artifact panel each have their own), so each passes its own. */
+  onReload?: () => void;
+}) {
   const artifact = useMemo<FileArtifact>(
     () => ({ kind: "repo-file", project, path: file.path }),
     [project, file.path]
@@ -201,6 +217,7 @@ export function FileViewer({ project, file }: { project: string; file: OpenFile 
       artifact={artifact}
       content={file.content}
       fallback={<SourcePre content={file.content} />}
+      onReload={onReload}
     />
   );
 }

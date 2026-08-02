@@ -30,6 +30,14 @@
 // "ready" message arrives, so pin-mode SURVIVES a live reload (an in-progress
 // "click to place" stays armed — the mode lives in parent state).
 //
+// The toolbar's ⟳ is that same path, on demand: it calls the HOST's `onReload`
+// (never a read of its own — the loading policy stays where it lives), the
+// host's next read arrives as new `content`, and the memo does the rest. Zoom
+// and pins are untouched by construction: zoom is component state keyed on the
+// artifact, pins live in the shared pinsStore, and neither is derived from
+// `content`. Shown for repo files AND KB docs — a repo read is one-shot and a
+// KB poll pauses while its host is hidden, so both genuinely need it.
+//
 // Zoom: transform:scale(z) + width/height 100/z% virtual viewport — the box
 // stays container-sized, scrolling stays inside the iframe, content reflows
 // like browser zoom. Persisted per doc-path in sessionStorage WRITE-THROUGH
@@ -268,7 +276,20 @@ function noteMeta(createdAt: string): string {
 
 /** Mounted by ArtifactBody with key={artifactIdentity} — all state is per-doc
  *  by construction. `content` is the HOST's (KB poll / explorer read). */
-export function WireframeView({ artifact, content }: { artifact: FileArtifact; content: string }) {
+export function WireframeView({
+  artifact,
+  content,
+  onReload,
+}: {
+  artifact: FileArtifact;
+  content: string;
+  /** Re-read this artifact from disk, supplied by the HOST (DocView's
+   *  useKbDoc.reload for KB docs, the explorerRead effect's for repo files).
+   *  The view does not load anything itself — it asks, new `content` arrives
+   *  as a prop, and the srcDoc memo swaps exactly as it does for a poll tick,
+   *  so zoom, pins and pin-mode all survive untouched. */
+  onReload?: () => void;
+}) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const frameBoxRef = useRef<HTMLDivElement>(null);
 
@@ -467,6 +488,23 @@ export function WireframeView({ artifact, content }: { artifact: FileArtifact; c
           <button type="button" style={BTN_STYLE} onClick={() => applyZoom(() => 1)} title="Reset zoom">
             100%
           </button>
+          {/* RELOAD — for BOTH artifact kinds, deliberately. A repo file has
+              no other refresh path at all (its read is one-shot), and a KB doc
+              polls only while its host is VISIBLE; an affordance that appeared
+              or behaved differently depending on which tree a file happens to
+              live in would be its own confusion. It costs no vertical space:
+              the toolbar is already here. */}
+          {onReload && (
+            <button
+              type="button"
+              style={BTN_STYLE}
+              onClick={onReload}
+              title="Re-read this file from disk"
+              aria-label="Reload"
+            >
+              ⟳
+            </button>
+          )}
         </div>
         <div ref={frameBoxRef} style={FRAME_BOX_STYLE}>
           {/* SANDBOX: allow-scripts ONLY — never add allow-same-origin (module header). */}

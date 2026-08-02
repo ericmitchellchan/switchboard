@@ -662,6 +662,12 @@ function PickerOverlay({ sessionId }: { sessionId: string }) {
  *  read exactly. */
 function RepoFileBody({ project, path }: { project: string; path: string }) {
   const [file, setFile] = useState<OpenFile | null>(null);
+  // One-shot reads need an explicit way to run again — the wireframe toolbar's
+  // ⟳ (see WireframeView). Re-running THIS effect keeps the panel's read and
+  // the Explorer screen's read identical, which is the whole point of them
+  // being the same two lines.
+  const [reloadNonce, setReloadNonce] = useState(0);
+  const reload = useCallback(() => setReloadNonce((n) => n + 1), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -676,10 +682,10 @@ function RepoFileBody({ project, path }: { project: string; path: string }) {
     return () => {
       cancelled = true;
     };
-  }, [project, path]);
+  }, [project, path, reloadNonce]);
 
   if (!file) return null;
-  return <FileViewer project={project} file={file} />;
+  return <FileViewer project={project} file={file} onReload={reload} />;
 }
 
 function CenteredNote({ children }: { children: ReactNode }) {

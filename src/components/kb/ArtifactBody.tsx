@@ -31,6 +31,7 @@ export function ArtifactBody({
   artifact,
   content,
   fallback,
+  onReload,
 }: {
   /** WHICH document this is — identity for per-doc state, the pins sidecar,
    *  and the `→ thread` reference. */
@@ -40,6 +41,11 @@ export function ArtifactBody({
   content: string;
   /** Rendered for kinds with no renderer (`data`, `unknown`). */
   fallback: ReactNode;
+  /** Re-read this artifact from disk NOW. The HOST supplies it, exactly as it
+   *  supplies `content` — a renderer still never loads a path itself. Passed
+   *  through to the wireframe surface, which is the only renderer with a
+   *  toolbar to put it on. */
+  onReload?: () => void;
 }) {
   const key = artifactIdentity(artifact);
   switch (docKind(artifact.path)) {
@@ -47,13 +53,15 @@ export function ArtifactBody({
       return <MarkdownDoc content={content} />;
     case "wireframe":
       // Live sandboxed rendering for .html/.htm.
-      return <WireframeView key={key} artifact={artifact} content={content} />;
+      return <WireframeView key={key} artifact={artifact} content={content} onReload={onReload} />;
     case "diagram":
       // Mermaid with pan/zoom (its own lazy chunk).
       return <DiagramView key={key} path={artifact.path} content={content} />;
     case "code":
       // .jsx/.tsx compiled into the same sandboxed frame (its own lazy chunk).
-      return <ComponentPreview key={key} artifact={artifact} content={content} />;
+      return (
+        <ComponentPreview key={key} artifact={artifact} content={content} onReload={onReload} />
+      );
     default:
       return <>{fallback}</>;
   }

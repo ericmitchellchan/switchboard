@@ -35,7 +35,7 @@ export function DocView({ path, active }: { path: string; active: boolean }) {
   // `content` is the OLD doc while `kind` is already the NEW one. Rendering
   // through that window mounted DiagramView with markdown in hand and flashed
   // a mermaid parse error. Nothing renders until the two agree.
-  const { path: loadedPath, content, error } = useKbDoc(path, active);
+  const { path: loadedPath, content, error, reload } = useKbDoc(path, active);
   const ready = loadedPath === path;
   const kind = docKind(path);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -59,6 +59,11 @@ export function DocView({ path, active }: { path: string; active: boolean }) {
           artifact={artifact}
           content={content}
           fallback={<PlaceholderBody kind={kind} path={path} />}
+          // The reload affordance is the HOST's read, forced: the KB's poll
+          // covers a doc you are watching, but not one you just saved from
+          // elsewhere and want NOW (and it pauses entirely while the screen is
+          // hidden). Same read, same merge, so an unchanged file is a no-op.
+          onReload={reload}
         />
       )}
     </div>
