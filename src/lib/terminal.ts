@@ -1,184 +1,53 @@
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
-import { WebglAddon } from "@xterm/addon-webgl";
-import { SearchAddon } from "@xterm/addon-search";
-import { SerializeAddon } from "@xterm/addon-serialize";
-import { WebLinksAddon } from "@xterm/addon-web-links";
-import { open } from "@tauri-apps/plugin-shell";
+// Terminal utilities + compatibility facade over the keep-alive registry.
+//
+// Instance OWNERSHIP (creation, keep-alive DOM, once-only PTY wiring, WebGL
+// attach/detach policy, disposal) lives in terminalRegistry.ts — panes acquire
+// and release instances through it, keyed by owner tokens whose rules are in
+// terminalLifecycle.ts. This module keeps the measurement/serialize/scroll
+// helpers and re-exports the registry-backed pieces so existing consumers
+// (workspace.ts, fitQueue.ts, App.tsx, useKeyboardShortcuts.ts, export.ts)
+// keep their import surface unchanged.
+
 import { log } from "./logger";
+import { resizeDecision } from "./resizePolicy";
+import {
+  getTerminal,
+  getAllTerminalIds,
+  enableWebGL,
+  disableWebGL,
+  setResizePropagationSuppressed,
+  registerDisposeCleanup,
+  isTerminalDetached,
+  setScreenWebGLGate,
+} from "./terminalRegistry";
 
-const THEME = {
-  background: "#0C0C0E",
-  foreground: "#E4E4E7",
-  cursor: "#A78BFA",
-  cursorAccent: "#0C0C0E",
-  selectionBackground: "rgba(167, 139, 250, 0.3)",
-  selectionForeground: "#E4E4E7",
-  black: "#18181B",
-  red: "#EF4444",
-  green: "#34D399",
-  yellow: "#F59E0B",
-  blue: "#60A5FA",
-  magenta: "#A78BFA",
-  cyan: "#22D3EE",
-  white: "#E4E4E7",
-  brightBlack: "#52525B",
-  brightRed: "#FCA5A5",
-  brightGreen: "#6EE7B7",
-  brightYellow: "#FCD34D",
-  brightBlue: "#93C5FD",
-  brightMagenta: "#C4B5FD",
-  brightCyan: "#67E8F9",
-  brightWhite: "#FAFAFA",
-};
-
-export interface TerminalInstance {
-  terminal: Terminal;
-  fitAddon: FitAddon;
-  webglAddon: WebglAddon | null;
-  searchAddon: SearchAddon;
-  serializeAddon: SerializeAddon;
-  webLinksAddon: WebLinksAddon;
-}
-
-// Module-level map: keeps terminal instances alive across React renders
-const terminalMap = new Map<string, TerminalInstance>();
+export type { TerminalInstance } from "./terminalRegistry";
+export {
+  getTerminal,
+  getAllTerminalIds,
+  enableWebGL,
+  disableWebGL,
+  setTerminalConfig,
+  isSessionDirty,
+  clearSessionDirty,
+  disposeTerminal,
+} from "./terminalRegistry";
 
 // Saved scroll positions for restoring after visibility change / sleep-wake
 const savedScrollPositions = new Map<string, { viewportY: number; baseY: number }>();
 
 // Hidden session tracking: sessions whose parent container has display:none
+// (single-pane mode keeps every tab MOUNTED and toggles CSS visibility — this
+// is distinct from the registry's keep-alive root, which holds UNMOUNTED
+// panes' terminals).
 const hiddenSessionIds = new Set<string>();
 
-// Dirty tracking: sessions that received new PTY data since last serialization.
-// Prevents saveAllScrollbacks from serializing unchanged terminals every 30s.
-const dirtySessionIds = new Set<string>();
-
-// Module-level config for font settings — set once from App after config loads
-let terminalConfig = {
-  fontSize: 13,
-  fontFamily: "'JetBrains Mono', 'Cascadia Code', 'SF Mono', monospace",
-};
-
-export function setTerminalConfig(cfg: { fontSize?: number; fontFamily?: string }) {
-  if (cfg.fontSize !== undefined) terminalConfig.fontSize = cfg.fontSize;
-  if (cfg.fontFamily !== undefined) terminalConfig.fontFamily = `'${cfg.fontFamily}', 'Cascadia Code', 'SF Mono', monospace`;
-}
-
-function buildTerminalOptions(opts?: { cols?: number; rows?: number; documentOverride?: Document }) {
-  return {
-    fontFamily: terminalConfig.fontFamily,
-    fontSize: terminalConfig.fontSize,
-    lineHeight: 1.3,
-    theme: THEME,
-    cursorBlink: true,
-    cursorStyle: "bar" as const,
-    scrollback: 10000,
-    allowProposedApi: true,
-    convertEol: true,
-    screenReaderMode: false,
-    ...(opts?.cols ? { cols: opts.cols } : {}),
-    ...(opts?.rows ? { rows: opts.rows } : {}),
-    ...(opts?.documentOverride ? { documentOverride: opts.documentOverride } : {}),
-  };
-}
-
-function buildInstance(terminal: Terminal): TerminalInstance {
-  const fitAddon = new FitAddon();
-  terminal.loadAddon(fitAddon);
-
-  const searchAddon = new SearchAddon();
-  terminal.loadAddon(searchAddon);
-
-  const serializeAddon = new SerializeAddon();
-  terminal.loadAddon(serializeAddon);
-
-  const webLinksAddon = new WebLinksAddon((_event, uri) => {
-    open(uri).catch(console.error);
-  });
-  terminal.loadAddon(webLinksAddon);
-
-  return {
-    terminal,
-    fitAddon,
-    webglAddon: null,
-    searchAddon,
-    serializeAddon,
-    webLinksAddon,
-  };
-}
-
-export function createTerminal(
-  sessionId: string,
-  opts?: { cols?: number; rows?: number }
-): TerminalInstance {
-  // Return existing if already created
-  const existing = terminalMap.get(sessionId);
-  if (existing) return existing;
-
-  log.debug(`Creating terminal for session id=${sessionId} cols=${opts?.cols} rows=${opts?.rows}`);
-
-  const terminal = new Terminal(buildTerminalOptions(opts));
-  const instance = buildInstance(terminal);
-  terminalMap.set(sessionId, instance);
-  return instance;
-}
-
-export function attachToDOM(sessionId: string, container: HTMLElement, withWebGL = true): void {
-  const instance = terminalMap.get(sessionId);
-  if (!instance) return;
-
-  log.debug(`Attaching terminal to DOM id=${sessionId} withWebGL=${withWebGL}`);
-
-  const { terminal } = instance;
-
-  // Open terminal into the container
-  if (!terminal.element) {
-    terminal.open(container);
-  } else {
-    container.appendChild(terminal.element);
-  }
-
-  // Load WebGL addon
-  if (withWebGL) {
-    enableWebGL(sessionId);
-  }
-
-  // NOTE: Do NOT call fit()/scrollToBottom() here.  TerminalPane owns
-  // all fit timing via a double-RAF to ensure the container layout has
-  // fully settled before measuring.  A competing fit() here would read
-  // stale dimensions and cause xterm to reflow its buffer with the
-  // wrong column count, producing garbled text and broken scroll.
-}
-
-export function enableWebGL(sessionId: string): void {
-  const instance = terminalMap.get(sessionId);
-  if (!instance || instance.webglAddon) return;
-
-  try {
-    const webglAddon = new WebglAddon();
-    webglAddon.onContextLoss(() => {
-      log.warn(`WebGL context lost for session id=${sessionId}`);
-      webglAddon.dispose();
-      instance.webglAddon = null;
-    });
-    instance.terminal.loadAddon(webglAddon);
-    instance.webglAddon = webglAddon;
-    log.debug(`WebGL enabled for session id=${sessionId}`);
-  } catch (e) {
-    log.warn(`Failed to enable WebGL for session id=${sessionId}: ${e}`);
-    instance.webglAddon = null;
-  }
-}
-
-export function disableWebGL(sessionId: string): void {
-  const instance = terminalMap.get(sessionId);
-  if (!instance || !instance.webglAddon) return;
-
-  log.debug(`Disabling WebGL for session id=${sessionId}`);
-  instance.webglAddon.dispose();
-  instance.webglAddon = null;
-}
+// The registry owns all disposal paths (session close / kill, app teardown);
+// clear this module's per-session state on every one of them.
+registerDisposeCleanup((sessionId) => {
+  savedScrollPositions.delete(sessionId);
+  hiddenSessionIds.delete(sessionId);
+});
 
 /**
  * Mark a terminal as hidden (parent container set to display:none by the
@@ -186,9 +55,14 @@ export function disableWebGL(sessionId: string): void {
  * terminal element in the DOM — no scroll reset, no reattach needed.
  */
 export function hideTerminal(sessionId: string): void {
+  // WebGL drop BEFORE the already-hidden guard (disableWebGL is idempotent):
+  // a remount while CSS-hidden — hide tab B → split unmounts its pane
+  // (parked, still in hiddenSessionIds) → back to single → B remounts with
+  // visible=false — has acquireTerminal re-enable WebGL, and the guard alone
+  // would leave that GPU context alive behind display:none.
+  disableWebGL(sessionId);
   if (hiddenSessionIds.has(sessionId)) return;
   hiddenSessionIds.add(sessionId);
-  disableWebGL(sessionId);
   log.debug(`Terminal hidden id=${sessionId}`);
 }
 
@@ -211,27 +85,30 @@ export function isTerminalHidden(sessionId: string): boolean {
 }
 
 /**
- * Remove a terminal element from the DOM (final cleanup before dispose).
- * Only called when a session is being closed — NOT on tab switch.
+ * Screen-level visibility (T11): the workstation shell hides the ENTIRE
+ * terminal screen with display:none while a non-terminal route (KB, Explorer)
+ * is active — a hide that TerminalPane's visible prop (tab visibility WITHIN
+ * the screen) never observes, so panes kept their GPU contexts behind it.
+ * App calls this on route changes. Hide = drop WebGL on every attached,
+ * non-CSS-hidden pane (same policy hideTerminal applies per tab); show =
+ * re-enable + repaint exactly like the adopt/show paths (hidden writes
+ * advanced the buffer while the renderer skipped them). CSS-hidden tabs and
+ * keep-alive-parked terminals stay WebGL-less on both transitions; the
+ * registry-side gate also keeps acquire/adopt/show/recover from creating
+ * contexts while the screen is hidden.
  */
-export function detachFromDOM(sessionId: string): void {
-  const instance = terminalMap.get(sessionId);
-  if (!instance) return;
-
-  log.debug(`Detaching terminal id=${sessionId} (final cleanup)`);
-
-  hiddenSessionIds.delete(sessionId);
-
-  // Dispose WebGL to free the context
-  if (instance.webglAddon) {
-    instance.webglAddon.dispose();
-    instance.webglAddon = null;
-  }
-
-  // Remove the terminal element from DOM without disposing the terminal
-  const el = instance.terminal.element;
-  if (el && el.parentElement) {
-    el.parentElement.removeChild(el);
+export function setTerminalScreenVisible(visible: boolean): void {
+  if (!setScreenWebGLGate(visible)) return; // no transition
+  for (const sessionId of getAllTerminalIds()) {
+    if (isTerminalDetached(sessionId)) continue;
+    if (hiddenSessionIds.has(sessionId)) continue;
+    if (visible) {
+      enableWebGL(sessionId);
+      const instance = getTerminal(sessionId);
+      instance?.terminal.refresh(0, instance.terminal.rows - 1);
+    } else {
+      disableWebGL(sessionId);
+    }
   }
 }
 
@@ -247,7 +124,7 @@ export function clearSavedScrollPosition(sessionId: string): void {
 
 /** Save scroll position without detaching (for visibility change / alt-tab) */
 export function saveScrollPosition(sessionId: string): void {
-  const instance = terminalMap.get(sessionId);
+  const instance = getTerminal(sessionId);
   if (!instance) return;
   const buf = instance.terminal.buffer.active;
   savedScrollPositions.set(sessionId, { viewportY: buf.viewportY, baseY: buf.baseY });
@@ -255,7 +132,7 @@ export function saveScrollPosition(sessionId: string): void {
 
 /** Restore scroll position from saved state (non-destructive — does not clear) */
 export function restoreScrollPosition(sessionId: string): void {
-  const instance = terminalMap.get(sessionId);
+  const instance = getTerminal(sessionId);
   if (!instance) return;
   const saved = savedScrollPositions.get(sessionId);
   if (!saved) return;
@@ -268,187 +145,8 @@ export function restoreScrollPosition(sessionId: string): void {
   }
 }
 
-export function getTerminal(sessionId: string): TerminalInstance | undefined {
-  return terminalMap.get(sessionId);
-}
-
-/** Mark a session as having new data (call after terminal.write) */
-export function markSessionDirty(sessionId: string): void {
-  dirtySessionIds.add(sessionId);
-}
-
-/** Check if a session has new data since last clearSessionDirty */
-export function isSessionDirty(sessionId: string): boolean {
-  return dirtySessionIds.has(sessionId);
-}
-
-/** Clear dirty flag after serialization */
-export function clearSessionDirty(sessionId: string): void {
-  dirtySessionIds.delete(sessionId);
-}
-
-export function disposeTerminal(sessionId: string): void {
-  const instance = terminalMap.get(sessionId);
-  if (!instance) return;
-
-  log.debug(`Disposing terminal for session id=${sessionId}`);
-  // Drop wiring before terminal.dispose() so we don't try to dispose listeners
-  // that the terminal has already torn down.
-  wiringRegistry.delete(sessionId);
-  wiringDisposables.delete(sessionId);
-  if (instance.webglAddon) {
-    instance.webglAddon.dispose();
-  }
-  instance.terminal.dispose();
-  terminalMap.delete(sessionId);
-  savedScrollPositions.delete(sessionId);
-  hiddenSessionIds.delete(sessionId);
-  dirtySessionIds.delete(sessionId);
-}
-
-// ---------------------------------------------------------------------------
-// xterm-level wiring registry
-//
-// Persists per-session callback definitions so that disposing and recreating
-// a Terminal (e.g. when popping a session into a Picture-in-Picture window)
-// can re-attach the same listeners to the new instance automatically.
-// ---------------------------------------------------------------------------
-
-export type XtermWiring = {
-  /** User typed/pasted into terminal — typically forwards to PTY stdin. */
-  onUserData: (sessionId: string, data: string) => void;
-  /** Fires after xterm parses written output — typically for status detection. */
-  onWriteParsed: (sessionId: string, terminal: Terminal) => void;
-  /** Alt-screen buffer change (vim/htop entry/exit). Optional. */
-  onBufferChange?: (sessionId: string, terminal: Terminal) => void;
-  /** Terminal resize — typically forwards new dims to PTY. */
-  onResize: (sessionId: string, dims: { cols: number; rows: number }) => void;
-};
-
-const wiringRegistry = new Map<string, XtermWiring>();
-const wiringDisposables = new Map<string, Array<() => void>>();
-
-function attachWiring(sessionId: string): void {
-  const wiring = wiringRegistry.get(sessionId);
-  const instance = terminalMap.get(sessionId);
-  if (!wiring || !instance) return;
-
-  const { terminal } = instance;
-  const disposables: Array<() => void> = [];
-
-  const onDataD = terminal.onData((data) => wiring.onUserData(sessionId, data));
-  disposables.push(() => onDataD.dispose());
-
-  const onWriteParsedD = terminal.onWriteParsed(() => wiring.onWriteParsed(sessionId, terminal));
-  disposables.push(() => onWriteParsedD.dispose());
-
-  if (wiring.onBufferChange) {
-    const onBufferChangeD = terminal.buffer.onBufferChange(() =>
-      wiring.onBufferChange!(sessionId, terminal)
-    );
-    disposables.push(() => onBufferChangeD.dispose());
-  }
-
-  const onResizeD = terminal.onResize((dims) => wiring.onResize(sessionId, dims));
-  disposables.push(() => onResizeD.dispose());
-
-  wiringDisposables.set(sessionId, disposables);
-}
-
-function detachWiring(sessionId: string): void {
-  const disposables = wiringDisposables.get(sessionId);
-  if (!disposables) return;
-  for (const d of disposables) {
-    try { d(); } catch { /* terminal may already be disposed */ }
-  }
-  wiringDisposables.delete(sessionId);
-}
-
-/**
- * Register the xterm-level event callbacks for a session and attach them to
- * the current Terminal instance. Idempotent — calling again replaces the
- * previous wiring. The wiring persists across `recreateTerminalInDocument`
- * calls, so callers don't need to re-register after PiP open/close.
- */
-export function setXtermWiring(sessionId: string, wiring: XtermWiring): void {
-  detachWiring(sessionId);
-  wiringRegistry.set(sessionId, wiring);
-  attachWiring(sessionId);
-}
-
-/** Remove a session's wiring (call on session close). */
-export function unsetXtermWiring(sessionId: string): void {
-  detachWiring(sessionId);
-  wiringRegistry.delete(sessionId);
-}
-
-/**
- * Dispose the existing Terminal for a session and create a fresh one bound
- * to a different document — used to move a terminal between the main window
- * and a Picture-in-Picture window. Scrollback is preserved via SerializeAddon.
- * Wiring registered via `setXtermWiring` is re-attached automatically.
- *
- * The caller is responsible for ensuring `targetContainer` is already inserted
- * into `targetDoc` before this is called (xterm.open() requires the container
- * to be in the document).
- */
-export function recreateTerminalInDocument(
-  sessionId: string,
-  targetDoc: Document,
-  targetContainer: HTMLElement,
-  options: { withWebGL: boolean }
-): void {
-  const existing = terminalMap.get(sessionId);
-  if (!existing) {
-    log.warn(`recreateTerminalInDocument: no terminal for session id=${sessionId}`);
-    return;
-  }
-
-  log.debug(`Recreating terminal id=${sessionId} in new document withWebGL=${options.withWebGL}`);
-
-  // Capture state from the existing terminal
-  const serialized = (() => {
-    try { return existing.serializeAddon.serialize(); }
-    catch (e) { log.warn(`Serialize failed for id=${sessionId}: ${e}`); return ""; }
-  })();
-  const cols = existing.terminal.cols;
-  const rows = existing.terminal.rows;
-
-  // Detach wiring before disposing so disposables don't fire on a dead terminal.
-  // Keep wiringRegistry intact — we'll re-attach to the new terminal below.
-  detachWiring(sessionId);
-
-  // Tear down old
-  if (existing.webglAddon) {
-    existing.webglAddon.dispose();
-  }
-  existing.terminal.dispose();
-  terminalMap.delete(sessionId);
-
-  // Build new with documentOverride
-  const terminal = new Terminal(buildTerminalOptions({ cols, rows, documentOverride: targetDoc }));
-  const instance = buildInstance(terminal);
-  terminalMap.set(sessionId, instance);
-
-  // Open in target container (must already be in targetDoc)
-  terminal.open(targetContainer);
-
-  // Replay scrollback
-  if (serialized) {
-    terminal.write(serialized, () => terminal.scrollToBottom());
-  }
-
-  // Re-attach wiring to the new terminal
-  attachWiring(sessionId);
-
-  // WebGL is per-document — main path opts in, PiP path opts out
-  if (options.withWebGL) {
-    enableWebGL(sessionId);
-  }
-}
-
 export function serializeTerminal(sessionId: string): string | null {
-  const instance = terminalMap.get(sessionId);
+  const instance = getTerminal(sessionId);
   if (!instance) return null;
   try {
     return instance.serializeAddon.serialize();
@@ -475,7 +173,7 @@ export function serializeTerminal(sessionId: string): string | null {
 export function serializeForPip(
   sessionId: string
 ): { text: string; cols: number; rows: number } | null {
-  const instance = terminalMap.get(sessionId);
+  const instance = getTerminal(sessionId);
   if (!instance) return null;
   try {
     const text = instance.serializeAddon.serialize();
@@ -490,53 +188,101 @@ export function serializeForPip(
   }
 }
 
-export function writeRestoreContent(sessionId: string, content: string): void {
-  const instance = terminalMap.get(sessionId);
-  if (!instance || !content) return;
-  instance.terminal.write(content, () => {
-    instance.terminal.scrollToBottom();
-  });
-}
+export type FitOutcome =
+  /** Nothing to do: grid already right, or the container isn't measurable. */
+  | { outcome: "none" }
+  /** A grid change is needed but the session is streaming — the caller
+   *  (fitQueue) flags a pending refit and re-runs after output settles. */
+  | { outcome: "deferred" }
+  /** The grid changed. `reflowed` = the widen path ran (snapshot → reset →
+   *  resize → async write): scroll restoration happens in the write callback,
+   *  so the caller must NOT restore scroll itself for this fit. */
+  | { outcome: "applied"; cols: number; rows: number; reflowed: boolean };
 
-export function fitTerminal(sessionId: string): { cols: number; rows: number } | null {
-  const instance = terminalMap.get(sessionId);
-  if (!instance) return null;
+/**
+ * Fit the terminal to its container under the settled resize policy
+ * (resizePolicy.ts): grow-only width capped at MAX_TERMINAL_COLS, rows follow
+ * the pane, widen = snapshot-reflow, mid-stream changes deferred.
+ *
+ * Never calls fitAddon.fit() — fit() applies proposeDimensions() verbatim,
+ * which would shrink cols on a narrowed pane (re-wrapping content the policy
+ * says must horizontal-scroll instead). We propose, decide, then resize()
+ * ourselves; xterm's onResize wiring forwards the one genuine PTY resize.
+ */
+export function fitTerminal(
+  sessionId: string,
+  opts?: { streaming?: boolean; initial?: boolean }
+): FitOutcome {
+  const instance = getTerminal(sessionId);
+  if (!instance) return { outcome: "none" };
 
   // Guard: skip fit if container has zero or very small dimensions (detached,
-  // not yet laid out, or mid-layout-transition).  fit() with tiny containers
-  // produces cols=2/rows=1, causing xterm to reflow the entire scrollback to
-  // 2 columns — corrupting all wrapped lines irreversibly.
+  // not yet laid out, or mid-layout-transition).  Tiny containers propose
+  // cols=2/rows=1; grow-only width blocks the col shrink, but the initial fit
+  // doesn't, and rows=1 is wrong for everyone.  A terminal parked in the
+  // keep-alive root (display:none) measures 0x0 and is skipped here.
   const container = instance.terminal.element?.parentElement;
   if (container && (container.clientWidth < 10 || container.clientHeight < 10)) {
     log.debug(`Skipping fit for session id=${sessionId}: container too small (${container.clientWidth}x${container.clientHeight})`);
-    return null;
+    return { outcome: "none" };
   }
 
   try {
-    instance.fitAddon.fit();
-    return {
-      cols: instance.terminal.cols,
-      rows: instance.terminal.rows,
-    };
+    const term = instance.terminal;
+    const proposed = instance.fitAddon.proposeDimensions();
+    const decision = resizeDecision(
+      { cols: term.cols, rows: term.rows },
+      proposed ?? null,
+      { streaming: !!opts?.streaming, initial: !!opts?.initial }
+    );
+
+    switch (decision.kind) {
+      case "none":
+        return { outcome: "none" };
+      case "defer":
+        log.debug(`fit deferred (streaming) id=${sessionId}`);
+        return { outcome: "deferred" };
+      case "resize":
+        // Height-only / initial / capped-legacy shrink: no reflow, no
+        // conflict window. onResize forwards the one genuine PTY resize.
+        term.resize(decision.cols, decision.rows);
+        return { outcome: "applied", cols: decision.cols, rows: decision.rows, reflowed: false };
+      case "reflow": {
+        // Widen: reflow to the wider grid via snapshot + rewrite so the PTY's
+        // async SIGWINCH repaint lands on content matching its cursor model
+        // (a WIDER grid can't wrap-break existing lines). Keep the reader's
+        // place as distance-from-bottom (0 = pinned at the prompt) and
+        // restore it in the write CALLBACK — xterm's parse is async, and
+        // restoring before the callback races the parse.
+        //
+        // Honest limits: the snapshot serializes only the last 3000 scrollback
+        // lines (of the 10k cap), so a widen reflow TRUNCATES older history;
+        // and fromBottom is measured in PRE-reflow row units, so the restored
+        // viewport is approximate when re-wrapping changes line counts.
+        const buf = term.buffer.active;
+        const fromBottom = Math.max(0, buf.baseY - buf.viewportY);
+        const snap = instance.serializeAddon.serialize({ scrollback: 3000 });
+        term.reset();
+        term.resize(decision.cols, decision.rows);
+        term.write(snap, () => {
+          // The parse window is async — the session can be disposed (or the
+          // instance replaced) before this fires.
+          const live = getTerminal(sessionId);
+          if (!live || live.terminal !== term) return;
+          term.scrollToBottom();
+          if (fromBottom > 0) term.scrollLines(-fromBottom);
+          term.refresh(0, term.rows - 1);
+        });
+        log.debug(
+          `fit reflow id=${sessionId} -> ${decision.cols}x${decision.rows} fromBottom=${fromBottom}`
+        );
+        return { outcome: "applied", cols: decision.cols, rows: decision.rows, reflowed: true };
+      }
+    }
   } catch (e) {
     log.warn(`Failed to fit terminal for session id=${sessionId}: ${e}`);
-    return null;
+    return { outcome: "none" };
   }
-}
-
-// Sessions whose onResize events should NOT be forwarded to the PTY. Used to
-// fence the forceViewportRefresh cols-1 bounce: that bounce is a display-only
-// scroll-area recalc, but each terminal.resize() fires onResize synchronously,
-// which would otherwise SIGWINCH the shell. SIGWINCH makes TUI apps (Claude
-// Code) redraw their current frame; when that frame is taller than the
-// viewport, lines already scrolled into scrollback can't be cleared, leaving
-// stacked duplicate copies. Suppressing the bounce keeps the PTY at its real
-// size and stops the spurious redraws.
-const resizePropagationSuppressed = new Set<string>();
-
-/** True while a forceViewportRefresh bounce is in flight for this session. */
-export function isResizePropagationSuppressed(sessionId: string): boolean {
-  return resizePropagationSuppressed.has(sessionId);
 }
 
 /**
@@ -545,22 +291,22 @@ export function isResizePropagationSuppressed(sessionId: string): boolean {
  * are unchanged after a display:none -> flex transition.
  *
  * The cols-1 bounce is fenced so its (transient) onResize events are not
- * forwarded to the PTY — see resizePropagationSuppressed above. xterm fires
- * onResize synchronously within resize(), so the flag reliably covers both
- * resize() calls.
+ * forwarded to the PTY — the registry's onResize forwarding checks the
+ * suppression flag. xterm fires onResize synchronously within resize(), so
+ * the flag reliably covers both resize() calls.
  */
 export function forceViewportRefresh(sessionId: string): void {
-  const instance = terminalMap.get(sessionId);
+  const instance = getTerminal(sessionId);
   if (!instance) return;
   const cols = instance.terminal.cols;
   const rows = instance.terminal.rows;
   if (cols <= 2) return; // can't shrink further
-  resizePropagationSuppressed.add(sessionId);
+  setResizePropagationSuppressed(sessionId, true);
   try {
     instance.terminal.resize(cols - 1, rows);
     instance.terminal.resize(cols, rows);
   } finally {
-    resizePropagationSuppressed.delete(sessionId);
+    setResizePropagationSuppressed(sessionId, false);
   }
 }
 
@@ -570,7 +316,7 @@ export function forceViewportRefresh(sessionId: string): void {
  * where xterm's internal scroll area height and scrollTop are stale.
  */
 export function forceViewportScrollSync(sessionId: string): void {
-  const instance = terminalMap.get(sessionId);
+  const instance = getTerminal(sessionId);
   if (!instance) return;
   const el = instance.terminal.element;
   if (!el) return;
@@ -588,11 +334,6 @@ export function forceViewportScrollSync(sessionId: string): void {
   viewport.scrollTop = buf.viewportY * cellHeight;
 }
 
-/** Return all active terminal session IDs */
-export function getAllTerminalIds(): string[] {
-  return Array.from(terminalMap.keys());
-}
-
 /**
  * Clear the texture atlas on all terminals that still have a live WebGL
  * context.  This fixes the Chromium/Nvidia bug where glyph textures
@@ -601,26 +342,35 @@ export function getAllTerminalIds(): string[] {
  */
 export function clearAllTextureAtlases(): void {
   let count = 0;
-  for (const [sessionId, instance] of terminalMap) {
-    if (!instance.webglAddon) continue;
+  const ids = getAllTerminalIds();
+  for (const sessionId of ids) {
+    const instance = getTerminal(sessionId);
+    if (!instance?.webglAddon) continue;
     if (!instance.terminal.element?.parentElement) continue;
     log.debug(`Clearing texture atlas for session id=${sessionId}`);
     instance.terminal.clearTextureAtlas();
     count++;
   }
-  log.info(`Cleared texture atlases for ${count}/${terminalMap.size} terminals`);
+  log.info(`Cleared texture atlases for ${count}/${ids.length} terminals`);
 }
 
 /**
  * Re-enable WebGL for all terminals that are attached to the DOM but lost
  * their WebGL context (e.g. after system sleep).  Falls back to canvas
- * rendering silently if WebGL re-creation fails.
+ * rendering silently if WebGL re-creation fails.  Terminals parked in the
+ * keep-alive root are skipped — they get a fresh context on re-adoption.
  */
 export function recoverAllWebGL(): void {
   let recovered = 0;
-  for (const [sessionId, instance] of terminalMap) {
-    // Only recover for terminals currently attached to the DOM
+  for (const sessionId of getAllTerminalIds()) {
+    const instance = getTerminal(sessionId);
+    if (!instance) continue;
+    // Only recover for terminals actually viewable: skip keep-alive-parked
+    // (unmounted — they get a fresh context on re-adoption) and CSS-hidden
+    // tabs (they re-enable via showTerminal on switch).
     if (!instance.terminal.element?.parentElement) continue;
+    if (isTerminalDetached(sessionId)) continue;
+    if (hiddenSessionIds.has(sessionId)) continue;
     // Only recover if WebGL was lost (addon is null)
     if (instance.webglAddon) continue;
 

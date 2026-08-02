@@ -17,7 +17,24 @@ export interface ShortcutActions {
   onExport?: () => void;
   onMoveTabLeft?: () => void;
   onMoveTabRight?: () => void;
+  /** Ctrl+Shift+O — toggle the floating PiP window. Moved off Ctrl+Shift+P in
+   *  A2, which the artifact panel toggle claimed (architecture.md §Panel
+   *  host); the two can't share a chord. */
   onTogglePip?: () => void;
+  /** Ctrl+Shift+B — toggle the LEFT workstation side menu (T4). Plain Ctrl+B
+   *  stays the right task-sidebar cycle. */
+  onToggleSideMenu?: () => void;
+  /** Ctrl+Shift+P — TOGGLE the active tab's artifact panel: close what's open,
+   *  or reopen the last artifact that tab showed (A3 gave the panel an open
+   *  path, and panelStore keeps the per-tab memory). Still a no-op on a tab
+   *  that has never had one — and the status-bar chip that advertises the
+   *  chord only renders when it would actually do something. */
+  onTogglePanel?: () => void;
+  /** Ctrl+Shift+M — toggle the FOCUSED pane's composer (increment D). It shows
+   *  itself on a tab holding a live claude conversation; this hides it, or
+   *  forces one onto a plain shell. Per-session and remembered for the app's
+   *  lifetime (lib/composer.toggleComposer). */
+  onToggleComposer?: () => void;
 }
 
 // Keys we intercept from xterm.js
@@ -46,9 +63,21 @@ function isOurShortcut(e: KeyboardEvent): boolean {
   }
 
   // Ctrl+Shift+W (close pane), Ctrl+Shift+S (export), Ctrl+Shift+[/] (move tab),
-  // Ctrl+Shift+P (toggle floating window).
+  // Ctrl+Shift+P (toggle artifact panel), Ctrl+Shift+O (toggle floating window),
+  // Ctrl+Shift+M (toggle composer).
   // Shift+[ produces { and Shift+] produces } on most keyboards
-  if (e.shiftKey && (key === "w" || key === "s" || key === "p" || key === "{" || key === "}")) return true;
+  if (
+    e.shiftKey &&
+    (key === "w" ||
+      key === "s" ||
+      key === "p" ||
+      key === "o" ||
+      key === "m" ||
+      key === "{" ||
+      key === "}")
+  ) {
+    return true;
+  }
 
   // Ctrl+Alt+Arrow (move focus between panes)
   if (e.altKey && (key === "arrowup" || key === "arrowdown" || key === "arrowleft" || key === "arrowright")) {
@@ -65,7 +94,15 @@ export function useKeyboardShortcuts(
   const actionsRef = useRef(actions);
   actionsRef.current = actions;
 
-  // Register the custom key handler on the active terminal
+  // Register the custom key handler on the active terminal.
+  //
+  // Handler-slot interplay: xterm has a SINGLE custom-key-handler slot. The
+  // registry installs a baseline handler (Ctrl+C copy / Ctrl+V skip) at
+  // instance creation — this effect REPLACES it the first time the session
+  // becomes active and never restores it, so both handlers must carry the
+  // same clipboard rules (this one adds the shortcut interception on top).
+  // TODO: centralize the clipboard rules in the registry's handler with a
+  // pluggable shortcut hook so there's one handler instead of two copies.
   useEffect(() => {
     if (!activeSessionId) return;
 
@@ -83,6 +120,14 @@ export function useKeyboardShortcuts(
             return false; // don't send to PTY
           }
           return true; // no selection → send SIGINT as normal
+        }
+
+        // Ctrl+V: skip xterm's keydown mapping (^V) so the browser's default
+        // paste proceeds — xterm's own `paste` listener does the bracketed
+        // paste into the PTY. Same rule as the registry's baseline handler
+        // (terminalRegistry.ts); writing the clipboard here would double-paste.
+        if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "v" && e.type === "keydown") {
+          return false;
         }
 
         if (isOurShortcut(e)) {
@@ -140,6 +185,11 @@ export function useKeyboardShortcuts(
 
       // Ctrl+Shift shortcuts
       if (e.shiftKey) {
+        if (key === "b") {
+          e.preventDefault();
+          a.onToggleSideMenu?.();
+          return;
+        }
         if (key === "w") {
           e.preventDefault();
           a.onClosePane?.();
@@ -152,7 +202,17 @@ export function useKeyboardShortcuts(
         }
         if (key === "p") {
           e.preventDefault();
+          a.onTogglePanel?.();
+          return;
+        }
+        if (key === "o") {
+          e.preventDefault();
           a.onTogglePip?.();
+          return;
+        }
+        if (key === "m") {
+          e.preventDefault();
+          a.onToggleComposer?.();
           return;
         }
         // Ctrl+Shift+[ / Ctrl+Shift+] — move tab left/right

@@ -34,6 +34,11 @@
   --bg-primary: #0C0C0E;
   --bg-secondary: #0A0A0B;
   --bg-elevated: #0F0F11;
+  /* Artifact panel surface. A DELIBERATE step up the ramp so the panel side
+     reads as a second surface beside the terminal's --bg-primary: 1.126:1,
+     vs 1.021:1 for --bg-elevated (3/255 per channel — invisible). Sits below
+     --border #1E1E22 so the divider still reads against it. */
+  --bg-panel: #1A1A1D;
   --bg-active: #151518;
   --border: #1E1E22;
   --border-subtle: #27272A;

@@ -79,6 +79,29 @@ export function onPipSessions(
   return listen<PipSessionInfo[]>("pip:sessions", (e) => callback(e.payload));
 }
 
+// ── Host mode (increment F, Decision 2) ──────────────────────────────────────
+// The floating window hosts EITHER a mirrored terminal or an ARTIFACT. A fresh
+// open carries the choice in its URL (`?artifact=`), but the window may already
+// be open showing a terminal when Eric pops something out — reopening it would
+// mean closing and recreating a window that is right there. So main can also
+// re-aim a LIVE PiP window over this channel.
+//
+// The payload is the raw artifact JSON (or null for "go back to the terminal
+// mirror"); PiP runs it through `sanitizeArtifact` like every other load path
+// rather than trusting the wire.
+
+export type PipHostPayload = { artifactJson: string | null };
+
+/** Main-side: re-aim an already-open floating window. */
+export async function sendPipHost(artifactJson: string | null): Promise<void> {
+  await emit("pip:host", { artifactJson });
+}
+
+/** PiP-side: listen for main re-aiming this window. */
+export function onPipHost(callback: (payload: PipHostPayload) => void): Promise<UnlistenFn> {
+  return listen<PipHostPayload>("pip:host", (e) => callback(e.payload));
+}
+
 // PiP-side: announce that the floating window is closing so main can tear
 // down its router and clear pipSessionId. PiP follows up with closePipWindow.
 export async function notifyPipClosing(): Promise<void> {

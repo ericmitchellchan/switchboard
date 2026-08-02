@@ -1,6 +1,22 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+// Repo picker for a NEW session.
+//
+// INCREMENT B (acceptance 7): the list is the REGISTRY's projects, not the
+// hand-maintained `config.json` repos it used to offer — the side menu already
+// browsed twelve registry projects while this dialog offered a stale handful.
+// `explorer.mergeSessionRepos` does the merge (registry primary, config-only
+// entries kept, dedupe by resolved path, archived last); every entry carries
+// an ABSOLUTE path that goes straight through as `working_dir`, so the new
+// session STARTS in that repo — no `cd` is ever typed anywhere.
+//
+// The fetch + merge itself lives in `explorer.useSessionRepos`, shared with
+// NewThreadDialog: two dialogs that both mean "pick a repo" must not have two
+// answers, which is exactly the drift that left `+ new thread` reading an
+// empty config.json list for two increments.
+
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import type { RepoConfig } from "../types";
 import { getHomeDir } from "../lib/ipc";
+import { useSessionRepos } from "../lib/explorer";
 
 interface NewSessionDialogProps {
   repos: RepoConfig[];
@@ -14,6 +30,9 @@ interface RepoOption {
   path: string;
   color: string;
   group: string;
+  /** Registry status meta, shown dimly like the Explorer rail does. */
+  status: string;
+  archived: boolean;
 }
 
 export function NewSessionDialog({ repos, onCreateSession, onClose }: NewSessionDialogProps) {
@@ -23,6 +42,11 @@ export function NewSessionDialog({ repos, onCreateSession, onClose }: NewSession
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
+  // Registry projects, merged with config.repos. A failure is NOT fatal: the
+  // hook degrades to exactly the old config-only list, so a broken
+  // registry.json costs Eric the extra projects, never the dialog.
+  const { options: repoOptions } = useSessionRepos(repos);
+
   // Resolve home dir from Rust (~ on Unix, %USERPROFILE% on Windows)
   useEffect(() => {
     getHomeDir()
@@ -30,16 +54,30 @@ export function NewSessionDialog({ repos, onCreateSession, onClose }: NewSession
       .catch(() => setHomeDir(""));
   }, []);
 
-  // Build options list: plain shell + repos
-  const allOptions: RepoOption[] = [
-    { type: "plain", name: "Plain Shell", path: homeDir, color: "#6B7280", group: "" },
-    ...repos.map((r) => {
-      // Cross-platform basename: split on / OR \ so both Windows + POSIX paths work
-      const parts = r.path.split(/[/\\]/);
-      const name = parts[parts.length - 1] || r.path;
-      return { type: "repo" as const, name, path: r.path, color: r.color, group: r.group };
-    }),
-  ];
+  // Build options list: plain shell + merged registry/config repos
+  const allOptions: RepoOption[] = useMemo(
+    () => [
+      {
+        type: "plain",
+        name: "Plain Shell",
+        path: homeDir,
+        color: "#6B7280",
+        group: "",
+        status: "",
+        archived: false,
+      },
+      ...repoOptions.map((o) => ({
+        type: "repo" as const,
+        name: o.name,
+        path: o.path,
+        color: o.color,
+        group: o.group,
+        status: o.status,
+        archived: o.archived,
+      })),
+    ],
+    [homeDir, repoOptions]
+  );
 
   const filtered = filter
     ? allOptions.filter(
@@ -197,7 +235,7 @@ export function NewSessionDialog({ repos, onCreateSession, onClose }: NewSession
                     padding: "6px 12px",
                     cursor: "pointer",
                     backgroundColor: i === selectedIndex ? "var(--bg-elevated)" : "transparent",
-                    borderLeft: i === selectedIndex ? "2px solid var(--accent-purple)" : "2px solid transparent",
+                    borderLeft: i === selectedIndex ? "2px solid var(--text-primary)" : "2px solid transparent",
                   }}
                 >
                   {/* Color dot */}
@@ -208,6 +246,7 @@ export function NewSessionDialog({ repos, onCreateSession, onClose }: NewSession
                       borderRadius: "50%",
                       backgroundColor: option.color,
                       flexShrink: 0,
+                      opacity: option.archived ? 0.4 : 1,
                     }}
                   />
                   <div style={{ flex: 1, minWidth: 0 }}>
@@ -215,7 +254,11 @@ export function NewSessionDialog({ repos, onCreateSession, onClose }: NewSession
                       style={{
                         fontFamily: "var(--font-mono)",
                         fontSize: 12,
-                        color: i === selectedIndex ? "var(--text-primary)" : "var(--text-secondary)",
+                        color: option.archived
+                          ? "var(--text-dim)"
+                          : i === selectedIndex
+                            ? "var(--text-primary)"
+                            : "var(--text-secondary)",
                         fontWeight: 500,
                       }}
                     >
@@ -226,7 +269,7 @@ export function NewSessionDialog({ repos, onCreateSession, onClose }: NewSession
                         style={{
                           fontFamily: "var(--font-mono)",
                           fontSize: 9.5,
-                          color: "var(--text-dim)",
+                          color: option.archived ? "var(--text-faint)" : "var(--text-dim)",
                           overflow: "hidden",
                           textOverflow: "ellipsis",
                           whiteSpace: "nowrap",
@@ -236,6 +279,20 @@ export function NewSessionDialog({ repos, onCreateSession, onClose }: NewSession
                       </div>
                     )}
                   </div>
+                  {/* Registry status meta — dim, right-aligned, the same
+                      treatment the Explorer rail gives it. */}
+                  {option.status !== "" && (
+                    <span
+                      style={{
+                        flexShrink: 0,
+                        fontFamily: "var(--font-mono)",
+                        fontSize: 9.5,
+                        color: option.archived ? "var(--text-faint)" : "var(--text-dim)",
+                      }}
+                    >
+                      {option.status}
+                    </span>
+                  )}
                 </div>
               </div>
             );

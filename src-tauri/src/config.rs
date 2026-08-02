@@ -20,6 +20,11 @@ pub struct Config {
     pub shell: String,
     #[serde(default)]
     pub repos: Vec<RepoConfig>,
+    /// Optional override for the personal knowledge-base checkout root (T6).
+    /// Resolution order lives in kb.rs: env SWITCHBOARD_KB_PATH → this field →
+    /// the built-in default. Absent from config.json = None.
+    #[serde(default)]
+    pub kb_path: Option<String>,
 }
 
 fn default_font() -> String {
@@ -47,6 +52,7 @@ impl Default for Config {
             font_size: default_font_size(),
             shell: default_shell(),
             repos: vec![],
+            kb_path: None,
         }
     }
 }

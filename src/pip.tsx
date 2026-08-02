@@ -4,11 +4,15 @@ import { Terminal } from "@xterm/xterm";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { open as openShellUrl } from "@tauri-apps/plugin-shell";
-import { closePipWindow, listSessions, onSessionExited, writeToSession } from "./lib/ipc";
-import { notifyPipClosing, notifyPipReady, notifyPipSwitchSession, onPipOutput, onPipSessions, type PipSessionInfo } from "./lib/pipBridge";
+import { closePipWindow, listSessions, onSessionExited, writeToSession, kbReadDoc, kbWriteDoc } from "./lib/ipc";
+import { notifyPipClosing, notifyPipReady, notifyPipSwitchSession, onPipHost, onPipOutput, onPipSessions, type PipSessionInfo } from "./lib/pipBridge";
 import { STATUS_CONFIGS } from "./lib/statusConfig";
-import type { AgentStatus } from "./types";
+import type { AgentStatus, Artifact } from "./types";
 import { log, initLogger } from "./lib/logger";
+import { describeArtifact, sanitizeArtifact } from "./lib/panelStore";
+import { configurePinsIO } from "./lib/pinsStore";
+import { ArtifactSurface } from "./components/kb/ArtifactSurface";
+import { Icon } from "./components/icons";
 import "@xterm/xterm/css/xterm.css";
 import "./styles/global.css";
 
@@ -18,6 +22,19 @@ const TAB_STRIP_HEIGHT = 28;
 // same on-disk log file as main. Without this, PiP would only log to its
 // (separate) DevTools console.
 initLogger().catch(() => {});
+
+// MODULE SCOPE, before any render — same rule and same reason as App's: the
+// floating window can now host an ARTIFACT (increment F), and a wireframe it
+// hosts writes pins through the ONE shared store. An effect would be too late
+// for the first mount, and an unwired store logs an error and stays inert
+// rather than presenting a real sidecar as empty.
+//
+// This does NOT make a second pins WRITER: pinsStore is per-WINDOW module
+// state, and the two windows never host the same artifact at the same time —
+// popping one out replaces the panel's copy with a placeholder, precisely so
+// there is one live record of it. Within each window the store is still the
+// only thing that writes.
+configurePinsIO({ read: kbReadDoc, write: kbWriteDoc });
 
 const THEME = {
   background: "#0C0C0E",
@@ -320,11 +337,146 @@ function TabStrip({
   );
 }
 
+/** ARTIFACT MODE (increment F, Decision 2) — the floating window hosting a
+ *  doc / mockup / live preview instead of a mirrored terminal.
+ *
+ *  It renders the SAME `ArtifactSurface` the panel renders, so a popped-out
+ *  wireframe has its pins and its ⟳, and a popped-out localhost preview has
+ *  its overlay and its health card — none of it reimplemented here. `active`
+ *  is unconditionally true: this window exists to show this one thing, so
+ *  there is no hidden-tab case to gate on.
+ *
+ *  The header is the drag handle (the window is `decorations(false)`), carries
+ *  the breadcrumb, and its `×` closes the window — which is what returns the
+ *  artifact to the panel, via main's `pip:closing` listener. */
+function PipArtifact({ artifact, onClose }: { artifact: Artifact; onClose: () => void }) {
+  const { icon, crumbs, title } = describeArtifact(artifact);
+  return (
+    <>
+      <div
+        style={{
+          position: "fixed",
+          top: 0,
+          left: 0,
+          right: 0,
+          height: TAB_STRIP_HEIGHT,
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          padding: "0 4px 0 10px",
+          backgroundColor: "rgba(255,255,255,0.04)",
+          borderBottom: "1px solid rgba(255,255,255,0.06)",
+          // @ts-expect-error — non-standard but supported by WebView2
+          WebkitAppRegion: "drag",
+          zIndex: 10,
+          fontFamily: "var(--font-mono)",
+          fontSize: 11,
+          color: "#A1A1AA",
+          overflow: "hidden",
+          whiteSpace: "nowrap",
+        }}
+        title={title}
+      >
+        <Icon name={icon} style={{ color: "#52525B" }} />
+        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+          {crumbs.map((crumb, i) => (
+            <span key={`${i}-${crumb.text}`}>
+              {i > 0 && <span style={{ color: "#3F3F46" }}> / </span>}
+              <span style={{ color: crumb.tone === "bright" ? "#FAFAFA" : "#A1A1AA" }}>
+                {crumb.text}
+              </span>
+            </span>
+          ))}
+        </span>
+        <button
+          onClick={onClose}
+          title="Close — returns it to the panel"
+          aria-label="Close floating window"
+          style={{
+            // @ts-expect-error — opt out of the parent drag region
+            WebkitAppRegion: "no-drag",
+            flexShrink: 0,
+            width: 22,
+            height: 20,
+            padding: 0,
+            background: "transparent",
+            border: "1px solid transparent",
+            borderRadius: 4,
+            color: "#A1A1AA",
+            fontSize: 13,
+            lineHeight: 1,
+            cursor: "pointer",
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = "rgba(239, 68, 68, 0.15)";
+            e.currentTarget.style.color = "#FCA5A5";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = "transparent";
+            e.currentTarget.style.color = "#A1A1AA";
+          }}
+        >
+          ×
+        </button>
+      </div>
+      <div
+        style={{
+          position: "fixed",
+          top: TAB_STRIP_HEIGHT,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          display: "flex",
+          flexDirection: "column",
+          backgroundColor: "var(--bg-panel, #1A1A1D)",
+          overflow: "hidden",
+        }}
+      >
+        <ArtifactSurface artifact={artifact} active />
+      </div>
+    </>
+  );
+}
+
 // Outer shell: owns the session list + active session id, swaps the inner
 // PipApp via React `key` to get a clean terminal teardown/recreate on switch.
-function PipShell({ initialSessionId }: { initialSessionId: string }) {
+//
+// Increment F: it also owns the window's HOST MODE. `artifact` non-null means
+// this window is showing an artifact instead of a terminal; main can flip that
+// at any time over `pip:host` (re-aiming a window that is already open beats
+// closing and recreating one).
+function PipShell({
+  initialSessionId,
+  initialArtifact,
+}: {
+  initialSessionId: string;
+  initialArtifact: Artifact | null;
+}) {
   const [activeSessionId, setActiveSessionId] = useState(initialSessionId);
   const [sessions, setSessions] = useState<PipSessionInfo[]>([]);
+  const [artifact, setArtifact] = useState<Artifact | null>(initialArtifact);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    onPipHost((payload) => {
+      // The wire is not trusted: every load path runs the lean gate, here as
+      // everywhere else.
+      const next = payload.artifactJson ? safeParseArtifact(payload.artifactJson) : null;
+      log.info(`[PiP] host mode → ${next ? next.kind : "terminal"}`);
+      setArtifact(next);
+    }).then((fn) => {
+      if (cancelled) {
+        fn();
+        return;
+      }
+      unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     // Initial fetch — main may not have broadcast yet by the time PiP mounts.
@@ -383,6 +535,13 @@ function PipShell({ initialSessionId }: { initialSessionId: string }) {
     }
   }, []);
 
+  // ARTIFACT MODE takes the whole window: the tab strip names TERMINALS, and a
+  // strip of terminals above a document would offer a switch that silently
+  // discards what the window was opened to show.
+  if (artifact) {
+    return <PipArtifact artifact={artifact} onClose={handleClose} />;
+  }
+
   return (
     <>
       <TabStrip
@@ -400,6 +559,17 @@ function PipShell({ initialSessionId }: { initialSessionId: string }) {
   );
 }
 
+/** Parse an artifact off the wire (URL query or `pip:host`) through the SAME
+ *  lean gate every other load path uses. Bad JSON → null → terminal mode,
+ *  never a half-built record. */
+function safeParseArtifact(json: string): Artifact | null {
+  try {
+    return sanitizeArtifact(JSON.parse(json));
+  } catch {
+    return null;
+  }
+}
+
 // PiP body fills the window edge-to-edge — no scrollbars, no margins.
 document.body.style.margin = "0";
 document.body.style.overflow = "hidden";
@@ -407,9 +577,19 @@ document.body.style.background = "#0C0C0E";
 
 const params = new URLSearchParams(window.location.search);
 const sessionId = params.get("session");
+// `?artifact=` boots the window straight into artifact mode (increment F).
+// URLSearchParams has already percent-DECODED it; ipc.openPipWindow did the
+// encoding, so exactly one side owns each direction.
+const initialArtifact = (() => {
+  const raw = params.get("artifact");
+  return raw ? safeParseArtifact(raw) : null;
+})();
 
 const root = createRoot(document.getElementById("root") as HTMLElement);
-if (!sessionId) {
+// A session id is required for the TERMINAL mirror and irrelevant to artifact
+// mode — an artifact pop-out from a tab-less workspace passes an empty one, and
+// erroring on that would turn a working pop-out into a red error card.
+if (!sessionId && !initialArtifact) {
   root.render(
     <div
       style={{
@@ -425,5 +605,5 @@ if (!sessionId) {
     </div>
   );
 } else {
-  root.render(<PipShell initialSessionId={sessionId} />);
+  root.render(<PipShell initialSessionId={sessionId ?? ""} initialArtifact={initialArtifact} />);
 }

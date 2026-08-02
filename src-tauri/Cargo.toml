@@ -22,7 +22,9 @@ tauri-plugin-log = "2"
 tauri-plugin-notification = "2"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order: registry.json project order is meaningful (the Explorer's
+# left rail lists projects in file order, not alphabetized BTreeMap order).
+serde_json = { version = "1", features = ["preserve_order"] }
 portable-pty = "=0.8.1"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
@@ -37,4 +39,11 @@ windows-sys = { version = "0.59", features = [
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
   "Win32_System_Power",
+  # Process-tree enumeration for claude discovery (src/discovery.rs) — the
+  # Toolhelp snapshot is the no-new-crate way to get every (pid, ppid) pair.
+  "Win32_System_Diagnostics_ToolHelp",
+  # OpenProcess + GetProcessTimes: a Toolhelp snapshot carries no creation
+  # time, and discovery needs one to prove a shell pid is still OURS and not a
+  # recycled one (see discovery::process_start_time_ms).
+  "Win32_System_Threading",
 ] }

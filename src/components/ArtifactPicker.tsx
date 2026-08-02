@@ -1,0 +1,739 @@
+// Artifact picker (increment B) — the `+` on the panel's tab strip.
+//
+// "Open an artifact manually", which is the ask the tab strip subsumes: every
+// other open path starts from a tree row, so a panel could only ever show what
+// the side menu happened to be pointing at. This is the direct route.
+//
+// SHAPE — one filterable list, TWO sources with deliberately different depth:
+//
+//   · KB docs are offered IMMEDIATELY and filtered GLOBALLY. The KB doc list is
+//     already one flat cached array (kb.useKbDocList — the side menu holds it
+//     too), so a full-path fuzzy filter over it costs nothing.
+//   · Repo files sit BEHIND A PROJECT, then behind directories. Listing every
+//     file of every registry project eagerly is O(all repos) of IPC per open —
+//     there is no recursive listing command, and building one would mean
+//     walking node_modules-sized trees to populate a picker. So the root list
+//     offers the projects, and picking one browses it with the same
+//     `explorerList` call the Explorer tree uses, one directory at a time.
+//
+// That asymmetry is the honest one: the KB is a bounded set of documents Eric
+// writes, a repo is an unbounded tree. Filtering applies to whatever level is
+// on screen, so typing narrows the KB globally and narrows a directory locally.
+//
+// Keyboard: type to filter · ↑/↓ move · Enter opens (or descends) · Esc
+// dismisses from any depth (the breadcrumb walks back up without leaving).
+//
+// INCREMENT H adds the two TERMINAL rows, because the panel can host a live
+// shell as well as a document:
+//
+//   · NEW TERMINAL descends into a third level — the same registry-backed repo
+//     list Ctrl+T offers (`explorer.mergeSessionRepos`), with THIS TAB's own
+//     project pinned at the top as the default. Picking one hands the choice to
+//     App's existing session-creation path; the picker never spawns anything.
+//   · RUNNING TERMINALS lists panel terminals that are alive with no view
+//     (`panelStore.parkedPanelSessions` — what "keep it running" leaves
+//     behind), so a shell you closed the tab of is one keystroke away instead
+//     of being an invisible process.
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
+import type { Artifact, RepoConfig } from "../types";
+import { docKind, useKbDocList } from "../lib/kb";
+import {
+  explorerList,
+  explorerProjects,
+  liveProjectFor,
+  mergeSessionRepos,
+} from "../lib/explorer";
+import type { ExplorerEntry, ExplorerProject } from "../lib/explorer";
+import {
+  FILE_ICON,
+  FOLDER_ICON,
+  SESSION_ICON,
+  getActiveTabSession,
+  sessionLabelFor,
+  useParkedPanelSessions,
+  type NewPanelTerminal,
+} from "../lib/panelStore";
+import { parseManualUrl, sessionDirFor, useDevServerKnown } from "../lib/devServer";
+import type { DevServerSource } from "../lib/devServer";
+import { STATUS_CONFIGS } from "../lib/statusConfig";
+import { ICON_SIZE, Icon, type IconName } from "./icons";
+
+/** Render cap. A KB with thousands of docs must not paint thousands of rows on
+ *  every keystroke; the filter is how you reach the tail. */
+const MAX_ROWS = 200;
+
+type Row =
+  /** A registry project — Enter descends into it. */
+  | { kind: "project"; id: string; project: string; label: string; meta: string; dim: boolean }
+  /** A directory inside the open project — Enter descends. */
+  | { kind: "dir"; id: string; label: string; path: string }
+  /** A KB doc — Enter opens it in the panel. */
+  | { kind: "kb"; id: string; label: string; meta: string; path: string }
+  /** A repo file — Enter opens it in the panel. */
+  | { kind: "file"; id: string; label: string; path: string }
+  /** THE MANUAL URL PATH (increment F). Appears at the top of the root list
+   *  the moment what you have typed parses as a URL or a bare port. It is the
+   *  fallback for a dev server whose banner the detector does not recognise —
+   *  detection is the common path, this is the guarantee.
+   *
+   *  Also the shape of a DETECTED url this session announced (`detected`), so a
+   *  candidate that lost the offer chip to a better-ranked one is one `+` away
+   *  instead of being a URL you have to have remembered. */
+  | {
+      kind: "url";
+      id: string;
+      label: string;
+      url: string;
+      project: string;
+      detected?: DevServerSource;
+    }
+  /** THE `new terminal` ENTRY (increment H) — Enter descends into the repo
+   *  list. It is a level, not a one-click spawn, because a shell has to start
+   *  SOMEWHERE and guessing the directory is the one thing that would make it
+   *  useless. */
+  | { kind: "new-terminal"; id: string; label: string }
+  /** A working directory for the new terminal (the repo level). */
+  | { kind: "spawn"; id: string; label: string; meta: string; target: NewPanelTerminal }
+  /** A panel terminal that is running with no view — bring it back. */
+  | { kind: "session"; id: string; label: string; meta: string; color: string; sessionId: string };
+
+export function ArtifactPicker({
+  onPick,
+  onNewTerminal,
+  repos,
+  onClose,
+}: {
+  /** Chosen artifact. The caller opens it in ITS panel — the picker never
+   *  routes or navigates, so `+` always means "add a tab here". Widened to the
+   *  full `Artifact` in increment F: a typed URL is a `localhost` artifact,
+   *  which has no full-width screen and is therefore not `OpenableArtifact`. */
+  onPick: (artifact: Artifact) => void;
+  /** `+ → new terminal` (increment H): a working directory was chosen. The
+   *  caller SPAWNS — through App's existing session-creation path — and opens
+   *  the result here. The picker knows nothing about PTYs. */
+  onNewTerminal: (target: NewPanelTerminal) => void;
+  /** Config repos, merged with the registry exactly as NewSessionDialog merges
+   *  them, so `+ → new terminal` and Ctrl+T offer the same list. */
+  repos: RepoConfig[];
+  onClose: () => void;
+}) {
+  const [project, setProject] = useState<string | null>(null);
+  const [dir, setDir] = useState("");
+  /** Which LEVEL is on screen: the root list, or the new-terminal repo list.
+   *  (`project !== null` is the third: a repo's file tree.) */
+  const [level, setLevel] = useState<"root" | "terminal">("root");
+  const [filter, setFilter] = useState("");
+  const [selected, setSelected] = useState(0);
+
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  // ── Sources ────────────────────────────────────────────────────────────────
+  const { docs, error: docsError } = useKbDocList(true);
+
+  // Dev-server URLs THIS tab's session announced, best-ranked first. The chip
+  // can only carry one; this is where the others stay reachable.
+  const knownUrls = useDevServerKnown(getActiveTabSession());
+
+  // Panel terminals running with no view (increment H).
+  const parkedSessions = useParkedPanelSessions();
+
+  const [projects, setProjects] = useState<ExplorerProject[] | null>(null);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    explorerProjects()
+      .then((list) => !cancelled && setProjects(list))
+      .catch((e) => !cancelled && setProjectsError(String(e)));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const [entries, setEntries] = useState<ExplorerEntry[] | null>(null);
+  const [entriesError, setEntriesError] = useState<string | null>(null);
+  useEffect(() => {
+    if (project === null) return;
+    let cancelled = false;
+    setEntries(null);
+    setEntriesError(null);
+    explorerList(project, dir)
+      .then((list) => !cancelled && setEntries(list))
+      .catch((e) => !cancelled && setEntriesError(String(e)));
+    return () => {
+      cancelled = true;
+    };
+  }, [project, dir]);
+
+  // ── Rows for the current level ─────────────────────────────────────────────
+  const rows = useMemo<Row[]>(() => {
+    const needle = filter.trim().toLowerCase();
+    const hit = (haystack: string) => needle.length === 0 || haystack.toLowerCase().includes(needle);
+
+    if (level === "terminal") {
+      // THE SAME LIST Ctrl+T OFFERS (mergeSessionRepos), with THIS TAB's own
+      // project pinned first as the default — a terminal opened beside a
+      // document is almost always for the project that document belongs to,
+      // and the tab's own cwd is the honest source for that.
+      const out: Row[] = [];
+      const tabDir = sessionDirFor(getActiveTabSession());
+      const tabProject = liveProjectFor(projects ?? [], tabDir);
+      // Separator- and case-insensitive, because the registry writes forward
+      // slashes and a session's cwd comes back however Windows spelled it —
+      // otherwise the pinned row and its registry twin would both be listed.
+      const samePath = (a: string, b: string) =>
+        a.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase() ===
+        b.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+      if (tabDir.length > 0 && hit(tabProject)) {
+        out.push({
+          kind: "spawn",
+          id: "s:tab",
+          label: tabProject,
+          meta: "this tab's project",
+          target: { name: tabProject, repo: tabProject, workingDir: tabDir },
+        });
+      }
+      for (const option of mergeSessionRepos(projects ?? [], repos)) {
+        if (tabDir.length > 0 && samePath(option.path, tabDir)) continue; // already pinned above
+        if (!hit(option.name) && !hit(option.path)) continue;
+        out.push({
+          kind: "spawn",
+          id: `s:${option.path}`,
+          label: option.name,
+          meta: option.status || option.group,
+          target: {
+            name: option.name,
+            repo: option.name,
+            workingDir: option.path,
+            repoColor: option.color,
+            group: option.group,
+          },
+        });
+        if (out.length >= MAX_ROWS) break;
+      }
+      return out;
+    }
+
+    if (project !== null) {
+      const out: Row[] = [];
+      for (const entry of entries ?? []) {
+        if (!hit(entry.name)) continue;
+        const path = dir ? `${dir}/${entry.name}` : entry.name;
+        out.push(
+          entry.is_dir
+            ? { kind: "dir", id: `d:${path}`, label: entry.name, path }
+            : { kind: "file", id: `f:${path}`, label: entry.name, path }
+        );
+        if (out.length >= MAX_ROWS) break;
+      }
+      return out;
+    }
+
+    const out: Row[] = [];
+    // A TYPED URL wins the top slot (increment F). It is offered only when the
+    // input actually parses, so it costs nothing while you are filtering docs,
+    // and it is first because typing a URL is unambiguous intent.
+    //
+    // The PROJECT it will be filed under comes from the ACTIVE TAB's cwd — a
+    // live preview's pins live in `<project>/live-pins.json`, so the artifact
+    // needs a bucket, and the tab you pressed `+` in is the honest source. A
+    // cwd the registry has never seen still yields one (acceptance 6).
+    const liveProject = liveProjectFor(projects ?? [], sessionDirFor(getActiveTabSession()));
+    const manualUrl = parseManualUrl(filter);
+    if (manualUrl) {
+      out.push({
+        kind: "url",
+        id: `u:${manualUrl}`,
+        label: manualUrl,
+        url: manualUrl,
+        project: liveProject,
+      });
+    }
+    // DETECTED, best-ranked first. A full-stack `pnpm dev` announces several
+    // servers and only one can hold the chip; these rows are where the rest
+    // stay reachable, and where a dismissed offer can be taken back. A URL the
+    // filter already produced by hand is not listed twice.
+    for (const detected of knownUrls) {
+      if (detected.url === manualUrl) continue;
+      if (!hit(detected.url)) continue;
+      out.push({
+        kind: "url",
+        id: `u:${detected.url}`,
+        label: detected.url,
+        url: detected.url,
+        project: liveProject,
+        detected: detected.source,
+      });
+    }
+    // NEW TERMINAL (increment H) — beside the doc/file options, above the
+    // projects, because it is an ACTION rather than a place and actions belong
+    // where the eye lands first. It filters like everything else.
+    if (hit("new terminal") || hit("shell")) {
+      out.push({ kind: "new-terminal", id: "t:new", label: "new terminal" });
+    }
+    // RUNNING TERMINALS — panel shells that are alive with no view.
+    for (const sessionId of parkedSessions) {
+      const label = sessionLabelFor(sessionId);
+      const name = label?.name ?? "terminal";
+      if (!hit(name)) continue;
+      out.push({
+        kind: "session",
+        id: `t:${sessionId}`,
+        label: name,
+        // "no view" is the fact that matters — it is why this row exists — and
+        // the live status says what the shell is doing while nobody watches.
+        meta: label ? `no view · ${STATUS_CONFIGS[label.status].label.toLowerCase()}` : "no view",
+        color: label ? STATUS_CONFIGS[label.status].color : "var(--text-dim)",
+        sessionId,
+      });
+    }
+    // Projects next — few rows, and they are the gateway to everything the
+    // flat KB list cannot reach.
+    for (const p of projects ?? []) {
+      if (!hit(p.key)) continue;
+      out.push({
+        kind: "project",
+        id: `p:${p.key}`,
+        project: p.key,
+        label: p.key,
+        meta: p.status,
+        dim: p.status === "archived",
+      });
+    }
+    for (const path of docs ?? []) {
+      if (!hit(path)) continue;
+      const segments = path.split("/");
+      out.push({
+        kind: "kb",
+        id: `k:${path}`,
+        label: segments[segments.length - 1],
+        meta: segments.slice(0, -1).join("/"),
+        path,
+      });
+      if (out.length >= MAX_ROWS) break;
+    }
+    return out;
+  }, [level, project, dir, entries, projects, docs, filter, knownUrls, parkedSessions, repos]);
+
+  // Keep the cursor on a real row as the list changes under it.
+  useEffect(() => {
+    setSelected((prev) => Math.max(0, Math.min(prev, rows.length - 1)));
+  }, [rows.length]);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, [project, dir, level]);
+
+  useEffect(() => {
+    const item = listRef.current?.children[selected] as HTMLElement | undefined;
+    item?.scrollIntoView({ block: "nearest" });
+  }, [selected]);
+
+  // ── Actions ────────────────────────────────────────────────────────────────
+  const enter = useCallback(
+    (row: Row) => {
+      switch (row.kind) {
+        case "project":
+          setProject(row.project);
+          setDir("");
+          setFilter("");
+          setSelected(0);
+          return;
+        case "dir":
+          setDir(row.path);
+          setFilter("");
+          setSelected(0);
+          return;
+        case "kb":
+          onPick({ kind: "kb-doc", path: row.path });
+          return;
+        case "url":
+          onPick({ kind: "localhost", project: row.project, url: row.url });
+          return;
+        case "new-terminal":
+          setLevel("terminal");
+          setFilter("");
+          setSelected(0);
+          return;
+        case "spawn":
+          onNewTerminal(row.target);
+          return;
+        case "session":
+          // Bringing a parked terminal back is an ordinary open: the store's
+          // one-home rule takes it out of the parked set as it lands here.
+          onPick({ kind: "session", sessionId: row.sessionId });
+          return;
+        case "file":
+          if (project !== null) onPick({ kind: "repo-file", project, path: row.path });
+      }
+    },
+    [onPick, onNewTerminal, project]
+  );
+
+  /** Breadcrumb navigation: `null` = back to the root list, a path = that
+   *  ancestor directory. */
+  const goTo = (nextDir: string | null) => {
+    if (nextDir === null) {
+      setProject(null);
+      setDir("");
+      setLevel("root");
+    } else {
+      setDir(nextDir);
+    }
+    setFilter("");
+    setSelected(0);
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    e.stopPropagation();
+    switch (e.key) {
+      case "ArrowDown":
+        e.preventDefault();
+        setSelected((prev) => Math.min(prev + 1, rows.length - 1));
+        break;
+      case "ArrowUp":
+        e.preventDefault();
+        setSelected((prev) => Math.max(prev - 1, 0));
+        break;
+      case "Enter":
+        e.preventDefault();
+        if (rows[selected]) enter(rows[selected]);
+        break;
+      case "Escape":
+        e.preventDefault();
+        onClose();
+        break;
+    }
+  };
+
+  // ── Paint ──────────────────────────────────────────────────────────────────
+  const dirSegments = dir.length > 0 ? dir.split("/") : [];
+  const emptyNote =
+    level === "terminal"
+      ? projects === null
+        ? "loading…"
+        : "no matches"
+      : project !== null
+        ? entriesError !== null
+          ? `cannot list: ${entriesError}`
+          : entries === null
+            ? "loading…"
+            : "no matches"
+        : docsError !== null && projectsError !== null
+          ? `KB unavailable: ${docsError}`
+          : docs === null && projects === null
+            ? "loading…"
+            : "no matches";
+
+  return (
+    <>
+      <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 99 }} />
+      <div
+        role="dialog"
+        aria-label="Open artifact"
+        style={{
+          position: "fixed",
+          top: 64,
+          left: "50%",
+          transform: "translateX(-50%)",
+          width: 460,
+          maxWidth: "calc(100vw - 32px)",
+          maxHeight: 460,
+          backgroundColor: "var(--bg-active)",
+          border: "1px solid var(--border)",
+          borderRadius: 8,
+          zIndex: 100,
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+          boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
+        }}
+      >
+        <div style={LABEL_STYLE}>
+          <Crumb onClick={() => goTo(null)} active={project === null && level === "root"}>
+            open artifact
+          </Crumb>
+          {level === "terminal" && (
+            <>
+              <span style={{ color: "var(--text-faint)" }}>/</span>
+              {/* The level you are IN — clicking it clears the filter rather
+                  than leaving, exactly like the last directory crumb below.
+                  The `open artifact` crumb to its left is the way back. */}
+              <Crumb
+                onClick={() => {
+                  setFilter("");
+                  setSelected(0);
+                }}
+                active
+              >
+                new terminal
+              </Crumb>
+            </>
+          )}
+          {project !== null && (
+            <>
+              <span style={{ color: "var(--text-faint)" }}>/</span>
+              <Crumb onClick={() => goTo("")} active={dir.length === 0}>
+                {project}
+              </Crumb>
+            </>
+          )}
+          {dirSegments.map((segment, i) => (
+            <span key={`${i}-${segment}`} style={{ display: "flex", gap: 6, minWidth: 0 }}>
+              <span style={{ color: "var(--text-faint)" }}>/</span>
+              <Crumb
+                onClick={() => goTo(dirSegments.slice(0, i + 1).join("/"))}
+                active={i === dirSegments.length - 1}
+              >
+                {segment}
+              </Crumb>
+            </span>
+          ))}
+        </div>
+
+        <div style={{ padding: "8px 10px", borderBottom: "1px solid var(--border)" }}>
+          <input
+            ref={inputRef}
+            value={filter}
+            onChange={(e) => {
+              setFilter(e.target.value);
+              setSelected(0);
+            }}
+            onKeyDown={onKeyDown}
+            placeholder={
+              level === "terminal"
+                ? "Where should the shell start?"
+                : project === null
+                  ? "Filter KB docs and projects, or type a URL / port…"
+                  : `Filter in ${project}…`
+            }
+            style={{
+              width: "100%",
+              fontFamily: "var(--font-mono)",
+              fontSize: 12,
+              color: "var(--text-primary)",
+              backgroundColor: "var(--bg-primary)",
+              border: "1px solid var(--border-subtle)",
+              borderRadius: 4,
+              padding: "6px 8px",
+              outline: "none",
+            }}
+          />
+        </div>
+
+        <div ref={listRef} style={{ flex: 1, overflowY: "auto", padding: "4px 0" }}>
+          {rows.map((row, i) => (
+            <div
+              key={row.id}
+              onClick={() => enter(row)}
+              onMouseEnter={() => setSelected(i)}
+              title={row.kind === "kb" ? row.path : row.label}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "5px 12px",
+                cursor: "pointer",
+                backgroundColor: i === selected ? "var(--bg-elevated)" : "transparent",
+                borderLeft:
+                  i === selected ? "2px solid var(--text-primary)" : "2px solid transparent",
+                fontFamily: "var(--font-mono)",
+                fontSize: 11.5,
+              }}
+            >
+              <span
+                style={{
+                  flex: "none",
+                  width: ICON_SIZE,
+                  height: ICON_SIZE,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  // A running terminal's mark carries its STATUS colour — the
+                  // same statusConfig value its tab-strip dot uses, so the row
+                  // and the tab it becomes say the same thing.
+                  color: row.kind === "session" ? row.color : "var(--text-faint)",
+                }}
+              >
+                <Icon name={iconFor(row)} />
+              </span>
+              <span
+                style={{
+                  flex: "none",
+                  maxWidth: "60%",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  color:
+                    row.kind === "project" && row.dim
+                      ? "var(--text-dim)"
+                      : i === selected
+                        ? "var(--text-primary)"
+                        : "var(--text-secondary)",
+                }}
+              >
+                {row.label}
+              </span>
+              <span
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  textAlign: "right",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  fontSize: 9.5,
+                  color: "var(--text-dim)",
+                }}
+              >
+                {metaFor(row)}
+              </span>
+            </div>
+          ))}
+          {rows.length === 0 && (
+            <div
+              style={{
+                padding: "16px 12px",
+                fontFamily: "var(--font-mono)",
+                fontSize: 11,
+                color: "var(--text-faint)",
+                textAlign: "center",
+              }}
+            >
+              {emptyNote}
+            </div>
+          )}
+          {rows.length >= MAX_ROWS && (
+            <div
+              style={{
+                padding: "6px 12px",
+                fontFamily: "var(--font-mono)",
+                fontSize: 9.5,
+                color: "var(--text-faint)",
+                textAlign: "center",
+              }}
+            >
+              first {MAX_ROWS} matches — keep typing to narrow
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+const LABEL_STYLE: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+  padding: "8px 10px 0",
+  fontFamily: "var(--font-mono)",
+  fontSize: 9.5,
+  textTransform: "uppercase",
+  letterSpacing: 1,
+  color: "var(--text-dim)",
+  overflow: "hidden",
+  whiteSpace: "nowrap",
+};
+
+function Crumb({
+  children,
+  active,
+  onClick,
+}: {
+  children: React.ReactNode;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        background: "none",
+        border: "none",
+        padding: 0,
+        fontFamily: "var(--font-mono)",
+        fontSize: 9.5,
+        textTransform: "uppercase",
+        letterSpacing: 1,
+        color: active ? "var(--text-secondary)" : "var(--text-dim)",
+        cursor: "pointer",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** Kind icon — ONE vocabulary with the side-menu trees and the panel header
+ *  (names from panelStore, paths from components/icons): a row and the tab it
+ *  becomes read as the same thing, and containers use the trees' own folder
+ *  icon rather than a second folder mark. Project and dir rows are always
+ *  COLLAPSED here — the picker descends into them rather than expanding them
+ *  in place — so they never take the open-folder variant. */
+function iconFor(row: Row): IconName {
+  switch (row.kind) {
+    case "project":
+    case "dir":
+      return FOLDER_ICON;
+    case "url":
+      // The same globe describeArtifact gives a localhost artifact in the
+      // panel header — a row and the tab it becomes read as the same thing.
+      return "localhost";
+    case "new-terminal":
+    case "spawn":
+    case "session":
+      // ONE vocabulary again: the prompt mark the panel header and the tab
+      // strip give a session artifact.
+      return SESSION_ICON;
+    case "kb":
+    case "file":
+      return FILE_ICON;
+  }
+}
+
+/** Right-hand meta: a KB doc's folder, a project's registry status, a repo
+ *  file's renderable kind (docKind — the same switch DocView routes on, so
+ *  `md`/`html`/`mmd` here means "this really has a viewer"). */
+function metaFor(row: Row): string {
+  switch (row.kind) {
+    case "project":
+      return row.meta;
+    case "dir":
+      return "";
+    case "url":
+      // Which bucket its pins will land in — worth stating before you open it,
+      // because that is the one thing a typed URL does not say for itself.
+      // For a DETECTED row, what announced it is the more useful fact: it is
+      // why this row sits above or below the others, and it is the difference
+      // between "your app" and "your API, which frames as JSON".
+      return row.detected
+        ? `${row.detected} · ${row.project}`
+        : `live preview · ${row.project}`;
+    case "new-terminal":
+      // Says where it will live, because that is the whole decision this row
+      // represents — a shell in the PANEL, not a new tab.
+      return "a shell in this panel";
+    case "spawn":
+    case "session":
+      return row.meta;
+    case "kb":
+      // Truncated from the LEFT: the deep end of a KB path
+      // (…/artifact-panel) is what disambiguates two docs with the same file
+      // name, and CSS ellipsis would eat exactly that end.
+      return ellipsizeStart(row.meta, 34);
+    case "file": {
+      const kind = docKind(row.path);
+      return kind === "unknown" ? "" : kind;
+    }
+  }
+}
+
+function ellipsizeStart(text: string, max: number): string {
+  return text.length <= max ? text : `…${text.slice(-(max - 1))}`;
+}

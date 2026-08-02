@@ -1,15 +1,32 @@
 import type { Session, AgentStatus } from "../types";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
+import { UpdateChip } from "./UpdateChip";
 
 interface StatusBarProps {
   sessions: Session[];
   taskCount?: number;
   onToggleSidebar?: () => void;
+  onToggleSideMenu?: () => void;
+  /** Ctrl+Shift+P — toggles the active tab's artifact panel (close what's
+   *  open, or reopen what it last showed). Passed ONLY when the chord would
+   *  actually do something for this tab: advertising a dead chord is a lie. */
+  onTogglePanel?: () => void;
+  /** Ctrl+Shift+M — toggles the FOCUSED pane's composer (increment D). Unlike
+   *  the panel chip this is live whenever a session is focused: the toggle
+   *  always does something, because forcing a composer onto a plain shell is a
+   *  supported state, not a no-op. */
+  onToggleComposer?: () => void;
+  /** Ctrl+Shift+O — the floating window (increment F). It has existed since v1
+   *  and was reachable ONLY by that undocumented chord; a standing gripe, and
+   *  now that the window can also host a popped-out ARTIFACT it needed a real
+   *  entry point. Passed whenever a session is focused, which is exactly when
+   *  the chord does something. */
+  onTogglePip?: () => void;
 }
 
 const DISPLAY_ORDER: AgentStatus[] = ["running", "waiting", "done", "error", "idle", "exited"];
 
-export function StatusBar({ sessions, taskCount, onToggleSidebar }: StatusBarProps) {
+export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMenu, onTogglePanel, onToggleComposer, onTogglePip }: StatusBarProps) {
   const counts = new Map<AgentStatus, number>();
   for (const s of sessions) {
     counts.set(s.status, (counts.get(s.status) || 0) + 1);
@@ -43,8 +60,87 @@ export function StatusBar({ sessions, taskCount, onToggleSidebar }: StatusBarPro
             </span>
           );
         })}
+        <UpdateChip />
       </div>
       <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+        {onToggleSideMenu && (
+          <>
+            <button
+              onClick={onToggleSideMenu}
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                fontFamily: "var(--font-mono)",
+                fontSize: 10,
+                color: "#52525B",
+                padding: 0,
+              }}
+            >
+              <span>Ctrl+Shift+B menu</span>
+            </button>
+            <span style={{ color: "#3F3F46" }}>{"│"}</span>
+          </>
+        )}
+        {onTogglePanel && (
+          <>
+            <button
+              onClick={onTogglePanel}
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                fontFamily: "var(--font-mono)",
+                fontSize: 10,
+                color: "#52525B",
+                padding: 0,
+              }}
+            >
+              <span>Ctrl+Shift+P panel</span>
+            </button>
+            <span style={{ color: "#3F3F46" }}>{"│"}</span>
+          </>
+        )}
+        {onTogglePip && (
+          <>
+            <button
+              onClick={onTogglePip}
+              title="Open or close the floating always-on-top window — it mirrors the focused terminal, or hosts an artifact popped out of the panel"
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                fontFamily: "var(--font-mono)",
+                fontSize: 10,
+                color: "#52525B",
+                padding: 0,
+              }}
+            >
+              <span>Ctrl+Shift+O float</span>
+            </button>
+            <span style={{ color: "#3F3F46" }}>{"│"}</span>
+          </>
+        )}
+        {onToggleComposer && (
+          <>
+            <button
+              onClick={onToggleComposer}
+              title="Show or hide the prose composer at the bottom of the focused pane"
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                fontFamily: "var(--font-mono)",
+                fontSize: 10,
+                color: "#52525B",
+                padding: 0,
+              }}
+            >
+              <span>Ctrl+Shift+M composer</span>
+            </button>
+            <span style={{ color: "#3F3F46" }}>{"│"}</span>
+          </>
+        )}
         <span>Ctrl+T new</span>
         <span style={{ color: "#3F3F46" }}>{"\u2502"}</span>
         <span>Ctrl+W close</span>
@@ -80,8 +176,9 @@ export function StatusBar({ sessions, taskCount, onToggleSidebar }: StatusBarPro
                   style={{
                     fontSize: 9,
                     fontWeight: 700,
-                    color: "#0A0A0B",
-                    backgroundColor: "#A78BFA",
+                    color: "#E4E4E7",
+                    backgroundColor: "#151518",
+                    border: "1px solid #27272A",
                     borderRadius: 3,
                     padding: "0 4px",
                   }}
