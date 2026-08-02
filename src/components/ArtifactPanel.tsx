@@ -39,6 +39,12 @@
 // affordable in a full-height column; horizontal room is the scarce axis, and
 // the strip spends none of it (the `+` lives OUTSIDE the scroller, so it stays
 // reachable at the 260px floor no matter how many tabs are open).
+//
+// ICONS (2026-08-02): the header's kind mark is an SVG from components/icons,
+// like both trees and the picker. The TAB STRIP deliberately stays text-only —
+// a tab caps at 150px and horizontal room is the scarce axis, so 14px spent on
+// a mark that is identical on every tab (one file icon now) would buy nothing
+// the header directly beneath it does not already say.
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
@@ -48,6 +54,9 @@ import { explorerRead } from "../lib/explorer";
 import {
   activateArtifact,
   artifactIdentity,
+  closeArtifactPicker,
+  openArtifactPicker,
+  useArtifactPickerOpen,
   artifactShortTitle,
   closeArtifactAt,
   closePanel,
@@ -67,6 +76,7 @@ import {
 } from "../lib/panelStore";
 import { buildSendReference, refOptions } from "../lib/agentContext";
 import { ArtifactPicker } from "./ArtifactPicker";
+import { Icon } from "./icons";
 import { DocView } from "./kb/DocView";
 import { FileViewer, type OpenFile } from "./ExplorerView";
 
@@ -424,14 +434,18 @@ export function ArtifactPanel({
   // T8 seam 2 gate — no terminal to type into means the `→ thread` action is
   // DISABLED, never a silent no-op. Hook order: before the early return below.
   const canSend = useSendToThreadAvailable();
-  const [pickerOpen, setPickerOpen] = useState(false);
+  // The picker request lives in panelStore, keyed by TAB (see
+  // §"`+` picker request"): the tab bar's panel button opens it for a tab whose
+  // panel is EMPTY, and an empty panel renders nothing that could hold a
+  // component-local flag.
+  const pickerOpen = useArtifactPickerOpen(sessionId);
 
-  // The picker belongs to the panel that opened it: a tab switch, or the panel
-  // closing under it, dismisses it rather than leaving a modal that would
-  // reappear (and open into a different tab) the next time the panel renders.
+  // The picker belongs to the panel that opened it: a TAB SWITCH dismisses it
+  // rather than leaving a modal that would open into a different tab. (A
+  // completed pick is dismissed by the store, inside openInPanel.)
   useEffect(() => {
-    setPickerOpen(false);
-  }, [sessionId, open]);
+    return () => closeArtifactPicker();
+  }, [sessionId]);
 
   // Measure the WORKSPACE CONTAINER (our flex parent — pane tree + divider +
   // panel, TaskSidebar excluded by construction in App.tsx) to decide docked
@@ -456,11 +470,16 @@ export function ArtifactPanel({
     return () => observer.disconnect();
   }, [open]);
 
-  if (!open || !sessionId || !state || !artifact) return null;
+  if (!open || !sessionId || !state || !artifact) {
+    // Nothing to draw — EXCEPT the picker, which this tab may have asked for
+    // with an empty panel (the tab bar's panel button). It is `position:
+    // fixed`, so it needs no panel behind it; picking builds the panel.
+    return pickerOpen && sessionId ? <PickerOverlay sessionId={sessionId} /> : null;
+  }
 
   const layout = panelLayoutFor(containerWidth, panelWidth);
   const overlay = layout.mode === "overlay";
-  const { glyph, crumbs, title } = describeArtifact(artifact);
+  const { icon, crumbs, title } = describeArtifact(artifact);
 
   // Crossover to the full-width screen. Shares panelStore's `fullWidthRoute`
   // with the routing helper's navigate branch, so "open full" and a
@@ -511,9 +530,13 @@ export function ArtifactPanel({
             : { flex: "none", minWidth: 0 }),
         }}
       >
-        <TabStrip sessionId={sessionId} state={state} onAdd={() => setPickerOpen(true)} />
+        <TabStrip
+          sessionId={sessionId}
+          state={state}
+          onAdd={() => openArtifactPicker(sessionId)}
+        />
         <header style={HEAD_STYLE}>
-          <span style={{ flex: "none", color: "var(--text-faint)" }}>{glyph}</span>
+          <Icon name={icon} style={{ color: "var(--text-faint)" }} />
           <span
             title={title}
             style={{
@@ -607,16 +630,24 @@ export function ArtifactPanel({
           overlay/docked flip. It always ADDS TO THIS PANEL — openInPanel, not
           openArtifact: `+` is not a click on a tree row and must never navigate
           away from the shell it was pressed beside. */}
-      {pickerOpen && (
-        <ArtifactPicker
-          onPick={(target: OpenableArtifact) => {
-            openInPanel(sessionId, target);
-            setPickerOpen(false);
-          }}
-          onClose={() => setPickerOpen(false)}
-        />
-      )}
+      {pickerOpen && <PickerOverlay sessionId={sessionId} />}
     </>
+  );
+}
+
+/** The `+` picker, mounted for a specific tab. Rendered from TWO places in
+ *  ArtifactPanel — beside a live panel, and INSTEAD of one when the tab has no
+ *  artifacts yet — so the "always adds to THIS panel" rule is written once.
+ *  `openInPanel`, never `openArtifact`: `+` is not a click on a tree row and
+ *  must never navigate away from the shell it was pressed beside. */
+function PickerOverlay({ sessionId }: { sessionId: string }) {
+  return (
+    <ArtifactPicker
+      // Dismissal is the store's (openInPanel clears the request), so a pick
+      // that lands on the already-active tab still closes the modal.
+      onPick={(target: OpenableArtifact) => openInPanel(sessionId, target)}
+      onClose={closeArtifactPicker}
+    />
   );
 }
 

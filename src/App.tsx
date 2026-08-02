@@ -53,6 +53,7 @@ import {
   removeSessionPanel,
   togglePanel,
   panelToggleAvailableFor,
+  openArtifactPicker,
   publishActiveTabSession,
   registerPanelActions,
   artifactFor,
@@ -1108,6 +1109,26 @@ export default function App() {
     if (getNavState().route.screen !== "terminal") navigate({ screen: "terminal" });
   }, []);
 
+  // The TAB BAR's panel button (right end of the bar, the wordmark's
+  // counterpart). It is NOT a plain alias for the chord: a toggle on a tab
+  // that has never opened anything would do nothing at all, and a button that
+  // visibly does nothing is the dead affordance we have now fixed twice. So:
+  //
+  //   · panel open, or hidden-but-remembered → toggle it (exactly the chord);
+  //   · nothing ever opened here → open the `+` PICKER, which is the manual
+  //     "open an artifact" flow the button is really promising.
+  //
+  // Same content-first-screen-second order as the chord, and for the same
+  // reason: the panel and its picker live on the terminal screen, so acting
+  // from KB/Explorer without revealing it would read as a no-op.
+  const handlePanelButton = useCallback(() => {
+    const sessionId = activeIdRef.current;
+    if (!sessionId) return;
+    if (panelToggleAvailableFor(sessionId)) togglePanel(sessionId);
+    else openArtifactPicker(sessionId);
+    if (getNavState().route.screen !== "terminal") navigate({ screen: "terminal" });
+  }, []);
+
   // The KB root never changes while the app runs — fetch it once so T8's
   // builders can emit ABSOLUTE doc paths (a thread's cwd is a repo; a
   // KB-relative path is not resolvable from inside the conversation). On
@@ -1715,6 +1736,11 @@ export default function App() {
         onReorder={reorderSession}
         waitingCount={waitingCount}
         onToggleSideMenu={toggleSideMenu}
+        // Per-TAB, like everything else about the panel: activeSessionId, not
+        // the focused pane. `""` from panelIdentityFor means "no panel open".
+        onPanelButton={activeSessionId ? handlePanelButton : undefined}
+        panelOpen={activePanelIdentity !== ""}
+        panelToggleAvailable={panelToggleAvailable}
       />
 
       {newSessionDialogOpen && repoPickerAvailable && (

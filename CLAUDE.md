@@ -11,7 +11,7 @@ src/
 ├── types.ts                   → Core interfaces (Session, AgentStatus, Task, Config, etc.)
 ├── components/
 │   ├── TerminalPane.tsx         → xterm.js wrapper, PTY data flow, status/task wiring
-│   ├── TabBar.tsx               → Tab bar with scroll, rename, close, group dividers
+│   ├── TabBar.tsx               → Tab bar with scroll, rename, close, group dividers + the right-end artifact-panel button
 │   ├── PaneContainer.tsx        → Recursive binary tree pane renderer
 │   ├── PaneDivider.tsx          → Drag-to-resize between panes
 │   ├── SessionHeader.tsx        → Per-session info bar (repo, cwd, restart)
@@ -33,6 +33,7 @@ src/
 │   │   ├── DocView.tsx            → Markdown reading view (routes to wireframe/diagram views)
 │   │   ├── WireframeView.tsx      → Sandboxed iframe wireframe rendering + pin/note markup
 │   │   └── DiagramView.tsx        → Mermaid diagram surface (lazy chunk, pan/zoom)
+│   ├── icons.tsx                → THE icon module: hand-written inline SVG (folder/folder-open/file/panel/localhost/chevrons) shared by both trees, the picker, the panel header and the tab-bar button
 │   ├── Toast.tsx                → Notification toasts
 │   └── PulsingDot.tsx           → Animated status indicator
 ├── hooks/
@@ -51,7 +52,7 @@ src/
 │   ├── fitQueue.ts              → Debounced per-session fit pipeline (show/resize coalescing)
 │   ├── route.ts                 → URL-backed route model + nav store (screen switching)
 │   ├── threadStore.ts           → Durable agent threads: records, revive decisions, shell-ready wait, action bridge
-│   ├── panelStore.ts            → Artifact panel state (per-TAB `PanelState` = artifact strip + activeIndex, global width), strip ops (`appendOrActivate`/`closeArtifactIn`), layout/drag math, header breadcrumbs, open-in-panel decision (`decideOpen`/`fullWidthRoute`), toggle memory, active-tab + send-to-thread bridges
+│   ├── panelStore.ts            → Artifact panel state (per-TAB `PanelState` = artifact strip + activeIndex, global width), strip ops (`appendOrActivate`/`closeArtifactIn`), layout/drag math, header breadcrumbs, the shared ICON NAMES (`FILE_ICON`/`folderIcon`/`describeArtifact().icon` — drawn by components/icons), open-in-panel decision (`decideOpen`/`fullWidthRoute`), toggle memory, `+`-picker request, active-tab + send-to-thread bridges
 │   ├── agentContext.ts          → Agent context injection (T8): shell-safe sanitizer + the two seam builders (`buildSpawnContext`, `buildSendReference`) + KB-root cache. PURE — the effectful ends live in App/threadStore/panelStore
 │   ├── kb.ts                    → KB doc list/read data layer (poll while active)
 │   ├── pins.ts                  → Wireframe pin/note file model (pure ops over pins JSON)
@@ -204,6 +205,11 @@ Chord notes:
   the UI. The StatusBar hint strip advertises Ctrl+T/W/[ ]/F/\\/1-9 as plain text plus
   THREE clickable buttons: Ctrl+Shift+B menu, Ctrl+Shift+P panel (rendered only while
   the chord would do something), and Ctrl+B tasks.
+- **The TAB BAR carries the two surface buttons**: the SWITCHBOARD wordmark (left end)
+  toggles the side menu, and the panel button (right end) toggles the artifact panel —
+  or, on a tab whose panel is EMPTY, opens the `+` picker instead, because a toggle
+  with nothing to show would be a dead affordance. That empty state is the only place
+  the button diverges from Ctrl+Shift+P.
 - **Ctrl+Shift+P reveals the terminal screen** when the route is elsewhere — the panel
   renders only there, so toggling from KB/Explorer would otherwise be invisible.
   Mirrors `applyOpenDecision`'s `revealTerminal`.

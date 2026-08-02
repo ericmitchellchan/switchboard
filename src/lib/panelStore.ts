@@ -45,7 +45,11 @@
 import { useSyncExternalStore } from "react";
 import type { Artifact, PanelState, Route, ScreenId } from "../types";
 import { getNavState, navigate } from "./route";
-import { docKind, type DocKind } from "./kb";
+// TYPE-ONLY, and deliberately so: the icon vocabulary is named here and DRAWN
+// in components/icons.tsx, and a type import is erased at build time — this
+// store keeps zero runtime dependency on React components (its tests import it
+// in a plain node environment).
+import type { IconName } from "../components/icons";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure helpers
@@ -185,21 +189,21 @@ export function panelWidthFromDrag(
 export type ArtifactCrumb = { text: string; tone: "lead" | "dim" | "bright" };
 
 export type ArtifactDescription = {
-  /** Kind glyph shown left of the breadcrumb. */
-  glyph: string;
+  /** Kind icon shown left of the breadcrumb (drawn by components/icons). */
+  icon: IconName;
   crumbs: ArtifactCrumb[];
   /** Flat one-line form for tooltips / aria labels. */
   title: string;
 };
 
-/** Build the panel header's glyph + breadcrumb for an artifact. Pure — the
- *  host just paints the tones. */
+/** Build the panel header's icon + breadcrumb for an artifact. Pure — the
+ *  host just draws the icon and paints the tones. */
 export function describeArtifact(artifact: Artifact): ArtifactDescription {
   switch (artifact.kind) {
     case "kb-doc": {
       const segments = artifact.path.split("/").filter((s) => s.length > 0);
       return {
-        glyph: "◆",
+        icon: FILE_ICON,
         crumbs: [{ text: "kb", tone: "dim" }, ...toneSegments(segments)],
         title: `kb / ${artifact.path}`,
       };
@@ -207,14 +211,14 @@ export function describeArtifact(artifact: Artifact): ArtifactDescription {
     case "repo-file": {
       const segments = artifact.path.split("/").filter((s) => s.length > 0);
       return {
-        glyph: "■",
+        icon: FILE_ICON,
         crumbs: [{ text: artifact.project, tone: "lead" }, ...toneSegments(segments, false)],
         title: `${artifact.project} / ${artifact.path}`,
       };
     }
     case "localhost":
       return {
-        glyph: "◉",
+        icon: "localhost",
         crumbs: [
           { text: artifact.project, tone: "lead" },
           { text: artifact.url, tone: "bright" },
@@ -224,60 +228,44 @@ export function describeArtifact(artifact: Artifact): ArtifactDescription {
   }
 }
 
-// ── Tree glyphs (Increment B, acceptance 5) ──────────────────────────────────
-// Folder-vs-file symbols for the side-menu trees (KbTreeSection /
-// ExplorerTreeSection). The vocabulary lives HERE, next to describeArtifact,
-// so the trees, the `+` picker and the panel header speak ONE language:
+// ── Tree icons (2026-08-02 — Eric, driving the app) ──────────────────────────
+// Folder-vs-file marks for the side-menu trees (KbTreeSection /
+// ExplorerTreeSection) and the `+` picker. The NAMES live here, next to
+// describeArtifact, so the trees, the picker and the panel header keep
+// speaking ONE language; the DRAWING lives in components/icons.tsx.
 //
-//   · the two anchors ARE describeArtifact's own glyphs — a document is ◆
-//     (its kb-doc glyph) and a plain file is ■ (its repo-file glyph), read
-//     out of the function rather than retyped, exactly as ArtifactPicker
-//     already does;
-//   · the file split comes from `kb.docKind` — the SAME switch DocView routes
-//     on — so "this row has a renderer" and "this row renders" can't drift.
+// This replaces the geometric-glyph vocabulary (◧ ◆ ◈ ◇ ▪ ▫ ■). Two things
+// were wrong with it and only one was fixable:
+//   1. it did not read — every mark was "a small filled shape", which is why
+//      Eric called them dots; and
+//   2. the marks did not ALIGN, because their ink sits at different offsets
+//      inside the identical 600/1000 mono cell (▪ occupies x 150…450 of the
+//      cell, ◧ occupies 0…600). See the measurements in components/icons.tsx.
+// A vector path puts its ink exactly where we say, so the alignment problem
+// stops existing rather than being compensated for.
 //
-// Shape language: DIAMONDS are documents that render (◆ markdown · ◈
-// wireframe · ◇ diagram), SQUARES are raw text (■ plain file · ▪ code · ▫
-// data), and ◧ — a box with a solid spine, i.e. a drawer — is a folder.
-//
-// FONT COVERAGE IS VERIFIED, NOT ASSUMED. Every glyph below was cmap-checked
-// against all four bundled weights of src/assets/fonts/JetBrainsMono-*.woff2
-// (2026-08-02): each is present and each has the same 600/1000 advance, so a
-// glyph occupies exactly one mono cell and never reflows a row. Sitting in
-// the Geometric Shapes block is NOT sufficient evidence — ▣ (U+25A3), the
-// obvious folder glyph, is absent from the font and would have fallen back to
-// a different typeface at a different width. Anything added here must be
-// re-checked and added to MONO_SAFE_CODEPOINTS in panelStore.test.ts.
+// Kind-awareness is GONE on purpose: one file icon for every file, per Eric's
+// "just use a folder icon and then a file icon". Nothing is lost that was
+// legible at 12px — the picker still prints the docKind as text, and DocView
+// still routes on it.
 
-const DOC_GLYPH = describeArtifact({ kind: "kb-doc", path: "x" }).glyph;
-const FILE_GLYPH = describeArtifact({ kind: "repo-file", project: "x", path: "y" }).glyph;
+/** File rows in BOTH trees, rows in the `+` picker, and the panel header for
+ *  every openable artifact (kb-doc and repo-file alike). */
+export const FILE_ICON: IconName = "file";
 
-/** Directory rows — project roots and plain folders alike, in BOTH trees.
- *  U+25E7 SQUARE WITH LEFT HALF BLACK: a container with a spine, which reads
- *  as a drawer at 9px and is unmistakably not one of the file shapes. */
-export const FOLDER_GLYPH = "◧";
+/** Directory rows — project roots and plain folders alike, in BOTH trees, plus
+ *  the picker's project/dir rows (which are always collapsed). */
+export const FOLDER_ICON: IconName = "folder";
 
-/** Kind glyph for a file row. Pure. */
-export function glyphForDocKind(kind: DocKind): string {
-  switch (kind) {
-    case "markdown":
-      return DOC_GLYPH;
-    case "wireframe":
-      return "◈";
-    case "diagram":
-      return "◇";
-    case "code":
-      return "▪";
-    case "data":
-      return "▫";
-    case "unknown":
-      return FILE_GLYPH;
-  }
-}
+/** Expanded directory rows. Matches the expander chevron, IDE-style. */
+export const FOLDER_OPEN_ICON: IconName = "folder-open";
 
-/** Kind glyph for a file PATH — `glyphForDocKind ∘ docKind`. Pure. */
-export function glyphForPath(path: string): string {
-  return glyphForDocKind(docKind(path));
+/** The tab bar's panel button. */
+export const PANEL_ICON: IconName = "panel";
+
+/** Folder icon for a row's expansion state. Pure. */
+export function folderIcon(open: boolean): IconName {
+  return open ? FOLDER_OPEN_ICON : FOLDER_ICON;
 }
 
 /** Last segment bright, first `lead` (only when it is also the root of the
@@ -653,6 +641,10 @@ export function initPanelStore(
  *  to it — the same strip the chord would have brought back. */
 export function openInPanel(sessionId: string, artifact: Artifact): void {
   if (sessionId.length === 0) return;
+  // Picking an artifact ENDS the pick — including the case below where the
+  // chosen artifact is already the active tab and nothing else changes. Left
+  // to the component, that no-op branch would strand an open modal.
+  closeArtifactPicker();
   const clean = sanitizeArtifact(artifact);
   if (!clean) return;
   const live = panels.get(sessionId) ?? null;
@@ -803,6 +795,9 @@ export function usePanelToggleAvailable(sessionId: string | null): boolean {
  *  strip into `lastPanelStates` on the way out, i.e. resurrect the memory of
  *  a tab that no longer exists. */
 export function removeSessionPanel(sessionId: string): void {
+  // A picker asking on behalf of a tab that no longer exists would open its
+  // pick into a dead session id.
+  if (pickerSessionId === sessionId) closeArtifactPicker();
   const hadPanel = panels.has(sessionId);
   const hadMemory = lastPanelStates.has(sessionId);
   if (!hadPanel && !hadMemory) return;
@@ -901,6 +896,47 @@ export function sendToThreadAvailable(): boolean {
  *  snapshot — no re-render on divider drags. */
 export function useSendToThreadAvailable(): boolean {
   return useSyncExternalStore(subscribe, sendToThreadAvailable);
+}
+
+// ── `+` picker request (2026-08-02) ──────────────────────────────────────────
+// WHICH TAB is currently asking for the artifact picker. It lives in the store
+// rather than in ArtifactPanel's local state because the picker now has TWO
+// callers with different starting conditions:
+//
+//   · the tab strip's `+`, which by definition has a panel behind it; and
+//   · the TAB BAR's panel button, pressed on a tab with NO artifacts — where
+//     the panel renders nothing at all, so a component-local flag inside it
+//     could never be set from outside.
+//
+// Keyed by session so the request is per-TAB like everything else here: a tab
+// switch cannot inherit another tab's open modal, and picking always adds to
+// the panel that asked. The picker itself is `position: fixed`, so it needs no
+// panel behind it to be visible.
+let pickerSessionId: string | null = null;
+
+/** Ask this tab's panel to show the `+` picker. */
+export function openArtifactPicker(sessionId: string): void {
+  if (sessionId.length === 0 || pickerSessionId === sessionId) return;
+  pickerSessionId = sessionId;
+  bump();
+}
+
+/** Dismiss the picker (Esc, backdrop click, tab switch, or a completed pick).
+ *  No-op when nothing is asking. */
+export function closeArtifactPicker(): void {
+  if (pickerSessionId === null) return;
+  pickerSessionId = null;
+  bump();
+}
+
+/** Is the picker open FOR THIS TAB? */
+export function artifactPickerOpenFor(sessionId: string | null): boolean {
+  return sessionId !== null && pickerSessionId === sessionId;
+}
+
+/** Narrow selector — a boolean snapshot, so no re-render per divider frame. */
+export function useArtifactPickerOpen(sessionId: string | null): boolean {
+  return useSyncExternalStore(subscribe, () => artifactPickerOpenFor(sessionId));
 }
 
 /** React hook: the active tab's panel artifact. The side-menu trees subscribe
@@ -1027,6 +1063,7 @@ export function __resetPanelStoreForTests(): void {
   lastPanelStates = new Map();
   activeTabSessionId = null;
   panelActions = null;
+  pickerSessionId = null;
   panelWidth = DEFAULT_PANEL_WIDTH;
   cachedView = null;
   listeners.clear();

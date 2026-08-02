@@ -5,10 +5,10 @@
 // the host (218px side menu instead of an in-screen rail) and the indent
 // (10px/level for the tighter column). Soft palette only.
 //
-// Rows carry IDE folder/file symbols (increment B, acceptance 5): the
-// expander plus panelStore.FOLDER_GLYPH on folders, glyphForPath (docKind-
-// aware) on docs. The vocabulary is panelStore's, shared with the panel
-// header and the `+` picker.
+// Rows carry IDE folder/file ICONS: a chevron expander plus a folder icon
+// (open/closed with the row) on folders, one file icon on docs. The names are
+// panelStore's — shared with the panel header and the `+` picker — and the
+// paths live in components/icons.tsx.
 //
 // Clicking a DOC goes through panelStore.openArtifact (A3): on the terminal
 // screen it opens IN THE PANEL beside the running shell, on the kb screen it
@@ -27,11 +27,12 @@ import { ancestorFolders, buildKbTree, useKbDocList } from "../lib/kb";
 import type { KbNode } from "../lib/kb";
 import { getNavState } from "../lib/route";
 import {
-  FOLDER_GLYPH,
-  glyphForPath,
+  FILE_ICON,
+  folderIcon,
   openArtifact,
   useActiveTabArtifact,
 } from "../lib/panelStore";
+import { EXPANDER_SIZE, ICON_SIZE, Icon, type IconName } from "./icons";
 
 // Survives menu unmount (visibility toggle). Not persisted to disk — a fresh
 // launch starts collapsed, matching the wireframe's ▸ project rows.
@@ -133,8 +134,8 @@ function KbTreeNode({
       <>
         <TreeRow
           label={node.name}
-          prefix={isOpen ? "▾" : "▸"}
-          icon={FOLDER_GLYPH}
+          expanded={isOpen}
+          icon={folderIcon(isOpen)}
           depth={depth}
           active={false}
           onClick={() => onToggle(node.path)}
@@ -157,7 +158,7 @@ function KbTreeNode({
   return (
     <TreeRow
       label={node.name}
-      icon={glyphForPath(node.path)}
+      icon={FILE_ICON}
       depth={depth}
       active={node.path === activeDoc}
       // Ctrl/⌘+click inverts panel-vs-full-width (Decision 2); ⌘ so the chord
@@ -185,26 +186,62 @@ export function TreeMessage({ children }: { children: ReactNode }) {
   );
 }
 
-/** The gutter: expander slot + kind glyph, in ONE flex child so the pair costs
+/** The gutter: expander slot + kind icon, in ONE flex child so the pair costs
  *  a single row gap instead of two (218px is the whole budget, and a deep
  *  nesting level spends 10px/level of it before this).
  *
- *  The expander slot is a FIXED 5px whether or not the row has an arrow, so a
- *  file's name lines up under its sibling folders' names the way an IDE tree
- *  does. `lineHeight: 1` keeps a 9px glyph from ever growing the 4px-padded
- *  row: height stays exactly what it was before the glyphs existed. */
+ *  ALIGNMENT (2026-08-02 — Eric: "the icons you're using for the folders are
+ *  misaligned"). Both slots are now FIXED-WIDTH boxes with a centred SVG
+ *  inside, and the row centres them vertically:
+ *
+ *      [ expander 9px ][ 2px ][ icon 12px ]  = 23px, at EVERY depth
+ *
+ *  so a file row's icon lands on exactly the same x as its sibling folder's,
+ *  with or without an expander, at depth 0 or depth 5. The old gutter was
+ *  14px of TEXT glyphs (a 5px expander slot holding a 5.4px arrow, then an
+ *  auto-width glyph), which failed twice over: the arrow overflowed its slot
+ *  by ~1.9px of ink, and the glyphs' ink sat at different offsets inside the
+ *  identical mono cell (▪ at x 150…450 of 600, ◧ at 0…600) — a quarter-cell
+ *  drift no slot arithmetic could reach, because it lived inside the font.
+ *
+ *  `lineHeight: 0` so the boxes contribute no baseline strut, and the 12px icon
+ *  is SHORTER than the 11.5px label's line box (JetBrains Mono is 1.32em ⇒
+ *  15.2px), so the row's height is still the label's — unchanged from before
+ *  the icons existed. Anything taller than ~15px here starts growing rows. */
+const EXPANDER_SLOT = EXPANDER_SIZE;
+const ICON_SLOT = ICON_SIZE;
+
 const GUTTER_STYLE: CSSProperties = {
   flex: "none",
   display: "flex",
   alignItems: "center",
-  gap: 3,
-  fontSize: 9,
-  lineHeight: 1,
+  gap: 2,
+  lineHeight: 0,
+};
+
+const EXPANDER_SLOT_STYLE: CSSProperties = {
+  flex: "none",
+  width: EXPANDER_SLOT,
+  height: EXPANDER_SLOT,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  color: "var(--text-dim)",
+};
+
+const ICON_SLOT_STYLE: CSSProperties = {
+  flex: "none",
+  width: ICON_SLOT,
+  height: ICON_SLOT,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  color: "var(--text-muted)",
 };
 
 export function TreeRow({
   label,
-  prefix,
+  expanded,
   icon,
   depth,
   active,
@@ -215,12 +252,13 @@ export function TreeRow({
   onClick,
 }: {
   label: string;
-  /** ▸/▾ for expandable rows; undefined renders a blank expander slot. */
-  prefix?: string;
-  /** Kind glyph — panelStore.FOLDER_GLYPH on directories, glyphForPath on
-   *  files (acceptance 5). Dim by construction: it must never compete with
-   *  the row label. */
-  icon?: string;
+  /** Expander state for expandable rows: `true` = expanded (chevron down),
+   *  `false` = collapsed (chevron right). `undefined` = a leaf, which renders
+   *  the slot EMPTY rather than omitting it. */
+  expanded?: boolean;
+  /** Kind icon — panelStore.folderIcon on directories, FILE_ICON on files.
+   *  Dim by construction: it must never compete with the row label. */
+  icon?: IconName;
   depth: number;
   active: boolean;
   /** Right-aligned dim meta text (e.g. project status). */
@@ -265,11 +303,20 @@ export function TreeRow({
       title={label}
       style={style}
     >
-      {(prefix !== undefined || icon !== undefined) && (
+      {(expanded !== undefined || icon !== undefined) && (
         <span style={GUTTER_STYLE} aria-hidden="true">
-          <span style={{ flex: "none", width: 5, color: "var(--text-dim)" }}>{prefix ?? ""}</span>
+          <span style={EXPANDER_SLOT_STYLE}>
+            {expanded !== undefined && (
+              <Icon
+                name={expanded ? "chevron-down" : "chevron-right"}
+                size={EXPANDER_SIZE}
+              />
+            )}
+          </span>
           {icon !== undefined && (
-            <span style={{ flex: "none", color: "var(--text-muted)" }}>{icon}</span>
+            <span style={ICON_SLOT_STYLE}>
+              <Icon name={icon} />
+            </span>
           )}
         </span>
       )}

@@ -11,8 +11,9 @@
 // — except for the hover-revealed `>_` affordance, which creates a NEW
 // terminal in that project's directory (never `cd`s a live one).
 //
-// Rows carry IDE folder/file symbols (increment B): the expander plus
-// panelStore.FOLDER_GLYPH on directories, glyphForPath on files.
+// Rows carry IDE folder/file ICONS: a chevron expander plus a folder icon
+// (open/closed with the row) on directories, one file icon on files. Names
+// from panelStore, paths from components/icons.tsx.
 //
 // Directory expansion state is side-menu-LOCAL by design (never routed);
 // like the KB section it lives at module level so toggling the menu keeps
@@ -32,8 +33,8 @@ import type { ExplorerEntry, ExplorerProject } from "../lib/explorer";
 import { useThreadsView } from "../lib/threadStore";
 import { getNavState } from "../lib/route";
 import {
-  FOLDER_GLYPH,
-  glyphForPath,
+  FILE_ICON,
+  folderIcon,
   openArtifact,
   useActiveTabArtifact,
 } from "../lib/panelStore";
@@ -162,8 +163,8 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
           <div key={childKey}>
             <TreeRow
               label={entry.name}
-              prefix={isOpen ? "▾" : "▸"}
-              icon={FOLDER_GLYPH}
+              expanded={isOpen}
+              icon={folderIcon(isOpen)}
               depth={depth}
               active={false}
               onClick={() => toggle(project, childPath)}
@@ -178,7 +179,7 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
         <TreeRow
           key={nodeKey(project, childPath)}
           label={entry.name}
-          icon={glyphForPath(childPath)}
+          icon={FILE_ICON}
           depth={depth}
           active={isActive}
           onClick={(e) =>
@@ -207,8 +208,8 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
           <div key={p.key}>
             <TreeRow
               label={p.key}
-              prefix={isOpen ? "▾" : "▸"}
-              icon={FOLDER_GLYPH}
+              expanded={isOpen}
+              icon={folderIcon(isOpen)}
               depth={0}
               active={activeRoute?.project === p.key}
               meta={p.status}

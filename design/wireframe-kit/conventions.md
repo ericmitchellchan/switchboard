@@ -74,20 +74,47 @@ that stop being true.
   this document"), hover `--bg-active`, ACTIVE tab = the panel surface itself,
   continuous with the body beneath it. Existing tokens only — a new surface value is
   not a licence to invent tab colors.
-- 2026-08-02 — FOLDER vs FILE SYMBOLS in both trees: a directory row is expander +
-  `◧`, a file row is a blank expander slot + a kind glyph (`◆` markdown · `◈`
-  wireframe · `◇` diagram · `▪` code · `▫` data · `■` anything else). Diamonds =
-  documents that render, squares = raw text, `◧` = container. The vocabulary lives in
-  `panelStore` and is SHARED with the panel header and the `+` picker — anchors come
-  out of `describeArtifact` and the file split out of `kb.docKind`; never write a
-  second mapping. Glyphs are 9px `--text-muted` (expander `--text-dim`) so they sit
-  below the 11.5px `--text-secondary` label, and they live in a fixed 14px gutter so
-  a file's name lines up under its sibling folders'. No emoji, no icon font, no SVG,
-  ever.
-- 2026-08-02 — VERIFY A GLYPH AGAINST THE BUNDLED FONT before using it. `▣` U+25A3
-  looked like the obvious folder mark and is simply ABSENT from JetBrains Mono — it
-  would have fallen back to another typeface at another advance width and shifted
-  every label on the row. cmap-check new glyphs against all four weights in
-  `src/assets/fonts/` (advance must be 600/1000) and add them to
-  `MONO_SAFE_CODEPOINTS` in `panelStore.test.ts`. "It's in the Geometric Shapes
-  block" is not evidence.
+- 2026-08-02 — REAL FOLDER AND FILE ICONS, drawn as inline SVG (Eric, driving the
+  app: "the icons you're using for the folders are misaligned … we should actually
+  just use a folder icon and then a file icon instead of a dot for each file"). This
+  SUPERSEDES the same day's earlier "no emoji, no icon font, no SVG, ever" rule for
+  folder/file/panel marks, for two reasons. (1) SEMANTICS: unicode geometric shapes
+  cannot say "folder" or "document" at 9-11px — `◧ ◆ ◈ ◇ ▪ ▫ ■` are all "a small
+  filled shape", which is precisely why they read as dots; every IDE uses vector
+  icons for exactly this reason. (2) ALIGNMENT: identical advance is not identical
+  ink. Measured in JetBrains Mono (1000 upem, advance 600 for all of them), `◧`/`■`
+  fill x 0…600 of the cell, `◆ ◈ ◇` overhang at -10…610, and `▪`/`▫` are a 300-unit
+  mark at x 150…450 — so a code file's mark started a quarter-cell right of its
+  parent folder's and was half the size, a drift living INSIDE the font that no slot
+  arithmetic could reach. Icons live in ONE module (`src/components/icons.tsx`),
+  hand-written paths on a 16x16 viewBox centred on (8,8), `currentColor`, no
+  dependency. EMOJI AND ICON FONTS REMAIN BANNED; unicode is still right for
+  everything that is text (`×`, `›`, `/`, `>_`).
+- 2026-08-02 — ONE file icon, not one per kind. Kind-aware file glyphs are gone: the
+  distinction was never legible at 12px and it was the thing being read as dots. The
+  `+` picker still names the kind in TEXT (its meta column), which is where it works.
+  Folders DO take two variants — closed and open, following the row's expander — the
+  way every IDE draws them.
+- 2026-08-02 — `◧` MOVED TO THE PANEL, as Eric suggested ("the icon used for a folder
+  should probably be for the panel"): the tab bar's panel button is a frame with its
+  RIGHT portion filled, now drawn as SVG. It sits at the RIGHT END of the tab bar as
+  the wordmark's counterpart (wordmark = side menu at the left end, panel button =
+  artifact panel at the right end). Active treatment is `--bg-active` + `--text-primary`
+  — soft palette, no new hue.
+- 2026-08-02 — A PANEL BUTTON ON AN EMPTY PANEL OPENS THE PICKER, it does not toggle
+  nothing. Same rule as the StatusBar chip's visibility gate and the `>_` affordance's
+  registration: never ship a control whose press is invisible. Panel open or
+  remembered → toggle (exactly Ctrl+Shift+P); nothing ever opened on this tab → the
+  `+` picker, which is what "open the panel" actually means from a cold start.
+- 2026-08-02 — ICON SLOTS ARE FIXED-WIDTH BOXES WITH CENTRED CONTENT, never
+  auto-width marks: `[9px expander][2px][12px icon]` = a 23px gutter at every depth,
+  present whether or not the row has an expander. That, plus `lineHeight: 0` on the
+  gutter, is what makes a file row's icon land on the same x as its sibling folder's
+  at depth 0 and depth 5 without changing the row height.
+- 2026-08-02 — VERIFY BEFORE YOU TRUST, whichever medium you are in. For text: `▣`
+  U+25A3 looked like the obvious folder mark and is simply ABSENT from JetBrains Mono
+  — it would have fallen back to another typeface at another advance width. For
+  vectors: draw the path, RASTERISE it, and look at it before shipping; a hand-written
+  16x16 path is easy to get subtly wrong and nothing in the type system catches a
+  folder that reads as a box. "It's in the Geometric Shapes block" and "the path looks
+  right in my head" are the same non-evidence.

@@ -28,7 +28,8 @@ import type { CSSProperties } from "react";
 import { docKind, useKbDocList } from "../lib/kb";
 import { explorerList, explorerProjects } from "../lib/explorer";
 import type { ExplorerEntry, ExplorerProject } from "../lib/explorer";
-import { FOLDER_GLYPH, describeArtifact, type OpenableArtifact } from "../lib/panelStore";
+import { FILE_ICON, FOLDER_ICON, type OpenableArtifact } from "../lib/panelStore";
+import { ICON_SIZE, Icon, type IconName } from "./icons";
 
 /** Render cap. A KB with thousands of docs must not paint thousands of rows on
  *  every keystroke; the filter is how you reach the tail. */
@@ -43,9 +44,6 @@ type Row =
   | { kind: "kb"; id: string; label: string; meta: string; path: string }
   /** A repo file — Enter opens it in the panel. */
   | { kind: "file"; id: string; label: string; path: string };
-
-const KB_GLYPH = describeArtifact({ kind: "kb-doc", path: "x" }).glyph;
-const REPO_GLYPH = describeArtifact({ kind: "repo-file", project: "x", path: "y" }).glyph;
 
 export function ArtifactPicker({
   onPick,
@@ -327,8 +325,18 @@ export function ArtifactPicker({
                 fontSize: 11.5,
               }}
             >
-              <span style={{ flex: "none", width: 10, color: "var(--text-faint)" }}>
-                {glyphFor(row)}
+              <span
+                style={{
+                  flex: "none",
+                  width: ICON_SIZE,
+                  height: ICON_SIZE,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  color: "var(--text-faint)",
+                }}
+              >
+                <Icon name={iconFor(row)} />
               </span>
               <span
                 style={{
@@ -441,19 +449,20 @@ function Crumb({
   );
 }
 
-/** Kind glyph — ONE vocabulary with the side-menu trees and the panel header
- *  (panelStore): the artifact kinds reuse describeArtifact's own glyphs so a
- *  row and the tab it becomes read as the same thing, and containers use the
- *  trees' FOLDER_GLYPH rather than a second folder mark. */
-function glyphFor(row: Row): string {
+/** Kind icon — ONE vocabulary with the side-menu trees and the panel header
+ *  (names from panelStore, paths from components/icons): a row and the tab it
+ *  becomes read as the same thing, and containers use the trees' own folder
+ *  icon rather than a second folder mark. Project and dir rows are always
+ *  COLLAPSED here — the picker descends into them rather than expanding them
+ *  in place — so they never take the open-folder variant. */
+function iconFor(row: Row): IconName {
   switch (row.kind) {
     case "project":
     case "dir":
-      return FOLDER_GLYPH;
+      return FOLDER_ICON;
     case "kb":
-      return KB_GLYPH;
     case "file":
-      return REPO_GLYPH;
+      return FILE_ICON;
   }
 }
 

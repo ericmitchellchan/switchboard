@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type { Artifact, PanelState, Thread } from "../types";
-import type { DocKind } from "./kb";
 import {
   // pure helpers
   clampPanelWidth,
@@ -11,6 +10,15 @@ import {
   parsePanelWidth,
   serializePanels,
   remapPanels,
+  // 2026-08-02: icon vocabulary + `+` picker request
+  FILE_ICON,
+  FOLDER_ICON,
+  FOLDER_OPEN_ICON,
+  PANEL_ICON,
+  folderIcon,
+  openArtifactPicker,
+  closeArtifactPicker,
+  artifactPickerOpenFor,
   // increment B: pure strip ops
   sameArtifact,
   indexOfArtifact,
@@ -40,10 +48,6 @@ import {
   panelLayoutFor,
   panelWidthFromDrag,
   describeArtifact,
-  // Increment B tree glyphs (acceptance 5)
-  FOLDER_GLYPH,
-  glyphForDocKind,
-  glyphForPath,
   paneTreeWidthFor,
   artifactIdentity,
   panelIdentityFor,
@@ -1001,7 +1005,7 @@ describe("artifactIdentity / panelIdentityFor", () => {
 
 // ─── A2: header presentation ─────────────────────────────────────────────────
 
-describe("describeArtifact (glyph + breadcrumb)", () => {
+describe("describeArtifact (icon + breadcrumb)", () => {
   it("kb-doc: `kb` root, ancestors dim, the doc bright", () => {
     const d = describeArtifact(KB_DOC);
     expect(d.crumbs).toEqual([
@@ -1012,7 +1016,6 @@ describe("describeArtifact (glyph + breadcrumb)", () => {
       { text: "requirements.md", tone: "bright" },
     ]);
     expect(d.title).toBe("kb / switchboard/features/artifact-panel/requirements.md");
-    expect(d.glyph.length).toBeGreaterThan(0);
   });
 
   it("repo-file: the PROJECT is the lead crumb, path segments are plain ancestors", () => {
@@ -1048,102 +1051,105 @@ describe("describeArtifact (glyph + breadcrumb)", () => {
     ]);
   });
 
-  it("kb-doc and repo-file are visually distinguishable by glyph", () => {
-    expect(describeArtifact(KB_DOC).glyph).not.toBe(describeArtifact(REPO_FILE).glyph);
+});
+
+// ─── Tree/panel ICONS (2026-08-02 — the geometric glyphs are gone) ──────────
+
+describe("icon vocabulary (folder vs file, one language for three surfaces)", () => {
+  // The glyph set (◧ ◆ ◈ ◇ ▪ ▫ ■) and its cmap guard were REMOVED with this
+  // change, not merely superseded: unicode geometric shapes cannot express
+  // folder/file semantics at 9-11px, and their ink sits at different offsets
+  // inside the identical mono cell (the misalignment Eric reported). The
+  // vocabulary is now icon NAMES here + hand-written SVG paths in
+  // components/icons.tsx, where `Record<IconName, ReactNode>` makes "a name
+  // with no drawing" a type error rather than something a test has to catch.
+
+  it("gives EVERY openable artifact the one file icon", () => {
+    // Eric, on the running app: "just use a folder icon and then a file icon
+    // instead of a dot for each file". Kind-awareness (markdown vs wireframe
+    // vs code vs data) was the thing being read as dots — the picker still
+    // prints docKind as TEXT, where it is legible.
+    expect(describeArtifact(KB_DOC).icon).toBe(FILE_ICON);
+    expect(describeArtifact(REPO_FILE).icon).toBe(FILE_ICON);
+  });
+
+  it("keeps localhost distinguishable — it is not a file", () => {
+    const d = describeArtifact({ kind: "localhost", project: "p", url: "http://localhost:1" });
+    expect(d.icon).not.toBe(FILE_ICON);
+    expect(d.icon).not.toBe(FOLDER_ICON);
+  });
+
+  it("never collides a folder icon with the file icon, in either state", () => {
+    expect(FOLDER_ICON).not.toBe(FILE_ICON);
+    expect(FOLDER_OPEN_ICON).not.toBe(FILE_ICON);
+    expect(FOLDER_OPEN_ICON).not.toBe(FOLDER_ICON);
+  });
+
+  it("folderIcon follows the row's expander state", () => {
+    expect(folderIcon(true)).toBe(FOLDER_OPEN_ICON);
+    expect(folderIcon(false)).toBe(FOLDER_ICON);
+  });
+
+  it("the panel button's icon is the panel's own, not a folder's", () => {
+    // Eric: "the icon used for a folder should probably be for the panel".
+    expect(PANEL_ICON).not.toBe(FOLDER_ICON);
+    expect(PANEL_ICON).not.toBe(FILE_ICON);
   });
 });
 
-// ─── Increment B: tree glyphs (acceptance 5) ─────────────────────────────────
+// ─── The `+` picker request (the tab-bar panel button's empty state) ─────────
 
-describe("tree glyphs (folder vs file, kind-aware)", () => {
-  const ALL_KINDS: DocKind[] = [
-    "markdown",
-    "wireframe",
-    "diagram",
-    "code",
-    "data",
-    "unknown",
-  ];
-
-  it("anchors on describeArtifact's own glyphs — no parallel mapping", () => {
-    // A markdown doc reads as the panel header's kb-doc glyph; a file with no
-    // renderer reads as its repo-file glyph. If describeArtifact ever changes
-    // these, the trees follow automatically.
-    expect(glyphForDocKind("markdown")).toBe(describeArtifact(KB_DOC).glyph);
-    expect(glyphForDocKind("unknown")).toBe(describeArtifact(REPO_FILE).glyph);
+describe("artifact picker request", () => {
+  it("is closed by default and scoped to ONE tab", () => {
+    expect(artifactPickerOpenFor("s1")).toBe(false);
+    openArtifactPicker("s1");
+    expect(artifactPickerOpenFor("s1")).toBe(true);
+    // Another tab must not inherit an open modal.
+    expect(artifactPickerOpenFor("s2")).toBe(false);
+    expect(artifactPickerOpenFor(null)).toBe(false);
   });
 
-  it("gives every DocKind exactly one single-character glyph", () => {
-    for (const kind of ALL_KINDS) {
-      const glyph = glyphForDocKind(kind);
-      // One column in a mono grid — a two-cell glyph would shift every label
-      // on the row and blow the 218px menu budget.
-      expect([...glyph]).toHaveLength(1);
-    }
+  it("only ONE tab can be asking at a time", () => {
+    openArtifactPicker("s1");
+    openArtifactPicker("s2");
+    expect(artifactPickerOpenFor("s1")).toBe(false);
+    expect(artifactPickerOpenFor("s2")).toBe(true);
   });
 
-  it("distinguishes the three renderable doc kinds from each other", () => {
-    const renderable = ["markdown", "wireframe", "diagram"] as const;
-    const glyphs = renderable.map(glyphForDocKind);
-    expect(new Set(glyphs).size).toBe(renderable.length);
+  it("closes on a completed pick — including one that changes nothing", () => {
+    openInPanel("s1", KB_DOC);
+    openArtifactPicker("s1");
+    // Re-picking the ALREADY ACTIVE artifact is openInPanel's no-op branch.
+    // The modal must still go away; that is why the store owns dismissal.
+    openInPanel("s1", KB_DOC);
+    expect(artifactPickerOpenFor("s1")).toBe(false);
   });
 
-  it("never collides a file glyph with the folder glyph", () => {
-    for (const kind of ALL_KINDS) {
-      expect(glyphForDocKind(kind)).not.toBe(FOLDER_GLYPH);
-    }
-    expect([...FOLDER_GLYPH]).toHaveLength(1);
+  it("closes when the tab it belongs to is destroyed", () => {
+    openInPanel("s1", KB_DOC);
+    openArtifactPicker("s1");
+    removeSessionPanel("s1");
+    expect(artifactPickerOpenFor("s1")).toBe(false);
   });
 
-  it("glyphForPath routes through docKind — the same switch DocView uses", () => {
-    expect(glyphForPath("a/b/spec.md")).toBe(glyphForDocKind("markdown"));
-    expect(glyphForPath("wireframes/shell.html")).toBe(glyphForDocKind("wireframe"));
-    expect(glyphForPath("diagrams/flow.mmd")).toBe(glyphForDocKind("diagram"));
-    expect(glyphForPath("src/App.tsx")).toBe(glyphForDocKind("code"));
-    expect(glyphForPath("registry.json")).toBe(glyphForDocKind("data"));
-    expect(glyphForPath("Makefile")).toBe(glyphForDocKind("unknown"));
+  it("survives the panel being hidden — the request is not the panel", () => {
+    // Ctrl+Shift+P while the picker is open leaves an empty panel; the picker
+    // is a fixed-position overlay and ArtifactPanel still hosts it.
+    openInPanel("s1", KB_DOC);
+    openArtifactPicker("s1");
+    togglePanel("s1");
+    expect(panelStateFor("s1")).toBeNull();
+    expect(artifactPickerOpenFor("s1")).toBe(true);
   });
 
-  it("is case-insensitive on the extension (docKind's contract)", () => {
-    expect(glyphForPath("README.MD")).toBe(glyphForDocKind("markdown"));
-  });
-
-  it("uses only codepoints VERIFIED present in the bundled JetBrains Mono", () => {
-    // Every codepoint here was cmap-checked against all four bundled weights
-    // of src/assets/fonts/JetBrainsMono-*.woff2 on 2026-08-02: present in all
-    // four, advance 600/1000 in all four, i.e. exactly one mono cell.
-    //
-    // This list is the point of the test. Being in the Geometric Shapes block
-    // is NOT evidence of coverage — ▣ U+25A3, the obvious folder glyph, is
-    // MISSING from the font and would have silently fallen back to another
-    // typeface at another width, shifting every label on the row. A new glyph
-    // must be cmap-checked and added here, never just "it looks like the
-    // others".
-    const MONO_SAFE_CODEPOINTS = new Set([
-      0x25c6, // ◆ black diamond      — markdown (describeArtifact kb-doc)
-      0x25c8, // ◈ diamond in diamond — wireframe
-      0x25c7, // ◇ white diamond      — diagram
-      0x25aa, // ▪ small black square — code
-      0x25ab, // ▫ small white square — data
-      0x25a0, // ■ black square       — plain file (describeArtifact repo-file)
-      0x25e7, // ◧ square, left half  — folder
-      0x25c9, // ◉ fisheye            — localhost (describeArtifact)
-    ]);
-    const everyGlyph = [
-      ...ALL_KINDS.map(glyphForDocKind),
-      FOLDER_GLYPH,
-      // The panel header's own glyphs go through the same guard — they are
-      // the anchors this vocabulary is built from, and `localhost` is the one
-      // that no DocKind maps to, so nothing else would cover it.
-      describeArtifact(KB_DOC).glyph,
-      describeArtifact(REPO_FILE).glyph,
-      describeArtifact({ kind: "localhost", project: "p", url: "http://localhost:1" }).glyph,
-    ];
-    for (const glyph of everyGlyph) {
-      expect(MONO_SAFE_CODEPOINTS).toContain(glyph.codePointAt(0));
-    }
+  it("closing is idempotent", () => {
+    openArtifactPicker("s1");
+    closeArtifactPicker();
+    closeArtifactPicker();
+    expect(artifactPickerOpenFor("s1")).toBe(false);
   });
 });
+
 
 // ─── A3: open-in-panel routing decision (architecture Decision 2) ────────────
 

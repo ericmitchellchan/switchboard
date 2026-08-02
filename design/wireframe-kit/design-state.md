@@ -1,8 +1,8 @@
 # Switchboard — Design State
 
 Generated 2026-07-31, regenerated 2026-08-01 (soft-palette chrome migration),
-regenerated 2026-08-02 (increment B: panel surface + tree glyphs) from repo
-code. Regenerate when `src/styles/global.css`, `src/lib/statusConfig.ts`, or
+regenerated 2026-08-02 (increment B: panel surface + tree glyphs), regenerated
+2026-08-02 (SVG icon set + tab-bar panel button) from repo code. Regenerate when `src/styles/global.css`, `src/lib/statusConfig.ts`, or
 the chrome components change (see README).
 
 ## Tokens (src/styles/global.css:33-52)
@@ -18,9 +18,9 @@ the chrome components change (see README).
 | `--border-subtle` | `#27272A` | inner dividers, scrollbar thumb, **panel left edge** |
 | `--text-primary` | `#E4E4E7` | main text |
 | `--text-secondary` | `#A1A1AA` | secondary text, tree row label |
-| `--text-muted` | `#71717A` | muted labels, **tree kind glyph** |
-| `--text-dim` | `#52525B` | dim/meta, **tree expander** |
-| `--text-faint` | `#3F3F46` | faintest (idle icon, panel header glyph) |
+| `--text-muted` | `#71717A` | muted labels, **tree kind icon** |
+| `--text-dim` | `#52525B` | dim/meta, **tree expander chevron** |
+| `--text-faint` | `#3F3F46` | faintest (idle icon, panel header icon, picker row icon) |
 | `--accent-purple` | `#A78BFA` | terminal theme only (cursor, ANSI magenta, selection tint) + repo-identity fallback (SessionHeader, `explorer.DEFAULT_REPO_COLOR`) — chrome demoted to white/zinc 2026-08-01 |
 | `--accent-green` | `#34D399` | positive accents |
 | `--accent-blue` | `#3B82F6` | running |
@@ -90,48 +90,58 @@ DiagramView runs mermaid `theme: "base"`, whose nodes carry their own fills.
 
 | Surface | Facts | Source |
 |---|---|---|
-| Tab bar | h 44px, bg `#0A0A0B`, border-bottom `#1E1E22`, tab pad `0 14px`, title 12.5px, waiting badge 10px `#F59E0B` pill `1px 5px`, group divider 1px `#27272A`, active-tab top border = status color, drag-over insert line 2px `--text-primary` | TabBar.tsx:104-141,247 |
+| Tab bar | h 44px, bg `#0A0A0B`, border-bottom `#1E1E22`, tab pad `0 14px`, title 12.5px, waiting badge 10px `#F59E0B` pill `1px 5px`, group divider 1px `#27272A`, active-tab top border = status color, drag-over insert line 2px `--text-primary` | TabBar.tsx |
+| Tab-bar panel button | RIGHT end, cell pad `0 10px` + 1px `#1E1E22` left border; button 24x24, radius 4, 14px `panel` icon; idle `#71717A` on transparent, hover `--text-primary` on `--bg-elevated`, **panel open = `--text-primary` on `--bg-active`** | TabBar.tsx PanelButton |
 | Status bar | h 26px, bg `#0A0A0B`, font 10px, count badge 9px outlined zinc (bg `#151518`, 1px `#27272A`, text `#E4E4E7`) | StatusBar.tsx:25-84 |
 | Side menu | w 218px, bg `#0A0A0B`, border-right 1px `#1E1E22`, section label 9.5px uppercase `--text-dim`, rows 11.5px | SideMenu.tsx:57-68 |
 | Tree row | pad `4px 10px 4px (12 + depth*10)px`, gap 6, active = `#151518` + inset 2px `--text-primary` | KbTreeSection.tsx TreeRow |
-| Tree gutter | 14px slot: 5px expander (`▸`/`▾`, 9px, `--text-dim`) + 3px gap + kind glyph (9px, `--text-muted`) | KbTreeSection.tsx GUTTER_STYLE |
+| Tree gutter | **23px slot: 9px expander chevron (`--text-dim`) + 2px gap + 12px kind icon (`--text-muted`)**, both fixed-width boxes, contents centred, `lineHeight: 0` and the 12px icon is under the 11.5px label's 15.2px line box (JetBrains Mono 1.32em), so row height is unchanged | KbTreeSection.tsx GUTTER_STYLE |
 | Artifact panel | default w 420px, min 260px, max 960px, min terminal 320px, overlay below 880px container, divider 4px | panelStore.ts:55-92 |
 | Panel tab strip | h 24px, bg `#1A1A1D`, tab max-w 150px, 10.5px, active = surface + inset 2px `--text-muted` + weight 600, `+` button 24px | ArtifactPanel.tsx TabStrip |
-| Panel header | h 36px, 11.5px, border-bottom `#1E1E22`, glyph `--text-faint`, actions `--text-dim` → `--text-primary` on hover | ArtifactPanel.tsx HEAD_STYLE |
+| Panel header | h 36px, 11.5px, border-bottom `#1E1E22`, 12px kind icon `--text-faint`, actions `--text-dim` → `--text-primary` on hover | ArtifactPanel.tsx HEAD_STYLE |
+| Picker row | pad `5px 12px`, gap 8, 12px icon slot `--text-faint`, label 11.5px, meta 9.5px `--text-dim` | ArtifactPicker.tsx |
 | Task sidebar | full 280px / collapsed 38px / hidden (right side) | TaskSidebar.tsx:68,139 |
 | Scrollbars | 5px, thumb `#27272A`, hover `#3F3F46` | global.css:84-99 |
 | Terminal | xterm.js, bg `--bg-primary` | terminal.ts |
 
-## Tree glyphs (src/lib/panelStore.ts — single source of truth)
+## Icons (src/components/icons.tsx — the only icon module)
 
-Folder and file rows are visually distinct in BOTH side-menu trees. The
-vocabulary is shared with the panel header and the `+` picker: the anchors are
-read out of `describeArtifact`, and the file split comes from `kb.docKind` —
-the same switch DocView routes on.
+Hand-written inline SVG, one 16x16 viewBox, ink centred on (8, 8), stroked in
+`currentColor` so the caller owns the colour. No dependency, no icon font, no
+sprite, no emoji. Names are exported from `panelStore` (`FILE_ICON`,
+`FOLDER_ICON`, `FOLDER_OPEN_ICON`, `PANEL_ICON`, `folderIcon(open)`,
+`describeArtifact().icon`) so the trees, the `+` picker, the panel header and
+the tab-bar button all speak one vocabulary; `Record<IconName, ReactNode>`
+makes a name with no drawing a type error.
 
-| Row | Glyph | Codepoint | Meaning |
-|---|---|---|---|
-| folder / project root | `◧` | U+25E7 | `FOLDER_GLYPH` — a box with a spine (drawer) |
-| markdown | `◆` | U+25C6 | `describeArtifact` kb-doc glyph |
-| wireframe (`.html`) | `◈` | U+25C8 | renders in a sandboxed iframe |
-| diagram (`.mmd`) | `◇` | U+25C7 | renders via mermaid |
-| code (`.tsx`/`.jsx`) | `▪` | U+25AA | raw text, source |
-| data (`.json`) | `▫` | U+25AB | raw text, data |
-| anything else | `■` | U+25A0 | `describeArtifact` repo-file glyph |
+| Name | Shape | Used by |
+|---|---|---|
+| `folder` | closed folder, tab left | collapsed directory / project rows (both trees), picker project + dir rows |
+| `folder-open` | back panel + swung-down front face | expanded directory / project rows |
+| `file` | document, folded top-right corner | EVERY file row (both trees), picker kb + file rows, panel header for kb-doc and repo-file |
+| `panel` | frame with its RIGHT portion filled | tab-bar panel button |
+| `localhost` | globe | panel header, `localhost` artifact kind (phase B) |
+| `chevron-right` / `chevron-down` | expander | tree rows, 9px |
 
-Diamonds = documents that render; squares = raw text; `◧` = container.
-Expander `▸`/`▾` (U+25B8/U+25BE) stays on directory rows in addition to the
-folder glyph; file rows keep a blank 5px expander slot so their names line up
-under their sibling folders'.
+Sizes: `ICON_SIZE` 12 (content), `EXPANDER_SIZE` 9 (chevron), 14 for the
+tab-bar button. Stroke 1.4 viewBox units (2 for chevrons).
 
-**Font coverage is verified, not assumed.** All nine codepoints were
-cmap-checked against all four bundled weights of
-`src/assets/fonts/JetBrainsMono-*.woff2` on 2026-08-02: present in every
-weight, advance 600/1000 in every weight (exactly one mono cell). Being in
-the Geometric Shapes block is NOT evidence — `▣` U+25A3, the obvious folder
-glyph, is MISSING from the font and would have fallen back to another
-typeface at another width. `MONO_SAFE_CODEPOINTS` in `panelStore.test.ts` is
-the regression guard.
+**One file icon for every kind, on purpose.** Kind-awareness (`◆ ◈ ◇ ▪ ▫ ■`
+by `docKind`) is gone — see the 2026-08-02 conventions entry. The picker still
+prints `docKind` as TEXT in its meta column, which is where it was ever
+legible.
+
+**Alignment is structural, not optical tuning.** Each slot is a fixed-width
+flex box with a centred SVG: `[9px expander][2px][12px icon]` = 23px at every
+depth, whether or not the row has an expander, so a file's icon lands on the
+same x as its sibling folder's at depth 0 and depth 5 alike. This is what the
+old text glyphs could not do — measured against the bundled JetBrains Mono
+(1000 upem, advance 600 for all of them), the INK inside that identical cell
+sat at different offsets: `◧`/`■` filled x 0…600, `◆ ◈ ◇` overhung at
+-10…610, and `▪`/`▫` were a 300-unit mark at x 150…450, i.e. a quarter-cell
+(2.25px at 9px) to the right of its parent folder's left edge and half the
+size. The `▸` expander compounded it, overflowing its 5px slot with ink out
+to 6.9px.
 
 ## Structural model (today)
 

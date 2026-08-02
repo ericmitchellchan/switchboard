@@ -2,6 +2,7 @@ import { useRef, useState, useEffect } from "react";
 import type { Session } from "../types";
 import { PulsingDot } from "./PulsingDot";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
+import { Icon } from "./icons";
 
 interface TabBarProps {
   sessions: Session[];
@@ -14,6 +15,20 @@ interface TabBarProps {
   /** Clicking the SWITCHBOARD wordmark toggles the left side menu — same
    *  action as Ctrl+Shift+B. */
   onToggleSideMenu?: () => void;
+  /** RIGHT-END counterpart of the wordmark: the artifact panel's own button.
+   *  Omitted (button hidden) when there is no tab to host a panel — the same
+   *  never-advertise-a-dead-affordance rule the StatusBar chip follows.
+   *
+   *  It does NOT always toggle: with an empty panel the handler opens the `+`
+   *  picker instead, because a toggle with nothing to show is the dead
+   *  affordance. The two booleans below are what the button PAINTS and SAYS;
+   *  the branch itself lives in App (it needs the store). */
+  onPanelButton?: () => void;
+  /** The active tab's panel is open right now → active treatment. */
+  panelOpen?: boolean;
+  /** The active tab has a panel open OR remembers one → the button toggles.
+   *  False means it opens the picker. */
+  panelToggleAvailable?: boolean;
 }
 
 export function TabBar({
@@ -25,6 +40,9 @@ export function TabBar({
   onReorder,
   waitingCount,
   onToggleSideMenu,
+  onPanelButton,
+  panelOpen = false,
+  panelToggleAvailable = false,
 }: TabBarProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
@@ -414,6 +432,80 @@ export function TabBar({
           </button>
         )}
       </div>
+
+      {onPanelButton && (
+        <PanelButton
+          onClick={onPanelButton}
+          open={panelOpen}
+          toggles={panelToggleAvailable}
+        />
+      )}
+    </div>
+  );
+}
+
+/** The artifact panel's button — right end of the tab bar, mirroring the
+ *  wordmark's side-menu toggle at the left end. Same glyph the trees used to
+ *  spend on folders (a frame with its right portion filled), which is where
+ *  Eric said it belonged.
+ *
+ *  Active treatment is the kit's soft palette and nothing else: `--bg-active`
+ *  behind `--text-primary`. No new hue — status dots stay the only colour in
+ *  this bar. */
+function PanelButton({
+  onClick,
+  open,
+  toggles,
+}: {
+  onClick: () => void;
+  open: boolean;
+  toggles: boolean;
+}) {
+  const [hover, setHover] = useState(false);
+  const title = open
+    ? "Hide the artifact panel (Ctrl+Shift+P)"
+    : toggles
+      ? "Show the artifact panel (Ctrl+Shift+P)"
+      : "Open an artifact in the panel — Ctrl+Shift+P toggles it once something is open";
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        padding: "0 10px",
+        borderLeft: "1px solid #1E1E22",
+        flexShrink: 0,
+      }}
+    >
+      <button
+        type="button"
+        onClick={onClick}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        title={title}
+        aria-label={title}
+        aria-pressed={open}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          width: 24,
+          height: 24,
+          padding: 0,
+          borderRadius: 4,
+          border: "none",
+          background: open
+            ? "var(--bg-active)"
+            : hover
+              ? "var(--bg-elevated)"
+              : "transparent",
+          color: open || hover ? "var(--text-primary)" : "#71717A",
+          cursor: "pointer",
+          transition: "background-color 0.15s ease, color 0.15s ease",
+        }}
+      >
+        <Icon name="panel" size={14} />
+      </button>
     </div>
   );
 }
