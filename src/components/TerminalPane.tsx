@@ -401,6 +401,26 @@ export const TerminalPane = memo(function TerminalPane({
       )}
       <div
         ref={containerRef}
+        // Click-to-focus for the WHOLE pane, not just the xterm element.
+        // xterm installs its own focus handler on its element — but this
+        // container is wider/taller than that element whenever `overflowX`
+        // kicks in or the rows don't fill the height, so clicking the empty
+        // gutter hit this div and focus stayed wherever it already was (the
+        // composer). Typing and Ctrl+V then both went to the composer even
+        // though the terminal is plainly what was clicked (owner 2026-08-02).
+        // mousedown, not click: focus must land BEFORE the paste/keystroke.
+        onMouseDown={(e) => {
+          const inst = getTerminal(session.id);
+          if (!inst) return;
+          const el = inst.terminal.element;
+          // Inside xterm proper — leave it alone so selection drags still work.
+          if (el && e.target instanceof Node && el.contains(e.target)) return;
+          // preventDefault so the browser's own mousedown focus step doesn't
+          // immediately move focus off the textarea we just focused (this div
+          // is not focusable, so there is no selection/caret behaviour to lose).
+          e.preventDefault();
+          inst.terminal.focus();
+        }}
         style={{
           width: "100%",
           // Flex child, not height:100% — the composer is a SIBLING below, and
