@@ -26,6 +26,16 @@ interface SessionHeaderProps {
  *  follows the session that made it rather than the tab that happens to be
  *  active.
  *
+ *  EXPORTED (2026-08-02) because there is now a THIRD place a shell can live:
+ *  the artifact panel. A panel terminal renders `TerminalPane` alone — no
+ *  SessionHeader — so a `pnpm dev` started there was DETECTED and stored but
+ *  had nowhere to offer itself, and the chip silently did not exist. That is
+ *  the exact surface Eric runs dev servers in, so the component moves rather
+ *  than being reimplemented: one chip, one set of rules (frame-not-open, the
+ *  `+N` sibling count, dismissal), wherever a terminal is drawn. App renders it
+ *  above the panel terminal (`renderPanelSession`); it returns null with no
+ *  offer, so it costs no layout until there is something to say.
+ *
  *  TWO THINGS THE COPY HAS TO CARRY, both learned from a real session:
  *   1. it says FRAME, not "open" — the panel hosts the running app in an
  *      iframe beside the shell. Switchboard never launches a browser and never
@@ -35,7 +45,7 @@ interface SessionHeaderProps {
  *   2. a URL already being previewed is never offered again — see
  *      `devServer.noteDevServerOutput`, which asks the panel store before it
  *      records an offer at all. */
-function DevServerOffer({ session, compact }: { session: Session; compact: boolean }) {
+export function DevServerOffer({ session, compact }: { session: Session; compact: boolean }) {
   const offer = useDevServerOffer(session.id);
   const extras = useDevServerOfferExtras(session.id);
 

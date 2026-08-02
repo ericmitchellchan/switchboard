@@ -25,8 +25,29 @@
 //   • MID-STREAM → "defer": while the session is actively streaming output,
 //     any grid change waits for ~1.5s of quiet (a reflow against an
 //     in-flight repaint is exactly the duplication bug).
+//   • AGENT BUSY → "defer" too, and for LONGER. See below.
 //   • INITIAL fit (a freshly created terminal, nothing rendered yet) sizes
 //     freely to the container — shrink allowed — but still capped.
+//
+// WHY "BUSY" EXISTS ON TOP OF "STREAMING" (2026-08-02, Eric, driving the app):
+// output recency alone is the physically-correct signal but its window is only
+// STREAM_QUIET_MS. A working agent is not a solid wall of output — claude
+// pauses between a tool call and the next frame — so a 1.5s gap in the middle
+// of a long run let a queued refit through, and the TUI repainted its live
+// frame on top of the reflowed grid a moment later. That is the mangled text
+// Eric sees when he opens a panel or resizes the window mid-run.
+//
+// So the grid is FROZEN for the whole time the agent is working, exactly as he
+// asked ("whenever a session is thinking or working, it's fixed... it doesn't
+// resize until it's completely done"). `busy` is fed from the status detector's
+// RUNNING state (fitQueue.noteSessionStatus) and defers on its own.
+//
+// THE SAFETY VALVE, and why it is safe: a status detector that wedges in
+// RUNNING would otherwise freeze a terminal's grid forever. So a deferred
+// refit still runs after BUSY_QUIET_MS of TOTAL SILENCE even while busy. That
+// cannot reintroduce the bug — the duplication needs a repaint IN FLIGHT, and
+// 30 seconds without a single PTY byte means nothing is in flight. A genuinely
+// working claude renders a spinner continuously and never reaches it.
 
 /** Hard cap on terminal columns: a huge window must not grow the grid to the
  *  whole pane width (→ endless horizontal scroll after the pane narrows). */
@@ -35,6 +56,12 @@ export const MAX_TERMINAL_COLS = 160;
 /** Output quiet window that ends "actively streaming" — and the delay before
  *  a deferred refit runs after the last output chunk. */
 export const STREAM_QUIET_MS = 1500;
+
+/** Quiet window a deferred refit must see before it runs ANYWAY while the
+ *  agent still reads as busy — the wedged-detector safety valve described in
+ *  the header. Long enough that a working agent never reaches it, short enough
+ *  that a stuck RUNNING state costs half a minute rather than the session. */
+export const BUSY_QUIET_MS = 30_000;
 
 export interface GridSize {
   cols: number;
@@ -57,6 +84,10 @@ export type ResizeAction =
 export interface ResizeDecisionOpts {
   /** Session produced PTY output within the last STREAM_QUIET_MS. */
   streaming: boolean;
+  /** The agent in this session is THINKING OR WORKING (statusDetector's
+   *  RUNNING). Independent of `streaming`: a working agent goes quiet between
+   *  frames, and those gaps are exactly where a refit used to slip through. */
+  busy?: boolean;
   /** First fit of a freshly created terminal (nothing rendered yet): size
    *  freely to the container — shrink allowed, no reflow needed — but capped. */
   initial?: boolean;
@@ -95,8 +126,10 @@ export function resizeDecision(
   if (opts.initial) return { kind: "resize", cols, rows };
 
   // Any genuine grid change mid-stream is deferred — even rows-only: the
-  // SIGWINCH repaint it triggers races the in-flight frame the same way.
-  if (opts.streaming) return { kind: "defer" };
+  // SIGWINCH repaint it triggers races the in-flight frame the same way. And
+  // any grid change while the agent is WORKING is deferred for the whole run,
+  // not just for the current burst (see the header).
+  if (opts.streaming || opts.busy) return { kind: "defer" };
 
   if (cols > prev.cols) return { kind: "reflow", cols, rows };
 

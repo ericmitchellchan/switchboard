@@ -31,8 +31,9 @@ import {
   forceViewportScrollSync,
 } from "./terminal";
 import { registerDisposeCleanup } from "./terminalRegistry";
-import { STREAM_QUIET_MS } from "./resizePolicy";
+import { BUSY_QUIET_MS, STREAM_QUIET_MS } from "./resizePolicy";
 import { log } from "./logger";
+import type { AgentStatus } from "../types";
 
 export type FitReason = "attach" | "show" | "resize" | "wake" | "visibility";
 
@@ -73,6 +74,33 @@ const lastOutputAt = new Map<string, number>();
 const pendingRefit = new Set<string>();
 const settleTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+// ── The BUSY signal (2026-08-02) ─────────────────────────────────────────────
+// "The agent is thinking or working" — statusDetector's RUNNING state, fed here
+// by TerminalPane's status wrapper so it arrives for EVERY emit path (buffer
+// scan, raw output, exit, clearWaiting) and for hidden panes too.
+//
+// Read resizePolicy's header for why this is a SECOND gate rather than a wider
+// STREAM_QUIET_MS: output recency answers "is a repaint in flight right now",
+// busy answers "is this session going to repaint again shortly". A refit needs
+// both to be false. The valve that keeps a wedged detector from freezing a
+// grid forever is BUSY_QUIET_MS of total silence, applied in the settle timer.
+
+/** Statuses that mean the agent owns the screen and a grid change would land
+ *  under a repaint. `waiting` is deliberately NOT here: it means the agent is
+ *  parked on a question, the frame is static, and holding the freeze would
+ *  leave a mis-sized terminal for as long as Eric takes to answer. */
+const BUSY_STATUSES: ReadonlySet<AgentStatus> = new Set<AgentStatus>(["running"]);
+
+const busySessions = new Set<string>();
+
+/** Sessions whose NEXT fit ignores the busy gate — set by the settle timer,
+ *  consumed once by runFit. Without it the valve could not fire at all: a
+ *  settle that ran while `busy` was still true would simply be deferred again
+ *  and re-arm the same 30s wait forever. By the time the timer fires the
+ *  session has been silent for the whole window (every chunk re-arms it), so
+ *  applying the grid change there is the safe case, not an exception to it. */
+const forcedRefits = new Set<string>();
+
 /** Feed the streaming signal — called from TerminalPane's onOutput session
  *  hook on every PTY chunk (registry-dispatched, runs mounted or hidden). */
 export function noteSessionOutput(sessionId: string): void {
@@ -81,28 +109,58 @@ export function noteSessionOutput(sessionId: string): void {
   if (pendingRefit.has(sessionId)) armSettleTimer(sessionId);
 }
 
+/** Feed the busy signal — called from TerminalPane's onStatusChange wrapper on
+ *  every status transition. Leaving BUSY with a refit still pending re-arms the
+ *  settle timer on the SHORT window, so the terminal snaps to its real size
+ *  ~STREAM_QUIET_MS after the agent finishes rather than waiting out the
+ *  safety valve. */
+export function noteSessionStatus(sessionId: string, status: AgentStatus): void {
+  const busy = BUSY_STATUSES.has(status);
+  if (busy === busySessions.has(sessionId)) return;
+  if (busy) {
+    busySessions.add(sessionId);
+    return;
+  }
+  busySessions.delete(sessionId);
+  if (pendingRefit.has(sessionId)) {
+    log.debug(`fitQueue: session left busy with a refit pending id=${sessionId}`);
+    armSettleTimer(sessionId);
+  }
+}
+
 /** True while the session produced output within the last STREAM_QUIET_MS. */
 export function isSessionStreaming(sessionId: string): boolean {
   const t = lastOutputAt.get(sessionId);
   return t !== undefined && Date.now() - t < STREAM_QUIET_MS;
 }
 
+/** True while the session's agent reads as thinking/working. */
+export function isSessionBusy(sessionId: string): boolean {
+  return busySessions.has(sessionId);
+}
+
 function armSettleTimer(sessionId: string): void {
   const existing = settleTimers.get(sessionId);
   if (existing) clearTimeout(existing);
+  // While the agent is working the refit waits for the LONG window, which a
+  // working agent never reaches (its spinner is output) — so in practice the
+  // grid is frozen until `noteSessionStatus` releases it and re-arms short.
+  const wait = busySessions.has(sessionId) ? BUSY_QUIET_MS : STREAM_QUIET_MS;
   settleTimers.set(
     sessionId,
     setTimeout(() => {
       settleTimers.delete(sessionId);
       if (!pendingRefit.delete(sessionId)) return;
-      log.debug(`fitQueue: deferred refit running after settle id=${sessionId}`);
+      log.debug(`fitQueue: deferred refit running after settle id=${sessionId} waited=${wait}ms`);
+      // This run APPLIES. See `forcedRefits`.
+      forcedRefits.add(sessionId);
       // Re-measure from scratch — the pane may have moved again while the
       // session streamed. Scroll preservation: the reflow path restores the
       // reader's place in its write callback; a settle that turns out to be
       // a no-op touches nothing (policy #6 — a resize-repaint settle never
       // parks the viewport).
       enqueueFit(sessionId, "resize", { fullRefresh: true }, 0);
-    }, STREAM_QUIET_MS)
+    }, wait)
   );
 }
 
@@ -112,6 +170,7 @@ function armSettleTimer(sessionId: string): void {
 registerDisposeCleanup((sessionId) => {
   cancelPendingFit(sessionId);
   lastOutputAt.delete(sessionId);
+  busySessions.delete(sessionId);
 });
 
 /**
@@ -155,6 +214,7 @@ export function cancelPendingFit(sessionId: string): void {
     debounceTimers.delete(sessionId);
   }
   pendingRefit.delete(sessionId);
+  forcedRefits.delete(sessionId);
   const settle = settleTimers.get(sessionId);
   if (settle) {
     clearTimeout(settle);
@@ -211,8 +271,12 @@ async function runFit(
   // wiring → resizeSession exactly when the dimensions actually change. A
   // second resizeSession call here only ever re-sent the same dims (a
   // redundant SIGWINCH that made TUI apps redraw).
+  const forced = forcedRefits.delete(sessionId);
   const fit = fitTerminal(sessionId, {
     streaming: isSessionStreaming(sessionId),
+    // A forced run is the safety valve firing after BUSY_QUIET_MS of silence —
+    // it deliberately ignores the busy gate (see `forcedRefits`).
+    busy: !forced && isSessionBusy(sessionId),
     initial: !!context.isFirstAttach,
   });
   if (fit.outcome === "deferred") {

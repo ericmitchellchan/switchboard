@@ -132,7 +132,44 @@ function joinPath(root: string, path: string): string {
  *  personal-kb checkout (ipc.kbRoot): a thread's cwd is a REPO, so a
  *  KB-relative path alone is not resolvable from inside the conversation.
  *  Omitted/empty → the KB-relative form, which is still honest, just weaker. */
-export type RefOptions = { kbRoot?: string | null };
+export type RefOptions = {
+  kbRoot?: string | null;
+  /** ABSOLUTE path of the scrollback mirror directory (ipc.scrollbackRoot).
+   *  Without it a `session` artifact has no ref at all — see artifactRef. */
+  scrollbackRoot?: string | null;
+  /** Display name of a `session` artifact's shell (the tab name Eric gave it).
+   *  Passed in rather than looked up so this module stays pure: the names live
+   *  in App's session list, published through panelStore.sessionLabelFor. */
+  sessionName?: string | null;
+};
+
+/** Where a session's transcript is mirrored, or `""` when the root is unknown.
+ *  The file is written by workspace.saveAllScrollbacks (periodically, and
+ *  FORCED immediately before either seam emits a reference to it). */
+/** File suffix of the agent-facing plain-text transcript. PAIRED WITH
+ *  `src-tauri/src/lib.rs`'s `TRANSCRIPT_SUFFIX`, which does the writing —
+ *  change one and change the other. It is deliberately NOT the `<id>.txt`
+ *  restore mirror: that one is an xterm serialize, full of escape sequences. */
+export const TRANSCRIPT_SUFFIX = ".transcript.txt";
+
+export function sessionTranscriptPath(sessionId: string, opts: RefOptions = {}): string {
+  const root = normalizePath(opts.scrollbackRoot ?? "");
+  if (root.length === 0 || sessionId.length === 0) return "";
+  // Sanitized HERE, so the callers below can wrap it in their own quotes
+  // without a second pass stripping those quotes back off — the same order
+  // artifactRef/buildSendReference already use for every other kind.
+  return sanitizeForTypedLine(joinPath(root, `${sessionId}${TRANSCRIPT_SUFFIX}`), REF_MAX);
+}
+
+/** Cap on the shell's display name inside a reference. Deliberately tighter
+ *  than REF_MAX so that path + name + the literal wording stays inside
+ *  SEND_REFERENCE_MAX without a final truncation (which could cut a quote). */
+const SESSION_NAME_MAX = 80;
+
+/** A panel terminal's name as it should READ in a sentence to an agent. */
+function sessionDisplayName(opts: RefOptions): string {
+  return sanitizeForTypedLine(opts.sessionName ?? "", SESSION_NAME_MAX) || "terminal";
+}
 
 /** How an artifact is NAMED to the agent: `<kind> <path>`.
  *
@@ -140,14 +177,26 @@ export type RefOptions = { kbRoot?: string | null };
  *                 (or `kb switchboard/…/requirements.md` with no known root)
  *    repo-file  → `repo switchboard/src/App.tsx`
  *    localhost  → `localhost switchboard http://localhost:5173` (phase B)
- *    session    → `""` (increment H): a live shell hosted in the panel is not
- *                 a thing another agent can open or read. Both seams treat an
- *                 empty ref as "nothing to say" — buildSpawnContext returns
- *                 null so the `--append-system-prompt` flag is OMITTED, and
- *                 buildSendReference returns "" so `→ thread` types nothing
- *                 (the panel header hides the action for a session anyway).
- *                 Naming a session id at a shell prompt would be noise
- *                 dressed as context. */
+ *    session    → `terminal C:/…/switchboard/scrollback/<id>.txt`
+ *
+ *  THE SESSION CASE, and why it changed (2026-08-02, Eric, driving the app).
+ *  It used to return `""`: a live shell is not a document, so both seams said
+ *  nothing about it. That was true about the SHELL and wrong about the point of
+ *  the panel — Eric put a `pnpm dev` in the panel beside a claude thread,
+ *  asked the thread to look at it, and it could not. "That's the whole point:
+ *  seeing the same surface."
+ *
+ *  What we can honestly offer is not the process but its TRANSCRIPT: the app
+ *  already mirrors every session's scrollback to
+ *  `%LOCALAPPDATA%/switchboard/scrollback/<id>.txt`, which is an ordinary file
+ *  an agent can Read. So a session's ref NAMES THAT FILE. Two consequences we
+ *  state rather than paper over:
+ *   · it is a SNAPSHOT, not a tail — both seams FORCE a flush immediately
+ *     before emitting the ref (App / ArtifactPanel), and the wording tells the
+ *     agent to re-read it for anything later; and
+ *   · with no known scrollback root there is still no ref, so the empty-string
+ *     contract below is unchanged for that case — the flag is omitted and
+ *     `→ thread` types nothing rather than naming a path that does not exist. */
 export function artifactRef(artifact: Artifact, opts: RefOptions = {}): string {
   switch (artifact.kind) {
     case "kb-doc": {
@@ -161,8 +210,11 @@ export function artifactRef(artifact: Artifact, opts: RefOptions = {}): string {
       );
     case "localhost":
       return sanitizeForTypedLine(`localhost ${artifact.project} ${artifact.url}`, REF_MAX);
-    case "session":
-      return "";
+    case "session": {
+      const path = sessionTranscriptPath(artifact.sessionId, opts);
+      if (path.length === 0) return "";
+      return sanitizeForTypedLine(`terminal ${path}`, REF_MAX);
+    }
   }
 }
 
@@ -188,6 +240,20 @@ export function buildSpawnContext(
   if (!artifact) return null;
   const ref = artifactRef(artifact, opts);
   if (ref.length === 0) return null;
+  // A LIVE TERMINAL gets its own sentence. "panel shows terminal <path>" would
+  // read as a file the panel is displaying, when the truth is a running shell
+  // whose output happens to be readable at that path — and the difference is
+  // the whole reason the agent should re-read it rather than assume it is
+  // final. Pins never apply (a shell has no sidecar), so the clause is skipped.
+  if (artifact.kind === "session") {
+    const path = sessionTranscriptPath(artifact.sessionId, opts);
+    return sanitizeForTypedLine(
+      `Workstation context: a live terminal named ${sessionDisplayName(opts)} is running beside ` +
+        `this conversation in the panel; its output is mirrored to ${path} — read that file for ` +
+        `what it has printed so far, and re-read it for anything since.`,
+      SPAWN_CONTEXT_MAX
+    );
+  }
   const pins = Number.isFinite(pinCount) ? Math.max(0, Math.trunc(pinCount)) : 0;
   const clause =
     pins > 0 ? ` (${pins} pin${pins === 1 ? "" : "s"} in ${SIDECAR_NAME} alongside)` : "";
@@ -224,9 +290,20 @@ export function buildSendReference(
   opts: RefOptions = {}
 ): string {
   const bare = artifactRef(artifact, opts);
-  // Nothing to reference (a `session` artifact — see artifactRef): type
-  // NOTHING. `Look at ""` would be a line that says less than silence.
+  // Nothing to reference (a session with no known scrollback root — see
+  // artifactRef): type NOTHING. `Look at ""` says less than silence.
   if (bare.length === 0) return "";
+  // A LIVE TERMINAL, same reason as the spawn seam: "Look at" a shell is the
+  // wrong verb and the wrong object. Name the FILE and say what it is, so the
+  // line is actionable without the user having to explain it afterwards.
+  // Pins are impossible here, so the pin branch below is unreachable for a
+  // session and is not spelled out twice.
+  if (artifact.kind === "session") {
+    // No final sanitize: `path` and the name are already clean (and a second
+    // pass would strip the quotes this line adds), and both are capped so the
+    // assembled line stays under SEND_REFERENCE_MAX.
+    return `Read "${sessionTranscriptPath(artifact.sessionId, opts)}" — the output of the live terminal ${sessionDisplayName(opts)} in my panel`;
+  }
   const ref = `"${bare}"`;
   if (!pin) return `Look at ${ref}`;
   const number = Number.isFinite(pin.number)
@@ -245,6 +322,7 @@ export function buildSendReference(
 // without threading a prop through the panel and the wireframe rail.
 
 let kbRootCache: string | null = null;
+let scrollbackRootCache: string | null = null;
 
 /** App publishes the resolved KB root here at boot (null = unresolved; the
  *  builders then emit KB-relative refs). */
@@ -257,7 +335,21 @@ export function getKbRootForContext(): string | null {
   return kbRootCache;
 }
 
-/** Convenience for call sites: `buildSendReference(a, p, refOptions())`. */
+/** App publishes the scrollback mirror directory here at boot. Null = a
+ *  `session` artifact has NO ref, and both seams fall silent for it — which is
+ *  exactly the pre-linkage behaviour, so a failed lookup degrades to the old
+ *  honest silence rather than to a broken path. */
+export function setScrollbackRootForContext(root: string | null): void {
+  scrollbackRootCache = root && root.length > 0 ? root : null;
+}
+
+export function getScrollbackRootForContext(): string | null {
+  return scrollbackRootCache;
+}
+
+/** Convenience for call sites: `buildSendReference(a, p, refOptions())`.
+ *  `sessionName` is NOT here — it is per-artifact and the caller holds it
+ *  (panelStore.artifactShortTitle). */
 export function refOptions(): RefOptions {
-  return { kbRoot: kbRootCache };
+  return { kbRoot: kbRootCache, scrollbackRoot: scrollbackRootCache };
 }

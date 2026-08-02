@@ -2,6 +2,7 @@ import { useRef, useState, useEffect } from "react";
 import type { Session } from "../types";
 import { PulsingDot } from "./PulsingDot";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
+import { tabGroupLabel, tabRepoSuffix } from "../lib/tabLabel";
 import { Icon } from "./icons";
 
 interface TabBarProps {
@@ -231,6 +232,11 @@ export function TabBar({
             const groupKey = session.group || session.repo || "";
             const showDivider = groupKey !== lastGroup && idx > 0 && groupKey !== "";
             lastGroup = groupKey;
+            // De-duplication (tabLabel.ts): a tab must not print the same word
+            // three times. Both are null when the tab's own NAME already leads
+            // with it — the divider rule still renders, only its text goes.
+            const groupLabel = showDivider ? tabGroupLabel(groupKey, session.name) : null;
+            const repoSuffix = tabRepoSuffix(session.name, session.repo);
 
             const isHovered = hoveredId === session.id;
             const showClose = isActive || isHovered;
@@ -276,18 +282,20 @@ export function TabBar({
                 {showDivider && (
                   <div style={{ display: "flex", alignItems: "center", paddingLeft: 4, gap: 4 }}>
                     <div style={{ width: 1, backgroundColor: "#27272A", margin: "8px 0" }} />
-                    <span
-                      style={{
-                        fontFamily: "var(--font-mono)",
-                        fontSize: 8.5,
-                        fontWeight: 600,
-                        color: "#52525B",
-                        letterSpacing: "0.04em",
-                        padding: "0 4px",
-                      }}
-                    >
-                      {groupKey.toUpperCase()}
-                    </span>
+                    {groupLabel && (
+                      <span
+                        style={{
+                          fontFamily: "var(--font-mono)",
+                          fontSize: 8.5,
+                          fontWeight: 600,
+                          color: "#52525B",
+                          letterSpacing: "0.04em",
+                          padding: "0 4px",
+                        }}
+                      >
+                        {groupLabel}
+                      </span>
+                    )}
                   </div>
                 )}
                 <button
@@ -358,7 +366,7 @@ export function TabBar({
                       {session.name}
                     </span>
                   )}
-                  {session.repo && (
+                  {repoSuffix && (
                     <span
                       style={{
                         fontSize: 9,
@@ -366,7 +374,7 @@ export function TabBar({
                         opacity: isActive ? 0.8 : 0.5,
                       }}
                     >
-                      {session.repo}
+                      {repoSuffix}
                     </span>
                   )}
                   <span

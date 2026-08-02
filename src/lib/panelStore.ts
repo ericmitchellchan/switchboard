@@ -1467,6 +1467,16 @@ export type PanelActions = {
   /** Close a panel terminal's tab. App asks first when the process is alive
    *  (keep running / promote / kill); the store never kills anything. */
   closePanelTerminal: (tabSessionId: string, sessionId: string) => void;
+  /** Write a session's CURRENT scrollback to its mirror file, right now.
+   *
+   *  The linkage that makes `→ thread` mean something for a live shell: the
+   *  reference names `<scrollbackRoot>/<id>.txt`, and that file is otherwise
+   *  only as fresh as the periodic save. Called immediately BEFORE the
+   *  reference is typed, so what the agent reads is what Eric was looking at
+   *  when he clicked. Resolves even on failure — a stale transcript is worth
+   *  more than a swallowed gesture, and the wording tells the agent to
+   *  re-read anyway. */
+  flushTerminalTranscript: (sessionId: string) => Promise<void>;
 };
 
 let panelActions: PanelActions | null = null;
@@ -1613,6 +1623,13 @@ export function promotePanelTerminal(sessionId: string): void {
 
 export function closePanelTerminal(tabSessionId: string, sessionId: string): void {
   panelActions?.closePanelTerminal(tabSessionId, sessionId);
+}
+
+/** Flush a session's scrollback mirror. Resolves (never rejects) when App is
+ *  not wired — the caller then types a reference to a file that is merely
+ *  older, not wrong. */
+export function flushTerminalTranscript(sessionId: string): Promise<void> {
+  return panelActions?.flushTerminalTranscript(sessionId) ?? Promise.resolve();
 }
 
 export function panelTerminalsAvailable(): boolean {

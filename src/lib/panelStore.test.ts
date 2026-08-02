@@ -1918,6 +1918,7 @@ describe("popped-out artifact", () => {
       sendToThread: () => {},
       popOutArtifact: (a) => calls.push(a),
       createPanelTerminal: () => {},
+      flushTerminalTranscript: () => Promise.resolve(),
       promotePanelTerminal: () => {},
       closePanelTerminal: () => {},
     });
@@ -2167,6 +2168,7 @@ describe("session artifacts (increment H)", () => {
       sendToThread: () => {},
       popOutArtifact: (a) => calls.push(a),
       createPanelTerminal: () => {},
+      flushTerminalTranscript: () => Promise.resolve(),
       promotePanelTerminal: () => {},
       closePanelTerminal: () => {},
     });

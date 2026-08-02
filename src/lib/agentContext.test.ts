@@ -16,12 +16,14 @@ import {
   REF_MAX,
   SEND_REFERENCE_MAX,
   SPAWN_CONTEXT_MAX,
+  TRANSCRIPT_SUFFIX,
   artifactRef,
   buildSendReference,
   buildSpawnContext,
   getKbRootForContext,
   refOptions,
   sanitizeForTypedLine,
+  sessionTranscriptPath,
   setKbRootForContext,
 } from "./agentContext";
 import { launchCommand } from "./threadStore";
@@ -34,6 +36,10 @@ const DOC: Artifact = {
 };
 
 const REPO_FILE: Artifact = { kind: "repo-file", project: "switchboard", path: "src/App.tsx" };
+
+const SESSION: Artifact = { kind: "session", sessionId: "s-42" };
+
+const SCROLLBACK = { scrollbackRoot: "C:/Users/eric/AppData/Local/switchboard/scrollback" };
 
 /** Every hostile construct in one string. */
 const NASTY = 'say "hi" `whoami` $(rm -rf /) $HOME %USERPROFILE% back\\slash\nsecond line';
@@ -338,16 +344,110 @@ describe("kb root cache", () => {
   it("round-trips, treats empty as unresolved, and feeds refOptions", () => {
     setKbRootForContext(null);
     expect(getKbRootForContext()).toBeNull();
-    expect(refOptions()).toEqual({ kbRoot: null });
+    expect(refOptions().kbRoot).toBeNull();
 
     setKbRootForContext("");
     expect(getKbRootForContext()).toBeNull();
 
     setKbRootForContext(KB_ROOT);
-    expect(refOptions()).toEqual({ kbRoot: KB_ROOT });
+    expect(refOptions().kbRoot).toBe(KB_ROOT);
     expect(buildSendReference(DOC, null, refOptions())).toContain(KB_ROOT);
 
     setKbRootForContext(null); // leave the module clean for other suites
+  });
+});
+
+// ─── panel terminals (the live-shell linkage, 2026-08-02) ────────────────────
+// A running shell is not a document, so both seams used to say nothing about
+// one. What they CAN honestly name is its transcript mirror, and these are the
+// rules that keep that honest: no root → no ref (the pre-linkage silence), the
+// path is quoted by us and survives sanitizing, and the wording says the file
+// is a snapshot to be re-read rather than the process itself.
+
+describe("session artifacts", () => {
+  it("no scrollback root → no ref, so both seams stay silent", () => {
+    expect(artifactRef(SESSION)).toBe("");
+    expect(buildSpawnContext(SESSION, 0)).toBeNull();
+    expect(buildSendReference(SESSION)).toBe("");
+  });
+
+  it("with a root → the ref names the transcript file", () => {
+    expect(artifactRef(SESSION, SCROLLBACK)).toBe(
+      "terminal C:/Users/eric/AppData/Local/switchboard/scrollback/s-42.transcript.txt"
+    );
+  });
+
+  it("sessionTranscriptPath is the shared path rule", () => {
+    expect(sessionTranscriptPath("s-42", SCROLLBACK)).toBe(
+      "C:/Users/eric/AppData/Local/switchboard/scrollback/s-42.transcript.txt"
+    );
+    expect(sessionTranscriptPath("s-42", {})).toBe("");
+    expect(sessionTranscriptPath("", SCROLLBACK)).toBe("");
+  });
+
+  it("names the PLAIN-TEXT transcript, never the ANSI restore mirror", () => {
+    // `<id>.txt` is an xterm serialize (escape sequences) — the wrong file to
+    // hand an agent. This pairing is duplicated in lib.rs; if it drifts, the
+    // reference points at a file nothing writes.
+    expect(TRANSCRIPT_SUFFIX).toBe(".transcript.txt");
+    const path = sessionTranscriptPath("s-42", SCROLLBACK);
+    expect(path.endsWith(TRANSCRIPT_SUFFIX)).toBe(true);
+    expect(path.endsWith("/s-42.txt")).toBe(false);
+  });
+
+  it("normalizes a Windows root — backslashes would be stripped by the sanitizer", () => {
+    expect(
+      sessionTranscriptPath("s-42", { scrollbackRoot: "C:\\Users\\eric\\AppData\\scrollback" })
+    ).toBe("C:/Users/eric/AppData/scrollback/s-42.transcript.txt");
+  });
+
+  it("the send line names the FILE and says what it is — quotes survive", () => {
+    const line = buildSendReference(SESSION, null, { ...SCROLLBACK, sessionName: "lodestar" });
+    expect(line).toBe(
+      'Read "C:/Users/eric/AppData/Local/switchboard/scrollback/s-42.transcript.txt" — ' +
+        "the output of the live terminal lodestar in my panel"
+    );
+    expect(line.length).toBeLessThanOrEqual(SEND_REFERENCE_MAX);
+  });
+
+  it("an unnamed shell falls back to `terminal`, never to an empty name", () => {
+    expect(buildSendReference(SESSION, null, SCROLLBACK)).toContain("live terminal terminal");
+    expect(
+      buildSendReference(SESSION, null, { ...SCROLLBACK, sessionName: "   " })
+    ).toContain("live terminal terminal");
+  });
+
+  it("a hostile tab name cannot break the line it is typed into", () => {
+    const line = buildSendReference(SESSION, null, { ...SCROLLBACK, sessionName: NASTY });
+    expect(line).not.toMatch(/[\r\n]/);
+    expect(line).not.toMatch(/[`$%\\]/);
+    // Exactly our own pair of quotes around the path, none from the name.
+    expect((line.match(/"/g) ?? []).length).toBe(2);
+  });
+
+  it("the spawn one-liner describes a RUNNING shell, not a document", () => {
+    const context = buildSpawnContext(SESSION, 0, {
+      ...SCROLLBACK,
+      sessionName: "lodestar",
+    }) as string;
+    expect(context).toContain("a live terminal named lodestar is running");
+    expect(context).toContain("scrollback/s-42.transcript.txt");
+    // It must tell the agent the file is a snapshot — that is the whole
+    // honesty of naming a file instead of the process.
+    expect(context).toContain("re-read");
+    expect(context).not.toContain("panel shows");
+    expect(context.length).toBeLessThanOrEqual(SPAWN_CONTEXT_MAX);
+  });
+
+  it("never claims pins — a shell has no sidecar", () => {
+    const context = buildSpawnContext(SESSION, 7, SCROLLBACK) as string;
+    expect(context).not.toContain("pin");
+  });
+
+  it("survives the launch line's own quoting", () => {
+    const context = buildSpawnContext(SESSION, 0, SCROLLBACK) as string;
+    expect(launchCommand({ chatSessionId: "abc-123", resume: false, appendSystemPrompt: context }))
+      .toBe(`claude --session-id abc-123 --append-system-prompt "${context}"`);
   });
 });
 

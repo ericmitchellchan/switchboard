@@ -172,6 +172,43 @@ fn scrollback_dir() -> Result<std::path::PathBuf, String> {
     Ok(base.join("switchboard").join("scrollback"))
 }
 
+/// The directory terminal scrollback is mirrored into, as an absolute path.
+///
+/// Read once at boot by the frontend (agentContext) so a PANEL TERMINAL can be
+/// NAMED to an agent: a live shell is not something claude can attach to, but
+/// its transcript is a file claude can `Read`, and that file is right here.
+/// Creating the directory eagerly matters — the reference we hand the agent
+/// must point somewhere that exists even if nothing has been flushed yet.
+#[tauri::command]
+async fn scrollback_root() -> Result<String, String> {
+    let dir = scrollback_dir()?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+/// Suffix of the AGENT-FACING transcript, alongside `<id>.txt`.
+///
+/// TWO FILES PER SESSION, ON PURPOSE. `<id>.txt` is the xterm SERIALIZE — SGR
+/// runs and absolute cursor moves — because restore and the PiP handoff write
+/// it back into another terminal and need that fidelity. `<id>.transcript.txt`
+/// is the same buffer as PLAIN TEXT, because its only reader is an agent, and
+/// an agent handed escape sequences is being given noise dressed as context.
+///
+/// PAIRED WITH `agentContext.TRANSCRIPT_SUFFIX`, which composes the path the
+/// reference names. Change one and change the other.
+const TRANSCRIPT_SUFFIX: &str = ".transcript.txt";
+
+#[tauri::command]
+async fn save_transcript(session_id: String, data: String) -> Result<(), String> {
+    let dir = scrollback_dir()?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{}{}", session_id, TRANSCRIPT_SUFFIX));
+    std::fs::write(&path, data.as_bytes()).map_err(|e| {
+        log::error!("Failed to save transcript for session id={}: {}", session_id, e);
+        e.to_string()
+    })
+}
+
 #[tauri::command]
 async fn save_scrollback(session_id: String, data: String) -> Result<(), String> {
     log::debug!("Saving scrollback for session id={}", session_id);
@@ -727,6 +764,8 @@ fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         rename_session,
         list_sessions,
         get_config,
+        scrollback_root,
+        save_transcript,
         save_scrollback,
         load_scrollback,
         save_threads,

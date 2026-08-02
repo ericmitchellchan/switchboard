@@ -4,6 +4,7 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  BUSY_QUIET_MS,
   MAX_TERMINAL_COLS,
   STREAM_QUIET_MS,
   resizeDecision,
@@ -12,6 +13,9 @@ import {
 
 const idle = { streaming: false };
 const streaming = { streaming: true };
+/** Output has SETTLED but the agent is still thinking/working — the gap the
+ *  busy gate exists to cover. */
+const busy = { streaming: false, busy: true };
 const grid = (cols: number, rows: number): GridSize => ({ cols, rows });
 
 describe("no-op proposals", () => {
@@ -108,6 +112,46 @@ describe("mid-stream defer", () => {
   });
 });
 
+// The second gate (2026-08-02). A working agent goes quiet BETWEEN frames, and
+// those gaps are where a queued refit used to slip through and get repainted
+// over — the mangled text Eric sees when he opens a panel mid-run.
+describe("agent-busy defer", () => {
+  it("widen while the agent is working → defer, even with output quiet", () => {
+    expect(resizeDecision(grid(100, 30), grid(140, 30), busy)).toEqual({ kind: "defer" });
+  });
+
+  it("rows-only change while the agent is working → defer", () => {
+    expect(resizeDecision(grid(120, 30), grid(120, 40), busy)).toEqual({ kind: "defer" });
+  });
+
+  it("no grid change while busy → none, not defer (nothing to hold)", () => {
+    expect(resizeDecision(grid(120, 30), grid(80, 30), busy)).toEqual({ kind: "none" });
+  });
+
+  it("busy is INDEPENDENT of streaming — either one alone defers", () => {
+    expect(resizeDecision(grid(100, 30), grid(140, 30), { streaming: true, busy: false })).toEqual({
+      kind: "defer",
+    });
+    expect(resizeDecision(grid(100, 30), grid(140, 30), { streaming: false, busy: true })).toEqual({
+      kind: "defer",
+    });
+  });
+
+  it("busy: false leaves the old behaviour exactly as it was", () => {
+    expect(resizeDecision(grid(100, 30), grid(140, 30), { streaming: false, busy: false })).toEqual({
+      kind: "reflow",
+      cols: 140,
+      rows: 30,
+    });
+  });
+
+  it("the initial fit ignores busy — a fresh terminal has nothing to repaint over", () => {
+    expect(
+      resizeDecision(grid(80, 24), grid(100, 40), { streaming: true, busy: true, initial: true })
+    ).toEqual({ kind: "resize", cols: 100, rows: 40 });
+  });
+});
+
 describe("initial fit (fresh terminal, nothing rendered)", () => {
   it("sizes freely down to the container (shrink allowed) via plain resize", () => {
     expect(
@@ -138,5 +182,11 @@ describe("constants", () => {
   it("cap and quiet window match the settled ky policy", () => {
     expect(MAX_TERMINAL_COLS).toBe(160);
     expect(STREAM_QUIET_MS).toBe(1500);
+  });
+
+  it("the busy safety valve is far longer than the stream window, and finite", () => {
+    expect(BUSY_QUIET_MS).toBe(30_000);
+    expect(BUSY_QUIET_MS).toBeGreaterThan(STREAM_QUIET_MS);
+    expect(Number.isFinite(BUSY_QUIET_MS)).toBe(true);
   });
 });

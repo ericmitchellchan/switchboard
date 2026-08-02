@@ -73,6 +73,7 @@ import {
   openArtifactPicker,
   useArtifactPickerOpen,
   artifactShortTitle,
+  flushTerminalTranscript,
   closeArtifactAt,
   closePanelTerminal,
   createPanelTerminal,
@@ -600,8 +601,27 @@ export function ArtifactPanel({
 
   // T8 seam 2 (explicit, visible): TYPE a reference to this artifact into the
   // terminal — no Enter. The user reviews/edits and sends it himself.
-  const reference = buildSendReference(artifact, null, refOptions());
-  const sendReference = () => sendToThread(reference);
+  //
+  // A LIVE TERMINAL is referenceable now (2026-08-02): the ref names its
+  // transcript mirror, and the FLUSH below is what makes that honest. Order
+  // matters — flush, then type — so the file the agent is pointed at already
+  // holds what Eric was looking at when he clicked. The flush resolves even on
+  // failure, so the send is never swallowed.
+  const reference = buildSendReference(artifact, null, {
+    ...refOptions(),
+    sessionName: artifactShortTitle(artifact),
+  });
+  const sendReference = () => {
+    if (artifact.kind === "session") {
+      void flushTerminalTranscript(artifact.sessionId).then(() => sendToThread(reference));
+      return;
+    }
+    sendToThread(reference);
+  };
+  // A session with no resolvable scrollback root has no ref at all (the root
+  // lookup failed at boot) — the action would type nothing, so it is hidden
+  // rather than offered.
+  const canReference = reference.length > 0;
 
   // Is THIS tab's active artifact the one in the floating window?
   const isPoppedOut = poppedIdentity === artifactIdentity(artifact);
@@ -705,13 +725,15 @@ export function ArtifactPanel({
               promote to tab
             </button>
           )}
-          {/* `→ thread`, `float` and `open full` are all meaningless for a live
-              shell: there is nothing to reference, nothing a second window
-              could show without becoming a second live view, and no full-width
-              screen for a session (promotion is that). Hidden, not disabled —
-              a disabled row of three would be chrome that never lights up. */}
-          {!isSession && (
-          <>
+          {/* `→ thread` NOW APPLIES TO A LIVE SHELL TOO (2026-08-02). Eric put
+              a `pnpm dev` in the panel beside a claude thread and asked the
+              thread to look at it: "that's the whole point — seeing the same
+              surface." It cannot see the process, but it can read the
+              transcript this app already mirrors, and that is what the
+              reference names. `float` and `open full` stay hidden for a
+              session: one is a second live view, the other is what `promote to
+              tab` already does. */}
+          {canReference && (
           <button
             type="button"
             onClick={sendReference}
@@ -733,6 +755,9 @@ export function ArtifactPanel({
           >
             → thread
           </button>
+          )}
+          {!isSession && (
+          <>
           {/* POP OUT (increment F, Decision 2) — hand this artifact to the
               floating PiP window. The same window the Ctrl+Shift+O terminal
               mirror uses: one window lifecycle, and it finally has a

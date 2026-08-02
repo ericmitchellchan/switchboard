@@ -157,6 +157,38 @@ export function serializeTerminal(sessionId: string): string | null {
 }
 
 /**
+ * PLAIN TEXT of a session's buffer — no ANSI, no cursor sequences.
+ *
+ * Deliberately NOT `serializeTerminal`. That one round-trips into another
+ * xterm, so it is full of SGR colour runs and absolute cursor moves; it is the
+ * right thing for restore and for PiP and the wrong thing for the ONE consumer
+ * that is not a terminal — an AGENT reading a panel terminal's output through
+ * its transcript mirror (agentContext's session ref). Handing claude 200KB of
+ * escape sequences would technically be "the linkage" and practically be
+ * noise.
+ *
+ * `translateToString(true)` right-trims each row, which also collapses the
+ * grid's padding back to real lines. Trailing blank rows (the unused part of
+ * the viewport) are dropped so the file ends where the output does.
+ */
+export function plainTextTerminal(sessionId: string): string | null {
+  const instance = getTerminal(sessionId);
+  if (!instance) return null;
+  try {
+    const buf = instance.terminal.buffer.active;
+    const lines: string[] = [];
+    for (let y = 0; y < buf.length; y++) {
+      lines.push(buf.getLine(y)?.translateToString(true) ?? "");
+    }
+    while (lines.length > 0 && lines[lines.length - 1].length === 0) lines.pop();
+    return lines.join("\n");
+  } catch (e) {
+    log.warn(`Failed to read plain text for session id=${sessionId}: ${e}`);
+    return null;
+  }
+}
+
+/**
  * Snapshot main's terminal for PiP handoff: full buffer (scrollback + visible)
  * plus dimensions so PiP can match before writing.
  *
@@ -211,7 +243,7 @@ export type FitOutcome =
  */
 export function fitTerminal(
   sessionId: string,
-  opts?: { streaming?: boolean; initial?: boolean }
+  opts?: { streaming?: boolean; busy?: boolean; initial?: boolean }
 ): FitOutcome {
   const instance = getTerminal(sessionId);
   if (!instance) return { outcome: "none" };
@@ -233,14 +265,16 @@ export function fitTerminal(
     const decision = resizeDecision(
       { cols: term.cols, rows: term.rows },
       proposed ?? null,
-      { streaming: !!opts?.streaming, initial: !!opts?.initial }
+      { streaming: !!opts?.streaming, busy: !!opts?.busy, initial: !!opts?.initial }
     );
 
     switch (decision.kind) {
       case "none":
         return { outcome: "none" };
       case "defer":
-        log.debug(`fit deferred (streaming) id=${sessionId}`);
+        log.debug(
+          `fit deferred id=${sessionId} streaming=${!!opts?.streaming} busy=${!!opts?.busy}`
+        );
         return { outcome: "deferred" };
       case "resize":
         // Height-only / initial / capped-legacy shrink: no reflow, no

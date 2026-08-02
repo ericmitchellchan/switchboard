@@ -12,7 +12,12 @@ import {
   unregisterSessionHooks,
   reviveSession,
 } from "../lib/terminalRegistry";
-import { enqueueFit, cancelPendingFit, noteSessionOutput } from "../lib/fitQueue";
+import {
+  enqueueFit,
+  cancelPendingFit,
+  noteSessionOutput,
+  noteSessionStatus,
+} from "../lib/fitQueue";
 import {
   initDetector,
   processBufferLines,
@@ -52,6 +57,10 @@ const sessionCallbacks = new Map<
 // stream its new PTY's output into the same live terminal.
 export function cleanupSessionListeners(sessionId: string) {
   unregisterSessionHooks(sessionId);
+  // An in-place restart reuses the session id without disposing the terminal,
+  // so the registry's dispose cleanup never runs — a session left BUSY here
+  // would freeze its new shell's grid until the fresh detector said otherwise.
+  noteSessionStatus(sessionId, "idle");
   // In-place restart reuses the session id: clear the exited latch so the
   // lifecycle state stays truthful for the new PTY. Harmless on the close
   // path — disposeTerminal follows unconditionally there.
@@ -81,6 +90,17 @@ function wireSession(sessionId: string) {
   // Callback accessors that read from the module-level map
   const getCbs = () => sessionCallbacks.get(sessionId);
 
+  // THE BUSY SIGNAL for the resize policy. Wrapping onStatusChange here rather
+  // than calling noteSessionStatus at App's handler is deliberate: this is the
+  // single funnel every statusDetector emit path goes through (buffer scan, raw
+  // output, markExited, clearWaiting), it runs for HIDDEN panes too (the
+  // registry dispatches these hooks regardless of mount), and it cannot be
+  // forgotten by a future caller that renders a terminal somewhere new.
+  const onStatus = (id: string, status: AgentStatus) => {
+    noteSessionStatus(id, status);
+    getCbs()?.onStatusChange(id, status);
+  };
+
   // onWriteParsed reads BUFFER_READ_LINES around the cursor for status
   // detection. baseY + cursorY converts the viewport-relative cursorY into
   // an absolute scrollback index — without this we'd read stale lines.
@@ -88,8 +108,7 @@ function wireSession(sessionId: string) {
 
   registerSessionHooks(sessionId, {
     onUserData: (_data) => {
-      const cbs = getCbs();
-      if (cbs) clearWaiting(sessionId, cbs.onStatusChange);
+      if (getCbs()) clearWaiting(sessionId, onStatus);
     },
     onWriteParsed: (terminal: Terminal) => {
       const cbs = getCbs();
@@ -102,7 +121,7 @@ function wireSession(sessionId: string) {
         const line = buf.getLine(y);
         if (line) lines.push(line.translateToString(true));
       }
-      processBufferLines(sessionId, lines, cursorAbsY, cbs.onStatusChange);
+      processBufferLines(sessionId, lines, cursorAbsY, onStatus);
     },
     onOutput: (bytes) => {
       // Streaming signal for the resize policy: stamp last-output-at so fits
@@ -135,7 +154,7 @@ function wireSession(sessionId: string) {
     onExited: () => {
       const cbs = getCbs();
       if (cbs) {
-        markExited(sessionId, cbs.onStatusChange);
+        markExited(sessionId, onStatus);
         cbs.onExited(sessionId);
       }
     },

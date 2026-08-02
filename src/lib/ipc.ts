@@ -80,6 +80,18 @@ export async function getHomeDir(): Promise<string> {
   return invoke("get_home_dir");
 }
 
+/** Absolute path of the scrollback mirror directory — the one thing that turns
+ *  a live panel terminal into something an agent can be pointed at. */
+export async function scrollbackRoot(): Promise<string> {
+  return invoke("scrollback_root");
+}
+
+/** Write the AGENT-FACING plain-text transcript for a session (see
+ *  lib.rs's TRANSCRIPT_SUFFIX for why it is a second file). */
+export async function saveTranscript(sessionId: string, data: string): Promise<void> {
+  return invoke("save_transcript", { sessionId, data });
+}
+
 export async function saveScrollback(sessionId: string, data: string): Promise<void> {
   return invoke("save_scrollback", { sessionId, data });
 }

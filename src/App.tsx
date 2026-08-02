@@ -3,7 +3,7 @@ import { flushSync } from "react-dom";
 import type { CSSProperties, ReactNode } from "react";
 import type { AgentStatus, Artifact, RepoConfig, ScreenId, Session, Thread } from "./types";
 import { TabBar } from "./components/TabBar";
-import { SessionHeader } from "./components/SessionHeader";
+import { SessionHeader, DevServerOffer } from "./components/SessionHeader";
 import { TerminalPane, cleanupSessionListeners } from "./components/TerminalPane";
 import { StatusBar } from "./components/StatusBar";
 import { ToastStack } from "./components/Toast";
@@ -19,8 +19,8 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot } from "./lib/ipc";
-import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty, isSessionDirty, serializeForPip, setTerminalScreenVisible } from "./lib/terminal";
+import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, saveTranscript } from "./lib/ipc";
+import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty, isSessionDirty, serializeForPip, plainTextTerminal, setTerminalScreenVisible } from "./lib/terminal";
 import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing, sendPipHost } from "./lib/pipBridge";
 import { bumpSessionGeneration, addSessionInputListener, getSessionGeneration } from "./lib/terminalRegistry";
 import {
@@ -46,6 +46,7 @@ import {
   unbindThreadsForSession,
   deleteThread,
   getThreadById,
+  findThreadBySessionId,
   launchCommand,
   createChatStartDetector,
   defaultThreadTitle,
@@ -66,6 +67,7 @@ import {
   publishActiveTabSession,
   registerPanelActions,
   artifactFor,
+  artifactShortTitle,
   activeTabArtifact,
   describeArtifact,
   inheritPanel,
@@ -82,6 +84,7 @@ import {
   parkPanelSession,
   releasePanelSession,
   publishSessionLabels,
+  flushTerminalTranscript,
   type NewPanelTerminal,
   type PanelActions,
   type SessionLabel,
@@ -90,8 +93,9 @@ import { clearDevServerSession, setPreviewOpenCheck } from "./lib/devServer";
 import { dirtyCount, flushDrafts } from "./lib/editor";
 import {
   buildSpawnContext,
-  getKbRootForContext,
+  refOptions,
   setKbRootForContext,
+  setScrollbackRootForContext,
 } from "./lib/agentContext";
 import { runPromotionPass, promotionPassReason, PROMOTION_POLL_MS } from "./lib/threadPromotion";
 import { explorerProjects, registerExplorerActions } from "./lib/explorer";
@@ -185,8 +189,18 @@ async function resolveSpawnContext(sessionId: string): Promise<string | null> {
   // repo file's is mirrored into the hidden `_repo-pins/` KB tree. pinTargetFor
   // is the one place that knows which — and it reads out of the KB either way,
   // so the lookup below is unchanged.
-  // (A `session` artifact has no file and no pins — and no ref either, so
-  // buildSpawnContext below returns null for it and the flag is omitted.)
+  // A `session` artifact has no file and no pins, but it DOES have a ref now
+  // (its transcript mirror — see agentContext.artifactRef). Flush it first, so
+  // the sentence the new thread boots with points at a file that already
+  // contains what the panel terminal has printed rather than at whatever the
+  // periodic save last happened to write.
+  if (artifact.kind === "session") {
+    await flushTerminalTranscript(artifact.sessionId);
+    return buildSpawnContext(artifact, 0, {
+      ...refOptions(),
+      sessionName: artifactShortTitle(artifact),
+    });
+  }
   if (artifact.kind === "kb-doc" || artifact.kind === "repo-file") {
     const { sidecarPath, docKey } = pinTargetFor(artifact);
     // Prefer the SHARED record when a view has it loaded: it is the same
@@ -206,7 +220,7 @@ async function resolveSpawnContext(sessionId: string): Promise<string | null> {
       }
     }
   }
-  return buildSpawnContext(artifact, pinCount, { kbRoot: getKbRootForContext() });
+  return buildSpawnContext(artifact, pinCount, refOptions());
 }
 
 type ConfirmState = {
@@ -1023,10 +1037,20 @@ export default function App() {
   // must survive a restart, so both flush the disk mirror exactly like the
   // other critical mutations — the 30s periodic save is not a durability
   // guarantee for something the user just typed.
+  // The other half of the one-name rule (see handleRenameTab): renaming from a
+  // thread row renames the TAB it is bound to. Read the record back AFTER the
+  // rename rather than trusting the typed string — an emptied box falls back to
+  // the derived default (`lodestar · Jul 31`), and the tab must show that, not
+  // become blank.
   const handleRenameThread = useCallback((threadId: string, title: string) => {
     renameThread(threadId, title);
     void saveThreadsToDisk();
-  }, []);
+    const thread = getThreadById(threadId);
+    if (thread?.sessionId) {
+      renameSessionLocal(thread.sessionId, thread.title);
+      renameSession(thread.sessionId, thread.title).catch(console.error);
+    }
+  }, [renameSessionLocal]);
 
   const handleSetThreadArchived = useCallback((threadId: string, archived: boolean) => {
     log.info(`${archived ? "Archive" : "Unarchive"} thread id=${threadId}`);
@@ -1245,10 +1269,27 @@ export default function App() {
     [reorderSession]
   );
 
+  // ONE NAME, TWO SURFACES (2026-08-02). A tab and the thread bound to it are
+  // the same conversation seen from the tab bar and from the side menu, and
+  // they START synced — handleCreateThread passes one title to both. Only
+  // RENAME forked them: renaming the tab left the thread row saying the old
+  // thing, so Eric had to type the name twice and the two lists disagreed
+  // about what he was working on.
+  //
+  // Both directions go through the PRIMITIVES (renameThread /
+  // renameSessionLocal), never through each other's handler, so there is no
+  // ping-pong to guard against; `renameThread` also returns early when the
+  // title is unchanged. A tab with no thread is unaffected — a `Ctrl+T` shell
+  // has no record to keep in step (see the promote-on-claude rule).
   const handleRenameTab = useCallback(
     (id: string, newName: string) => {
       renameSessionLocal(id, newName);
       renameSession(id, newName).catch(console.error);
+      const thread = findThreadBySessionId(id);
+      if (thread) {
+        renameThread(thread.id, newName);
+        void saveThreadsToDisk();
+      }
     },
     [renameSessionLocal]
   );
@@ -1430,6 +1471,15 @@ export default function App() {
     kbRoot()
       .then(setKbRootForContext)
       .catch((err) => log.warn(`kb_root unavailable — agent refs stay KB-relative: ${err}`));
+    // Same shape, same reason, for PANEL TERMINALS: a live shell's ref is its
+    // transcript file, which needs the mirror directory's absolute path. On
+    // failure a session artifact simply has no ref, which is the behaviour that
+    // shipped before the linkage existed — degraded, never wrong.
+    scrollbackRoot()
+      .then(setScrollbackRootForContext)
+      .catch((err) =>
+        log.warn(`scrollback_root unavailable — panel terminals stay unreferenceable: ${err}`)
+      );
   }, []);
 
   // T8 seam 2 — send-to-thread. TYPES the reference into the terminal and
@@ -1540,6 +1590,34 @@ export default function App() {
     },
     [doCreateSession, switchToSessionDirect, addToast]
   );
+
+  // FLUSH — write a session's buffer to its AGENT-FACING transcript, now.
+  //
+  // This is the whole of the panel-terminal → agent linkage on App's side. A
+  // running shell is not something claude can attach to, but its output is
+  // text, and text is a file claude can Read. Two things make that honest:
+  //
+  //  · PLAIN TEXT, not the restore mirror. `<id>.txt` is an xterm serialize
+  //    (SGR runs, absolute cursor moves) because restore and PiP write it back
+  //    into a terminal; an agent handed that is being handed noise. So this
+  //    writes `<id>.transcript.txt` from `plainTextTerminal`.
+  //  · FRESHNESS. Nothing writes the transcript on a timer, so it is produced
+  //    HERE, at the moment a reference to it is built — a reference typed a
+  //    second after `pnpm dev` failed must point at a file that contains the
+  //    failure, not at whatever a background save last happened to catch.
+  //
+  // Never rejects: a failed flush leaves an older (or absent) file, and the
+  // reference is still worth typing — its wording already tells the agent the
+  // file is a snapshot to re-read.
+  const handleFlushTerminalTranscript = useCallback(async (sessionId: string) => {
+    const text = plainTextTerminal(sessionId);
+    if (text === null) return;
+    try {
+      await saveTranscript(sessionId, text);
+    } catch (err) {
+      log.warn(`Transcript flush failed id=${sessionId} — the agent gets an older file: ${err}`);
+    }
+  }, []);
 
   // PROMOTE — MOVE the session to the tab bar. ONE LIVE VIEW ACROSS THE MOVE,
   // guaranteed by taking two commits instead of one:
@@ -1670,7 +1748,24 @@ export default function App() {
       );
     }
     return (
-      <TerminalPane
+      <>
+        {/* THE OFFER, FOR A SHELL THAT HAS NO HEADER (2026-08-02). Detection
+            already ran here — `noteDevServerOutput` hangs off the registry's
+            per-session output hook, so a `pnpm dev` in the panel was noticed
+            whether or not anything was mounted — but the chip lives on
+            SessionHeader, which a panel terminal does not render. The offer was
+            therefore recorded and INVISIBLE: reachable only if you thought to
+            open `+` and read the detected-URL list. Since the panel is exactly
+            where Eric runs dev servers, that was the common case failing.
+
+            Rendered as a SIBLING above TerminalPane (whose root is `flex: 1`
+            inside the panel's column), so it costs no layout while there is no
+            offer and, when one appears, the resulting height change goes
+            through the pane's existing ResizeObserver → fitQueue → grow-only
+            policy like any other. Same component, same rules, same wording —
+            not a second implementation that could drift. */}
+        <DevServerOffer session={session} compact />
+        <TerminalPane
         key={session.id}
         session={session}
         // The panel only renders on the terminal screen at all, so this is the
@@ -1687,7 +1782,8 @@ export default function App() {
         onResolveTask={resolveByFingerprint}
         onRestart={handleRestartSession}
         isFocused={false}
-      />
+        />
+      </>
     );
   };
 
@@ -1716,6 +1812,7 @@ export default function App() {
     createPanelTerminal: handleCreatePanelTerminal,
     promotePanelTerminal: handlePromotePanelTerminal,
     closePanelTerminal: handleClosePanelTerminal,
+    flushTerminalTranscript: handleFlushTerminalTranscript,
   };
   useEffect(() => {
     registerPanelActions({
@@ -1727,6 +1824,8 @@ export default function App() {
         panelActionsRef.current?.promotePanelTerminal(sessionId),
       closePanelTerminal: (tabSessionId, sessionId) =>
         panelActionsRef.current?.closePanelTerminal(tabSessionId, sessionId),
+      flushTerminalTranscript: (sessionId) =>
+        panelActionsRef.current?.flushTerminalTranscript(sessionId) ?? Promise.resolve(),
     });
     return () => registerPanelActions(null);
   }, []);
