@@ -46,6 +46,21 @@
 //
 // A document that carries its OWN CSP keeps it: browsers enforce every policy
 // present, so ours can only tighten, never loosen, whatever the author wrote.
+//
+// ── SCOPE: this is the srcDoc frames only ───────────────────────────────────
+// Two frames use this policy — WireframeView's srcDoc and componentPreview's
+// shell — and BOTH still run `sandbox="allow-scripts"` alone. That is
+// deliberate and load-bearing: the opaque origin is what keeps app storage and
+// cookies away from markup we assembled out of untrusted repo files, and
+// `connect-src 'none'` above is written assuming it.
+//
+// The LIVE LOCALHOST PREVIEW (`components/kb/LocalhostView.tsx`) is NOT one of
+// these. It frames a URL, so no policy of ours can be planted in it at all, and
+// since 2026-08-02 it carries `allow-same-origin` — an opaque origin made every
+// module-based dev app render blank (its `<script type="module">` fetches are
+// CORS-checked and `Origin: null` matches no dev server's allowlist). What
+// keeps THAT frame away from Switchboard's backend is `ipc_guard.rs`, not a
+// sandbox token. Do not reconcile the two postures; they guard different things.
 
 /** The policy planted into every sandboxed document. */
 export const FRAME_CSP = [

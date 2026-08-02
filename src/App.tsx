@@ -56,6 +56,7 @@ import {
 } from "./lib/threadStore";
 import {
   initPanelStore,
+  isLocalhostUrlOpen,
   remapPanelSessions,
   removeSessionPanel,
   togglePanel,
@@ -74,7 +75,7 @@ import {
   clearPoppedOutArtifact,
   usePoppedOutIdentity,
 } from "./lib/panelStore";
-import { clearDevServerSession } from "./lib/devServer";
+import { clearDevServerSession, setPreviewOpenCheck } from "./lib/devServer";
 import { dirtyCount, flushDrafts } from "./lib/editor";
 import {
   buildSpawnContext,
@@ -1707,6 +1708,11 @@ export default function App() {
       // path below calls remapPanelSessions, so bindings whose tab did not
       // come back are dropped rather than left pointing at nothing.
       initPanelStore(savedWorkspace?.panels ?? {}, savedWorkspace?.panelWidth);
+
+      // Detection asks the panel store "is this already framed?" before it
+      // offers. Wired AFTER initPanelStore so a restored preview counts on the
+      // very first banner a restarted dev server prints.
+      setPreviewOpenCheck(isLocalhostUrlOpen);
 
       if (savedWorkspace && savedWorkspace.sessions.length > 0) {
         log.info(`Restoring workspace with ${savedWorkspace.sessions.length} sessions`);

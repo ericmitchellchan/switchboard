@@ -199,6 +199,27 @@ type SessionState = {
 const sessions = new Map<string, SessionState>();
 const listeners = new Set<() => void>();
 
+/** "Is this URL already being previewed?" — INJECTED, so this module keeps
+ *  importing nothing but React and stays unit-testable without a panel store.
+ *  App wires `panelStore.isLocalhostUrlOpen` at boot; unset means "nothing is
+ *  open", which is the correct answer before the panel store exists. */
+let previewOpenCheck: ((url: string) => boolean) | null = null;
+
+export function setPreviewOpenCheck(check: ((url: string) => boolean) | null): void {
+  previewOpenCheck = check;
+}
+
+/** Is a preview of this URL already on screen? Never throws — a broken checker
+ *  must degrade to "offer it", not silence detection entirely. */
+function alreadyPreviewed(url: string): boolean {
+  if (!previewOpenCheck) return false;
+  try {
+    return previewOpenCheck(url) === true;
+  } catch {
+    return false;
+  }
+}
+
 function bump(): void {
   for (const l of listeners) l();
 }
@@ -250,6 +271,13 @@ export function noteDevServerOutput(sessionId: string, text: string): void {
   for (const url of urls) {
     if (state.seen.has(url)) continue;
     state.seen.add(url);
+    // ALREADY ON SCREEN = ALREADY ANSWERED. A server restart reprints its
+    // banner, and a `pnpm dev` in a SECOND tab announces a port the first tab's
+    // preview is already framing — in both cases the URL is new to THIS
+    // session's `seen` set, so the anti-nag memory above does not cover it and
+    // the chip would offer something Eric is looking at. It still joins `seen`,
+    // so closing the preview later does not make the old banner pop back.
+    if (alreadyPreviewed(url)) continue;
     // LAST hit wins the chip: a server that reports several ports in one
     // banner has printed the one it actually settled on last.
     state.offer = url;
@@ -289,4 +317,5 @@ export function clearDevServerSession(sessionId: string): void {
 export function __resetDevServerForTests(): void {
   sessions.clear();
   listeners.clear();
+  previewOpenCheck = null;
 }

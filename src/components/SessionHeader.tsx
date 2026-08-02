@@ -24,7 +24,17 @@ interface SessionHeaderProps {
  *  something" belongs, and because the header renders in BOTH layouts (the
  *  single-pane path in App and PaneContainer's split leaves), so the offer
  *  follows the session that made it rather than the tab that happens to be
- *  active. */
+ *  active.
+ *
+ *  TWO THINGS THE COPY HAS TO CARRY, both learned from a real session:
+ *   1. it says FRAME, not "open" — the panel hosts the running app in an
+ *      iframe beside the shell. Switchboard never launches a browser and never
+ *      touches a window you already have (a dev script that opens its own
+ *      Electron/browser window is that script's doing, and closing it is not
+ *      Switchboard's business);
+ *   2. a URL already being previewed is never offered again — see
+ *      `devServer.noteDevServerOutput`, which asks the panel store before it
+ *      records an offer at all. */
 function DevServerOffer({ session, compact }: { session: Session; compact: boolean }) {
   const offer = useDevServerOffer(session.id);
 
@@ -59,7 +69,14 @@ function DevServerOffer({ session, compact }: { session: Session; compact: boole
       <button
         type="button"
         onClick={take}
-        title={`Preview ${offer} in the artifact panel`}
+        // The verb matters: this does NOT hand the URL to a browser. It frames
+        // the running app in the panel beside the shell that started it, which
+        // is the whole point of the surface — and is also why nothing happens
+        // to any window you already have open.
+        title={
+          `Frame ${offer} in the artifact panel, beside this shell.\n` +
+          `Nothing opens in a browser and no window of yours is touched.`
+        }
         style={{
           display: "flex",
           alignItems: "center",
@@ -80,7 +97,7 @@ function DevServerOffer({ session, compact }: { session: Session; compact: boole
         onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-primary)")}
         onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-secondary)")}
       >
-        <span style={{ color: "var(--text-dim)" }}>preview</span>
+        <span style={{ color: "var(--text-dim)" }}>frame</span>
         <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{short}</span>
       </button>
       <span

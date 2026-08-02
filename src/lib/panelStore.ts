@@ -969,6 +969,31 @@ export function usePoppedOutIdentity(): string {
   return useSyncExternalStore(subscribe, poppedOutIdentity);
 }
 
+/** Is this URL already being previewed ANYWHERE — any tab's strip, or the
+ *  floating window?
+ *
+ *  Deliberately across every panel rather than one session's: a dev server is
+ *  a machine-wide thing, and "you are already looking at this" is true no
+ *  matter which tab printed the banner. The popped-out artifact counts because
+ *  while it is out there its panel tab holds a PLACEHOLDER — checking only the
+ *  strips would call a preview that is visibly on screen "not open".
+ *
+ *  URL comparison is `artifactIdentity`'s tail: the store holds normalized
+ *  URLs (devServer/parseManualUrl produce them) so a string compare is the
+ *  same decision `appendOrActivate` makes, and the PROJECT is deliberately not
+ *  part of it — the same port filed under two projects is still one server. */
+export function isLocalhostUrlOpen(url: string): boolean {
+  if (typeof url !== "string" || url.length === 0) return false;
+  const out = poppedOut?.artifact;
+  if (out && out.kind === "localhost" && out.url === url) return true;
+  for (const state of panels.values()) {
+    for (const artifact of state.artifacts) {
+      if (artifact.kind === "localhost" && artifact.url === url) return true;
+    }
+  }
+  return false;
+}
+
 /** Send the panel's active artifact to the floating window. No-op when App has
  *  registered no handler (callers gate on `usePopOutAvailable` so the action is
  *  DISABLED rather than silently dead). */

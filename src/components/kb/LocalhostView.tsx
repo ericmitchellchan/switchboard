@@ -4,19 +4,19 @@
 // the right, in a real iframe. Switchboard never STARTS a server (explicit
 // non-goal) — it watches the PTY, offers, and frames what you started.
 //
-// ── SANDBOX POSTURE — MEASURED, not reasoned. Read this before touching the ──
-// ── `sandbox` attribute. Removing one token from it opens a hole that was ────
-// ── found by experiment, not by review. ──────────────────────────────────────
+// ── SANDBOX POSTURE — MEASURED, not reasoned, and CORRECTED once. Read the ───
+// ── whole sequence before touching the `sandbox` attribute: the reason it ────
+// ── carries `allow-same-origin` today is the reason it must not carry it ─────
+// ── again if the IPC origin gate is ever removed. ────────────────────────────
 //
 // This frame is NOT WireframeView's srcDoc. `lib/sandbox.ts`'s CSP does not and
 // cannot apply to it: that policy is planted into a document WE assemble, and
 // this document is fetched from a server we do not control the content of.
 //
-// THE FINDING (increment F phase 1, in a production build at
-// `http://tauri.localhost`, framing a plain `python -m http.server`):
-// **Tauri injects `__TAURI_INTERNALS__` into EVERY frame, subframes included.**
-// The framed page really can call `invoke`. Measured, four variants, one
-// throwaway build:
+// ── 1. INCREMENT F: `allow-same-origin` WAS a hole ───────────────────────────
+// **Tauri injects `__TAURI_INTERNALS__` into EVERY frame, subframes included**,
+// so a framed page really could call `invoke`. Measured in a production build
+// at `http://tauri.localhost`, framing a plain `python -m http.server`:
 //
 //   sandbox attribute                          | invoke("kb_root")
 //   -------------------------------------------|---------------------------
@@ -26,28 +26,66 @@
 //   allow-scripts                              | REJECTED "Origin header is
 //                                              |   not a valid URL"
 //
-// RESOLVED is not theoretical: the same frame called
-// `invoke("write_file", {path, content})` and a file appeared on disk. Framing
-// a dev server with `allow-same-origin` hands any code on any local port
-// Switchboard's entire command surface — file writes and `create_session`
-// (i.e. process execution) included.
+// RESOLVED was literal: the frame called `invoke("write_file", {path, content})`
+// and a file appeared on disk. So F shipped `allow-scripts allow-forms` and
+// WITHHELD `allow-same-origin`, because the opaque origin (`Origin: null`) was
+// the only thing refusing those invokes.
 //
-// `allow-same-origin` is the ENTIRE difference, and the mechanism is the Origin
-// header: without it the frame runs at an OPAQUE origin, sends `Origin: null`,
-// and Tauri's own IPC handler refuses the request. So:
+// ── 2. INCREMENT G: the control MOVED off the sandbox attribute ──────────────
+// Relying on one HTML attribute at one call site was the weakness, not the
+// strength — any future frame added anywhere with `allow-same-origin` silently
+// re-opened `write_file` and `create_session`. `src-tauri/src/ipc_guard.rs`
+// wraps the invoke handler and REJECTS any invoke whose `Origin` is not one of
+// the app's own document origins. G measured a cross-origin frame carrying
+// `allow-scripts allow-same-origin`: `kb_root`/`write_file` REJECTED, no file
+// written, `window.ipc.postMessage` unanswered — while the app's own window
+// kept full IPC on both transports.
 //
+// ── 3. WHAT WITHHOLDING IT ACTUALLY COST (measured 2026-08-02) ───────────────
+// The withheld token was not free, and the bill was a BLANK PREVIEW. Framing
+// lodestar's real vite dev server (`http://127.0.0.1:5273/`) from a
+// cross-origin parent, headless Chromium, Switchboard's exact attribute:
+//
+//   sandbox="allow-scripts allow-forms"
+//     · the frame's `load` event FIRES and the HTML document arrives (200);
+//     · then, console, three times over:
+//         "Access to script at 'http://127.0.0.1:5273/@vite/client' from
+//          origin 'null' has been blocked by CORS policy: No
+//          'Access-Control-Allow-Origin' header is present."
+//       — same for `/src/main.tsx` and `/@react-refresh`;
+//     · `#root` is never populated. The frame renders ALL WHITE.
+//
+//   sandbox="allow-scripts allow-forms allow-same-origin"
+//     · zero CORS errors, "[vite] connecting…" → "[vite] connected.", the app
+//       renders exactly as it does in its own window.
+//
+// The mechanism is not exotic and not lodestar-specific: **`<script type=
+// "module">` is always fetched in CORS mode**, and an opaque origin sends
+// `Origin: null`. Vite ≥ 6.0.9 (CVE-2025-24010) defaults `server.cors.origin`
+// to `defaultAllowedOrigins` — `/^https?:\/\/(?:(?:[^:]+\.)?localhost|
+// 127\.0\.0\.1|\[::1\])(?::\d+)?$/` — which `null` cannot match, so the dev
+// server answers with no `Access-Control-Allow-Origin` at all (verified with a
+// header dump: `Vary: Origin` present, ACAO absent for `null`, present for
+// every real localhost origin). EVERY modern bundler-driven dev app is
+// module-based, so this is the default outcome, not an edge case.
+//
+// ── 4. THEREFORE: GRANTED, with the guard as the control ─────────────────────
 //   GRANTED
 //     · allow-scripts — it is an APP; without it there is nothing to preview.
-//       Alone it yields the opaque origin, which is the thing doing the work.
 //     · allow-forms — a form POST is not origin-gated, so this costs nothing
 //       and lets you log into your own dev app.
+//     · allow-same-origin — the frame is a NORMAL browsing context at the dev
+//       server's own origin: its module scripts load, its API calls to itself
+//       are same-origin, cookies/localStorage/IndexedDB work. What stops it
+//       reaching Switchboard is `ipc_guard`, which is a server-side check on
+//       every invoke and not an attribute a future edit can drop by accident.
+//       RE-VERIFIED against this exact attribute before it shipped — see the
+//       increment-H probe in the feature doc.
 //
-//   WITHHELD — and `allow-same-origin` is not "not needed", it is FORBIDDEN
-//     · allow-same-origin — see the table. Never add it. If a dev app needs
-//       real storage, open it in a real browser; the fix is not here.
+//   STILL WITHHELD
 //     · allow-top-navigation / -by-user-activation — a preview must never
-//       navigate the Switchboard window away from Switchboard. (Verified in
-//       the same run: `top.location.href = …` threw SecurityError.)
+//       navigate the Switchboard window away from Switchboard. (Verified:
+//       `top.location.href = …` throws SecurityError.)
 //     · allow-popups / allow-popups-to-escape-sandbox — a preview spawning
 //       windows in a desktop app is a bug, not a feature.
 //     · allow-modals — an `alert()` in a subframe blocks the whole renderer,
@@ -55,25 +93,24 @@
 //     · allow-downloads, allow-pointer-lock, allow-presentation,
 //       allow-orientation-lock — nothing a preview needs.
 //
-// WHAT THE OPAQUE ORIGIN COSTS, honestly. The framed app gets no cookies, no
-// `localStorage` (reading it THROWS), no IndexedDB and no service worker, and
-// its own XHR/fetch back to its own server is now cross-origin — which most dev
-// servers answer without CORS headers, so an app that fetches its API on boot
-// will show its error state. HMR is unaffected (WebSocket is not CORS-gated)
-// and so is the initial render, which is what this surface is for: looking at
-// the UI you just changed, beside the shell that changed it. A preview that is
-// slightly less capable is the correct trade against a preview that can write
-// to disk.
+// IF THE GUARD EVER GOES, THIS TOKEN GOES WITH IT. `allow-same-origin` is safe
+// here only because `ipc_guard.rs` exists; they are one decision recorded in
+// two files, and `ipc_guard`'s tests assert the framed-origin denial precisely
+// so this line cannot quietly become wrong.
 //
-// The parent side is unaffected either way: the health poll below runs at
-// `tauri.localhost`, not in the frame. And the app's own DOM was never
-// reachable — `contentDocument` reads back null for this frame with or without
-// any sandbox attribute, because the origins differ.
+// WHAT IT DOES *NOT* GRANT. `allow-same-origin` means "same origin as the
+// document's own URL", NOT "same origin as the parent". Switchboard still
+// cannot read into the frame: `contentDocument` reads back null with or without
+// the token (measured in both probe runs above), because `tauri.localhost` and
+// `127.0.0.1:5273` are different origins regardless of sandboxing. So the
+// positional-pin design below is unchanged — nothing about it became possible.
 //
 // (Switchboard's OTHER frames — the wireframe srcDoc and the component preview
-// — already run `allow-scripts` alone, so they are on the safe side of this
-// table by construction. That is now a load-bearing property of theirs, not
-// just a tidy default.)
+// — still run `allow-scripts` ALONE and must keep doing so. They execute
+// untrusted markup we assembled, they have no server whose origin they need,
+// and `lib/sandbox.ts`'s `connect-src 'none'` CSP is written on the assumption
+// that they cannot reach app storage. That is a different frame with a
+// different trade; do not "make it consistent" with this one.)
 //
 // ── PINS ARE POSITIONAL, and what that costs (Decision 3) ────────────────────
 // A live pin is `{xPct, yPct, viewport, url, note}` against the FRAME'S OWN
@@ -367,17 +404,16 @@ export function LocalhostView({
       <div style={MAIN_COL_STYLE}>
         <div style={TOOLBAR_STYLE}>
           <span
-            // The sandbox note is here rather than in a banner because it
-            // matters exactly once — the first time an app that reads
-            // localStorage on boot shows its error state and you wonder whose
-            // fault it is. See the module header for why the frame is opaque.
+            // What the frame CAN do is worth stating once, because the previous
+            // answer ("nothing, it is opaque") was visible as a blank preview
+            // and is no longer true. See the module header for the sequence.
             title={
               `${project} — ${url}\n` +
               `${health === "down" ? "not responding" : health === "up" ? "responding" : "checking…"}\n\n` +
-              `Sandboxed preview: the frame runs at an opaque origin (no cookies, ` +
-              `no localStorage, its own API calls are cross-origin). That is what ` +
-              `stops a dev server reaching Switchboard's backend. Open it in a ` +
-              `browser when you need the real thing.`
+              `Framed here, not opened in a browser. The frame runs at the dev ` +
+              `server's own origin, so its scripts, API calls and storage work ` +
+              `normally; it still cannot navigate this window, open popups, or ` +
+              `reach Switchboard's backend (every invoke is origin-checked).`
             }
             style={{
               display: "flex",
@@ -433,15 +469,17 @@ export function LocalhostView({
 
         <div style={FRAME_BOX_STYLE}>
           {/* SANDBOX: read the module header before changing a single token.
-              `allow-same-origin` is ABSENT deliberately and must stay absent —
-              adding it was measured to give the framed dev server Switchboard's
-              full Tauri command surface, `write_file` included.
+              `allow-same-origin` is PRESENT deliberately — without it the frame
+              is an opaque origin, its `<script type="module">` requests are
+              CORS-blocked by every modern dev server, and the preview renders
+              blank. What keeps the framed app out of Switchboard's command
+              surface is `src-tauri/src/ipc_guard.rs`, not this attribute.
               `src` is assigned imperatively (the effect above), never as a
               prop, so ⟳ can re-navigate to the same URL. */}
           <iframe
             ref={frameRef}
             title={`${project} live preview`}
-            sandbox="allow-scripts allow-forms"
+            sandbox="allow-scripts allow-forms allow-same-origin"
             style={{
               border: "none",
               display: "block",

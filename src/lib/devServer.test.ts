@@ -10,6 +10,7 @@ import {
   clearDevServerSession,
   registerSessionDir,
   sessionDirFor,
+  setPreviewOpenCheck,
   __resetDevServerForTests,
 } from "./devServer";
 
@@ -273,5 +274,59 @@ describe("offer store", () => {
     expect(sessionDirFor(SID)).toBe("C:\\Users\\ericm\\projects\\lodestar");
     expect(sessionDirFor("nope")).toBe("");
     expect(sessionDirFor(null)).toBe("");
+  });
+});
+
+// ── "already framed" suppression ─────────────────────────────────────────────
+// The anti-nag memory is per-SESSION `seen`, which cannot cover the two cases
+// that actually annoyed: a server restart in a session whose offer was already
+// taken, and a second tab announcing a port the first tab is already framing.
+// The panel store answers "is this on screen?" through an injected check.
+describe("offer store — a URL already being previewed", () => {
+  beforeEach(() => {
+    __resetDevServerForTests();
+  });
+
+  it("does not offer a URL that is already framed", () => {
+    setPreviewOpenCheck((url) => url === "http://localhost:5173/");
+    noteDevServerOutput(SID, VITE_PLAIN);
+    expect(devServerOfferFor(SID)).toBeNull();
+  });
+
+  it("still offers a DIFFERENT port while one is framed", () => {
+    setPreviewOpenCheck((url) => url === "http://localhost:5173/");
+    noteDevServerOutput(SID, "  ➜  Local:   http://localhost:5174/\r\n");
+    expect(devServerOfferFor(SID)).toBe("http://localhost:5174/");
+  });
+
+  it("suppresses the offer in a SECOND session too — a port is machine-wide", () => {
+    setPreviewOpenCheck((url) => url === "http://localhost:5173/");
+    noteDevServerOutput("tab-a", VITE_PLAIN);
+    noteDevServerOutput("tab-b", VITE_PLAIN);
+    expect(devServerOfferFor("tab-a")).toBeNull();
+    expect(devServerOfferFor("tab-b")).toBeNull();
+  });
+
+  it("remembers the suppressed URL, so closing the preview does not resurrect the banner", () => {
+    setPreviewOpenCheck(() => true);
+    noteDevServerOutput(SID, VITE_PLAIN);
+    expect(devServerOfferFor(SID)).toBeNull();
+    // Preview closed; the SAME banner reprints. `seen` already holds it.
+    setPreviewOpenCheck(() => false);
+    noteDevServerOutput(SID, VITE_PLAIN);
+    expect(devServerOfferFor(SID)).toBeNull();
+  });
+
+  it("offers normally when no check is wired", () => {
+    noteDevServerOutput(SID, VITE_PLAIN);
+    expect(devServerOfferFor(SID)).toBe("http://localhost:5173/");
+  });
+
+  it("a throwing check degrades to OFFERING, never to silent detection", () => {
+    setPreviewOpenCheck(() => {
+      throw new Error("panel store exploded");
+    });
+    noteDevServerOutput(SID, VITE_PLAIN);
+    expect(devServerOfferFor(SID)).toBe("http://localhost:5173/");
   });
 });

@@ -40,6 +40,7 @@ import {
   openInPanel,
   closePanel,
   closeArtifactAt,
+  isLocalhostUrlOpen,
   activateArtifact,
   panelStateFor,
   removeSessionPanel,
@@ -1871,5 +1872,67 @@ describe("popped-out artifact", () => {
     expect(popOutAvailable()).toBe(true);
     popOutArtifact(LIVE);
     expect(calls).toEqual([LIVE]);
+  });
+});
+
+// ── "is this URL already framed?" ────────────────────────────────────────────
+// The dev-server offer chip asks this before it offers, so a restarting server
+// (or a second tab running the same one) does not re-offer a preview that is
+// already on screen. It spans EVERY panel plus the floating window, because a
+// dev server is machine-wide and a popped-out preview is very much open.
+
+describe("isLocalhostUrlOpen", () => {
+  const LIVE: Artifact = { kind: "localhost", project: "lodestar", url: "http://localhost:5173/" };
+  const OTHER: Artifact = { kind: "localhost", project: "orbit", url: "http://localhost:5174/" };
+  const DOC: Artifact = { kind: "kb-doc", path: "a/b.md" };
+
+  beforeEach(() => {
+    __resetPanelStoreForTests();
+  });
+
+  it("is false with nothing open", () => {
+    expect(isLocalhostUrlOpen("http://localhost:5173/")).toBe(false);
+  });
+
+  it("finds a preview in a panel strip", () => {
+    openInPanel("sess-1", LIVE);
+    expect(isLocalhostUrlOpen("http://localhost:5173/")).toBe(true);
+    expect(isLocalhostUrlOpen("http://localhost:5174/")).toBe(false);
+  });
+
+  it("finds one on a NON-active tab of a strip", () => {
+    openInPanel("sess-1", LIVE);
+    openInPanel("sess-1", DOC); // LIVE is no longer the active tab
+    expect(isLocalhostUrlOpen("http://localhost:5173/")).toBe(true);
+  });
+
+  it("finds one in ANOTHER session's panel", () => {
+    openInPanel("sess-2", LIVE);
+    expect(isLocalhostUrlOpen("http://localhost:5173/")).toBe(true);
+  });
+
+  it("finds the POPPED-OUT preview, whose panel tab is only a placeholder", () => {
+    setPoppedOutArtifact("sess-1", LIVE);
+    expect(isLocalhostUrlOpen("http://localhost:5173/")).toBe(true);
+  });
+
+  it("ignores non-localhost artifacts and junk input", () => {
+    openInPanel("sess-1", DOC);
+    openInPanel("sess-1", OTHER);
+    expect(isLocalhostUrlOpen("a/b.md")).toBe(false);
+    expect(isLocalhostUrlOpen("")).toBe(false);
+    expect(isLocalhostUrlOpen(null as unknown as string)).toBe(false);
+  });
+
+  it("matches the URL EXACTLY — a different path is a different preview", () => {
+    openInPanel("sess-1", LIVE);
+    expect(isLocalhostUrlOpen("http://localhost:5173")).toBe(false);
+    expect(isLocalhostUrlOpen("http://localhost:5173/admin")).toBe(false);
+  });
+
+  it("goes false again once the preview is closed", () => {
+    openInPanel("sess-1", LIVE);
+    closeArtifactAt("sess-1", 0);
+    expect(isLocalhostUrlOpen("http://localhost:5173/")).toBe(false);
   });
 });
