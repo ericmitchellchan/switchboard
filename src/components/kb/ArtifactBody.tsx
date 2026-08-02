@@ -22,7 +22,7 @@ import type { ReactNode } from "react";
 import type { FileArtifact } from "../../types";
 import { docKind } from "../../lib/kb";
 import { artifactIdentity } from "../../lib/panelStore";
-import { MarkdownDoc } from "./MarkdownDoc";
+import { MarkdownSurface } from "./MarkdownSurface";
 import { WireframeView } from "./WireframeView";
 import { DiagramView } from "./DiagramView";
 import { ComponentPreview } from "./ComponentPreview";
@@ -42,15 +42,20 @@ export function ArtifactBody({
   /** Rendered for kinds with no renderer (`data`, `unknown`). */
   fallback: ReactNode;
   /** Re-read this artifact from disk NOW. The HOST supplies it, exactly as it
-   *  supplies `content` — a renderer still never loads a path itself. Passed
-   *  through to the wireframe surface, which is the only renderer with a
-   *  toolbar to put it on. */
+   *  supplies `content` — a renderer still never loads a path itself. Reaches
+   *  the wireframe surface (its toolbar's ⟳) and the markdown surface (after a
+   *  save, and after take-theirs, so the rendered view catches up without
+   *  waiting for a poll that a repo file does not even have). */
   onReload?: () => void;
 }) {
   const key = artifactIdentity(artifact);
   switch (docKind(artifact.path)) {
     case "markdown":
-      return <MarkdownDoc content={content} />;
+      // The WORKING SURFACE (increment G): view ⇄ edit on one surface, with the
+      // buffer, the dirty state and the conflict banner keyed by identity in
+      // lib/editor. Keyed like the others — a repo file and a KB doc can share
+      // a path, and a buffer must never follow you to a different document.
+      return <MarkdownSurface key={key} artifact={artifact} content={content} onReload={onReload} />;
     case "wireframe":
       // Live sandboxed rendering for .html/.htm.
       return <WireframeView key={key} artifact={artifact} content={content} onReload={onReload} />;

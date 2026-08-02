@@ -77,6 +77,7 @@ import {
   type ArtifactCrumb,
 } from "../lib/panelStore";
 import { buildSendReference, refOptions } from "../lib/agentContext";
+import { useDirtyKeys } from "../lib/editor";
 import { ArtifactPicker } from "./ArtifactPicker";
 import { Icon } from "./icons";
 import { ArtifactSurface } from "./kb/ArtifactSurface";
@@ -164,6 +165,10 @@ function TabStrip({
 }) {
   const listRef = useRef<HTMLDivElement>(null);
   const [hovered, setHovered] = useState<number | null>(null);
+  // WHICH documents hold unsaved edits (increment G). A newline-joined string
+  // snapshot, so the strip re-renders when the dirty SET changes and never on
+  // a keystroke inside one buffer.
+  const dirtyKeys = useDirtyKeys();
 
   // Follow the active tab when it changes or the strip grows past the edge —
   // an opened artifact whose tab is off-screen reads as "nothing happened".
@@ -204,15 +209,19 @@ function TabStrip({
           const isActive = i === state.activeIndex;
           const isHovered = hovered === i;
           const { title } = describeArtifact(artifact);
+          const identity = artifactIdentity(artifact);
+          // `\n`-delimited on both ends so `kb-doc:a.md` cannot match inside
+          // `kb-doc:a.md.bak`.
+          const isDirtyTab = `\n${dirtyKeys}\n`.includes(`\n${identity}\n`);
           return (
             <div
               // Keyed by CONTENT, not position: the dedupe invariant makes it
               // unique, and closing a middle tab then re-keys nothing (a
               // positional key would re-map every tab's DOM to its neighbour's).
-              key={artifactIdentity(artifact)}
+              key={identity}
               role="tab"
               aria-selected={isActive}
-              title={title}
+              title={isDirtyTab ? `${title} — unsaved changes` : title}
               onClick={() => activateArtifact(sessionId, i)}
               onMouseEnter={() => setHovered(i)}
               onMouseLeave={() => setHovered((prev) => (prev === i ? null : prev))}
@@ -252,6 +261,22 @@ function TabStrip({
                 transition: "background-color 0.15s ease, color 0.15s ease",
               }}
             >
+              {/* UNSAVED marker (increment G): the tab strip is where you see
+                  that a document you switched away from still holds work. Same
+                  dot the markdown surface's own toolbar draws, from the same
+                  predicate. */}
+              {isDirtyTab && (
+                <span
+                  aria-label="unsaved changes"
+                  style={{
+                    flex: "none",
+                    width: 5,
+                    height: 5,
+                    borderRadius: "50%",
+                    background: isActive ? "var(--text-primary)" : "var(--text-muted)",
+                  }}
+                />
+              )}
               <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
                 {artifactShortTitle(artifact)}
               </span>
@@ -621,15 +646,20 @@ export function ArtifactPanel({
             {isPoppedOut ? "↙ back" : "↗ float"}
           </button>
           {artifact.kind !== "localhost" && (
+            // OPEN FULL is an ICON now (increment G, Decision 5) — the `open`
+            // mark from the shared module, which already means "go to it" in
+            // the thread row menu. The words were the widest thing in a 36px
+            // header on a 260px panel; the affordance is not.
             <button
               type="button"
               onClick={openFull}
               title={`Open ${title} full width`}
-              style={ACTION_STYLE}
+              aria-label={`Open ${title} full width`}
+              style={{ ...ACTION_STYLE, display: "flex", alignItems: "center", padding: "0 3px" }}
               onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-primary)")}
               onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-dim)")}
             >
-              open full
+              <Icon name="open" size={12} />
             </button>
           )}
           <button

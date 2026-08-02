@@ -220,6 +220,18 @@ export async function explorerRead(
   return invoke("explorer_read", { projectKey, relPath });
 }
 
+/** Write a repo file (increment G — repo markdown is editable too). Guarded in
+ *  Rust by the SAME two layers `explorer_read` goes through, plus two rules of
+ *  its own: the file must ALREADY EXIST (this is an editor's save, not a way to
+ *  drop new files into a source tree) and a symlink at the target is refused. */
+export async function explorerWrite(
+  projectKey: string,
+  relPath: string,
+  content: string
+): Promise<void> {
+  return invoke("explorer_write", { projectKey, relPath, content });
+}
+
 export async function writeFile(path: string, content: string): Promise<void> {
   return invoke("write_file", { path, content });
 }

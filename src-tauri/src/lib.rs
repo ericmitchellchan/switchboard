@@ -743,6 +743,7 @@ fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         explorer::explorer_projects,
         explorer::explorer_list,
         explorer::explorer_read,
+        explorer::explorer_write,
         write_file,
         confirm_app_close,
         open_pip_window,

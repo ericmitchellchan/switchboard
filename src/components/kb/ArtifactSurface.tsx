@@ -20,7 +20,8 @@
 // pop-out action belong to whoever hosts this.
 
 import type { Artifact } from "../../types";
-import { useRepoFile } from "../../lib/explorer";
+import { REPO_EDIT_POLL_MS, useRepoFile } from "../../lib/explorer";
+import { useHasBuffer } from "../../lib/editor";
 import { artifactIdentity } from "../../lib/panelStore";
 import { DocView } from "./DocView";
 import { FileViewer } from "../ExplorerView";
@@ -75,7 +76,14 @@ function RepoFileBody({ project, path }: { project: string; path: string }) {
   // Explorer screen's effect. It also carries the ⟳'s rule: a reload folds
   // into the existing state instead of blanking it, so the renderer is never
   // unmounted mid-edit.
-  const { file, reload } = useRepoFile(project, path);
+  //
+  // The ONE case where a repo file polls (increment G): it has an open edit
+  // buffer, so an agent writing under it must raise the conflict banner within
+  // the same 2.5s a KB doc would, rather than waiting for the save-time
+  // re-read. Loading policy stays the HOST's decision — the editor store only
+  // answers "is there a buffer".
+  const editing = useHasBuffer(artifactIdentity({ kind: "repo-file", project, path }));
+  const { file, reload } = useRepoFile(project, path, editing ? REPO_EDIT_POLL_MS : 0);
 
   if (!file) return null;
   return <FileViewer project={project} file={file} onReload={reload} />;

@@ -283,6 +283,53 @@ fn read_at(project: &ProjectInfo, rel_path: &str) -> Result<String, String> {
     fs::read_to_string(&canon).map_err(|e| format!("cannot read {:?}: {}", rel_path, e))
 }
 
+/// Write `content` to a file that ALREADY EXISTS inside the project's repo
+/// root (increment G — repo markdown is editable, not only KB docs).
+///
+/// The guard is the SAME two layers `read_at` goes through, in the same order,
+/// because the containment argument is the same one:
+///   1. `resolve_repo_rel` runs layer 1 (`validate_rel_path`: no `..`, no
+///      absolute/drive/verbatim/UNC form, no `:` in a component) and resolves
+///      the CANONICAL repo root;
+///   2. `canonicalize_within` resolves the target and requires it to sit under
+///      that root — which is what closes the symlinked/junctioned-parent hole
+///      that layer 1 alone cannot see.
+///
+/// Then two rules layer 2 does not cover, both borrowed from `kb::write_doc_at`:
+///   · the file must ALREADY EXIST. kb_write_doc creates (pins sidecars land in
+///     new folders); this command edits documents you opened, so a create path
+///     would be a way to drop new files into a source tree with no UI for it.
+///     `fs::canonicalize` requires existence anyway, which is what makes layer 2
+///     apply to the FINAL component here and not merely to its parent — the
+///     precise reason kb.rs needs an extra `symlink_metadata` check and this
+///     does not.
+///   · a symlink at the target is refused outright, so an existing symlink
+///     inside the repo cannot redirect the write outside it. (Canonicalize
+///     would already have resolved it and containment would already have
+///     judged the RESOLVED path — this refuses even a symlink that resolves to
+///     a legal in-repo path, because writing "through" a link is never what an
+///     editor buffer means.)
+fn write_at(project: &ProjectInfo, rel_path: &str, content: &str) -> Result<(), String> {
+    let (root, rest) = resolve_repo_rel(project, rel_path)?;
+    if rest.is_empty() {
+        return Err("not a file".to_string());
+    }
+    let target = root.join(&rest);
+    if let Ok(meta) = fs::symlink_metadata(&target) {
+        // is_symlink() covers Windows symlink files/dirs AND junction reparse
+        // points.
+        if meta.file_type().is_symlink() {
+            return Err(format!("refusing to write through symlink {:?}", rel_path));
+        }
+    }
+    let canon = canonicalize_within(&root, &target)?;
+    let meta = fs::metadata(&canon).map_err(|e| format!("cannot stat {:?}: {}", rel_path, e))?;
+    if !meta.is_file() {
+        return Err(format!("not a file: {:?}", rel_path));
+    }
+    fs::write(&canon, content.as_bytes()).map_err(|e| format!("cannot write {:?}: {}", rel_path, e))
+}
+
 // ── Tauri commands ───────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -302,6 +349,23 @@ pub async fn explorer_read(project_key: String, rel_path: String) -> Result<Stri
     let projects = load_registry()?;
     let project = find_project(&projects, &project_key)?;
     read_at(&project, &rel_path)
+}
+
+#[tauri::command]
+pub async fn explorer_write(
+    project_key: String,
+    rel_path: String,
+    content: String,
+) -> Result<(), String> {
+    log::info!(
+        "explorer_write {}/{:?} ({} bytes)",
+        project_key,
+        rel_path,
+        content.len()
+    );
+    let projects = load_registry()?;
+    let project = find_project(&projects, &project_key)?;
+    write_at(&project, &rel_path, &content)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -551,5 +615,149 @@ mod explorer_tests {
         write(&root, "big.txt", &big);
         let err = read_at(&project, "big.txt").unwrap_err();
         assert!(err.contains("too large"), "unexpected error: {}", err);
+    }
+
+    // ── Write guard (increment G) ──
+    // Mirrors kb.rs's write guard tests: the same two layers, plus the
+    // must-already-exist rule that is this command's own.
+
+    #[test]
+    fn write_replaces_an_existing_file_in_place() {
+        let root = temp_repo("write-ok");
+        write(&root, "specs/plan.md", "# before");
+        let project = project_for(&root);
+        write_at(&project, "specs/plan.md", "# after").unwrap();
+        assert_eq!(read_at(&project, "specs/plan.md").unwrap(), "# after");
+    }
+
+    #[test]
+    fn write_outside_repo_root_is_rejected_and_nothing_created() {
+        let root = temp_repo("write-escape");
+        write(&root, "keep.md", "x");
+        let project = project_for(&root);
+
+        for rel in [
+            "../outside.md",
+            "specs/../../outside.md",
+            "C:/Windows/Temp/outside.md",
+            "/etc/passwd",
+            r"\\server\share\outside.md",
+            "doc.md:hidden",
+        ] {
+            let err = write_at(&project, rel, "escape").unwrap_err();
+            assert!(!err.is_empty(), "expected a rejection for {:?}", rel);
+        }
+
+        // The sibling of the repo root is where `..` would have landed.
+        let outside = root.parent().unwrap().join("outside.md");
+        assert!(!outside.exists(), "a write escaped to {:?}", outside);
+        // …and the legitimate file is untouched.
+        assert_eq!(read_at(&project, "keep.md").unwrap(), "x");
+    }
+
+    #[test]
+    fn write_refuses_to_create_and_refuses_a_directory() {
+        let root = temp_repo("write-create");
+        let project = project_for(&root);
+        // A file that does not exist: canonicalize fails, so containment is
+        // never even in question — this command edits, it does not create.
+        assert!(write_at(&project, "brand-new.md", "nope").is_err());
+        assert!(!root.join("brand-new.md").exists());
+        // An empty rel path is the repo root itself.
+        assert!(write_at(&project, "", "nope").is_err());
+        // A directory target.
+        write(&root, "src/lib.rs", "x");
+        assert!(write_at(&project, "src", "nope").is_err());
+    }
+
+    /// The unknown-project gate: `explorer_write` addresses a repo by registry
+    /// KEY, so a path can only ever be resolved against a root the registry
+    /// named. There is no client-supplied root to escape from.
+    #[test]
+    fn write_to_an_unknown_project_is_rejected() {
+        let projects = parse_registry(FIXTURE).unwrap();
+        assert!(find_project(&projects, "not-a-project").is_err());
+    }
+
+    /// Junction (dir reparse point) escape through the PARENT — the case layer
+    /// 1 cannot see and `canonicalize_within` exists for. Junctions need no
+    /// privilege, so this runs on any Windows box.
+    #[cfg(windows)]
+    #[test]
+    fn write_rejects_junctioned_parent_dir_escape() {
+        let root = temp_repo("write-junction");
+        let outside_dir = temp_repo("write-junction-outside");
+        fs::write(outside_dir.join("evil.md"), "original").unwrap();
+        let junction = root.join("jdir");
+        if !make_junction(&junction, &outside_dir) {
+            eprintln!("junction creation failed — skipping");
+            return;
+        }
+        let project = project_for(&root);
+        let err = write_at(&project, "jdir/evil.md", "escape").unwrap_err();
+        assert!(err.contains("escapes repo root"), "unexpected error: {}", err);
+        assert_eq!(
+            fs::read_to_string(outside_dir.join("evil.md")).unwrap(),
+            "original"
+        );
+    }
+
+    /// A symlink FILE at the target is refused before the write, so an existing
+    /// link inside the repo cannot redirect an editor buffer out of it.
+    /// Degrades (like kb.rs's twin) to asserting the reparse-DETECTION
+    /// predicate when the runner lacks symlink privilege.
+    #[test]
+    fn write_rejects_pre_existing_symlink_file_target() {
+        let root = temp_repo("write-symlink");
+        let outside = std::env::temp_dir()
+            .join(format!("switchboard-explorer-outside-{}.md", std::process::id()));
+        fs::write(&outside, "outside-original").unwrap();
+        let link = root.join("link.md");
+
+        #[cfg(windows)]
+        let link_created = std::os::windows::fs::symlink_file(&outside, &link).is_ok();
+        #[cfg(unix)]
+        let link_created = std::os::unix::fs::symlink(&outside, &link).is_ok();
+
+        let project = project_for(&root);
+        if link_created {
+            let err = write_at(&project, "link.md", "redirected!").unwrap_err();
+            assert!(err.contains("symlink"), "unexpected error: {}", err);
+            assert_eq!(fs::read_to_string(&outside).unwrap(), "outside-original");
+        } else {
+            eprintln!(
+                "symlink_file unavailable (no dev-mode privilege) — asserting \
+                 reparse detection via junction instead"
+            );
+            let target_dir = temp_repo("write-symlink-jtarget");
+            let junction = root.join("jdir");
+            if !make_junction(&junction, &target_dir) {
+                eprintln!("junction creation failed too — skipping");
+                return;
+            }
+            assert!(fs::symlink_metadata(&junction).unwrap().file_type().is_symlink());
+        }
+        let _ = fs::remove_file(&outside);
+    }
+
+    /// Create an NTFS junction (no privilege required). Returns false if the
+    /// tool or filesystem refuses.
+    #[cfg(windows)]
+    fn make_junction(link: &Path, target: &Path) -> bool {
+        // cmd's mklink rejects `\\?\` verbatim forms — strip for the shell.
+        let strip = |p: &Path| {
+            let s = p.to_string_lossy().into_owned();
+            s.strip_prefix(r"\\?\").map(|s| s.to_string()).unwrap_or(s)
+        };
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J", &strip(link), &strip(target)])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(windows))]
+    fn make_junction(_link: &Path, _target: &Path) -> bool {
+        false
     }
 }

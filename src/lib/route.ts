@@ -107,13 +107,29 @@ export function applyRouteToParams(
   return params;
 }
 
+/** A route's identity — two routes with the same key are the same LOCATION.
+ *  Used to keep `navigate` from pushing a history entry for a navigation that
+ *  goes nowhere (clicking the doc you are already reading), which is what made
+ *  the stack unusable as a back affordance: `back` popped an entry identical to
+ *  where you were standing and read as a dead button. Pure. */
+export function routeKey(route: Route): string {
+  return routeToParams(route).toString();
+}
+
+export function sameRoute(a: Route, b: Route): boolean {
+  return routeKey(a) === routeKey(b);
+}
+
 /** Sync a route into the window URL via replaceState. Non-route params on the
  *  live URL survive; stale router-owned params do not.
  *
- *  NOTE: replaceState never creates a history entry, so navigation builds no
- *  back/forward stack — the webview's back/forward (Alt+Left etc.) has
- *  nothing to pop, and App's popstate listener is purely defensive resync
- *  against external history mutations, not a working back button. */
+ *  DELIBERATELY still replaceState (increment G revisited this): the BACK
+ *  affordance is the store's own `history` stack, which `navigate` pushes to
+ *  and `navigateBack` pops. Mirroring that into `pushState` as well would give
+ *  the webview's Alt+Left a second, independent stack — and App's popstate
+ *  listener resyncs by calling `navigate`, so a browser-level back would push a
+ *  fresh entry while consuming a native one, and the two stacks would drift
+ *  apart within a few navigations. One stack, one back button. */
 export function writeRouteToUrl(route: Route): void {
   if (typeof window === "undefined") return;
   const params = applyRouteToParams(
@@ -165,9 +181,17 @@ export function subscribeNav(listener: () => void): () => void {
 }
 
 /** Navigate to an explicit route. Pushes the previous route onto history and
- *  records the new route as the screen's last-known sub-state. */
+ *  records the new route as the screen's last-known sub-state.
+ *
+ *  Navigating to the location you are ALREADY on is a NO-OP (increment G): the
+ *  history entry would be a duplicate, and `back` returning you to where you
+ *  are standing is the shape of a broken button. Nothing else changes either —
+ *  `lastByScreen` already records this location, and skipping the state swap
+ *  keeps the `useRoute` snapshot identity-stable, so App's defensive popstate
+ *  resync costs no re-render at all. */
 export function navigate(next: Route): void {
   const s = navState;
+  if (sameRoute(s.route, next)) return;
   setNavState({
     route: next,
     history: [...s.history, s.route].slice(-HISTORY_CAP),
@@ -182,20 +206,67 @@ export function navigateToScreen(screen: ScreenId): void {
   navigate(navState.lastByScreen[screen] ?? ({ screen } as Route));
 }
 
-/** Pop the previous route off the history stack. No-op on empty history. */
+/** Pop the previous route off the history stack. No-op on empty history.
+ *
+ *  Also records the restored route as its screen's last-known sub-state: back
+ *  is a real navigation, so a later side-menu return to that screen must land
+ *  where BACK left you, not where you were before it.
+ *
+ *  Going back to `{screen:"terminal"}` restores the panel by construction — the
+ *  artifact panel is per-TAB state in `panelStore`, which navigation never
+ *  touches. */
 export function navigateBack(): void {
   const s = navState;
   if (s.history.length === 0) return;
+  const target = s.history[s.history.length - 1];
   setNavState({
-    ...s,
-    route: s.history[s.history.length - 1],
+    route: target,
     history: s.history.slice(0, -1),
+    lastByScreen: { ...s.lastByScreen, [target.screen]: target },
   });
+}
+
+/** Is there anywhere to go back TO? */
+export function canNavigateBack(): boolean {
+  return navState.history.length > 0;
+}
+
+/** Where `back` would take you, for the control's tooltip — a location the user
+ *  can recognize, not a route object. Null when the stack is empty. */
+export function backTargetLabel(): string | null {
+  const s = navState;
+  if (s.history.length === 0) return null;
+  const target = s.history[s.history.length - 1];
+  switch (target.screen) {
+    case "terminal":
+      return "the terminal";
+    case "threads":
+      return "threads";
+    case "kb":
+      return target.doc ? `kb / ${target.doc}` : "the knowledge base";
+    case "explorer":
+      return target.path
+        ? `${target.project} / ${target.path}`
+        : target.project
+          ? target.project
+          : "the explorer";
+  }
 }
 
 /** React hook: the current route, re-rendering on navigation. */
 export function useRoute(): Route {
   return useSyncExternalStore(subscribeNav, () => navState.route);
+}
+
+/** React hook: can we go back? A boolean snapshot — the control re-renders when
+ *  the answer flips, not on every navigation. */
+export function useCanNavigateBack(): boolean {
+  return useSyncExternalStore(subscribeNav, canNavigateBack);
+}
+
+/** React hook: the back control's label. A string snapshot. */
+export function useBackTargetLabel(): string | null {
+  return useSyncExternalStore(subscribeNav, backTargetLabel);
 }
 
 /** Test-only: reset the store to a known state. */

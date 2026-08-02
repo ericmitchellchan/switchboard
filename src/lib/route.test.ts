@@ -18,6 +18,10 @@ import {
   navigate,
   navigateToScreen,
   navigateBack,
+  canNavigateBack,
+  backTargetLabel,
+  routeKey,
+  sameRoute,
   getNavState,
   subscribeNav,
   __resetNavForTests,
@@ -293,5 +297,101 @@ describe("navigation store", () => {
     expect(params.get("screen")).toBe("kb");
     expect(params.get("doc")).toBe("spec.md");
     expect(params.get("keep")).toBe("1");
+  });
+});
+
+// ── Back navigation (increment G, Decision 5) ────────────────────────────────
+// The store's history stack has existed since T4 and nothing consumed it. It is
+// now the ONE back mechanism (BackButton → navigateBack), which makes two
+// things load-bearing that were not: an entry must mean a real change of
+// location, and going back must be recorded as a navigation.
+
+describe("routeKey / sameRoute", () => {
+  it("treats identical locations as the same route", () => {
+    expect(sameRoute({ screen: "kb", doc: "a.md" }, { screen: "kb", doc: "a.md" })).toBe(true);
+    expect(sameRoute({ screen: "terminal" }, { screen: "terminal" })).toBe(true);
+  });
+
+  it("separates different docs, projects, paths and screens", () => {
+    expect(sameRoute({ screen: "kb", doc: "a.md" }, { screen: "kb", doc: "b.md" })).toBe(false);
+    expect(sameRoute({ screen: "kb" }, { screen: "kb", doc: "a.md" })).toBe(false);
+    expect(sameRoute({ screen: "kb" }, { screen: "terminal" })).toBe(false);
+    expect(
+      sameRoute(
+        { screen: "explorer", project: "p", path: "a.ts" },
+        { screen: "explorer", project: "p", path: "b.ts" }
+      )
+    ).toBe(false);
+  });
+
+  it("ignores the orphaned-param cases routeToParams already drops", () => {
+    // A path with no project is not part of the location (parseRoute drops it).
+    expect(routeKey({ screen: "explorer", path: "a.ts" })).toBe(routeKey({ screen: "explorer" }));
+  });
+});
+
+describe("navigation history for the back control", () => {
+  beforeEach(() => {
+    __resetNavForTests();
+  });
+
+  it("re-navigating to the SAME location pushes nothing", () => {
+    navigate({ screen: "kb", doc: "spec.md" });
+    expect(getNavState().history).toEqual([{ screen: "terminal" }]);
+    navigate({ screen: "kb", doc: "spec.md" });
+    navigate({ screen: "kb", doc: "spec.md" });
+    expect(getNavState().history).toEqual([{ screen: "terminal" }]);
+    // …and back therefore actually goes somewhere.
+    navigateBack();
+    expect(getNavState().route).toEqual({ screen: "terminal" });
+  });
+
+  it("open-full from the terminal pushes ONE entry, and back returns to the terminal", () => {
+    // The panel's `open full` and a full-width tree click both land here.
+    navigate({ screen: "kb", doc: "switchboard/increment-g.md" });
+    expect(canNavigateBack()).toBe(true);
+    navigateBack();
+    expect(getNavState().route).toEqual({ screen: "terminal" });
+    expect(canNavigateBack()).toBe(false);
+  });
+
+  it("canNavigateBack is false on a fresh boot", () => {
+    expect(canNavigateBack()).toBe(false);
+  });
+
+  it("navigateBack records the restored route as its screen's last sub-state", () => {
+    navigate({ screen: "kb", doc: "a.md" });
+    navigate({ screen: "kb", doc: "b.md" });
+    navigate({ screen: "explorer", project: "lodestar" });
+    navigateBack(); // back to kb/b.md
+    expect(getNavState().route).toEqual({ screen: "kb", doc: "b.md" });
+    // Leaving and returning by SCREEN must land where BACK left us, not where
+    // we were before it.
+    navigateToScreen("threads");
+    navigateToScreen("kb");
+    expect(getNavState().route).toEqual({ screen: "kb", doc: "b.md" });
+  });
+
+  it("backTargetLabel names a location the user can recognize", () => {
+    expect(backTargetLabel()).toBeNull();
+    navigate({ screen: "kb", doc: "switchboard/spec.md" });
+    expect(backTargetLabel()).toBe("the terminal");
+    navigate({ screen: "explorer", project: "lodestar", path: "specs/plan.md" });
+    expect(backTargetLabel()).toBe("kb / switchboard/spec.md");
+    navigate({ screen: "threads" });
+    expect(backTargetLabel()).toBe("lodestar / specs/plan.md");
+    navigateBack();
+    navigateBack();
+    expect(backTargetLabel()).toBe("the terminal");
+  });
+
+  it("labels the param-less variants too", () => {
+    navigate({ screen: "kb" });
+    navigate({ screen: "explorer" });
+    expect(backTargetLabel()).toBe("the knowledge base");
+    navigate({ screen: "threads" });
+    expect(backTargetLabel()).toBe("the explorer");
+    navigate({ screen: "explorer", project: "orbit" });
+    expect(backTargetLabel()).toBe("threads");
   });
 });

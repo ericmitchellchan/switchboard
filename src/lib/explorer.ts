@@ -11,6 +11,7 @@ export {
   explorerProjects,
   explorerList,
   explorerRead,
+  explorerWrite,
 } from "./ipc";
 export type { ExplorerProject, ExplorerEntry } from "./ipc";
 import { useCallback, useEffect, useState } from "react";
@@ -284,12 +285,26 @@ export function mergeFileRead(
   return { key, path, content, error: result.error };
 }
 
+/** Re-read cadence while a repo file has an OPEN EDIT BUFFER. Matches the KB's
+ *  `KB_POLL_MS` so "the agent changed this under me" is noticed at the same
+ *  speed wherever the document lives. */
+export const REPO_EDIT_POLL_MS = 2500;
+
 /** THE repo-file read, for both hosts. One-shot per document (repo reads have
  *  never polled) plus an explicit `reload` for the wireframe toolbar's ⟳ —
- *  which re-runs this read WITHOUT unmounting anything, per the fold above. */
+ *  which re-runs this read WITHOUT unmounting anything, per the fold above.
+ *
+ *  `pollMs > 0` adds a repeat, and there is exactly ONE caller-side reason to
+ *  pass it (increment G): the document has an open edit buffer. A KB doc polls
+ *  already, so an agent writing under a dirty buffer raises the conflict banner
+ *  within 2.5s; a repo file would otherwise not notice until the save-time
+ *  re-read. Never silently overwriting is guaranteed either way — this is about
+ *  telling you EARLY rather than at the moment you press Ctrl+S. Off by default,
+ *  so a repo file you are only reading costs exactly what it always did. */
 export function useRepoFile(
   project: string | undefined,
-  path: string | undefined
+  path: string | undefined,
+  pollMs = 0
 ): { file: OpenFile | null; reload: () => void } {
   const [file, setFile] = useState<OpenFile | null>(null);
   const [nonce, setNonce] = useState(0);
@@ -303,18 +318,27 @@ export function useRepoFile(
     const key = fileKey(project, path);
     let cancelled = false;
     setFile((prev) => beginFileRead(prev, key, path));
-    explorerRead(project, path)
-      .then((content) => {
-        if (!cancelled) setFile((prev) => mergeFileRead(prev, key, path, { ok: true, content }));
-      })
-      .catch((e) => {
-        if (!cancelled)
-          setFile((prev) => mergeFileRead(prev, key, path, { ok: false, error: String(e) }));
-      });
+    const read = () =>
+      explorerRead(project, path)
+        .then((content) => {
+          if (!cancelled) setFile((prev) => mergeFileRead(prev, key, path, { ok: true, content }));
+        })
+        .catch((e) => {
+          if (!cancelled)
+            setFile((prev) => mergeFileRead(prev, key, path, { ok: false, error: String(e) }));
+        });
+    void read();
+    if (pollMs <= 0) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    const timer = window.setInterval(() => void read(), pollMs);
     return () => {
       cancelled = true;
+      window.clearInterval(timer);
     };
-  }, [project, path, nonce]);
+  }, [project, path, nonce, pollMs]);
 
   return { file, reload };
 }

@@ -75,6 +75,7 @@ import {
   usePoppedOutIdentity,
 } from "./lib/panelStore";
 import { clearDevServerSession } from "./lib/devServer";
+import { dirtyCount, flushDrafts } from "./lib/editor";
 import {
   buildSpawnContext,
   getKbRootForContext,
@@ -88,6 +89,7 @@ import { ArtifactPanel, CRUMB_TONE } from "./components/ArtifactPanel";
 import { NewThreadDialog } from "./components/NewThreadDialog";
 import { DocView } from "./components/kb/DocView";
 import { ExplorerView } from "./components/ExplorerView";
+import { BackButton } from "./components/BackButton";
 import { ThreadsScreen } from "./components/ThreadsScreen";
 import { enqueueFit } from "./lib/fitQueue";
 import { useRoute, navigate, readRouteFromUrl, getNavState } from "./lib/route";
@@ -278,9 +280,11 @@ export default function App() {
         : undefined;
 
   // Defensive: resync the store if something external mutates history. NOTE
-  // writeRouteToUrl only ever replaceState's — no history entries are pushed,
-  // so browser/webview back-forward (Alt+Left etc.) has nothing to pop and
-  // this listener does not give you back/forward navigation today.
+  // writeRouteToUrl only ever replaceState's — no BROWSER history entries are
+  // pushed, so Alt+Left has nothing to pop; the working back affordance is the
+  // store's own stack, driven by `navigateBack` from the full-width screens'
+  // BackButton (increment G). This listener stays a defensive resync, and
+  // `navigate`'s same-route dedupe makes it a cheap no-op when nothing moved.
   useEffect(() => {
     const onPop = () => navigate(readRouteFromUrl());
     window.addEventListener("popstate", onPop);
@@ -1590,6 +1594,13 @@ export default function App() {
       const sessions = sessionsRef.current;
       const needsConfirm = sessions.some((s) => shouldConfirmSessionClose(s));
 
+      // Unsaved EDIT buffers are flushed to their draft mirror before anything
+      // else — a close must not race the 400ms debounce. They are preserved,
+      // not lost, so they never BLOCK the close; the dialog (when one appears
+      // for another reason) says so rather than staying silent about them.
+      flushDrafts();
+      const drafts = dirtyCount();
+
       if (!needsConfirm) {
         void exitApp();
         return;
@@ -1598,10 +1609,15 @@ export default function App() {
       const activeCount = sessions.filter(
         (s) => s.status === "running" || s.status === "waiting"
       ).length;
+      const draftNote =
+        drafts > 0
+          ? `\n\n${drafts} unsaved document edit${drafts === 1 ? "" : "s"} will be kept as a draft and restored next time.`
+          : "";
       const message =
-        activeCount > 0
+        (activeCount > 0
           ? `${activeCount} session${activeCount === 1 ? " is" : "s are"} still active. Closing Switchboard will end ${activeCount === 1 ? "it" : "them"} and lose any in-progress work.`
-          : `${sessions.length} session${sessions.length === 1 ? " has" : "s have"} unsaved output. Close anyway?`;
+          : `${sessions.length} session${sessions.length === 1 ? " has" : "s have"} unsaved output. Close anyway?`) +
+        draftNote;
 
       setConfirmState({
         open: true,
@@ -1836,6 +1852,10 @@ export default function App() {
       // Threads mirror regardless of open sessions — a thread with no open
       // tab is exactly the durable state that must survive.
       saveThreadsToDisk().catch(() => {});
+      // Same reasoning for unsaved DOCUMENT edits: synchronous localStorage,
+      // so the 400ms debounce can never swallow the last few keystrokes on the
+      // way out (increment G, acceptance 6). An F5 reload lands here too.
+      flushDrafts();
     };
 
     window.addEventListener("beforeunload", handleBeforeUnload);
@@ -2453,6 +2473,9 @@ function KnowledgeBaseScreen({ active, doc, menuHidden }: { active: boolean; doc
           overflow: "hidden",
         }}
       >
+        {/* Back to wherever you came from — including the terminal screen with
+            its panel intact (increment G, Decision 5). */}
+        <BackButton />
         {crumbs.map((crumb, i) => (
           <Fragment key={`${i}-${crumb.text}`}>
             {i > 0 && <span>/</span>}

@@ -27,7 +27,8 @@ src/
 │   ├── ExplorerTreeSection.tsx  → Side-menu registry projects + IDE-style inline file tree
 │   ├── NewThreadDialog.tsx      → Repo picker for creating a thread
 │   ├── NewSessionDialog.tsx     → Repo picker / new session config (lazy-loaded)
-│   ├── ExplorerView.tsx         → Explorer screen body: breadcrumb + file viewer (tree lives in the side menu); repo files route through the SHARED ArtifactBody kind switch
+│   ├── ExplorerView.tsx         → Explorer screen body: BACK control + breadcrumb + file viewer (tree lives in the side menu); repo files route through the SHARED ArtifactBody kind switch
+│   ├── BackButton.tsx           → THE back control on the full-width screens (route.navigateBack; renders only when there is somewhere to go)
 │   ├── ArtifactPanel.tsx        → Artifact panel host: right-side co-present surface inside the terminal screen (divider, tab strip + `+`, header chrome, docked/overlay, `float` pop-out + the popped-out placeholder); hosts ArtifactSurface, renders no viewer of its own
 │   ├── ArtifactPicker.tsx       → The `+` picker: filterable KB docs + registry projects, repo files browsed one directory at a time (explorerList), and the MANUAL URL row (type a port or a URL) that opens a live preview
 │   ├── UpdateChip.tsx           → In-app updater chip (consent-based install flow)
@@ -39,10 +40,11 @@ src/
 │   │   ├── PinsRail.tsx           → THE collapsible pins rail (260px <-> 26px edge), shared by WireframeView and LocalhostView; per-doc preference, collapsed by default when empty
 │   │   ├── DocView.tsx            → KB doc load policy (2500ms active-gated poll) + the KB's fallback for unrendered kinds
 │   │   ├── MarkdownDoc.tsx        → THE markdown path: one unified pipeline + typography + the link-activation policy (KB docs and repo READMEs alike)
+│   │   ├── MarkdownSurface.tsx    → THE WORKING SURFACE (increment G): view ⇄ edit toggle, dirty dot, Ctrl+S, the "changed on disk" conflict banner and the plain mono textarea — wraps MarkdownDoc for every host
 │   │   ├── WireframeView.tsx      → Sandboxed iframe wireframe rendering + pin/note markup (takes an Artifact + content + the host's `onReload`; no KB coupling)
 │   │   ├── ComponentPreview.tsx   → .jsx/.tsx preview shell: lazy-loads the compiler, feeds the compiled document to WireframeView's iframe
 │   │   └── DiagramView.tsx        → Mermaid diagram surface (lazy chunk, pan/zoom)
-│   ├── icons.tsx                → THE icon module: hand-written inline SVG (folder/folder-open/file/panel/localhost/chevrons + the row-menu set: ellipsis/open/rename/archive/unarchive/trash) shared by both trees, the picker, the panel header, the tab-bar button and the thread row menu
+│   ├── icons.tsx                → THE icon module: hand-written inline SVG (folder/folder-open/file/panel/localhost/chevrons + the row-menu set: ellipsis/open/rename/archive/unarchive/trash + the editing pair: edit/save) shared by both trees, the picker, the panel header, the tab-bar button, the thread row menu and the markdown surface
 │   ├── Toast.tsx                → Notification toasts
 │   └── PulsingDot.tsx           → Animated status indicator
 ├── hooks/
@@ -59,7 +61,7 @@ src/
 │   ├── terminal.ts              → Facade over the registry + measurement/serialize/scroll/fit helpers
 │   ├── resizePolicy.ts          → Settled resize policy (grow-only width, snapshot-reflow on widen, mid-stream defer)
 │   ├── fitQueue.ts              → Debounced per-session fit pipeline (show/resize coalescing)
-│   ├── route.ts                 → URL-backed route model + nav store (screen switching)
+│   ├── route.ts                 → URL-backed route model + nav store (screen switching) + THE back stack (`navigate` dedupes the same location, `navigateBack`/`canNavigateBack`/`backTargetLabel` drive BackButton)
 │   ├── threadStore.ts           → Durable agent threads: records (explicit + promoted), revive decisions, shell-ready wait, history selection/filter/relative-time helpers, action bridge
 │   ├── composer.ts              → Composer wire format (`composeWrite`: single line vs bracketed paste), send-history + caret rules, and the per-session visibility/draft/history store. PURE helpers + module singleton
 │   ├── threadPromotion.ts       → Tab→thread promotion (increment C): what a discovery MEANS for the thread list (`planPromotion`) + the poll pass. PURE decision + injected IO; observe-only
@@ -71,7 +73,8 @@ src/
 │   ├── pinsStore.ts             → ONE shared `.pins.json` record per sidecar (refcounted mounts, one debounced writer, injected IO) — the panel and the KB screen can host the same wireframe at once
 │   ├── devServer.ts             → Dev-server URL detection (pure `detectDevServerUrl` over ANSI-stripped PTY text + `parseManualUrl`) and the per-session OFFER store
 │   ├── pinsRail.ts              → Pins-rail collapse rule (pure: a stored preference wins, else collapsed iff the doc has no pins) + the sessionStorage key
-│   ├── explorer.ts              → Explorer data layer (projects/listing/read via IPC, live-thread annotation, session-repo merge) + THE repo-file read both hosts share (`useRepoFile` / `mergeFileRead`)
+│   ├── explorer.ts              → Explorer data layer (projects/listing/read/WRITE via IPC, live-thread annotation, session-repo merge) + THE repo-file read both hosts share (`useRepoFile` / `mergeFileRead`; polls ONLY while the file has an open edit buffer)
+│   ├── editor.ts                → THE markdown edit buffer: explicit save, the disk-vs-buffer fold (`foldDisk`) that raises a conflict instead of clobbering, keep-mine/take-theirs, the save-time re-read, and the localStorage draft mirror. PURE rules + module singleton + injected IO
 │   ├── sandbox.ts               → THE iframe posture: the frame Content-Security-Policy + `injectCsp` (planted into wireframe srcDoc AND the component-preview shell)
 │   ├── diagramZoom.ts           → Pure pan/zoom math for the diagram surface
 │   ├── diagramMeta.ts           → Diagram metadata parsing (.mmd frontmatter/title)
@@ -85,15 +88,16 @@ src/
 │   ├── logger.ts                → Frontend structured logging
 │   ├── updater.ts               → Auto-update check
 │   └── export.ts                → Export session to file
-└── lib/*.test.ts              → 21 Vitest test suites (paneLayout, statusDetector, taskDetector, resizePolicy, terminalLifecycle, route, threadStore, threadPromotion, panelStore, agentContext, composer, kb, pins, pinsStore, componentPreview, explorer, diagramZoom, updaterState, sandbox, devServer, pinsRail)
+└── lib/*.test.ts              → 22 Vitest test suites (paneLayout, statusDetector, taskDetector, resizePolicy, terminalLifecycle, route, threadStore, threadPromotion, panelStore, agentContext, composer, kb, pins, pinsStore, componentPreview, explorer, editor, diagramZoom, updaterState, sandbox, devServer, pinsRail)
 
 src-tauri/
 ├── src/
 │   ├── main.rs                  → Entry point (calls lib::run)
-│   ├── lib.rs                   → Tauri commands, plugin setup, event dispatch
+│   ├── lib.rs                   → Tauri commands, plugin setup, event dispatch; the invoke handler is WRAPPED by the IPC origin gate
+│   ├── ipc_guard.rs             → THE IPC origin gate: an invoke that did not come from the app's own document does not run (subframes get nothing, whatever their sandbox)
 │   ├── config.rs                → Config load from %APPDATA%/switchboard/config.json
 │   ├── kb.rs                    → KB backend: traversal-guarded doc tree/read over the personal-kb checkout
-│   ├── explorer.rs              → Explorer backend: registry.json-driven repo listing/read (same guard posture)
+│   ├── explorer.rs              → Explorer backend: registry.json-driven repo listing/read/write (same guard posture; `explorer_write` edits an EXISTING file only)
 │   ├── power.rs                 → Win32 power monitor (sleep/wake events)
 │   ├── discovery.rs             → Claude discovery: PTY shell pid → descendant pids → `~/.claude/sessions/<pid>.json`. Toolhelp snapshot, freshness + ambiguity guards, observe-only
 │   └── pty/
@@ -180,6 +184,12 @@ pnpm test:watch        # Vitest (watch mode)
 - **The pins overlay is `pointer-events: none` except in pin mode** — the live app underneath stays fully interactive (click, scroll, type) because the layer is not there as far as the pointer is concerned; badges opt pointer events back on INDIVIDUALLY, so a badge is always clickable without the layer ever swallowing anything else
 - **The pins rail collapses, and its default comes from CONTENT** — no stored preference + zero pins -> collapsed (its worst case was being permanently 260px of nothing); + at least one pin -> expanded; a stored preference wins in BOTH directions. Per-DOCUMENT (artifact identity, like the zoom key — a repo file and a KB doc can share a path) and per-SESSION (sessionStorage, write-through at the moment of change, never an effect keyed on [identity, collapsed] — that clobbers the stored value on a doc switch, the recorded bug). Collapsed is a real 26px clickable edge, never nothing: a rail that vanished would take its own toggle with it
 - **The floating window hosts EITHER a terminal or an artifact — one window lifecycle, not a second window type** — `pip.html?session=` mirrors a shell (as always); `pip.html?artifact=<json>` hosts an artifact, and `pip:host` re-aims a window that is ALREADY open rather than closing and recreating one that is on screen. It renders the same `ArtifactSurface` the panel renders, so a popped-out wireframe keeps its pins and a popped-out preview keeps its overlay and health card. While an artifact is out there the panel tab shows a PLACEHOLDER, not a second live copy — two frames on one dev server, two health polls and two mounts of one pin sidecar is duplication, not co-presence — and closing the window (its `x`, Ctrl+Shift+O, or `back`) returns it. PiP finally has discoverable entry points too: the panel header's `float` action and the status bar's `Ctrl+Shift+O float`
+- **An invoke that did not come from the app's own document does not run — and the ONE-CALL-SITE mitigation is gone** — increment F measured that Tauri injects `__TAURI_INTERNALS__` into every frame, so a framed page with `allow-same-origin` could `invoke("write_file")` and a file appeared on disk. The only defence was the sandbox attribute at ONE call site, which meant any future frame anywhere silently re-opened full command access including `create_session` (process execution). `src-tauri/src/ipc_guard.rs` is the durable fix: the invoke handler is WRAPPED, and an invoke whose `Origin` is not one of the app's own document origins is rejected and logged before any command sees it. The allowlist is built ONCE at setup from the app's own config (`tauri.localhost` in all three production forms + `build.devUrl`, the latter ONLY under `tauri::is_dev()` so a shipped bundle cannot hand IPC to port 1620); per-invoke `Webview::url()` is a blocking UI-thread round trip and `write_to_session` runs on every keystroke. `plugin:`/`core:` commands never reach the handler and never needed to — tauri ACL-gates them to `ExecutionContext::Local` because `capabilities/default.json` declares no `remote` URLs; the hole was that the APP's own commands skip the ACL entirely when the app declares no ACL manifest (`has_app_acl_manifest`, tauri 2.10.2 `webview/mod.rs`). MEASURED, both directions, with a probe (a cross-origin `allow-scripts allow-same-origin` frame): frame custom-protocol `kb_root`/`write_file` → REJECTED, no file; frame `window.ipc.postMessage` with the REAL invoke key → NO RESPONSE; main frame → RESOLVED on both transports.
+- **An ABSENT `Origin` is a different TRANSPORT, not an unknown caller** — tauri has two IPC paths and only the custom-protocol one carries headers. `ipc-protocol.js` switches PERMANENTLY to `window.ipc.postMessage` the first time a fetch rejects, which is exactly what a page UNLOAD does to in-flight requests: Switchboard's `beforeunload` flush (`save_scrollback`, `save_threads`) arrives with no Origin at all. Denying it would drop the workspace save on every F5 — data loss dressed as security — so `classify()` returns `PostMessage` (allow) for an absent header and `Deny` for a header that is present and wrong (`null`, a framed origin). That is only safe because a subframe cannot REACH that transport, which was measured: wry registers `ICoreWebView2::add_WebMessageReceived`, which WebView2 raises for the TOP-LEVEL document only (iframes raise `CoreWebView2Frame::WebMessageReceived`, unregistered). Windows/WebView2 only — re-run the probe before trusting this branch on another platform.
+- **Explicit save, and never a silent overwrite in either direction** — `lib/editor.ts` owns the whole rule set and `MarkdownSurface` only draws it. Ctrl+S is the ONLY writer (a ~1s autosave would put Eric and an agent on overlapping timers over one file — the exact race that produced two data-loss bugs in the pins layer). `foldDisk` reconciles disk against buffer on every host read: a CLEAN buffer FOLLOWS the file (the existing 2500ms poll, unchanged), a DIRTY one raises a CONFLICT and touches neither side until keep-mine / take-theirs. Save re-reads FIRST and turns a moved file into the same banner — that is the only way a REPO file, whose host does one-shot reads and never polls, can notice an external change. A failed write KEEPS the buffer and shows the error; the one path that loses typed text is a `discard` button. Dirty buffers survive tab/screen/artifact switches AND a restart (localStorage mirror, debounced 400ms, flushed synchronously on `beforeunload` and on the close dialog, which also SAYS they are kept). The ONE case where a repo file polls is an OPEN EDIT BUFFER (`useRepoFile(project, path, pollMs)`, driven by `useHasBuffer`): a KB doc's 2500ms poll already raises the banner under a dirty buffer, and a repo file must do it at the same speed rather than waiting for Ctrl+S. Loading policy stays the HOST's — the editor store only answers "is there a buffer".
+- **Repo markdown is editable, and the guard is the read guard plus two rules** — `explorer_write` runs `resolve_repo_rel` (layer 1: component-wise validation of the RAW relative path — no `..`, no absolute/drive/verbatim/UNC form, no `:` in a component — then the canonical repo root) and `canonicalize_within` (layer 2: containment, which is what closes the junctioned-parent hole), exactly as `explorer_read` does. Then: the file must ALREADY EXIST (an editor saves, it does not drop new files into a source tree — and `fs::canonicalize` requiring existence is what makes layer 2 cover the FINAL component here, unlike `kb_write_doc`, which needs an extra `symlink_metadata` check because it creates), and a symlink at the target is refused outright. Roots are never client-supplied: a write addresses a repo by registry KEY. Cargo tests mirror the kb.rs guard tests, junction case included.
+- **Markdown is the only editable kind** — `isEditable` = `docKind === "markdown"` AND a file-backed artifact. Wireframes, diagrams, `.jsx/.tsx` previews and live localhost frames stay READ-ONLY; the edit surface is reached through the SAME `ArtifactBody` kind switch, so it appears in the panel, on both full-width screens and in the PiP window without any host knowing about it. The buffer is keyed by `artifactIdentity`, not path — a repo file and a KB doc can share a relative path, and a buffer must never follow you to a different document.
+- **One back stack, and it is the store's** — `route.ts` has carried `history` + `navigateBack()` since T4 with nothing consuming them. `BackButton` (rendered on the full-width screens, and only when there is somewhere to go) is that missing half, and `navigate` now DEDUPES the same location so an entry means a real change of place — a back button that returns you to where you are standing is a broken button. `writeRouteToUrl` deliberately still `replaceState`s: mirroring into `pushState` would give the webview's Alt+Left a second, independent stack, and App's popstate handler resyncs by calling `navigate`, so the two would drift apart within a few navigations. Going back to the terminal restores the artifact panel by construction — the panel is per-TAB state in `panelStore`, which navigation never touches. `open full` is an ICON now (the shared `open` mark), because the words were the widest thing in a 36px header on a 260px panel.
 - **Lazy loading** — NewSessionDialog loaded via `React.lazy` + Suspense only when repos configured; mermaid is its own lazy chunk (DiagramView)
 - **`portable-pty = "=0.8.1"`** — pinned, v0.9 has Windows ConPTY bug
 - **CLAUDECODE env var** stripped from PTY sessions
@@ -226,6 +236,7 @@ are reconciled against it. Adding a chord means updating both.
 | Toggle artifact panel (active tab) | Ctrl+Shift+P |
 | Toggle composer (focused pane) | Ctrl+Shift+M |
 | Toggle floating PiP window | Ctrl+Shift+O |
+| Save the open markdown edit buffer | Ctrl+S (inside the editor) |
 | Export session scrollback | Ctrl+Shift+S |
 | Terminal search | Ctrl+F |
 | Split horizontal | Ctrl+\\ |
@@ -236,6 +247,7 @@ are reconciled against it. Adding a chord means updating both.
 | Paste into terminal | Ctrl+V |
 
 Chord notes:
+- **Ctrl+S is LOCAL to the markdown editor** (increment G) — it is handled on the textarea and `stopPropagation`s, so it never reaches the window handler and never collides with Ctrl+Shift+S (export). There is no global Ctrl+S.
 - **Ctrl+Shift+P moved PiP to Ctrl+Shift+O** (A2) — the two cannot share a chord.
 - **Ctrl+Shift+O is no longer keyboard-only** (increment F): the StatusBar carries a
   `Ctrl+Shift+O float` button and the panel header a `float` action, because the

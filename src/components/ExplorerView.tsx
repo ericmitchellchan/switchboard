@@ -30,10 +30,13 @@
 import { useMemo } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import type { FileArtifact } from "../types";
-import { useRepoFile } from "../lib/explorer";
+import { REPO_EDIT_POLL_MS, useRepoFile } from "../lib/explorer";
 import type { OpenFile } from "../lib/explorer";
+import { useHasBuffer } from "../lib/editor";
+import { artifactIdentity } from "../lib/panelStore";
 import { navigate } from "../lib/route";
 import { ArtifactBody } from "./kb/ArtifactBody";
+import { BackButton } from "./BackButton";
 
 const ROOT_STYLE: CSSProperties = {
   flex: 1,
@@ -83,8 +86,17 @@ export function ExplorerView({
 }) {
   // The read (and its ⟳) lives in lib/explorer.useRepoFile — the SAME hook the
   // artifact panel uses, so the two hosts cannot drift and a reload never
-  // unmounts the renderer.
-  const { file: openFile, reload } = useRepoFile(project, path);
+  // unmounts the renderer. The poll switches on only while this file has an
+  // open EDIT BUFFER (increment G), so an agent writing under a dirty buffer
+  // raises the conflict banner here at the same 2.5s a KB doc would.
+  const editing = useHasBuffer(
+    project && path ? artifactIdentity({ kind: "repo-file", project, path }) : ""
+  );
+  const { file: openFile, reload } = useRepoFile(
+    project,
+    path,
+    editing ? REPO_EDIT_POLL_MS : 0
+  );
 
   const segments = path ? path.split("/") : [];
   const fileName = segments[segments.length - 1];
@@ -99,6 +111,9 @@ export function ExplorerView({
   return (
     <div style={ROOT_STYLE}>
       <div style={HEAD_STYLE}>
+        {/* Back to wherever you came from — including the terminal screen with
+            its panel intact (increment G, Decision 5). */}
+        <BackButton />
         {project ? (
           <>
             <button

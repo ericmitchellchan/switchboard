@@ -49,7 +49,12 @@ export type IconName =
   | "rename"
   | "archive"
   | "unarchive"
-  | "trash";
+  | "trash"
+  // Editing (increment G). `rename`'s pencil sits ON a baseline because it
+  // renames a ROW; this pencil writes into a document, so it carries a page
+  // instead — same rules, distinct mark, no glyph doing two jobs.
+  | "edit"
+  | "save";
 
 /** Default box for a content icon (folder / file / localhost / panel). Rows
  *  reserve exactly this much, so the icon column is identical at every depth
@@ -77,6 +82,8 @@ const STROKE: Record<IconName, number> = {
   archive: 1.4,
   unarchive: 1.4,
   trash: 1.4,
+  edit: 1.4,
+  save: 1.4,
 };
 
 // Every path below is centred on (8, 8) in the 16x16 box:
@@ -173,6 +180,24 @@ const PATHS: Record<IconName, ReactNode> = {
       <path d="M3.6 5.7v7.2h8.8V5.7" />
       <path d="M8 11V7.6" />
       <path d="M6.4 9.2 8 7.6l1.6 1.6" />
+    </>
+  ),
+  // Edit: a pencil over a document's corner — "write into this page". Ink
+  // x 2…14, y 2…14, so it optically matches `file` in the same slot.
+  edit: (
+    <>
+      <path d="M8.4 2.6H2.9v10.8h10.2V7.9" />
+      <path d="m11.4 2.2 2.4 2.4-5.1 5.1-3 .6.6-3z" />
+    </>
+  ),
+  // Save: a tray with an arrow coming down into it. Deliberately not a floppy
+  // disk — at 12px the floppy's shutter and label are two grey smudges, and the
+  // arrow reads as "commit this downward" at any size.
+  save: (
+    <>
+      <path d="M8 2.4v6.9" />
+      <path d="M5.2 6.6 8 9.4l2.8-2.8" />
+      <path d="M3 10.4v3.2h10v-3.2" />
     </>
   ),
   // Delete: a bin with a lid and two staves.

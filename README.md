@@ -37,6 +37,7 @@ The full set, as bound in `src/hooks/useKeyboardShortcuts.ts` (the source of tru
 | Ctrl+Shift+P | Toggle the artifact panel for the active tab |
 | Ctrl+Shift+M | Toggle the composer on the focused pane |
 | Ctrl+Shift+O | Toggle the floating picture-in-picture terminal window |
+| Ctrl+S | Save the markdown document you are editing (inside the editor only) |
 | Ctrl+Shift+S | Export the active session's scrollback to a file |
 | Ctrl+F | Terminal search |
 | Ctrl+\ | Split horizontal |
