@@ -16,8 +16,10 @@ import {
   emptyPinsFile,
   parsePinsFile,
   parseWireframeMessage,
+  pinTargetFor,
   pinsForDoc,
   removePin,
+  REPO_PINS_ROOT,
   serializePinsFile,
   sidecarPathFor,
   updatePinNote,
@@ -53,6 +55,83 @@ describe("sidecarPathFor / docFileName", () => {
   it("docFileName returns the last segment", () => {
     expect(docFileName("a/b/shell.html")).toBe("shell.html");
     expect(docFileName("shell.html")).toBe("shell.html");
+  });
+});
+
+describe("pinTargetFor — KB sidecar vs repo mirror", () => {
+  it("keeps a KB doc's pins in the sidecar NEXT TO it (unchanged behaviour)", () => {
+    expect(pinTargetFor({ kind: "kb-doc", path: "switchboard/wireframes/shell.html" })).toEqual({
+      sidecarPath: "switchboard/wireframes/.pins.json",
+      docKey: "shell.html",
+    });
+    expect(pinTargetFor({ kind: "kb-doc", path: "shell.html" })).toEqual({
+      sidecarPath: SIDECAR_NAME,
+      docKey: "shell.html",
+    });
+  });
+
+  it("mirrors a repo file's pins into the hidden KB tree", () => {
+    // Eric's case: lodestar / specs / mockups / cases-compact-v1.html
+    expect(
+      pinTargetFor({
+        kind: "repo-file",
+        project: "lodestar",
+        path: "specs/mockups/cases-compact-v1.html",
+      })
+    ).toEqual({
+      sidecarPath: `${REPO_PINS_ROOT}/lodestar/specs/mockups/.pins.json`,
+      docKey: "cases-compact-v1.html",
+    });
+  });
+
+  it("mirrors a repo-ROOT file into the project's own mirror folder", () => {
+    expect(pinTargetFor({ kind: "repo-file", project: "orbit", path: "index.html" })).toEqual({
+      sidecarPath: `${REPO_PINS_ROOT}/orbit/.pins.json`,
+      docKey: "index.html",
+    });
+  });
+
+  it("hides every mirrored sidecar from the KB tree (leading `_` segment)", () => {
+    // kb.rs skip_dir and buildKbTree both drop `_`-prefixed segments, which is
+    // what keeps `<file>.pins.json` mirrors out of the doc list.
+    const { sidecarPath } = pinTargetFor({ kind: "repo-file", project: "p", path: "a/b.html" });
+    expect(sidecarPath.split("/")[0].startsWith("_")).toBe(true);
+  });
+
+  it("is collision-free across projects and repos within a project", () => {
+    const a = pinTargetFor({ kind: "repo-file", project: "orbit", path: "docs/x.html" });
+    const b = pinTargetFor({ kind: "repo-file", project: "lodestar", path: "docs/x.html" });
+    expect(a.sidecarPath).not.toBe(b.sidecarPath);
+    // multi-repo projects carry the repo name as the first path component
+    const r1 = pinTargetFor({ kind: "repo-file", project: "cr", path: "mcp/w.html" });
+    const r2 = pinTargetFor({ kind: "repo-file", project: "cr", path: "web/w.html" });
+    expect(r1.sidecarPath).not.toBe(r2.sidecarPath);
+  });
+
+  it("is reversible — strip the root, first segment is the project", () => {
+    const { sidecarPath } = pinTargetFor({
+      kind: "repo-file",
+      project: "lodestar",
+      path: "specs/mockups/cases-compact-v1.html",
+    });
+    const rest = sidecarPath.slice(`${REPO_PINS_ROOT}/`.length).split("/");
+    expect(rest[0]).toBe("lodestar");
+    expect(rest.slice(1, -1).join("/")).toBe("specs/mockups");
+  });
+
+  it("normalizes separators and drops components the KB write guard rejects", () => {
+    expect(
+      pinTargetFor({ kind: "repo-file", project: "p", path: "a\\b\\c.html" }).sidecarPath
+    ).toBe(`${REPO_PINS_ROOT}/p/a/b/.pins.json`);
+    // `..`, `.`, empty and `:`-bearing components can never reach the joined
+    // path — a traversal attempt degrades to a shorter mirror path, never to a
+    // write outside the mirror tree.
+    const escaped = pinTargetFor({ kind: "repo-file", project: "p", path: "../../x/y.html" });
+    expect(escaped.sidecarPath).toBe(`${REPO_PINS_ROOT}/p/x/.pins.json`);
+    expect(escaped.sidecarPath).not.toContain("..");
+    expect(
+      pinTargetFor({ kind: "repo-file", project: "p", path: "a/b.html:ads" }).sidecarPath
+    ).not.toContain(":");
   });
 });
 
@@ -219,9 +298,11 @@ describe("clampZoom / zoomAfterWheel", () => {
     expect(zoomAfterWheel(zoomAfterWheel(1, -120), 120)).toBeCloseTo(1, 10);
   });
 
-  it("zoomStorageKey is per doc-path", () => {
-    expect(zoomStorageKey("a/b.html")).not.toBe(zoomStorageKey("a/c.html"));
-    expect(zoomStorageKey("a/b.html")).toContain("a/b.html");
+  it("zoomStorageKey is per artifact identity, not per path", () => {
+    expect(zoomStorageKey("kb-doc:a/b.html")).not.toBe(zoomStorageKey("kb-doc:a/c.html"));
+    expect(zoomStorageKey("kb-doc:a/b.html")).toContain("a/b.html");
+    // the reason it takes an identity: same path, different document
+    expect(zoomStorageKey("kb-doc:a/b.html")).not.toBe(zoomStorageKey("repo-file:p:a/b.html"));
   });
 });
 

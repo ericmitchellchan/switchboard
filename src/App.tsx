@@ -76,7 +76,7 @@ import {
 } from "./lib/agentContext";
 import { runPromotionPass, PROMOTION_POLL_MS } from "./lib/threadPromotion";
 import { explorerProjects, registerExplorerActions } from "./lib/explorer";
-import { docFileName, parsePinsFile, pinsForDoc, sidecarPathFor } from "./lib/pins";
+import { parsePinsFile, pinsForDoc, pinTargetFor } from "./lib/pins";
 import { configurePinsIO, getPinsFile } from "./lib/pinsStore";
 import { ArtifactPanel, CRUMB_TONE } from "./components/ArtifactPanel";
 import { NewThreadDialog } from "./components/NewThreadDialog";
@@ -160,22 +160,26 @@ async function resolveSpawnContext(sessionId: string): Promise<string | null> {
   const artifact = artifactFor(sessionId);
   if (!artifact) return null;
   let pinCount = 0;
-  if (artifact.kind === "kb-doc") {
-    const sidecarPath = sidecarPathFor(artifact.path);
+  // Both FILE kinds can carry pins now: a KB doc's sidecar sits next to it, a
+  // repo file's is mirrored into the hidden `_repo-pins/` KB tree. pinTargetFor
+  // is the one place that knows which — and it reads out of the KB either way,
+  // so the lookup below is unchanged.
+  if (artifact.kind !== "localhost") {
+    const { sidecarPath, docKey } = pinTargetFor(artifact);
     // Prefer the SHARED record when a view has it loaded: it is the same
     // record every mount edits and it is newer than disk during the write
     // debounce, so a pin placed a moment ago is counted instead of missed.
     // Only fall back to disk when nothing has the sidecar open.
     const shared = getPinsFile(sidecarPath);
     if (shared) {
-      pinCount = pinsForDoc(shared, docFileName(artifact.path)).length;
+      pinCount = pinsForDoc(shared, docKey).length;
     } else {
       try {
         const text = await kbReadDoc(sidecarPath);
-        pinCount = pinsForDoc(parsePinsFile(text), docFileName(artifact.path)).length;
+        pinCount = pinsForDoc(parsePinsFile(text), docKey).length;
       } catch {
-        // No sidecar next to this doc (kb_read_doc errors on missing files) —
-        // the artifact still gets announced, just without a pin clause.
+        // No sidecar for this doc (kb_read_doc errors on missing files) — the
+        // artifact still gets announced, just without a pin clause.
       }
     }
   }

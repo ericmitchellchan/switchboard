@@ -143,6 +143,15 @@ export type Artifact =
   | { kind: "repo-file"; project: string; path: string } // registry project + rel path
   | { kind: "localhost"; project: string; url: string }; // Phase B — declared, never constructed in Phase A
 
+/** The artifact kinds that name a FILE on disk — the ones with a readable
+ *  `path` and therefore a renderable BODY (docKind switch, pins sidecar,
+ *  zoom key). `localhost` is deliberately outside it: it has a url, not a
+ *  path, and nothing in the rendering/annotation stack applies to it. Views
+ *  that render content take THIS type, so "does this artifact have a body?"
+ *  is answered by the type system rather than by a runtime kind check in
+ *  every viewer. */
+export type FileArtifact = Extract<Artifact, { path: string }>;
+
 /** Increment B — ONE session's panel holds MANY artifacts (a tab strip), not
  *  one. `activeIndex` names the tab whose body is rendered and which the
  *  header's breadcrumb / `open full` / `→ thread` / `×` act on.

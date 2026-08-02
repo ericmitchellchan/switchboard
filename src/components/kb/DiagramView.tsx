@@ -66,6 +66,15 @@ const ROOT_STYLE: CSSProperties = {
   flex: 1,
   minWidth: 0,
   minHeight: 0,
+  // `height: 100%` as well as `flex: 1` (increment C): the hosts are not all
+  // flex containers. DocView's scroller and the Explorer screen's scroller are
+  // BLOCK boxes with a definite height, where `flex: 1` is inert and a column
+  // flex container with `height: auto` would collapse the canvas (its only
+  // child is absolutely positioned, i.e. zero max-content height) to nothing.
+  // Where the parent IS a flex container this is redundant, not different —
+  // the flex algorithm still owns the size. Matches WireframeView, which has
+  // always sized itself this way.
+  height: "100%",
   display: "flex",
   flexDirection: "column",
   fontFamily: "var(--font-mono)",

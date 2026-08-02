@@ -22,6 +22,10 @@
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
+// Type-only (erased at build): this module stays pure and importable in a
+// plain node test, exactly like agentContext.ts, which takes the same type.
+import type { FileArtifact } from "../types";
+
 export interface Pin {
   id: string;
   /** Filename (last path segment) of the doc this pin belongs to. */
@@ -62,6 +66,74 @@ export function sidecarPathFor(docRelPath: string): string {
 export function docFileName(docRelPath: string): string {
   const idx = docRelPath.lastIndexOf("/");
   return idx === -1 ? docRelPath : docRelPath.slice(idx + 1);
+}
+
+// ── Repo mirror (increment C) ────────────────────────────────────────────────
+// A wireframe can now live in a REPO, not just the KB, and pins must still
+// work on it. They cannot be written NEXT to it: `kb_write_doc` is guarded to
+// the KB root, and the architecture already settled the principle for the
+// localhost case — MARKUP LIVES IN THE KB, REPOS STAY CLEAN. A repo file's
+// annotations are therefore MIRRORED into the KB under one hidden tree:
+//
+//   repo `lodestar` + `specs/mockups/cases-compact-v1.html`
+//     → `_repo-pins/lodestar/specs/mockups/.pins.json`, pin.doc = "cases-compact-v1.html"
+//
+// Properties of the scheme:
+//   · HIDDEN — the top-level folder is `_`-prefixed, which both kb.rs
+//     (skip_dir) and buildKbTree already exclude, so mirrored sidecars never
+//     appear as KB documents. (A `<file>.pins.json` sidecar next to a mirrored
+//     copy would NOT be hidden — `.json` is a KB doc extension — which is why
+//     the whole tree is hidden at its root instead.)
+//   · COLLISION-FREE — registry project keys are unique, and a repo-relative
+//     path is unique within its project (multi-repo projects carry the repo
+//     name as their first path component, per explorer.rs's virtual root).
+//   · REVERSIBLE — strip `_repo-pins/`, the first segment is the project and
+//     the rest is the repo-relative directory.
+//   · SAME SHAPE as a KB sidecar — one `.pins.json` per FOLDER with `doc`
+//     keyed by filename, so pins.ts's ops and pinsStore's one-record-per-
+//     sidecar rule apply unchanged. There is still exactly ONE pins writer.
+
+/** Hidden KB folder holding mirrored repo-file annotation sidecars. */
+export const REPO_PINS_ROOT = "_repo-pins";
+
+/** Where an artifact's pins live (KB-relative sidecar) and the `doc` key they
+ *  are filed under inside it. */
+export interface PinTarget {
+  sidecarPath: string;
+  docKey: string;
+}
+
+/** Normalize a path for use as KB-relative mirror segments: backslashes to
+ *  forward slashes, and any component the KB write guard would reject (`.`,
+ *  `..`, empty, or one containing `:`) dropped. Total by construction — a
+ *  pathological input degrades to a shorter mirror path, never to an invalid
+ *  one and never to a write outside the mirror tree. */
+function mirrorSegments(path: string): string[] {
+  return path
+    .replace(/\\/g, "/")
+    .split("/")
+    .filter((seg) => seg.length > 0 && seg !== "." && seg !== ".." && !seg.includes(":"));
+}
+
+/**
+ * The sidecar + doc key for a file artifact. KB docs keep TODAY'S behaviour
+ * exactly (sidecar next to the doc); repo files resolve into the hidden mirror
+ * tree documented above. Total for both kinds — every file artifact has a
+ * place for its pins, so no caller needs a null branch.
+ */
+export function pinTargetFor(artifact: FileArtifact): PinTarget {
+  if (artifact.kind === "kb-doc") {
+    return { sidecarPath: sidecarPathFor(artifact.path), docKey: docFileName(artifact.path) };
+  }
+  const segments = [...mirrorSegments(artifact.project), ...mirrorSegments(artifact.path)];
+  const mirrored = [REPO_PINS_ROOT, ...segments].join("/");
+  return {
+    sidecarPath: sidecarPathFor(mirrored),
+    // The file's own name, exactly as a KB sidecar keys it. Falls back to the
+    // raw path when normalization ate every segment (unreachable for a path
+    // that came from the explorer backend).
+    docKey: segments.length > 0 ? segments[segments.length - 1] : docFileName(artifact.path),
+  };
 }
 
 // ── Parse / serialize (tolerant) ─────────────────────────────────────────────
@@ -188,9 +260,12 @@ export function zoomAfterWheel(zoom: number, deltaY: number): number {
   return clampZoom(zoom * Math.exp(-deltaY * 0.0015));
 }
 
-/** sessionStorage key for the per-doc zoom level. */
-export function zoomStorageKey(docRelPath: string): string {
-  return `sb-wf-zoom:${docRelPath}`;
+/** sessionStorage key for the per-doc zoom level. Takes the artifact's
+ *  IDENTITY (panelStore.artifactIdentity), not a bare path: a repo file and a
+ *  KB doc can share a relative path, and two projects certainly can, so a
+ *  path-keyed store would leak one document's zoom into another's. */
+export function zoomStorageKey(artifactIdentity: string): string {
+  return `sb-wf-zoom:${artifactIdentity}`;
 }
 
 /** Messages the INSTRUMENT script posts out of the iframe. NOTE: the

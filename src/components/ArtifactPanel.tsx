@@ -652,7 +652,9 @@ function PickerOverlay({ sessionId }: { sessionId: string }) {
 }
 
 /** Repo-file body: one read per (project, path) feeding the Explorer's own
- *  FileViewer.
+ *  FileViewer — which since increment C routes by the SAME `docKind` switch a
+ *  KB doc goes through, so an `.html` mockup in a repo renders here exactly as
+ *  it does from the KB tree.
  *
  *  No `active` gate here, deliberately — explorer reads are ONE-SHOT (no poll
  *  to pause, unlike DocView's 2.5s doc poll), so gating on visibility would
@@ -677,7 +679,7 @@ function RepoFileBody({ project, path }: { project: string; path: string }) {
   }, [project, path]);
 
   if (!file) return null;
-  return <FileViewer file={file} />;
+  return <FileViewer project={project} file={file} />;
 }
 
 function CenteredNote({ children }: { children: ReactNode }) {

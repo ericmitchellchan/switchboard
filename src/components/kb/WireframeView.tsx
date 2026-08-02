@@ -1,5 +1,16 @@
 // Live HTML wireframe rendering + pin/note markup (T7).
 //
+// SURFACE-AGNOSTIC (increment C): this view knows nothing about the KB. It
+// takes the CONTENT to render and the ARTIFACT that names it; the loading
+// strategy is the HOST's business — DocView feeds it useKbDoc's 2500ms
+// active-gated poll for KB docs, the Explorer screen and the artifact panel
+// feed it a one-shot `explorerRead` for repo files (same cadence as every
+// other repo-file read; explorer reads have never polled). Everything the
+// view derives per document — display name, zoom key, pins sidecar, the
+// `→ thread` reference — comes from the artifact, so a repo wireframe is not
+// a special case anywhere below. Repo pins are MIRRORED into the KB
+// (pins.pinTargetFor); the shared pinsStore is still the only writer.
+//
 // SANDBOX POSTURE — the two load-bearing lines (do not weaken either):
 //   1. <iframe sandbox="allow-scripts"> — allow-scripts WITHOUT
 //      allow-same-origin. The mockup runs as an opaque origin: it cannot
@@ -44,16 +55,17 @@ import {
   docFileName,
   parseWireframeMessage,
   pinsForDoc,
+  pinTargetFor,
   removePin,
-  sidecarPathFor,
   updatePinNote,
   zoomAfterWheel,
   zoomStorageKey,
   WIREFRAME_MSG_SOURCE,
 } from "../../lib/pins";
 import type { PinsFile } from "../../lib/pins";
+import type { FileArtifact } from "../../types";
 import { mutatePins as mutateSharedPins, usePinsFile } from "../../lib/pinsStore";
-import { sendToThread, useSendToThreadAvailable } from "../../lib/panelStore";
+import { artifactIdentity, sendToThread, useSendToThreadAvailable } from "../../lib/panelStore";
 import { buildSendReference, refOptions } from "../../lib/agentContext";
 
 // ── Instrument script (plain JS, appended to the mockup document) ────────────
@@ -239,9 +251,9 @@ const NOTE_INPUT_STYLE: CSSProperties = {
   minHeight: 40,
 };
 
-function loadStoredZoom(path: string): number {
+function loadStoredZoom(identity: string): number {
   try {
-    const raw = sessionStorage.getItem(zoomStorageKey(path));
+    const raw = sessionStorage.getItem(zoomStorageKey(identity));
     return raw === null ? 1 : clampZoom(parseFloat(raw));
   } catch {
     return 1;
@@ -254,8 +266,9 @@ function noteMeta(createdAt: string): string {
   return `— eric${when}`;
 }
 
-/** Mounted by DocView with key={path} — all state is per-doc by construction. */
-export function WireframeView({ path, content }: { path: string; content: string }) {
+/** Mounted by ArtifactBody with key={artifactIdentity} — all state is per-doc
+ *  by construction. `content` is the HOST's (KB poll / explorer read). */
+export function WireframeView({ artifact, content }: { artifact: FileArtifact; content: string }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const frameBoxRef = useRef<HTMLDivElement>(null);
 
@@ -263,26 +276,32 @@ export function WireframeView({ path, content }: { path: string; content: string
   // iframe (rule 2 of the sandbox contract in the module header).
   const srcDoc = useMemo(() => content + INSTRUMENT, [content]);
 
-  // ── Zoom (write-through persistence, no [path, zoom] effect) ──
-  const [zoom, setZoomState] = useState<number>(() => loadStoredZoom(path));
+  const path = artifact.path;
+  const identity = artifactIdentity(artifact);
+
+  // ── Zoom (write-through persistence, no [identity, zoom] effect) ──
+  const [zoom, setZoomState] = useState<number>(() => loadStoredZoom(identity));
   const zoomRef = useRef(zoom);
   const applyZoom = useCallback(
     (fn: (z: number) => number) => {
       const next = clampZoom(fn(zoomRef.current));
       zoomRef.current = next;
       try {
-        sessionStorage.setItem(zoomStorageKey(path), String(next));
+        sessionStorage.setItem(zoomStorageKey(identity), String(next));
       } catch {
         // storage unavailable — zoom still works for the session in memory
       }
       setZoomState(next);
     },
-    [path]
+    [identity]
   );
 
   // ── Pins ──
-  const docName = docFileName(path);
-  const sidecarPath = sidecarPathFor(path);
+  // KB docs file pins in the sidecar NEXT TO the doc; repo files mirror into
+  // the hidden `_repo-pins/` KB tree (pins.ts documents the scheme). Either
+  // way it is one `.pins.json` path handed to the ONE shared store.
+  const displayName = docFileName(path);
+  const { sidecarPath, docKey: docName } = useMemo(() => pinTargetFor(artifact), [artifact]);
   // The sidecar lives in a SHARED store keyed by its path, not in component
   // state: this same wireframe can be mounted twice at once (artifact panel on
   // the terminal screen + the keep-alive KB screen), and two private copies
@@ -303,16 +322,18 @@ export function WireframeView({ path, content }: { path: string; content: string
     [pinsFile, docName]
   );
 
-  // T8 seam 2 (A4): per-pin `→ thread` TYPES `Look at kb <doc>, pin N: "<note>"`
-  // into the terminal — no Enter, ever. Disabled (not silently inert) when
-  // there is no session to type into. Works from the panel AND from the
-  // full-width KB screen; App reveals the terminal before writing.
+  // T8 seam 2 (A4): per-pin `→ thread` TYPES `Look at "kb <doc>", pin N: "<note>"`
+  // (or `"repo <project>/<path>"`) into the terminal — no Enter, ever.
+  // Disabled (not silently inert) when there is no session to type into.
+  // Works from the panel AND from the full-width KB/Explorer screens; App
+  // reveals the terminal before writing. artifactRef already speaks both
+  // kinds, so the repo case needed nothing new here.
   const canSend = useSendToThreadAvailable();
   const sendPin = useCallback(
     (number: number, note: string) => {
-      sendToThread(buildSendReference({ kind: "kb-doc", path }, { number, note }, refOptions()));
+      sendToThread(buildSendReference(artifact, { number, note }, refOptions()));
     },
-    [path]
+    [artifact]
   );
 
   // ── Iframe messaging ──
@@ -411,7 +432,7 @@ export function WireframeView({ path, content }: { path: string; content: string
       <div style={MAIN_COL_STYLE}>
         <div style={TOOLBAR_STYLE}>
           <span style={{ color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {docName}
+            {displayName}
           </span>
           <span style={{ flex: 1 }} />
           <button
@@ -424,7 +445,13 @@ export function WireframeView({ path, content }: { path: string; content: string
             }}
             disabled={pinsFile === null}
             onClick={() => setPinMode((m) => !m)}
-            title="Pin mode: click in the mockup to drop a numbered pin"
+            // Where a repo file's notes LAND is worth saying once, quietly:
+            // they are mirrored into the KB, never written into the repo.
+            title={
+              artifact.kind === "repo-file"
+                ? `Pin mode: click in the mockup to drop a numbered pin — notes are stored in the KB (${sidecarPath}), never in the repo`
+                : "Pin mode: click in the mockup to drop a numbered pin"
+            }
           >
             {"\u{1F4CC}"} pin
           </button>
@@ -445,7 +472,7 @@ export function WireframeView({ path, content }: { path: string; content: string
           {/* SANDBOX: allow-scripts ONLY — never add allow-same-origin (module header). */}
           <iframe
             ref={iframeRef}
-            title={docName}
+            title={displayName}
             sandbox="allow-scripts"
             srcDoc={srcDoc}
             style={iframeStyle}

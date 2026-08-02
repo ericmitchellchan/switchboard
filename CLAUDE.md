@@ -25,14 +25,17 @@ src/
 │   ├── ExplorerTreeSection.tsx  → Side-menu registry projects + IDE-style inline file tree
 │   ├── NewThreadDialog.tsx      → Repo picker for creating a thread
 │   ├── NewSessionDialog.tsx     → Repo picker / new session config (lazy-loaded)
-│   ├── ExplorerView.tsx         → Explorer screen body: breadcrumb + file viewer (tree lives in the side menu)
+│   ├── ExplorerView.tsx         → Explorer screen body: breadcrumb + file viewer (tree lives in the side menu); repo files route through the SHARED ArtifactBody kind switch
 │   ├── ArtifactPanel.tsx        → Artifact panel host: right-side co-present surface inside the terminal screen (divider, tab strip + `+`, header chrome, docked/overlay); hosts DocView / FileViewer, renders no viewer of its own
 │   ├── ArtifactPicker.tsx       → The `+` picker: filterable KB docs + registry projects, repo files browsed one directory at a time (explorerList)
 │   ├── UpdateChip.tsx           → In-app updater chip (consent-based install flow)
 │   ├── ConfirmDialog.tsx        → Modal confirm (close/destructive actions)
 │   ├── kb/                      → Knowledge Base screen views
-│   │   ├── DocView.tsx            → Markdown reading view (routes to wireframe/diagram views)
-│   │   ├── WireframeView.tsx      → Sandboxed iframe wireframe rendering + pin/note markup
+│   │   ├── ArtifactBody.tsx       → THE kind switch (docKind → renderer) shared by DocView and the Explorer's FileViewer; hosts differ only in the fallback
+│   │   ├── DocView.tsx            → KB doc load policy (2500ms active-gated poll) + the KB's fallback for unrendered kinds
+│   │   ├── MarkdownDoc.tsx        → THE markdown path: one unified pipeline + typography + the link-activation policy (KB docs and repo READMEs alike)
+│   │   ├── WireframeView.tsx      → Sandboxed iframe wireframe rendering + pin/note markup (takes an Artifact + content; no KB coupling)
+│   │   ├── ComponentPreview.tsx   → .jsx/.tsx preview shell: lazy-loads the compiler, feeds the compiled document to WireframeView's iframe
 │   │   └── DiagramView.tsx        → Mermaid diagram surface (lazy chunk, pan/zoom)
 │   ├── icons.tsx                → THE icon module: hand-written inline SVG (folder/folder-open/file/panel/localhost/chevrons) shared by both trees, the picker, the panel header and the tab-bar button
 │   ├── Toast.tsx                → Notification toasts
@@ -57,7 +60,8 @@ src/
 │   ├── panelStore.ts            → Artifact panel state (per-TAB `PanelState` = artifact strip + activeIndex, global width), strip ops (`appendOrActivate`/`closeArtifactIn`), layout/drag math, header breadcrumbs, the shared ICON NAMES (`FILE_ICON`/`folderIcon`/`describeArtifact().icon` — drawn by components/icons), open-in-panel decision (`decideOpen`/`fullWidthRoute`), toggle memory, `+`-picker request, active-tab + send-to-thread bridges
 │   ├── agentContext.ts          → Agent context injection (T8): shell-safe sanitizer + the two seam builders (`buildSpawnContext`, `buildSendReference`) + KB-root cache. PURE — the effectful ends live in App/threadStore/panelStore
 │   ├── kb.ts                    → KB doc list/read data layer (poll while active)
-│   ├── pins.ts                  → Wireframe pin/note file model (pure ops over pins JSON)
+│   ├── pins.ts                  → Wireframe pin/note file model (pure ops over pins JSON) + `pinTargetFor` (KB sidecar vs the hidden `_repo-pins/` mirror for repo files)
+│   ├── componentPreview.ts      → LAZY chunk: TypeScript transpile + inlined React UMD → a self-contained preview document (never imported statically)
 │   ├── pinsStore.ts             → ONE shared `.pins.json` record per sidecar (refcounted mounts, one debounced writer, injected IO) — the panel and the KB screen can host the same wireframe at once
 │   ├── explorer.ts              → Explorer data layer (projects/listing/read via IPC, live-thread annotation)
 │   ├── diagramZoom.ts           → Pure pan/zoom math for the diagram surface
@@ -72,7 +76,7 @@ src/
 │   ├── logger.ts                → Frontend structured logging
 │   ├── updater.ts               → Auto-update check
 │   └── export.ts                → Export session to file
-└── lib/*.test.ts              → 15 Vitest test suites (paneLayout, statusDetector, taskDetector, resizePolicy, terminalLifecycle, route, threadStore, panelStore, agentContext, kb, pins, pinsStore, explorer, diagramZoom, updaterState)
+└── lib/*.test.ts              → 17 Vitest test suites (paneLayout, statusDetector, taskDetector, resizePolicy, terminalLifecycle, route, threadStore, threadPromotion, panelStore, agentContext, kb, pins, pinsStore, componentPreview, explorer, diagramZoom, updaterState)
 
 src-tauri/
 ├── src/
@@ -144,6 +148,9 @@ pnpm test:watch        # Vitest (watch mode)
 - **Tab/thread parity — promote on claude, never on tab creation** — a plain `Ctrl+T` shell gets no record (history would fill with throwaway `git status` shells, and a revive chip on a never-persisted session lies). The moment a claude conversation is actually running in ANY tab, that tab is promoted to a thread. Detection is a PROCESS-TREE walk (`discovery.rs`): the PTY's shell pid → descendants → whichever owns a `~/.claude/sessions/<pid>.json`, which keys on the claude PID and carries the conversation uuid + cwd. Not cwd/start-time matching — that cannot tell two tabs in the same repo apart. Two guards are load-bearing: a candidate must have STARTED AFTER our shell (Windows pid reuse makes unrelated processes look like descendants), and AMBIGUITY REFUSES (two claudes under one tab, or one claude under two tabs → promote NEITHER and log). The whole path is OBSERVE-ONLY: a process snapshot plus JSON reads, never a `writeToSession`. Polling stops entirely when every tab is bound
 - **Threads list = recent 8 + `See all (N)`** — the 218px rail caps at `MENU_THREAD_LIMIT`, EXCEPT that live threads are never truncated out (`selectMenuThreads` widens the slice rather than hiding a conversation you are having). The overflow row and the section label both open `{screen:"threads"}`, the param-less, deep-linkable history screen
 - **One shared record per `.pins.json`, never per mount** — the artifact panel and the keep-alive KB screen can host the SAME wireframe simultaneously (`display:none` is not unmount). Component-local pin state meant two copies and a silent last-writer-wins clobber, so all mounts go through `pinsStore` (refcounted subscribe, one debounced writer per sidecar, flush on last release). `pins.ts` stays pure and owns the file's contents; the store owns sharing and IO
+- **ONE kind switch, and the KB is not special** — `docKind` (lib/kb.ts) is the kind vocabulary and `ArtifactBody` is the ONLY place that maps a kind to a renderer. The Explorer's `FileViewer` used to know just `.md` and `<pre>` everything else, so an HTML mockup living in a REPO rendered as source in both the panel and the Explorer screen while the identical file in the KB rendered fine. Renderers therefore take an `Artifact` + its CONTENT, never a path they load themselves: the HOST owns loading policy (KB = useKbDoc's 2500ms active-gated poll, repo = a one-shot `explorerRead`), and the only per-host difference left is the FALLBACK for kinds nothing renders (KB: a placeholder note; repo: the file's source)
+- **Repo markup annotates into the KB, never into the repo** — `kb_write_doc` is guarded to the KB root and repos stay clean, so a repo file's pins are MIRRORED to `_repo-pins/<project>/<repo-rel-dir>/.pins.json` (`pins.pinTargetFor`). The `_` root hides the whole tree from the KB listing (kb.rs `skip_dir` + `buildKbTree`), the scheme is collision-free (unique project keys; multi-repo projects carry the repo name as their first path component) and reversible. It is the SAME per-folder sidecar shape as a KB doc, so the one-record-per-sidecar store is still the only pins writer
+- **Preview dependencies are lazy or they are not added** — mermaid (DiagramView) and the JSX/TSX compiler (`lib/componentPreview.ts`: TypeScript + React's UMD builds) are reachable ONLY through a module-level `import()`. `pnpm build` is the check: `mermaid.core-*.js` and `componentPreview-*.js` must be their own chunks and `main` must contain neither. Untrusted component code is COMPILED in the app and EXECUTED only inside WireframeView's `allow-scripts`/no-`allow-same-origin` iframe
 - **Artifact panel is per-TAB, never per-pane** — `panelStore` keys on the TAB's `activeSessionId`, not `effectiveActiveSessionId` (the focused pane). A split terminal + panel just shares the width: moving pane focus never swaps or blanks the panel, and persistence never forks one binding per pane
 - **Panel geometry is measured against the WORKSPACE container** — App nests `[pane tree | divider | ArtifactPanel]` in a container that EXCLUDES the TaskSidebar, so the panel's right edge is the container's right edge. Every width rule in `panelStore` (`panelLayoutFor`, `panelWidthFromDrag`, the MIN_TERMINAL_WIDTH floor, overlay's `right: 0`) assumes that nesting; re-parenting the panel next to the sidebar makes all of them wrong by exactly the sidebar's width (0/38/280px)
 - **Two honest agent-context seams, and no third** — (1) SPAWN-TIME: `--append-system-prompt "<one-liner>"` on the thread launch line, re-derived from the target tab's panel at EVERY spawn so stale context dies with the session; a fresh thread inherits the panel it was launched from so the sentence is true. (2) SEND-TO-THREAD: `→ thread` TYPES a reference into the terminal with NO trailing `\r` — the Enter is the user's. Anything that injects mid-conversation or presses Enter for the user is out of scope. Both strings go through `agentContext.sanitizeForTypedLine` (control chars, `" \ $ % \``) because they land on a shell line

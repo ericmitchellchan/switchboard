@@ -11,17 +11,25 @@
 // local (never routed). Breadcrumb segments stay clickable for up-navigation
 // context — with no listing surface in the main area anymore, every crumb
 // closes the file back to the project's empty state (the tree is where you
-// go deeper). `.md` files render through DocView's EXACT markdown path
-// (MarkdownDoc — same unified pipeline + typography); everything else is a
-// read-only mono <pre>. Oversize (>512KB) and unreadable files surface the
-// backend's error string dimly. Reads are one-shot per (project, path) — no
-// polling, matching the old behavior.
+// go deeper).
+//
+// RENDERING (increment C): a repo file goes through the SAME kind switch a KB
+// doc does — `ArtifactBody`. It used to route only `.md` and dump everything
+// else into a `<pre>`, which is why an HTML mockup living in a repo showed its
+// source instead of the mockup. Now `.html/.htm` renders in the sandboxed
+// wireframe frame, `.mmd` as a diagram, `.jsx/.tsx` as a compiled preview,
+// `.md` through the shared markdown pipeline — and the `<pre>` is what is
+// LEFT when no renderer claims the extension, which for a repo (unlike the
+// KB) is still the right answer. Oversize (>512KB) and unreadable files
+// surface the backend's error string dimly. Reads are one-shot per
+// (project, path) — no polling, matching the old behavior.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
+import type { FileArtifact } from "../types";
 import { explorerRead } from "../lib/explorer";
 import { navigate } from "../lib/route";
-import { MarkdownDoc } from "./kb/DocView";
+import { ArtifactBody } from "./kb/ArtifactBody";
 
 const ROOT_STYLE: CSSProperties = {
   flex: 1,
@@ -56,11 +64,6 @@ const CRUMB_BTN_STYLE: CSSProperties = {
   overflow: "hidden",
   textOverflow: "ellipsis",
 };
-
-function extOf(name: string): string {
-  const idx = name.lastIndexOf(".");
-  return idx > 0 ? name.slice(idx + 1).toLowerCase() : "";
-}
 
 /** A read attempt for one repo file: `content` and `error` are both null while
  *  the read is in flight. Exported for the artifact panel, which hosts the
@@ -155,8 +158,8 @@ export function ExplorerView({
       </div>
 
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", background: "var(--bg-primary)" }}>
-        {openFile ? (
-          <FileViewer file={openFile} />
+        {openFile && project ? (
+          <FileViewer project={project} file={openFile} />
         ) : (
           <CenteredNote>
             <span>select a file from the explorer tree</span>
@@ -174,11 +177,18 @@ export function ExplorerView({
 
 // ── Viewer ───────────────────────────────────────────────────────────────────
 
-/** The repo-file rendering path (md → DocView's markdown pipeline, everything
- *  else → read-only mono <pre>). Exported so the artifact panel renders repo
+/** The repo-file rendering path. Exported so the artifact panel renders repo
  *  files through the EXACT same viewer this screen uses — the panel is chrome
- *  + lifecycle, never a second viewer. */
-export function FileViewer({ file }: { file: OpenFile }) {
+ *  + lifecycle, never a second viewer. Both hosts pass the PROJECT separately
+ *  from the read: the artifact identity is derived from `file.path`, not from
+ *  the route/props path, so the identity and the content on screen always
+ *  name the same file even in the render where a new read is still in flight
+ *  (the same rule DocView's `ready` gate enforces for the KB poll). */
+export function FileViewer({ project, file }: { project: string; file: OpenFile }) {
+  const artifact = useMemo<FileArtifact>(
+    () => ({ kind: "repo-file", project, path: file.path }),
+    [project, file.path]
+  );
   if (file.error !== null) {
     // Includes the backend's >512KB refusal — shown dimly, per spec.
     return <CenteredNote>cannot read {file.path}: {file.error}</CenteredNote>;
@@ -186,10 +196,18 @@ export function FileViewer({ file }: { file: OpenFile }) {
   if (file.content === null) {
     return <CenteredNote>reading {file.path}…</CenteredNote>;
   }
-  if (extOf(file.path) === "md") {
-    // The SAME markdown path DocView uses — shared pipeline + typography.
-    return <MarkdownDoc content={file.content} />;
-  }
+  return (
+    <ArtifactBody
+      artifact={artifact}
+      content={file.content}
+      fallback={<SourcePre content={file.content} />}
+    />
+  );
+}
+
+/** What a repo file falls back to when no renderer claims its extension: its
+ *  own text, read-only. */
+function SourcePre({ content }: { content: string }) {
   return (
     <pre
       style={{
@@ -200,14 +218,14 @@ export function FileViewer({ file }: { file: OpenFile }) {
         lineHeight: 1.6,
         color: "var(--text-secondary)",
         // Transparent: FileViewer is shared with the artifact panel, which
-        // paints its own --bg-elevated surface (increment B). The explorer
+        // paints its own --bg-panel surface (increment B). The explorer
         // SCREEN's scroller still paints --bg-primary above.
         background: "transparent",
         whiteSpace: "pre",
         overflowX: "auto",
       }}
     >
-      {file.content}
+      {content}
     </pre>
   );
 }
