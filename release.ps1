@@ -78,11 +78,47 @@ Re-run .\build.ps1 -Full and confirm it completes the signing step.
 }
 $signature = (Get-Content $sigFile -Raw).Trim()
 
-# Target triple -> the key the running app looks itself up under.
-# arm64-setup.exe => windows-aarch64, x64-setup.exe => windows-x86_64.
-$platformKey = if ($installer.Name -match "arm64") { "windows-aarch64" }
-               elseif ($installer.Name -match "x64") { "windows-x86_64" }
-               else { Write-Error "Cannot infer target triple from $($installer.Name)"; exit 1 }
+# Target triple -> the key the RUNNING app looks itself up under.
+#
+# NEVER INFER THIS FROM THE INSTALLER FILENAME. tauri names the bundle after the
+# HOST architecture, and this machine is ARM64 Windows building with an x86_64
+# toolchain (stable-x86_64-pc-windows-msvc, forced non-host) — so it emits
+# `Switchboard_<v>_arm64-setup.exe` containing an **x86_64** binary. The app
+# then asks the endpoint for `windows-x86_64`, finds only `windows-aarch64`,
+# and logs:
+#
+#   None of the fallback platforms `["windows-x86_64-nsis", "windows-x86_64"]`
+#   were found in the response `platforms` object
+#
+# That is a SILENT no-update: the chip never appears, the release looks perfect
+# from every angle, and it reads as "the updater doesn't work." It cost 0.2.1
+# -> 0.3.0 a hand-run installer and was misattributed to the pubkey rotation.
+#
+# The PE header of the binary that was actually bundled is ground truth, so
+# read that instead. (PE machine type at [e_lfanew + 4]: 0x8664 = AMD64,
+# 0xAA64 = ARM64.)
+$builtExe = "src-tauri/target/release/switchboard.exe"
+if (-not (Test-Path $builtExe)) {
+    Write-Error "No built binary at $builtExe - cannot determine the target triple."
+    exit 1
+}
+$stream = [System.IO.File]::OpenRead((Resolve-Path $builtExe))
+try {
+    $reader = New-Object System.IO.BinaryReader($stream)
+    $stream.Position = 0x3C
+    $stream.Position = $reader.ReadInt32() + 4
+    $machine = $reader.ReadUInt16()
+} finally {
+    $stream.Close()
+}
+$platformKey = switch ($machine) {
+    0x8664  { "windows-x86_64" }
+    0xAA64  { "windows-aarch64" }
+    default { Write-Error ("Unknown PE machine type 0x{0:X} in {1}" -f $machine, $builtExe); exit 1 }
+}
+if ($installer.Name -match "arm64" -and $platformKey -eq "windows-x86_64") {
+    Write-Host "NOTE: bundle is named arm64 (host arch) but contains an x86_64 binary - using $platformKey, which is what the app asks for." -ForegroundColor Yellow
+}
 
 Write-Host "Installer   $($installer.Name) ($([math]::Round($installer.Length/1MB,1)) MB)"
 Write-Host "Platform    $platformKey"
