@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type { Artifact, PanelState, Thread } from "../types";
+import type { DocKind } from "./kb";
 import {
   // pure helpers
   clampPanelWidth,
@@ -39,6 +40,10 @@ import {
   panelLayoutFor,
   panelWidthFromDrag,
   describeArtifact,
+  // Increment B tree glyphs (acceptance 5)
+  FOLDER_GLYPH,
+  glyphForDocKind,
+  glyphForPath,
   paneTreeWidthFor,
   artifactIdentity,
   panelIdentityFor,
@@ -1042,6 +1047,87 @@ describe("describeArtifact (glyph + breadcrumb)", () => {
 
   it("kb-doc and repo-file are visually distinguishable by glyph", () => {
     expect(describeArtifact(KB_DOC).glyph).not.toBe(describeArtifact(REPO_FILE).glyph);
+  });
+});
+
+// ─── Increment B: tree glyphs (acceptance 5) ─────────────────────────────────
+
+describe("tree glyphs (folder vs file, kind-aware)", () => {
+  const ALL_KINDS: DocKind[] = [
+    "markdown",
+    "wireframe",
+    "diagram",
+    "code",
+    "data",
+    "unknown",
+  ];
+
+  it("anchors on describeArtifact's own glyphs — no parallel mapping", () => {
+    // A markdown doc reads as the panel header's kb-doc glyph; a file with no
+    // renderer reads as its repo-file glyph. If describeArtifact ever changes
+    // these, the trees follow automatically.
+    expect(glyphForDocKind("markdown")).toBe(describeArtifact(KB_DOC).glyph);
+    expect(glyphForDocKind("unknown")).toBe(describeArtifact(REPO_FILE).glyph);
+  });
+
+  it("gives every DocKind exactly one single-character glyph", () => {
+    for (const kind of ALL_KINDS) {
+      const glyph = glyphForDocKind(kind);
+      // One column in a mono grid — a two-cell glyph would shift every label
+      // on the row and blow the 218px menu budget.
+      expect([...glyph]).toHaveLength(1);
+    }
+  });
+
+  it("distinguishes the three renderable doc kinds from each other", () => {
+    const renderable = ["markdown", "wireframe", "diagram"] as const;
+    const glyphs = renderable.map(glyphForDocKind);
+    expect(new Set(glyphs).size).toBe(renderable.length);
+  });
+
+  it("never collides a file glyph with the folder glyph", () => {
+    for (const kind of ALL_KINDS) {
+      expect(glyphForDocKind(kind)).not.toBe(FOLDER_GLYPH);
+    }
+    expect([...FOLDER_GLYPH]).toHaveLength(1);
+  });
+
+  it("glyphForPath routes through docKind — the same switch DocView uses", () => {
+    expect(glyphForPath("a/b/spec.md")).toBe(glyphForDocKind("markdown"));
+    expect(glyphForPath("wireframes/shell.html")).toBe(glyphForDocKind("wireframe"));
+    expect(glyphForPath("diagrams/flow.mmd")).toBe(glyphForDocKind("diagram"));
+    expect(glyphForPath("src/App.tsx")).toBe(glyphForDocKind("code"));
+    expect(glyphForPath("registry.json")).toBe(glyphForDocKind("data"));
+    expect(glyphForPath("Makefile")).toBe(glyphForDocKind("unknown"));
+  });
+
+  it("is case-insensitive on the extension (docKind's contract)", () => {
+    expect(glyphForPath("README.MD")).toBe(glyphForDocKind("markdown"));
+  });
+
+  it("uses only codepoints VERIFIED present in the bundled JetBrains Mono", () => {
+    // Every codepoint here was cmap-checked against all four bundled weights
+    // of src/assets/fonts/JetBrainsMono-*.woff2 on 2026-08-02: present in all
+    // four, advance 600/1000 in all four, i.e. exactly one mono cell.
+    //
+    // This list is the point of the test. Being in the Geometric Shapes block
+    // is NOT evidence of coverage — ▣ U+25A3, the obvious folder glyph, is
+    // MISSING from the font and would have silently fallen back to another
+    // typeface at another width, shifting every label on the row. A new glyph
+    // must be cmap-checked and added here, never just "it looks like the
+    // others".
+    const MONO_SAFE_CODEPOINTS = new Set([
+      0x25c6, // ◆ black diamond      — markdown (describeArtifact kb-doc)
+      0x25c8, // ◈ diamond in diamond — wireframe
+      0x25c7, // ◇ white diamond      — diagram
+      0x25aa, // ▪ small black square — code
+      0x25ab, // ▫ small white square — data
+      0x25a0, // ■ black square       — plain file (describeArtifact repo-file)
+      0x25e7, // ◧ square, left half  — folder
+    ]);
+    for (const glyph of [...ALL_KINDS.map(glyphForDocKind), FOLDER_GLYPH]) {
+      expect(MONO_SAFE_CODEPOINTS).toContain(glyph.codePointAt(0));
+    }
   });
 });
 

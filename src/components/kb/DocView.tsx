@@ -119,7 +119,11 @@ const SCROLL_STYLE: CSSProperties = {
   flex: 1,
   minWidth: 0,
   overflowY: "auto",
-  background: "var(--bg-primary)",
+  // SURFACE-AGNOSTIC (increment B): DocView is hosted by both the full-width
+  // KB screen (--bg-primary #0C0C0E) and the artifact panel, which now paints
+  // its own --bg-elevated #0F0F11 so it reads as a second surface. Painting
+  // --bg-primary here would punch a terminal-coloured hole in the panel.
+  background: "transparent",
 };
 
 export function DocView({ path, active }: { path: string; active: boolean }) {

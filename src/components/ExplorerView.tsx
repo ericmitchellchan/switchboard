@@ -199,7 +199,10 @@ export function FileViewer({ file }: { file: OpenFile }) {
         fontSize: 11,
         lineHeight: 1.6,
         color: "var(--text-secondary)",
-        background: "var(--bg-primary)",
+        // Transparent: FileViewer is shared with the artifact panel, which
+        // paints its own --bg-elevated surface (increment B). The explorer
+        // SCREEN's scroller still paints --bg-primary above.
+        background: "transparent",
         whiteSpace: "pre",
         overflowX: "auto",
       }}

@@ -114,7 +114,9 @@ const CANVAS_STYLE: CSSProperties = {
   minHeight: 0,
   overflow: "hidden",
   position: "relative",
-  background: "var(--bg-primary)",
+  // Transparent so the canvas takes its HOST's surface (KB screen
+  // #0C0C0E, artifact panel #0F0F11); mermaid paints its own node fills.
+  background: "transparent",
   cursor: "grab",
   // Pointer-drag pans; without this, drags select SVG text instead.
   userSelect: "none",

@@ -193,7 +193,11 @@ const FRAME_BOX_STYLE: CSSProperties = {
   minHeight: 0,
   overflow: "hidden",
   position: "relative",
-  background: "var(--bg-primary)",
+  // Letterbox around the sandboxed iframe — transparent so it takes the
+  // HOST's surface (KB screen #0C0C0E, artifact panel #0F0F11). The wireframe
+  // itself paints its own background inside the frame, so this only affects
+  // the margin around it.
+  background: "transparent",
 };
 
 const RAIL_STYLE: CSSProperties = {

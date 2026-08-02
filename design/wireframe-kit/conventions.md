@@ -51,3 +51,30 @@ that stop being true.
   breadcrumb, the `→ thread` / `open full` / `×` actions, the divider) is white/zinc
   only, same ramp and same 1px hairlines as the rest of the app. Status colors stay
   functional-only — nothing in the panel is colored to decorate it.
+- 2026-08-02 — The PANEL IS A DISTINCT SURFACE, one step up the SAME zinc ramp
+  (Eric, driving the shipped panel): terminal side `--bg-primary` #0C0C0E, panel
+  `--bg-elevated` #0F0F11, plus a 1px `--border-subtle` #27272A left edge inside the
+  4px divider. That step is the whole move — never a new hue, never tinted text,
+  never a status color. The panel's tab strip, header and body are ONE surface: its
+  viewers (DocView, FileViewer, WireframeView letterbox, DiagramView canvas) paint
+  `transparent` and take their host's value, so the same doc reads #0F0F11 in the
+  panel and #0C0C0E full-width. Anything painting `--bg-primary` inside the panel is
+  a bug — it punches a terminal-colored hole in it. Mock it as two flat values with a
+  hard edge; do NOT reach for a shadow or a gradient to sell the difference.
+- 2026-08-02 — FOLDER vs FILE SYMBOLS in both trees: a directory row is expander +
+  `◧`, a file row is a blank expander slot + a kind glyph (`◆` markdown · `◈`
+  wireframe · `◇` diagram · `▪` code · `▫` data · `■` anything else). Diamonds =
+  documents that render, squares = raw text, `◧` = container. The vocabulary lives in
+  `panelStore` and is SHARED with the panel header and the `+` picker — anchors come
+  out of `describeArtifact` and the file split out of `kb.docKind`; never write a
+  second mapping. Glyphs are 9px `--text-muted` (expander `--text-dim`) so they sit
+  below the 11.5px `--text-secondary` label, and they live in a fixed 14px gutter so
+  a file's name lines up under its sibling folders'. No emoji, no icon font, no SVG,
+  ever.
+- 2026-08-02 — VERIFY A GLYPH AGAINST THE BUNDLED FONT before using it. `▣` U+25A3
+  looked like the obvious folder mark and is simply ABSENT from JetBrains Mono — it
+  would have fallen back to another typeface at another advance width and shifted
+  every label on the row. cmap-check new glyphs against all four weights in
+  `src/assets/fonts/` (advance must be 600/1000) and add them to
+  `MONO_SAFE_CODEPOINTS` in `panelStore.test.ts`. "It's in the Geometric Shapes
+  block" is not evidence.

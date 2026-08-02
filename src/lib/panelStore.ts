@@ -45,6 +45,7 @@
 import { useSyncExternalStore } from "react";
 import type { Artifact, PanelState, Route, ScreenId } from "../types";
 import { getNavState, navigate } from "./route";
+import { docKind, type DocKind } from "./kb";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure helpers
@@ -221,6 +222,62 @@ export function describeArtifact(artifact: Artifact): ArtifactDescription {
         title: `${artifact.project} / ${artifact.url}`,
       };
   }
+}
+
+// ── Tree glyphs (Increment B, acceptance 5) ──────────────────────────────────
+// Folder-vs-file symbols for the side-menu trees (KbTreeSection /
+// ExplorerTreeSection). The vocabulary lives HERE, next to describeArtifact,
+// so the trees, the `+` picker and the panel header speak ONE language:
+//
+//   · the two anchors ARE describeArtifact's own glyphs — a document is ◆
+//     (its kb-doc glyph) and a plain file is ■ (its repo-file glyph), read
+//     out of the function rather than retyped, exactly as ArtifactPicker
+//     already does;
+//   · the file split comes from `kb.docKind` — the SAME switch DocView routes
+//     on — so "this row has a renderer" and "this row renders" can't drift.
+//
+// Shape language: DIAMONDS are documents that render (◆ markdown · ◈
+// wireframe · ◇ diagram), SQUARES are raw text (■ plain file · ▪ code · ▫
+// data), and ◧ — a box with a solid spine, i.e. a drawer — is a folder.
+//
+// FONT COVERAGE IS VERIFIED, NOT ASSUMED. Every glyph below was cmap-checked
+// against all four bundled weights of src/assets/fonts/JetBrainsMono-*.woff2
+// (2026-08-02): each is present and each has the same 600/1000 advance, so a
+// glyph occupies exactly one mono cell and never reflows a row. Sitting in
+// the Geometric Shapes block is NOT sufficient evidence — ▣ (U+25A3), the
+// obvious folder glyph, is absent from the font and would have fallen back to
+// a different typeface at a different width. Anything added here must be
+// re-checked and added to MONO_SAFE_CODEPOINTS in panelStore.test.ts.
+
+const DOC_GLYPH = describeArtifact({ kind: "kb-doc", path: "x" }).glyph;
+const FILE_GLYPH = describeArtifact({ kind: "repo-file", project: "x", path: "y" }).glyph;
+
+/** Directory rows — project roots and plain folders alike, in BOTH trees.
+ *  U+25E7 SQUARE WITH LEFT HALF BLACK: a container with a spine, which reads
+ *  as a drawer at 9px and is unmistakably not one of the file shapes. */
+export const FOLDER_GLYPH = "◧";
+
+/** Kind glyph for a file row. Pure. */
+export function glyphForDocKind(kind: DocKind): string {
+  switch (kind) {
+    case "markdown":
+      return DOC_GLYPH;
+    case "wireframe":
+      return "◈";
+    case "diagram":
+      return "◇";
+    case "code":
+      return "▪";
+    case "data":
+      return "▫";
+    case "unknown":
+      return FILE_GLYPH;
+  }
+}
+
+/** Kind glyph for a file PATH — `glyphForDocKind ∘ docKind`. Pure. */
+export function glyphForPath(path: string): string {
+  return glyphForDocKind(docKind(path));
 }
 
 /** Last segment bright, first `lead` (only when it is also the root of the

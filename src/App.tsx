@@ -68,6 +68,7 @@ import {
   getKbRootForContext,
   setKbRootForContext,
 } from "./lib/agentContext";
+import { explorerProjects, registerExplorerActions } from "./lib/explorer";
 import { docFileName, parsePinsFile, pinsForDoc, sidecarPathFor } from "./lib/pins";
 import { configurePinsIO, getPinsFile } from "./lib/pinsStore";
 import { ArtifactPanel, CRUMB_TONE } from "./components/ArtifactPanel";
@@ -274,6 +275,13 @@ export default function App() {
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [newSessionDialogOpen, setNewSessionDialogOpen] = useState(false);
+  // How many projects the REGISTRY knows (increment B). The repo picker now
+  // offers registry projects merged with config.repos, so "is there anything
+  // to pick from?" can no longer be answered by config.repos alone — with an
+  // empty config.json the twelve registry projects would be unreachable from
+  // Ctrl+T. One cheap read of registry.json at boot; a failure just leaves the
+  // old config-only gate in force.
+  const [registryProjectCount, setRegistryProjectCount] = useState(0);
   const [newThreadDialogOpen, setNewThreadDialogOpen] = useState(false);
   const [confirmState, setConfirmState] = useState<ConfirmState>(CLOSED_CONFIRM);
   const [pipSessionId, setPipSessionId] = useState<string | null>(null);
@@ -364,8 +372,23 @@ export default function App() {
   // "fix" this by making Ctrl+T inherit without deciding that a plain shell
   // should carry the previous tab's artifact — that is a product call, not a
   // bug.
+  useEffect(() => {
+    let cancelled = false;
+    explorerProjects()
+      .then((list) => {
+        if (!cancelled) setRegistryProjectCount(list.length);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /** Is there anything for the repo picker to offer beyond a plain shell? */
+  const repoPickerAvailable = config.repos.length > 0 || registryProjectCount > 0;
+
   const handleNewTab = useCallback(async () => {
-    if (config.repos.length > 0) {
+    if (repoPickerAvailable) {
       setNewSessionDialogOpen(true);
       return;
     }
@@ -381,7 +404,7 @@ export default function App() {
     } catch (err) {
       log.error(`Failed to create session: ${err}`);
     }
-  }, [doCreateSession, config.repos.length, paneLayout]);
+  }, [doCreateSession, repoPickerAvailable, paneLayout]);
 
   const handleCreateSession = useCallback(
     async (name: string, repo: string, workingDir: string, repoColor?: string, group?: string) => {
@@ -860,6 +883,26 @@ export default function App() {
     });
     return () => registerThreadActions(null);
   }, [handleOpenThread, handleReviveThread, handleDeleteThread]);
+
+  // Bridge "open terminal here" (Explorer project rows) to the SAME creation
+  // path the repo picker uses — handleCreateSession → doCreateSession →
+  // createSession(name, repo, workingDir) → addSession → pane focus, plus
+  // doCreateSession's reveal of the terminal screen. Not a fork of it: the
+  // affordance is a repo-picker choice made from the tree instead of the
+  // dialog, and it must behave identically.
+  //
+  // NEVER-MUTATE GUARANTEE: this path only SPAWNS. There is no
+  // writeToSession, no `cd`, no keystroke aimed at an existing terminal —
+  // every existing shell (mid-command, running claude, or in a REPL) is
+  // untouched. Decision 2 keeps the useful half and drops the risky one.
+  useEffect(() => {
+    registerExplorerActions({
+      openTerminalHere: (name, workingDir) => {
+        void handleCreateSession(name, name, workingDir);
+      },
+    });
+    return () => registerExplorerActions(null);
+  }, [handleCreateSession]);
 
   // Publish session statuses + active session so thread rows can render live
   // status dots (statusConfig colors) and the active-row highlight.
@@ -1654,7 +1697,7 @@ export default function App() {
         onToggleSideMenu={toggleSideMenu}
       />
 
-      {newSessionDialogOpen && config.repos.length > 0 && (
+      {newSessionDialogOpen && repoPickerAvailable && (
         <NewSessionDialogLazy
           repos={config.repos}
           onCreateSession={handleCreateSession}
@@ -1832,7 +1875,14 @@ export default function App() {
             and aligning any one of them breaks the rule above it. */}
         <ScreenErrorBoundary
           resetKey={`panel:${activeSessionId ?? "none"}:${activePanelIdentity}`}
-          fallbackStyle={{ flex: "none", width: getPanelWidth(), borderLeft: "1px solid var(--border-subtle)" }}
+          fallbackStyle={{
+            flex: "none",
+            width: getPanelWidth(),
+            borderLeft: "1px solid var(--border-subtle)",
+            // Same surface as the live panel (increment B) — a crash card must
+            // not read as a hole in the terminal side.
+            background: "var(--bg-elevated)",
+          }}
         >
           <ArtifactPanel
             sessionId={activeSessionId}

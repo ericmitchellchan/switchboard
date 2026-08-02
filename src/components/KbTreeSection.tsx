@@ -5,6 +5,11 @@
 // the host (218px side menu instead of an in-screen rail) and the indent
 // (10px/level for the tighter column). Soft palette only.
 //
+// Rows carry IDE folder/file symbols (increment B, acceptance 5): the
+// expander plus panelStore.FOLDER_GLYPH on folders, glyphForPath (docKind-
+// aware) on docs. The vocabulary is panelStore's, shared with the panel
+// header and the `+` picker.
+//
 // Clicking a DOC goes through panelStore.openArtifact (A3): on the terminal
 // screen it opens IN THE PANEL beside the running shell, on the kb screen it
 // navigates full-width as before, and Ctrl/⌘+click inverts either one. The
@@ -21,7 +26,12 @@ import type { Route } from "../types";
 import { ancestorFolders, buildKbTree, useKbDocList } from "../lib/kb";
 import type { KbNode } from "../lib/kb";
 import { getNavState } from "../lib/route";
-import { openArtifact, useActiveTabArtifact } from "../lib/panelStore";
+import {
+  FOLDER_GLYPH,
+  glyphForPath,
+  openArtifact,
+  useActiveTabArtifact,
+} from "../lib/panelStore";
 
 // Survives menu unmount (visibility toggle). Not persisted to disk — a fresh
 // launch starts collapsed, matching the wireframe's ▸ project rows.
@@ -124,6 +134,7 @@ function KbTreeNode({
         <TreeRow
           label={node.name}
           prefix={isOpen ? "▾" : "▸"}
+          icon={FOLDER_GLYPH}
           depth={depth}
           active={false}
           onClick={() => onToggle(node.path)}
@@ -146,6 +157,7 @@ function KbTreeNode({
   return (
     <TreeRow
       label={node.name}
+      icon={glyphForPath(node.path)}
       depth={depth}
       active={node.path === activeDoc}
       // Ctrl/⌘+click inverts panel-vs-full-width (Decision 2); ⌘ so the chord
@@ -173,19 +185,42 @@ export function TreeMessage({ children }: { children: ReactNode }) {
   );
 }
 
+/** The gutter: expander slot + kind glyph, in ONE flex child so the pair costs
+ *  a single row gap instead of two (218px is the whole budget, and a deep
+ *  nesting level spends 10px/level of it before this).
+ *
+ *  The expander slot is a FIXED 5px whether or not the row has an arrow, so a
+ *  file's name lines up under its sibling folders' names the way an IDE tree
+ *  does. `lineHeight: 1` keeps a 9px glyph from ever growing the 4px-padded
+ *  row: height stays exactly what it was before the glyphs existed. */
+const GUTTER_STYLE: CSSProperties = {
+  flex: "none",
+  display: "flex",
+  alignItems: "center",
+  gap: 3,
+  fontSize: 9,
+  lineHeight: 1,
+};
+
 export function TreeRow({
   label,
   prefix,
+  icon,
   depth,
   active,
   meta,
   dim,
   leading,
+  hoverAction,
   onClick,
 }: {
   label: string;
-  /** ▸/▾ for expandable rows; undefined renders no arrow slot. */
+  /** ▸/▾ for expandable rows; undefined renders a blank expander slot. */
   prefix?: string;
+  /** Kind glyph — panelStore.FOLDER_GLYPH on directories, glyphForPath on
+   *  files (acceptance 5). Dim by construction: it must never compete with
+   *  the row label. */
+  icon?: string;
   depth: number;
   active: boolean;
   /** Right-aligned dim meta text (e.g. project status). */
@@ -194,6 +229,9 @@ export function TreeRow({
   dim?: boolean;
   /** Leading inline element (e.g. the live-thread status dot). */
   leading?: ReactNode;
+  /** Revealed on hover only, left of `meta` (the thread rows' `×` pattern).
+   *  Must be a `role="button"` span, never a nested <button>. */
+  hoverAction?: ReactNode;
   /** The event is passed so opening rows can read the Ctrl/⌘ modifier
    *  (Decision 2's inversion); expand rows ignore it. */
   onClick: (e: React.MouseEvent) => void;
@@ -227,8 +265,13 @@ export function TreeRow({
       title={label}
       style={style}
     >
-      {prefix !== undefined && (
-        <span style={{ flex: "none", fontSize: 9, color: "var(--text-dim)" }}>{prefix}</span>
+      {(prefix !== undefined || icon !== undefined) && (
+        <span style={GUTTER_STYLE} aria-hidden="true">
+          <span style={{ flex: "none", width: 5, color: "var(--text-dim)" }}>{prefix ?? ""}</span>
+          {icon !== undefined && (
+            <span style={{ flex: "none", color: "var(--text-muted)" }}>{icon}</span>
+          )}
+        </span>
       )}
       {leading}
       <span
@@ -242,6 +285,7 @@ export function TreeRow({
       >
         {label}
       </span>
+      {hover && hoverAction}
       {meta !== undefined && (
         <span
           style={{

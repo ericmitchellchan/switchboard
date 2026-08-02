@@ -79,6 +79,22 @@ export const CRUMB_TONE: Record<ArtifactCrumb["tone"], CSSProperties> = {
   bright: { color: "var(--text-primary)", fontWeight: 400 },
 };
 
+/** The panel's surface value (Increment B, Decision 4 / acceptance 6).
+ *
+ *  The terminal side is `--bg-primary` #0C0C0E; the panel is `--bg-elevated`
+ *  #0F0F11 — ONE step up the same zinc ramp, ~1.2% luminance, which is enough
+ *  to read as a second surface across a hard vertical edge and far too little
+ *  to read as a colour. No new hue, no tinted text, no status colour touched:
+ *  the soft palette holds (2026-08-01 convention), and the divider/left border
+ *  does the rest of the work.
+ *
+ *  It is applied to the STRIP, the header (by inheritance) and the body
+ *  together — the panel's own viewers paint `transparent` so they take
+ *  whichever surface hosts them (#0F0F11 here, #0C0C0E on the full-width
+ *  screens). Anything painting `--bg-primary` inside the panel would punch a
+ *  terminal-coloured hole in it. */
+const PANEL_SURFACE = "var(--bg-elevated)";
+
 const HEAD_STYLE: CSSProperties = {
   height: 36,
   flex: "none",
@@ -142,7 +158,10 @@ function TabStrip({
         display: "flex",
         alignItems: "stretch",
         borderBottom: "1px solid var(--border)",
-        background: "var(--bg-secondary)",
+        // The strip, the header and the body are ONE surface (--bg-elevated):
+        // the panel is distinguished from the terminal side by its own value
+        // in the zinc ramp, not by internal banding. See PANEL_SURFACE.
+        background: PANEL_SURFACE,
       }}
     >
       <div
@@ -189,11 +208,12 @@ function TabStrip({
                 padding: "0 4px 0 9px",
                 borderRight: "1px solid var(--border)",
                 boxShadow: isActive ? "inset 0 2px 0 var(--text-muted)" : "none",
-                background: isActive
-                  ? "var(--bg-active)"
-                  : isHovered
-                    ? "var(--bg-elevated)"
-                    : "transparent",
+                // The strip's own background IS --bg-elevated now, so hover no
+                // longer has a distinct step below --bg-active to use without
+                // colliding with the active tab. Hover feedback is the text
+                // ramp + the revealed `×`; the active tab keeps the raised
+                // --bg-active, the 2px rule and the bolder weight.
+                background: isActive ? "var(--bg-active)" : "transparent",
                 color: isActive
                   ? "var(--text-primary)"
                   : isHovered
@@ -452,7 +472,15 @@ export function ArtifactPanel({
           display: "flex",
           flexDirection: "column",
           overflow: "hidden",
-          background: "var(--bg-primary)",
+          background: PANEL_SURFACE,
+          // A hairline at the panel's own edge, in BOTH modes. Docked, it sits
+          // just inside the 4px divider and gives the surface change a crisp
+          // boundary instead of letting two near-blacks meet on a soft edge;
+          // `--border-subtle` #27272A is the brighter of the two hairline
+          // tokens, which is the "slightly stronger border" this needs. The
+          // global border-box means it costs 1px of `layout.width`, not an
+          // extra pixel of layout.
+          borderLeft: "1px solid var(--border-subtle)",
           width: layout.width,
           ...(overlay
             ? {
@@ -461,7 +489,6 @@ export function ArtifactPanel({
                 right: 0,
                 bottom: 0,
                 zIndex: 6,
-                borderLeft: "1px solid var(--border-subtle)",
                 boxShadow: "-10px 0 28px rgba(0, 0, 0, 0.55)",
               }
             : { flex: "none", minWidth: 0 }),
@@ -549,7 +576,7 @@ export function ArtifactPanel({
             <DocView path={artifact.path} active={active} />
           </div>
         ) : artifact.kind === "repo-file" ? (
-          <div style={{ flex: 1, minHeight: 0, overflowY: "auto", background: "var(--bg-primary)" }}>
+          <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
             <RepoFileBody project={artifact.project} path={artifact.path} />
           </div>
         ) : (

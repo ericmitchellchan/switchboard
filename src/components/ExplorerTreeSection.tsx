@@ -7,7 +7,12 @@
 // (dirs-first, server-side skip-list); clicking a FILE goes through
 // panelStore.openArtifact (A3) — the panel beside the running shell on the
 // terminal screen, the explorer screen full-width when that's what's showing,
-// Ctrl/⌘+click inverts. Directory/project rows only expand; they open nothing.
+// Ctrl/⌘+click inverts. Directory/project rows only expand; they open nothing
+// — except for the hover-revealed `>_` affordance, which creates a NEW
+// terminal in that project's directory (never `cd`s a live one).
+//
+// Rows carry IDE folder/file symbols (increment B): the expander plus
+// panelStore.FOLDER_GLYPH on directories, glyphForPath on files.
 //
 // Directory expansion state is side-menu-LOCAL by design (never routed);
 // like the KB section it lives at module level so toggling the menu keeps
@@ -17,11 +22,21 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { Route } from "../types";
-import { annotateProjects, explorerList, explorerProjects } from "../lib/explorer";
+import {
+  annotateProjects,
+  explorerList,
+  explorerProjects,
+  getExplorerActions,
+} from "../lib/explorer";
 import type { ExplorerEntry, ExplorerProject } from "../lib/explorer";
 import { useThreadsView } from "../lib/threadStore";
 import { getNavState } from "../lib/route";
-import { openArtifact, useActiveTabArtifact } from "../lib/panelStore";
+import {
+  FOLDER_GLYPH,
+  glyphForPath,
+  openArtifact,
+  useActiveTabArtifact,
+} from "../lib/panelStore";
 import { PulsingDot } from "./PulsingDot";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
 import { TreeMessage, TreeRow } from "./KbTreeSection";
@@ -148,6 +163,7 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
             <TreeRow
               label={entry.name}
               prefix={isOpen ? "▾" : "▸"}
+              icon={FOLDER_GLYPH}
               depth={depth}
               active={false}
               onClick={() => toggle(project, childPath)}
@@ -162,6 +178,7 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
         <TreeRow
           key={nodeKey(project, childPath)}
           label={entry.name}
+          icon={glyphForPath(childPath)}
           depth={depth}
           active={isActive}
           onClick={(e) =>
@@ -191,6 +208,7 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
             <TreeRow
               label={p.key}
               prefix={isOpen ? "▾" : "▸"}
+              icon={FOLDER_GLYPH}
               depth={0}
               active={activeRoute?.project === p.key}
               meta={p.status}
@@ -202,6 +220,7 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
                   <PulsingDot color={STATUS_CONFIGS.running.color} pulse />
                 ) : undefined
               }
+              hoverAction={<OpenTerminalHere project={p} />}
               onClick={() => toggle(p.key, "")}
             />
             {isOpen && renderDir(p.key, "", 1)}
@@ -209,5 +228,51 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
         );
       })}
     </div>
+  );
+}
+
+/** "Open terminal here" — hover-revealed on a PROJECT row, exactly like the
+ *  thread rows' `×`. A `role="button"` span, not a <button>: TreeRow is
+ *  itself a button and nesting one is invalid HTML.
+ *
+ *  It creates a BRAND-NEW session whose cwd is the project's repo (Decision
+ *  2's useful half) and reveals the terminal screen. It NEVER types into a
+ *  live shell — no `cd`, no keystroke, no touching an existing session; that
+ *  shell may be mid-command, running claude, or in a REPL. The whole effect
+ *  goes through App's own creation path via the explorer actions bridge.
+ *
+ *  Multi-repo projects open their FIRST repo — the same one `explorer_list`
+ *  treats as the project's head; a project with no repos gets no affordance.
+ *  The session NAME is the project key, matching what the repo picker
+ *  produces for the same project. */
+function OpenTerminalHere({ project }: { project: ExplorerProject }) {
+  const dir = project.repos[0];
+  if (dir === undefined || getExplorerActions() === null) return null;
+  return (
+    <span
+      role="button"
+      aria-label={`Open a new terminal in ${project.key}`}
+      title={`Open a NEW terminal in ${dir} (no existing terminal is changed)`}
+      onClick={(e) => {
+        e.stopPropagation();
+        getExplorerActions()?.openTerminalHere(project.key, dir);
+      }}
+      style={{
+        flex: "none",
+        fontSize: 9,
+        lineHeight: 1,
+        letterSpacing: -0.5,
+        color: "var(--text-dim)",
+        padding: "0 2px",
+      }}
+      onMouseEnter={(e) => {
+        (e.currentTarget as HTMLElement).style.color = "var(--text-primary)";
+      }}
+      onMouseLeave={(e) => {
+        (e.currentTarget as HTMLElement).style.color = "var(--text-dim)";
+      }}
+    >
+      &gt;_
+    </span>
   );
 }
