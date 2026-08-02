@@ -59,7 +59,7 @@ export interface SavedSession {
 }
 
 export interface SavedWorkspace {
-  version: 4; // v4 (panel tabs): `panels` values become PanelState. v1/v2/v3 payloads are migrated on load.
+  version: 5; // v5 (panel terminals): a panel strip may hold a `session` artifact. v1–v4 payloads are migrated on load.
   sessions: SavedSession[];
   activeSessionId: string | null;
   paneLayout: unknown; // PaneNode serialized
@@ -75,7 +75,13 @@ export interface SavedWorkspace {
    *  expired session is meaningless (see applyWorkspaceStaleness).
    *
    *  v4: the value is a whole TAB STRIP (PanelState), not a single Artifact.
-   *  A v3 blob's `Artifact` migrates to `{artifacts:[a], activeIndex:0}`. */
+   *  A v3 blob's `Artifact` migrates to `{artifacts:[a], activeIndex:0}`.
+   *
+   *  v5: a strip entry may be a `session` artifact (increment H). The SHAPE is
+   *  unchanged — a v4 blob is a valid v5 blob, it simply never held one — but
+   *  the session ids inside those entries are remapped through the SAME
+   *  restore idMap the keys are (panelStore.remapPanels), and an entry whose
+   *  session did not come back is dropped like an unmapped key. */
   panels: Record<string, PanelState>;
   /** Global panel width (one width for all tabs — one less thing to restore). */
   panelWidth: number;
@@ -141,7 +147,20 @@ export type Route =
 export type Artifact =
   | { kind: "kb-doc"; path: string } // KB rel path (md/html/mmd/…)
   | { kind: "repo-file"; project: string; path: string } // registry project + rel path
-  | { kind: "localhost"; project: string; url: string }; // Phase B — declared, never constructed in Phase A
+  | { kind: "localhost"; project: string; url: string } // Phase B — declared, never constructed in Phase A
+  // INCREMENT H — a real PTY session hosted BY the panel. The reference is a
+  // session id and nothing else: the session record itself lives where every
+  // other session lives (App's `sessions` + the keep-alive registry), so a
+  // panel terminal inherits status detection, scrollback persistence,
+  // workspace restore and thread promotion for free.
+  //
+  // THE INVARIANT THIS KIND EXISTS TO KEEP: a session has exactly ONE live
+  // view. A panel terminal is CREATED in the panel and lives there — it is
+  // never mirrored from a pane — and while the panel owns it, it is absent
+  // from the tab bar and from the pane tree (panelStore.isPanelOwnedSession,
+  // applied by App). `promote to tab` MOVES it (park → release), it never
+  // duplicates it.
+  | { kind: "session"; sessionId: string };
 
 /** The artifact kinds that name a FILE on disk — the ones with a readable
  *  `path` and therefore a renderable BODY (docKind switch, pins sidecar,

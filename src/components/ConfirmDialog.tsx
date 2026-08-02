@@ -16,6 +16,13 @@ interface ConfirmDialogProps {
    *  holds focus, so with Enter unbound here the key does nothing worse than
    *  cancel — and cancelling changes nothing. Esc still cancels either way. */
   enterConfirms?: boolean;
+  /** EXTRA non-destructive choices, rendered between Cancel and the confirm
+   *  button (increment H). A dialog with more than two outcomes is rare and
+   *  should stay rare — the panel-terminal close guard has three real ones
+   *  (keep running / promote to tab / kill) and offering only two would force
+   *  a lie into one of the labels. Cancel is still the focused button and Esc
+   *  still cancels, so the extra choices cannot be hit by reflex either. */
+  extraActions?: Array<{ label: string; onClick: () => void }>;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -28,6 +35,7 @@ export function ConfirmDialog({
   cancelLabel = "Cancel",
   destructive = true,
   enterConfirms = true,
+  extraActions,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -81,7 +89,9 @@ export function ConfirmDialog({
           top: "50%",
           left: "50%",
           transform: "translate(-50%, -50%)",
-          width: 360,
+          // Wider when there are more than two outcomes: four mono buttons on
+          // one row need the room, and the footer wraps below that.
+          width: extraActions && extraActions.length > 0 ? 420 : 360,
           maxWidth: "calc(100vw - 32px)",
           backgroundColor: "var(--bg-active)",
           border: "1px solid var(--border)",
@@ -120,6 +130,7 @@ export function ConfirmDialog({
           style={{
             display: "flex",
             justifyContent: "flex-end",
+            flexWrap: "wrap",
             gap: 8,
             marginTop: 4,
           }}
@@ -147,6 +158,31 @@ export function ConfirmDialog({
           >
             {cancelLabel}
           </button>
+          {extraActions?.map((action) => (
+            <button
+              key={action.label}
+              onClick={action.onClick}
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: 12,
+                color: "var(--text-primary)",
+                backgroundColor: "transparent",
+                border: "1px solid var(--border)",
+                borderRadius: 4,
+                padding: "6px 14px",
+                cursor: "pointer",
+                outline: "none",
+              }}
+              onFocus={(e) => {
+                e.currentTarget.style.borderColor = "var(--text-secondary)";
+              }}
+              onBlur={(e) => {
+                e.currentTarget.style.borderColor = "var(--border)";
+              }}
+            >
+              {action.label}
+            </button>
+          ))}
           <button
             onClick={onConfirm}
             style={{

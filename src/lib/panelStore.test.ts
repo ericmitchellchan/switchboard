@@ -76,8 +76,18 @@ import {
   getActiveTabSession,
   activeTabArtifact,
   inheritPanel,
+  // increment H: panel-hosted terminals
+  panelOwnedSessionIds,
+  isPanelOwnedSession,
+  parkPanelSession,
+  releasePanelSession,
+  parkedPanelSessions,
+  publishSessionLabels,
+  sessionLabelFor,
+  SESSION_ICON,
   type OpenableArtifact,
   type OpenContext,
+  type SessionLabel,
 } from "./panelStore";
 import { __resetNavForTests, getNavState } from "./route";
 // The workspace migration + staleness rules live in threadStore.ts (so tests
@@ -297,13 +307,13 @@ describe("parsePanelsV3 (a v3 artifact becomes a one-tab strip)", () => {
   });
 });
 
-// ─── Workspace v1/v2/v3/v4 → v4 migration (panel half) ───────────────────────
+// ─── Workspace v1…v5 → v5 migration (panel half) ─────────────────────────────
 
 describe("migrateSavedWorkspace (panels)", () => {
-  it("v1 → v4: sessions/layout/counter preserved, panels default {} + default width", () => {
+  it("v1 → v5: sessions/layout/counter preserved, panels default {} + default width", () => {
     const raw = mkWorkspaceV1();
     const ws = migrateSavedWorkspace(raw)!;
-    expect(ws.version).toBe(4);
+    expect(ws.version).toBe(5);
     expect(ws.sessions).toEqual(raw.sessions);
     expect(ws.paneLayout).toEqual(raw.paneLayout);
     expect(ws.activeSessionId).toBe("s1");
@@ -314,11 +324,11 @@ describe("migrateSavedWorkspace (panels)", () => {
     expect(ws.panelWidth).toBe(DEFAULT_PANEL_WIDTH);
   });
 
-  it("v2 → v4 is LOSSLESS for sessions AND threads, panels default {}", () => {
+  it("v2 → v5 is LOSSLESS for sessions AND threads, panels default {}", () => {
     const t = mkThread({ sessionId: "s1" });
     const raw = mkWorkspaceV1({ version: 2, threads: [t] });
     const ws = migrateSavedWorkspace(raw)!;
-    expect(ws.version).toBe(4);
+    expect(ws.version).toBe(5);
     expect(ws.sessions).toEqual(raw.sessions);
     expect(ws.threads).toEqual([t]);
     expect(ws.panels).toEqual({});
@@ -330,7 +340,7 @@ describe("migrateSavedWorkspace (panels)", () => {
     expect(ws.panels).toEqual({});
   });
 
-  it("v3 → v4 is ADDITIVE and LOSSLESS: each artifact becomes a one-tab strip", () => {
+  it("v3 → v5 is ADDITIVE and LOSSLESS: each artifact becomes a one-tab strip", () => {
     const raw = mkWorkspaceV1({
       version: 3,
       threads: [mkThread({ sessionId: "s1" })],
@@ -338,14 +348,14 @@ describe("migrateSavedWorkspace (panels)", () => {
       panelWidth: 500,
     });
     const ws = migrateSavedWorkspace(raw)!;
-    expect(ws.version).toBe(4);
+    expect(ws.version).toBe(5);
     expect(ws.sessions).toEqual(raw.sessions); // v3's other halves untouched
     expect(ws.threads).toHaveLength(1);
     expect(ws.panels).toEqual({ "s1": one(KB_DOC), "s3": one(REPO_FILE) });
     expect(ws.panelWidth).toBe(500);
   });
 
-  it("v4 round-trip: strips tolerant-parsed, width clamped", () => {
+  it("v4/v5 round-trip: strips tolerant-parsed, width clamped", () => {
     const raw = mkWorkspaceV1({
       version: 4,
       threads: [],
@@ -357,13 +367,13 @@ describe("migrateSavedWorkspace (panels)", () => {
       panelWidth: 5000,
     });
     const ws = migrateSavedWorkspace(raw)!;
-    expect(ws.version).toBe(4);
+    expect(ws.version).toBe(5);
     expect(ws.panels).toEqual({ "s1": strip([KB_DOC, REPO_FILE], 1), "s3": one(REPO_FILE) });
     expect(ws.panelWidth).toBe(MAX_PANEL_WIDTH);
   });
 
   it("a garbage panels blob degrades to {} rather than rejecting the workspace", () => {
-    for (const version of [3, 4]) {
+    for (const version of [3, 4, 5]) {
       const ws = migrateSavedWorkspace(mkWorkspaceV1({ version, panels: "nope" }))!;
       expect(ws).not.toBeNull();
       expect(ws.sessions).toHaveLength(1);
@@ -372,7 +382,7 @@ describe("migrateSavedWorkspace (panels)", () => {
   });
 
   it("unknown versions are still rejected outright", () => {
-    expect(migrateSavedWorkspace(mkWorkspaceV1({ version: 5 }))).toBeNull();
+    expect(migrateSavedWorkspace(mkWorkspaceV1({ version: 6 }))).toBeNull();
     expect(migrateSavedWorkspace(mkWorkspaceV1({ version: "4" }))).toBeNull();
   });
 });
@@ -1890,6 +1900,9 @@ describe("popped-out artifact", () => {
     registerPanelActions({
       sendToThread: () => {},
       popOutArtifact: (a) => calls.push(a),
+      createPanelTerminal: () => {},
+      promotePanelTerminal: () => {},
+      closePanelTerminal: () => {},
     });
     expect(popOutAvailable()).toBe(true);
     popOutArtifact(LIVE);
@@ -1974,5 +1987,235 @@ describe("isLocalhostUrlOpen", () => {
     openInPanel("sess-1", LIVE);
     closeArtifactAt("sess-1", 0);
     expect(isLocalhostUrlOpen("http://localhost:5173/")).toBe(false);
+  });
+});
+
+// ─── INCREMENT H: the panel hosts a live shell ───────────────────────────────
+// The whole increment turns on ONE invariant — a session has exactly one live
+// view — and these are the store's half of enforcing it. The other half is
+// App's filter (a panel-owned session is absent from the tab bar and the pane
+// tree) and the panel's single body slot; both read `isPanelOwnedSession`.
+
+const SESSION_A: Artifact = { kind: "session", sessionId: "pty-a" };
+const SESSION_B: Artifact = { kind: "session", sessionId: "pty-b" };
+
+describe("session artifacts (increment H)", () => {
+  beforeEach(() => {
+    __resetPanelStoreForTests();
+  });
+
+  it("sanitizes to the id and nothing else; a nameless one is rejected", () => {
+    expect(sanitizeArtifact({ kind: "session", sessionId: "pty-a", junk: 1, name: "x" })).toEqual(
+      SESSION_A
+    );
+    expect(sanitizeArtifact({ kind: "session" })).toBeNull();
+    expect(sanitizeArtifact({ kind: "session", sessionId: "" })).toBeNull();
+  });
+
+  it("identity is the session id — so re-opening one ACTIVATES its tab", () => {
+    expect(artifactIdentity(SESSION_A)).toBe("session:pty-a");
+    expect(sameArtifact(SESSION_A, { kind: "session", sessionId: "pty-a" })).toBe(true);
+    expect(sameArtifact(SESSION_A, SESSION_B)).toBe(false);
+
+    openInPanel("tab-1", KB_DOC);
+    openInPanel("tab-1", SESSION_A);
+    openInPanel("tab-1", SESSION_A); // again — must not append a second tab
+    expect(panelStateFor("tab-1")).toEqual(strip([KB_DOC, SESSION_A], 1));
+  });
+
+  it("is NAMED by the published session label, and says 'terminal' without one", () => {
+    expect(artifactShortTitle(SESSION_A)).toBe("terminal");
+    expect(describeArtifact(SESSION_A).icon).toBe(SESSION_ICON);
+
+    publishSessionLabels(
+      new Map<string, SessionLabel>([["pty-a", { name: "lodestar dev", status: "running" }]])
+    );
+    expect(sessionLabelFor("pty-a")?.status).toBe("running");
+    expect(artifactShortTitle(SESSION_A)).toBe("lodestar dev");
+    expect(describeArtifact(SESSION_A).title).toBe("terminal / lodestar dev");
+    expect(describeArtifact(SESSION_A).crumbs.map((c) => c.text)).toEqual([
+      "terminal",
+      "lodestar dev",
+    ]);
+  });
+
+  it("publishing an unchanged label set does NOT notify (no re-render per keystroke)", () => {
+    let notified = 0;
+    const unsubscribe = subscribeToPanelStore(() => (notified += 1));
+    publishSessionLabels(new Map([["pty-a", { name: "dev", status: "idle" }]]));
+    expect(notified).toBe(1);
+    publishSessionLabels(new Map([["pty-a", { name: "dev", status: "idle" }]]));
+    expect(notified).toBe(1); // same content, different Map object
+    publishSessionLabels(new Map([["pty-a", { name: "dev", status: "running" }]]));
+    expect(notified).toBe(2); // a real status flip
+    unsubscribe();
+  });
+
+  // ── ONE SESSION, ONE HOME ──
+  it("opening a live shell in another tab TAKES it — never lists it twice", () => {
+    openInPanel("tab-1", SESSION_A);
+    openInPanel("tab-2", SESSION_A);
+    expect(panelStateFor("tab-1")).toBeNull(); // its only tab left with it
+    expect(panelStateFor("tab-2")).toEqual(one(SESSION_A));
+    // …and the strip it left is otherwise untouched.
+    openInPanel("tab-3", KB_DOC);
+    openInPanel("tab-3", SESSION_B);
+    openInPanel("tab-4", SESSION_B);
+    expect(panelStateFor("tab-3")).toEqual(one(KB_DOC));
+    expect(panelStateFor("tab-4")).toEqual(one(SESSION_B));
+  });
+
+  // ── OWNERSHIP: the tab bar / pane-tree filter ──
+  it("a shell in a LIVE strip is panel-owned", () => {
+    openInPanel("tab-1", SESSION_A);
+    expect(isPanelOwnedSession("pty-a")).toBe(true);
+    expect(panelOwnedSessionIds()).toEqual(new Set(["pty-a"]));
+    expect(isPanelOwnedSession("pty-b")).toBe(false);
+    expect(isPanelOwnedSession(null)).toBe(false);
+  });
+
+  it("a HIDDEN panel still owns its shells (Ctrl+Shift+P must not spawn a tab)", () => {
+    openInPanel("tab-1", SESSION_A);
+    togglePanel("tab-1"); // strip filed into the toggle memory
+    expect(panelStateFor("tab-1")).toBeNull();
+    expect(isPanelOwnedSession("pty-a")).toBe(true);
+    togglePanel("tab-1"); // and back
+    expect(panelStateFor("tab-1")).toEqual(one(SESSION_A));
+    expect(isPanelOwnedSession("pty-a")).toBe(true);
+  });
+
+  it("PARK takes the view away and keeps ownership; RELEASE ends it", () => {
+    openInPanel("tab-1", KB_DOC);
+    openInPanel("tab-1", SESSION_A);
+
+    parkPanelSession("pty-a");
+    expect(panelStateFor("tab-1")).toEqual(one(KB_DOC)); // no view…
+    expect(isPanelOwnedSession("pty-a")).toBe(true); // …but still ours
+    expect(parkedPanelSessions()).toEqual(["pty-a"]);
+
+    releasePanelSession("pty-a");
+    expect(isPanelOwnedSession("pty-a")).toBe(false); // the tab bar may take it
+    expect(parkedPanelSessions()).toEqual([]);
+  });
+
+  it("park scrubs the toggle MEMORY too — a hidden strip cannot resurrect it", () => {
+    openInPanel("tab-1", KB_DOC);
+    openInPanel("tab-1", SESSION_A);
+    togglePanel("tab-1"); // whole strip into memory
+    releasePanelSession("pty-a"); // promoted while the panel was hidden
+    expect(isPanelOwnedSession("pty-a")).toBe(false);
+    togglePanel("tab-1"); // bring the strip back
+    expect(panelStateFor("tab-1")).toEqual(one(KB_DOC)); // without the terminal
+  });
+
+  it("re-opening a parked shell un-parks it (the `+` picker's RUNNING TERMINALS row)", () => {
+    openInPanel("tab-1", SESSION_A);
+    parkPanelSession("pty-a");
+    expect(parkedPanelSessions()).toEqual(["pty-a"]);
+    openInPanel("tab-2", SESSION_A);
+    expect(parkedPanelSessions()).toEqual([]);
+    expect(panelStateFor("tab-2")).toEqual(one(SESSION_A));
+  });
+
+  it("closing a HOST TAB parks its terminals instead of orphaning them", () => {
+    openInPanel("tab-1", SESSION_A);
+    openInPanel("tab-1", KB_DOC);
+    removeSessionPanel("tab-1"); // the tab was destroyed
+    expect(panelStateFor("tab-1")).toBeNull();
+    expect(parkedPanelSessions()).toEqual(["pty-a"]); // still running, still reachable
+    expect(isPanelOwnedSession("pty-a")).toBe(true);
+  });
+
+  it("release is idempotent and safe for a session the panel never owned", () => {
+    releasePanelSession("stranger");
+    parkPanelSession("");
+    releasePanelSession("");
+    expect(parkedPanelSessions()).toEqual([]);
+    expect(panelOwnedSessionIds()).toEqual(new Set());
+  });
+
+  // ── A live shell is not content ──
+  it("a new thread does NOT inherit a panel terminal", () => {
+    expect(inheritPanel(SESSION_A, "new-tab")).toBe(false);
+    expect(panelStateFor("new-tab")).toBeNull();
+    // …while a document still does.
+    expect(inheritPanel(KB_DOC, "new-tab")).toBe(true);
+  });
+
+  it("a live shell never floats — the floating window would be a SECOND view", () => {
+    setPoppedOutArtifact("tab-1", SESSION_A);
+    expect(getPoppedOutArtifact()).toBeNull();
+    const calls: Artifact[] = [];
+    registerPanelActions({
+      sendToThread: () => {},
+      popOutArtifact: (a) => calls.push(a),
+      createPanelTerminal: () => {},
+      promotePanelTerminal: () => {},
+      closePanelTerminal: () => {},
+    });
+    popOutArtifact(SESSION_A);
+    expect(calls).toEqual([]); // the handler is never even reached
+  });
+});
+
+// ─── Restore: a panel terminal comes back with its session ───────────────────
+
+describe("remapPanels with session artifacts (increment H)", () => {
+  it("rewrites the session id inside the artifact, not just the key", () => {
+    const panels = { "old-tab": strip([KB_DOC, SESSION_A], 1) };
+    const idMap = new Map([
+      ["old-tab", "new-tab"],
+      ["pty-a", "pty-a-new"],
+    ]);
+    expect(remapPanels(panels, idMap)).toEqual({
+      "new-tab": strip([KB_DOC, { kind: "session", sessionId: "pty-a-new" }], 1),
+    });
+  });
+
+  it("drops a terminal whose session did not restore, keeping the rest of the strip", () => {
+    const panels = { "old-tab": strip([SESSION_A, KB_DOC], 1) };
+    const out = remapPanels(panels, new Map([["old-tab", "new-tab"]]));
+    // The active tab is preserved BY CONTENT: the doc was active and still is.
+    expect(out).toEqual({ "new-tab": one(KB_DOC) });
+  });
+
+  it("drops the whole strip when the terminal was all it held", () => {
+    const panels = { "old-tab": one(SESSION_A) };
+    expect(remapPanels(panels, new Map([["old-tab", "new-tab"]]))).toEqual({});
+  });
+
+  it("through the store: the live panel follows the restored ids", () => {
+    __resetPanelStoreForTests();
+    initPanelStore({ "old-tab": one(SESSION_A) });
+    remapPanelSessions(
+      new Map([
+        ["old-tab", "new-tab"],
+        ["pty-a", "pty-a-new"],
+      ])
+    );
+    expect(panelStateFor("new-tab")).toEqual(one({ kind: "session", sessionId: "pty-a-new" }));
+    expect(isPanelOwnedSession("pty-a-new")).toBe(true);
+    expect(isPanelOwnedSession("pty-a")).toBe(false);
+  });
+});
+
+// ─── Workspace v5 carries a panel terminal ───────────────────────────────────
+
+describe("migrateSavedWorkspace v5 (panel terminals)", () => {
+  it("keeps a session artifact through the migration", () => {
+    const raw = mkWorkspaceV1({
+      version: 5,
+      panels: { "s1": strip([KB_DOC, SESSION_A], 1) },
+      panelWidth: 500,
+    });
+    const ws = migrateSavedWorkspace(raw)!;
+    expect(ws.version).toBe(5);
+    expect(ws.panels).toEqual({ "s1": strip([KB_DOC, SESSION_A], 1) });
+  });
+
+  it("a v4 blob is a valid v5 one — nothing to transform, nothing lost", () => {
+    const v4 = mkWorkspaceV1({ version: 4, panels: { "s1": strip([KB_DOC, REPO_FILE], 1) } });
+    const v5 = mkWorkspaceV1({ version: 5, panels: { "s1": strip([KB_DOC, REPO_FILE], 1) } });
+    expect(migrateSavedWorkspace(v4)!.panels).toEqual(migrateSavedWorkspace(v5)!.panels);
   });
 });

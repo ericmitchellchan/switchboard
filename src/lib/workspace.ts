@@ -37,7 +37,7 @@ export function buildSavedWorkspace(
   });
 
   return {
-    version: 4,
+    version: 5,
     sessions: savedSessions,
     activeSessionId,
     paneLayout: paneLayout as unknown,
@@ -49,6 +49,9 @@ export function buildSavedWorkspace(
     threads: getThreads(),
     // Artifact panel state (v4): per-tab TAB STRIPS keyed by session id (lean
     // by invariant — see panelStore.sanitizePanelState) + the global width.
+    // v5 (increment H): a strip may hold a `session` artifact, whose session
+    // rides in `sessions` above like any other — a panel terminal restores
+    // because it IS a session, not because the panel persists anything extra.
     panels: getPanelsRecord(),
     panelWidth: getPanelWidth(),
   };

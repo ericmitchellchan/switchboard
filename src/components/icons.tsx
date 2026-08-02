@@ -54,7 +54,12 @@ export type IconName =
   // renames a ROW; this pencil writes into a document, so it carries a page
   // instead — same rules, distinct mark, no glyph doing two jobs.
   | "edit"
-  | "save";
+  | "save"
+  // A LIVE SHELL (increment H) — the panel can host a PTY session as an
+  // artifact, so the tab strip and the panel header need a mark for it. Same
+  // rules as everything above; deliberately NOT a reused `panel` or `file`
+  // glyph, because a running process is neither.
+  | "terminal";
 
 /** Default box for a content icon (folder / file / localhost / panel). Rows
  *  reserve exactly this much, so the icon column is identical at every depth
@@ -84,6 +89,7 @@ const STROKE: Record<IconName, number> = {
   trash: 1.4,
   edit: 1.4,
   save: 1.4,
+  terminal: 1.4,
 };
 
 // Every path below is centred on (8, 8) in the 16x16 box:
@@ -198,6 +204,15 @@ const PATHS: Record<IconName, ReactNode> = {
       <path d="M8 2.4v6.9" />
       <path d="M5.2 6.6 8 9.4l2.8-2.8" />
       <path d="M3 10.4v3.2h10v-3.2" />
+    </>
+  ),
+  // Terminal: a prompt chevron and its input rule — the universal shell mark,
+  // and the one shape that cannot be mistaken for a document at 11px. Ink
+  // x 3.4…12.6, y 4.2…11.8, so it optically centres like every icon above.
+  terminal: (
+    <>
+      <path d="M3.4 4.2 7 8l-3.6 3.8" />
+      <path d="M8.2 11.8h4.4" />
     </>
   ),
   // Delete: a bin with a lid and two staves.

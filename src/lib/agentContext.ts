@@ -139,7 +139,15 @@ export type RefOptions = { kbRoot?: string | null };
  *    kb-doc     → `kb C:/Users/eric/projects/personal-kb/switchboard/…/requirements.md`
  *                 (or `kb switchboard/…/requirements.md` with no known root)
  *    repo-file  → `repo switchboard/src/App.tsx`
- *    localhost  → `localhost switchboard http://localhost:5173` (phase B) */
+ *    localhost  → `localhost switchboard http://localhost:5173` (phase B)
+ *    session    → `""` (increment H): a live shell hosted in the panel is not
+ *                 a thing another agent can open or read. Both seams treat an
+ *                 empty ref as "nothing to say" — buildSpawnContext returns
+ *                 null so the `--append-system-prompt` flag is OMITTED, and
+ *                 buildSendReference returns "" so `→ thread` types nothing
+ *                 (the panel header hides the action for a session anyway).
+ *                 Naming a session id at a shell prompt would be noise
+ *                 dressed as context. */
 export function artifactRef(artifact: Artifact, opts: RefOptions = {}): string {
   switch (artifact.kind) {
     case "kb-doc": {
@@ -153,6 +161,8 @@ export function artifactRef(artifact: Artifact, opts: RefOptions = {}): string {
       );
     case "localhost":
       return sanitizeForTypedLine(`localhost ${artifact.project} ${artifact.url}`, REF_MAX);
+    case "session":
+      return "";
   }
 }
 
@@ -213,7 +223,11 @@ export function buildSendReference(
   pin?: PinReference | null,
   opts: RefOptions = {}
 ): string {
-  const ref = `"${artifactRef(artifact, opts)}"`;
+  const bare = artifactRef(artifact, opts);
+  // Nothing to reference (a `session` artifact — see artifactRef): type
+  // NOTHING. `Look at ""` would be a line that says less than silence.
+  if (bare.length === 0) return "";
+  const ref = `"${bare}"`;
   if (!pin) return `Look at ${ref}`;
   const number = Number.isFinite(pin.number)
     ? Math.min(MAX_PIN_NUMBER, Math.max(1, Math.trunc(pin.number)))

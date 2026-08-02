@@ -2,7 +2,16 @@ import { useState, useCallback, useRef } from "react";
 import type { Session } from "../types";
 import { log } from "../lib/logger";
 
-export function useSessions() {
+/**
+ * @param isSelectable Can this session be the ACTIVE tab? Increment H: a panel
+ *   terminal is a real session that is deliberately absent from the tab bar and
+ *   the pane tree (panelStore.isPanelOwnedSession), so every "which tab now?"
+ *   decision here — Ctrl+1…9, Ctrl+[ / ], and the next tab after a close — must
+ *   step OVER it. Without this, those chords could hand focus to a session with
+ *   nothing on screen and blank the workspace. Omitted = every session counts,
+ *   which is the pre-increment-H behaviour exactly.
+ */
+export function useSessions(isSelectable?: (session: Session) => boolean) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
 
@@ -10,6 +19,15 @@ export function useSessions() {
   sessionsRef.current = sessions;
   const activeIdRef = useRef(activeSessionId);
   activeIdRef.current = activeSessionId;
+  // A ref, not a dep: the predicate reads a module store that is current the
+  // instant it mutates, and every callback below must see the latest one
+  // without being re-created (they are handed to useKeyboardShortcuts).
+  const selectableRef = useRef(isSelectable);
+  selectableRef.current = isSelectable;
+  const selectableList = useCallback(
+    (list: Session[]) => (selectableRef.current ? list.filter(selectableRef.current) : list),
+    []
+  );
 
   const addSession = useCallback((session: Session) => {
     setSessions((prev) => [...prev, session]);
@@ -20,15 +38,22 @@ export function useSessions() {
     setSessions((prev) => {
       const next = prev.filter((s) => s.id !== sessionId);
       if (sessionId === activeIdRef.current && next.length > 0) {
-        const removedIndex = prev.findIndex((s) => s.id === sessionId);
-        const newIndex = Math.min(removedIndex, next.length - 1);
-        setActiveSessionId(next[newIndex].id);
+        // The next tab is chosen from the SELECTABLE list (see the hook doc):
+        // landing on a panel terminal would show an empty workspace.
+        const pickable = selectableList(next);
+        const removedIndex = selectableList(prev).findIndex((s) => s.id === sessionId);
+        if (pickable.length > 0) {
+          const newIndex = Math.min(Math.max(0, removedIndex), pickable.length - 1);
+          setActiveSessionId(pickable[newIndex].id);
+        } else {
+          setActiveSessionId(null);
+        }
       } else if (next.length === 0) {
         setActiveSessionId(null);
       }
       return next;
     });
-  }, []);
+  }, [selectableList]);
 
   const renameSession = useCallback(
     (sessionId: string, newName: string) => {
@@ -53,23 +78,30 @@ export function useSessions() {
 
   const switchToSession = useCallback((sessionId: string) => {
     const exists = sessionsRef.current.find((s) => s.id === sessionId);
-    if (exists) setActiveSessionId(sessionId);
-  }, []);
-
-  const switchByIndex = useCallback((index: number) => {
-    const s = sessionsRef.current;
-    if (index >= 0 && index < s.length) {
-      setActiveSessionId(s[index].id);
+    // Selectable, not merely existing: a panel terminal is a session, but
+    // making it the active TAB would leave the workspace showing nothing.
+    // (`promote to tab` releases panel ownership BEFORE calling this, so the
+    // promoted session is selectable by the time it gets here.)
+    if (exists && (!selectableRef.current || selectableRef.current(exists))) {
+      setActiveSessionId(sessionId);
     }
   }, []);
 
+  const switchByIndex = useCallback((index: number) => {
+    // Ctrl+1…9 counts the TABS the user can see, not the raw session array.
+    const s = selectableList(sessionsRef.current);
+    if (index >= 0 && index < s.length) {
+      setActiveSessionId(s[index].id);
+    }
+  }, [selectableList]);
+
   const switchRelative = useCallback((delta: number) => {
-    const s = sessionsRef.current;
+    const s = selectableList(sessionsRef.current);
     if (s.length === 0) return;
     const currentIndex = s.findIndex((x) => x.id === activeIdRef.current);
     const nextIndex = (currentIndex + delta + s.length) % s.length;
     setActiveSessionId(s[nextIndex].id);
-  }, []);
+  }, [selectableList]);
 
   const moveSession = useCallback((sessionId: string, direction: -1 | 1) => {
     setSessions((prev) => {

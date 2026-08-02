@@ -43,7 +43,7 @@
 //   - `activeIndex` is always valid: clamped on load and re-derived on close.
 
 import { useSyncExternalStore } from "react";
-import type { Artifact, PanelState, Route, ScreenId } from "../types";
+import type { AgentStatus, Artifact, PanelState, Route, ScreenId } from "../types";
 import { getNavState, navigate } from "./route";
 // PURE helper only (no store state crosses this seam, and devServer imports
 // nothing but React, so there is no cycle): "which server is this URL?" is
@@ -230,6 +230,22 @@ export function describeArtifact(artifact: Artifact): ArtifactDescription {
         ],
         title: `${artifact.project} / ${artifact.url}`,
       };
+    case "session": {
+      // A SESSION has no path — its name is the tab name Eric gave it, which
+      // lives in App's session list, not here. `sessionLabelFor` is the
+      // published view of that list (§Session labels): one lookup, so the tab
+      // strip, the header and the picker all say the same word.
+      const label = sessionLabelFor(artifact.sessionId);
+      const name = label?.name ?? "terminal";
+      return {
+        icon: SESSION_ICON,
+        crumbs: [
+          { text: "terminal", tone: "dim" },
+          { text: name, tone: "bright" },
+        ],
+        title: `terminal / ${name}`,
+      };
+    }
   }
 }
 
@@ -267,6 +283,10 @@ export const FOLDER_OPEN_ICON: IconName = "folder-open";
 
 /** The tab bar's panel button. */
 export const PANEL_ICON: IconName = "panel";
+
+/** A LIVE SHELL hosted by the panel (increment H) — the tab strip, the panel
+ *  header and the `+` picker's terminal rows. One vocabulary, one mark. */
+export const SESSION_ICON: IconName = "terminal";
 
 /** Folder icon for a row's expansion state. Pure. */
 export function folderIcon(open: boolean): IconName {
@@ -314,6 +334,11 @@ export function sanitizeArtifact(raw: unknown): Artifact | null {
       return isNonEmptyString(raw.project) && isNonEmptyString(raw.url)
         ? { kind: "localhost", project: raw.project, url: raw.url }
         : null;
+    case "session":
+      // Increment H. The id is the WHOLE record — everything else about the
+      // session (name, cwd, status, scrollback) lives where sessions live, so
+      // there is nothing here to go stale.
+      return isNonEmptyString(raw.sessionId) ? { kind: "session", sessionId: raw.sessionId } : null;
     default:
       return null;
   }
@@ -345,6 +370,11 @@ export function artifactIdentity(artifact: Artifact): string {
       // artifacts (which is what the positional-pin scoping requires).
       // The artifact keeps its own `url` — only the comparison folds.
       return `localhost:${artifact.project}:${serverKey(artifact.url)}`;
+    case "session":
+      // The session id IS the identity. Two references to one session are one
+      // artifact, which is what makes the dedupe rule enforce the one-live-view
+      // invariant rather than merely coexist with it.
+      return `session:${artifact.sessionId}`;
   }
 }
 
@@ -371,6 +401,10 @@ export function clampActiveIndex(length: number, index: number): number {
  *  name), which is what distinguishes co-open artifacts at a glance. The full
  *  breadcrumb stays in the header — this is the 140px version of it. */
 export function artifactShortTitle(artifact: Artifact): string {
+  // A session's short title is its SESSION NAME (the tab name), not a path —
+  // read through the same published label the header uses so the strip and the
+  // header can never disagree about what a terminal is called.
+  if (artifact.kind === "session") return sessionLabelFor(artifact.sessionId)?.name ?? "terminal";
   const raw = artifact.kind === "localhost" ? artifact.url : artifact.path;
   const segments = raw.split("/").filter((s) => s.length > 0);
   return segments[segments.length - 1] ?? raw;
@@ -498,7 +532,14 @@ export function serializePanels(
 /** Remap panel keys through the workspace-restore session idMap. A panel
  *  whose old sessionId has no restored counterpart is DROPPED — unlike a
  *  thread (which is severed and stays revivable), a panel binding without its
- *  tab is meaningless. Pass an empty map on fresh starts to drop everything. */
+ *  tab is meaningless. Pass an empty map on fresh starts to drop everything.
+ *
+ *  INCREMENT H — the same idMap also rewrites the CONTENT of a `session`
+ *  artifact. Its `sessionId` names a tab that was respawned under a fresh id
+ *  exactly like the key was, and a session artifact pointing at a dead id would
+ *  render an empty body forever. An entry whose session did not come back is
+ *  dropped (same rule as an unmapped key), and a strip left with nothing is
+ *  dropped whole — an empty strip is not a panel. */
 export function remapPanels(
   panels: Record<string, PanelState>,
   idMap: Map<string, string>
@@ -506,9 +547,32 @@ export function remapPanels(
   const out: Record<string, PanelState> = {};
   for (const [oldId, state] of Object.entries(panels)) {
     const newId = idMap.get(oldId);
-    if (newId) out[newId] = state;
+    if (!newId) continue;
+    const remapped = remapPanelState(state, idMap);
+    if (remapped) out[newId] = remapped;
   }
   return out;
+}
+
+/** One strip through the idMap: session artifacts rewritten or dropped,
+ *  everything else untouched, the active tab preserved BY CONTENT (same rule
+ *  sanitizePanelState follows). Returns null when nothing survives. */
+function remapPanelState(state: PanelState, idMap: Map<string, string>): PanelState | null {
+  const activeBefore = state.artifacts[clampActiveIndex(state.artifacts.length, state.activeIndex)];
+  const artifacts: Artifact[] = [];
+  let activeIndex = 0;
+  for (const artifact of state.artifacts) {
+    let next: Artifact | null = artifact;
+    if (artifact.kind === "session") {
+      const mapped = idMap.get(artifact.sessionId);
+      next = mapped ? { kind: "session", sessionId: mapped } : null;
+    }
+    if (!next) continue;
+    if (artifact === activeBefore) activeIndex = artifacts.length;
+    artifacts.push(next);
+  }
+  if (artifacts.length === 0) return null;
+  return { artifacts, activeIndex: clampActiveIndex(artifacts.length, activeIndex) };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -541,11 +605,37 @@ let lastPanelStates = new Map<string, PanelState>();
 /** The ACTIVE TAB's session id, published by App (§Active-tab bridge below). */
 let activeTabSessionId: string | null = null;
 
+/** PARKED panel terminals (increment H): sessions the panel OWNS that have no
+ *  view right now.
+ *
+ *  Two things live here, and they are the same state:
+ *   · "keep it running" from the close guard — the tab closes, the shell keeps
+ *     going, and the `+` picker lists it under RUNNING TERMINALS so it can be
+ *     brought back into any tab's panel; and
+ *   · the ONE COMMIT in the middle of `promote to tab` / `kill`, during which
+ *     the artifact is already out of the strip (the panel has unmounted the
+ *     terminal) but ownership has NOT yet been released (so the pane tree
+ *     cannot mount it). That is what makes "one live view throughout the move"
+ *     structural rather than a matter of React's commit ordering.
+ *
+ *  Deliberately NOT persisted: after a restart every restored session is a
+ *  FRESH shell (the process died with the app), so a parked one has nothing
+ *  left to keep running and comes back as an ordinary tab. Persisting the set
+ *  would hide a brand-new empty shell behind a picker row. */
+let parkedSessions = new Set<string>();
+
 const listeners = new Set<() => void>();
 let cachedView: PanelsView | null = null;
+/** Derived, cached because useSyncExternalStore demands a STABLE snapshot:
+ *  recomputing the set per render would loop. Invalidated by bump() alone —
+ *  every mutator goes through it. */
+let cachedOwnedSessions: ReadonlySet<string> | null = null;
+let cachedParkedSessions: readonly string[] | null = null;
 
 function bump(): void {
   cachedView = null;
+  cachedOwnedSessions = null;
+  cachedParkedSessions = null;
   for (const l of listeners) l();
 }
 
@@ -637,6 +727,10 @@ export function initPanelStore(
   // tab. (Boot calls this exactly once, before any open — this is a guard, not
   // a live path.)
   lastPanelStates = new Map();
+  // Parked terminals are session-lifetime state and are never persisted (see
+  // `parkedSessions`) — a re-seed starts with none, so a restored blob can
+  // never hide a fresh shell behind a picker row.
+  parkedSessions = new Set();
   panelWidth = clampPanelWidth(width);
   bump();
 }
@@ -670,6 +764,19 @@ export function openInPanel(sessionId: string, artifact: Artifact): void {
   closeArtifactPicker();
   const clean = sanitizeArtifact(artifact);
   if (!clean) return;
+  if (clean.kind === "session") {
+    // ONE SESSION, ONE HOME (increment H). A live shell must not be listed in
+    // two strips: only one panel renders at a time, so it would not produce two
+    // simultaneous views — but a tab switch would then MOVE a running terminal
+    // between hosts, and both strips would claim it. Opening it here takes it
+    // out of wherever it was (and out of the parked set), which is exactly what
+    // "the panel that holds it" should mean.
+    dropSessionArtifact(clean.sessionId, sessionId);
+    if (parkedSessions.has(clean.sessionId)) {
+      parkedSessions = new Set(parkedSessions);
+      parkedSessions.delete(clean.sessionId);
+    }
+  }
   const live = panels.get(sessionId) ?? null;
   const revived = live === null ? lastPanelStates.get(sessionId) ?? null : null;
   const current = live ?? revived;
@@ -743,6 +850,12 @@ export function closeArtifactAt(sessionId: string, index: number): void {
  *  Returns whether the new tab now shows the inherited artifact. */
 export function inheritPanel(artifact: Artifact | null, newSessionId: string): boolean {
   if (!artifact || newSessionId.length === 0) return false;
+  // A RUNNING TERMINAL IS NOT CONTEXT (increment H). Inheritance copies what
+  // the user was LOOKING AT into a new tab's panel; a session artifact cannot
+  // be copied — it names one live shell with one live view, and "inheriting" it
+  // would MOVE Eric's dev server into a thread he just created. A new thread
+  // launched beside a panel terminal simply starts with an empty panel.
+  if (artifact.kind === "session") return false;
   openInPanel(newSessionId, artifact);
   const now = artifactFor(newSessionId);
   return now !== null && sameArtifact(now, artifact);
@@ -832,6 +945,15 @@ export function removeSessionPanel(sessionId: string): void {
     if (hadPopOut) bump();
     return;
   }
+  // PANEL TERMINALS OUTLIVE THEIR HOST TAB (increment H). This tab is being
+  // destroyed, and its strip may hold live shells — a dev server among them.
+  // Killing them because their host tab closed is precisely the surprise the
+  // close guard exists to prevent, so they are PARKED instead: still running,
+  // still owned by the panel, listed under RUNNING TERMINALS in any tab's `+`.
+  const orphans: string[] = [];
+  for (const state of [panels.get(sessionId), lastPanelStates.get(sessionId)]) {
+    if (state) for (const a of state.artifacts) if (a.kind === "session") orphans.push(a.sessionId);
+  }
   if (hadPanel) {
     panels = new Map(panels);
     panels.delete(sessionId);
@@ -839,6 +961,10 @@ export function removeSessionPanel(sessionId: string): void {
   if (hadMemory) {
     lastPanelStates = new Map(lastPanelStates);
     lastPanelStates.delete(sessionId);
+  }
+  if (orphans.length > 0) {
+    parkedSessions = new Set(parkedSessions);
+    for (const id of orphans) parkedSessions.add(id);
   }
   bump();
 }
@@ -856,7 +982,159 @@ export function setPanelWidth(w: number): void {
  *  on fresh starts to drop every binding). */
 export function remapPanelSessions(idMap: Map<string, string>): void {
   panels = new Map(Object.entries(remapPanels(Object.fromEntries(panels), idMap)));
+  // Parked ids follow the same map for completeness. In practice this set is
+  // empty at restore time (it is never persisted), so this is a guard against a
+  // future caller remapping mid-session, not a live path.
+  if (parkedSessions.size > 0) {
+    const next = new Set<string>();
+    for (const id of parkedSessions) {
+      const mapped = idMap.get(id);
+      if (mapped) next.add(mapped);
+    }
+    parkedSessions = next;
+  }
   bump();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Panel-owned sessions (increment H)
+// ─────────────────────────────────────────────────────────────────────────────
+// THE ONE-LIVE-VIEW INVARIANT, stated once and enforced here.
+//
+// A session has exactly one live xterm view. The registry arbitrates a second
+// mount by STEALING (last mount wins, the loser is severed) — correct, but a
+// mechanism we should never have to exercise. So the panel does not compete
+// for a session; it OWNS one:
+//
+//   A session is PANEL-OWNED when it appears in a live strip, in a hidden
+//   strip (Ctrl+Shift+P files the whole strip into `lastPanelStates`, and a
+//   hidden panel still owns its terminals), or in `parkedSessions`.
+//
+// App filters panel-owned sessions out of the TAB BAR and out of the pane
+// tree — including the single-pane branch, which mounts EVERY session it is
+// given — so a panel-owned session has no pane mount to steal from. Inside the
+// panel, only the active tab of the active tab's panel renders a body, and
+// `openInPanel` keeps a session artifact in AT MOST ONE strip. Those three
+// facts leave exactly one possible mount at any moment.
+//
+// Moving between the two homes is therefore a two-step, never a swap:
+//   park(id)    — the artifact leaves every strip (the panel unmounts the
+//                 terminal, which parks in the keep-alive root) and ownership
+//                 is RETAINED, so nothing else may mount it;
+//   release(id) — ownership ends; only now can the pane tree take it.
+// App runs the first inside `flushSync`, so the unmount is committed before
+// the mount is even possible.
+
+/** Every session the panel owns (see the section header). */
+export function panelOwnedSessionIds(): ReadonlySet<string> {
+  if (!cachedOwnedSessions) {
+    const out = new Set<string>(parkedSessions);
+    for (const state of panels.values()) collectSessionIds(state, out);
+    for (const state of lastPanelStates.values()) collectSessionIds(state, out);
+    cachedOwnedSessions = out;
+  }
+  return cachedOwnedSessions;
+}
+
+function collectSessionIds(state: PanelState, into: Set<string>): void {
+  for (const artifact of state.artifacts) {
+    if (artifact.kind === "session") into.add(artifact.sessionId);
+  }
+}
+
+/** Is this session the panel's? (⇒ it must NOT appear in the tab bar or the
+ *  pane tree.) Reads the module singleton, so it is true the instant a store
+ *  mutation lands — before React has re-rendered anything. */
+export function isPanelOwnedSession(sessionId: string | null | undefined): boolean {
+  return typeof sessionId === "string" && panelOwnedSessionIds().has(sessionId);
+}
+
+/** React hook for App's tab-bar / pane-tree filter. */
+export function usePanelOwnedSessions(): ReadonlySet<string> {
+  return useSyncExternalStore(subscribe, panelOwnedSessionIds);
+}
+
+/** Panel terminals that are alive with NO view — what the `+` picker lists
+ *  under RUNNING TERMINALS. Sorted for a stable row order. */
+export function parkedPanelSessions(): readonly string[] {
+  if (!cachedParkedSessions) cachedParkedSessions = Array.from(parkedSessions).sort();
+  return cachedParkedSessions;
+}
+
+export function useParkedPanelSessions(): readonly string[] {
+  return useSyncExternalStore(subscribe, parkedPanelSessions);
+}
+
+/** Drop a session artifact from every strip (live AND remembered), except
+ *  optionally one tab. Mutates the module maps WITHOUT bumping — callers bump
+ *  once. Returns whether anything changed.
+ *
+ *  A strip left empty is DELETED rather than remembered: remembering it would
+ *  keep the session panel-owned through `lastPanelStates`, which is exactly the
+ *  ownership we are trying to end. */
+function dropSessionArtifact(sessionId: string, exceptTab?: string): boolean {
+  let changed = false;
+  let panelsCloned = false;
+  for (const [tab, state] of Array.from(panels)) {
+    if (tab === exceptTab) continue;
+    const next = withoutSession(state, sessionId);
+    if (next === state) continue;
+    if (!panelsCloned) {
+      panels = new Map(panels);
+      panelsCloned = true;
+    }
+    changed = true;
+    if (next === null) panels.delete(tab);
+    else panels.set(tab, next);
+  }
+  let memoryCloned = false;
+  for (const [tab, state] of Array.from(lastPanelStates)) {
+    const next = withoutSession(state, sessionId);
+    if (next === state) continue;
+    if (!memoryCloned) {
+      lastPanelStates = new Map(lastPanelStates);
+      memoryCloned = true;
+    }
+    changed = true;
+    if (next === null) lastPanelStates.delete(tab);
+    else lastPanelStates.set(tab, next);
+  }
+  return changed;
+}
+
+/** One strip without a session's tab. Returns the SAME object when it holds no
+ *  such tab, and null when removing it empties the strip. */
+function withoutSession(state: PanelState, sessionId: string): PanelState | null {
+  const index = state.artifacts.findIndex(
+    (a) => a.kind === "session" && a.sessionId === sessionId
+  );
+  if (index < 0) return state;
+  return closeArtifactIn(state, index);
+}
+
+/** PARK a panel terminal: take its view away, keep ownership. This is "keep it
+ *  running" from the close guard, and the middle step of promote/kill. */
+export function parkPanelSession(sessionId: string): void {
+  if (sessionId.length === 0) return;
+  const changed = dropSessionArtifact(sessionId);
+  if (parkedSessions.has(sessionId) && !changed) return;
+  parkedSessions = new Set(parkedSessions);
+  parkedSessions.add(sessionId);
+  bump();
+}
+
+/** RELEASE a panel terminal: the panel stops owning it entirely. Used by
+ *  `promote to tab` (the tab bar takes it) and by teardown (it is gone). Safe
+ *  to call for a session the panel never owned. */
+export function releasePanelSession(sessionId: string): void {
+  if (sessionId.length === 0) return;
+  let changed = dropSessionArtifact(sessionId);
+  if (parkedSessions.has(sessionId)) {
+    parkedSessions = new Set(parkedSessions);
+    parkedSessions.delete(sessionId);
+    changed = true;
+  }
+  if (changed) bump();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -897,6 +1175,17 @@ export function activeTabArtifact(): Artifact | null {
 // module-singleton bridge as threadStore.registerThreadActions, for the same
 // reason: no callback threaded through DocView into a rail row.
 
+/** What `+ → new terminal` picked: exactly the arguments App's EXISTING
+ *  session-creation path takes (`doCreateSession`). The panel does not fork
+ *  session creation — it chooses a working directory and hands it over. */
+export type NewPanelTerminal = {
+  name: string;
+  repo: string;
+  workingDir: string;
+  repoColor?: string;
+  group?: string;
+};
+
 export type PanelActions = {
   /** TYPE text into the focused terminal. The implementation MUST NOT append
    *  a trailing \r — the Enter that sends it is the user's keystroke. */
@@ -906,6 +1195,18 @@ export type PanelActions = {
    *  WHICH artifact is out there, so the panel can say so instead of drawing a
    *  second live copy of it. */
   popOutArtifact: (artifact: Artifact) => void;
+  // ── Increment H ────────────────────────────────────────────────────────────
+  // Session lifecycle belongs to App (it owns `sessions`, the pane layout and
+  // the confirm dialog); the panel owns only the artifact record. Same
+  // module-singleton bridge, same reason.
+  /** Spawn a shell through App's existing creation path and open it as a
+   *  `session` artifact in THIS tab's panel. */
+  createPanelTerminal: (tabSessionId: string, target: NewPanelTerminal) => void;
+  /** MOVE a panel terminal to the tab bar — park, commit, release, focus. */
+  promotePanelTerminal: (sessionId: string) => void;
+  /** Close a panel terminal's tab. App asks first when the process is alive
+   *  (keep running / promote / kill); the store never kills anything. */
+  closePanelTerminal: (tabSessionId: string, sessionId: string) => void;
 };
 
 let panelActions: PanelActions | null = null;
@@ -956,6 +1257,12 @@ let poppedOut: { sessionId: string; artifact: Artifact } | null = null;
 export function setPoppedOutArtifact(sessionId: string, artifact: Artifact): void {
   const clean = sanitizeArtifact(artifact);
   if (!clean || sessionId.length === 0) return;
+  // A LIVE SHELL NEVER FLOATS (increment H). The floating window renders the
+  // same ArtifactSurface, and a terminal there would be a SECOND live view of
+  // one session — the exact case this increment is built to make impossible.
+  // The panel header hides the `float` action for a session artifact; this is
+  // the store-side half, so no future caller can route around it.
+  if (clean.kind === "session") return;
   poppedOut = { sessionId, artifact: clean };
   bump();
 }
@@ -1018,6 +1325,7 @@ export function isLocalhostUrlOpen(url: string): boolean {
  *  registered no handler (callers gate on `usePopOutAvailable` so the action is
  *  DISABLED rather than silently dead). */
 export function popOutArtifact(artifact: Artifact): void {
+  if (artifact.kind === "session") return; // one live view — see setPoppedOutArtifact
   panelActions?.popOutArtifact(artifact);
 }
 
@@ -1027,6 +1335,77 @@ export function popOutAvailable(): boolean {
 
 export function usePopOutAvailable(): boolean {
   return useSyncExternalStore(subscribe, popOutAvailable);
+}
+
+// ── Panel-terminal actions (increment H) ─────────────────────────────────────
+// Thin wrappers over the bridge, so the panel and the picker never reach for
+// `panelActions` themselves. Each is a no-op when App has registered nothing
+// (the affordances gate on `usePanelTerminalsAvailable`, so they are HIDDEN
+// rather than silently dead).
+
+export function createPanelTerminal(tabSessionId: string, target: NewPanelTerminal): void {
+  panelActions?.createPanelTerminal(tabSessionId, target);
+}
+
+export function promotePanelTerminal(sessionId: string): void {
+  panelActions?.promotePanelTerminal(sessionId);
+}
+
+export function closePanelTerminal(tabSessionId: string, sessionId: string): void {
+  panelActions?.closePanelTerminal(tabSessionId, sessionId);
+}
+
+export function panelTerminalsAvailable(): boolean {
+  return panelActions !== null;
+}
+
+export function usePanelTerminalsAvailable(): boolean {
+  return useSyncExternalStore(subscribe, panelTerminalsAvailable);
+}
+
+// ── Session labels (increment H) ─────────────────────────────────────────────
+// A `session` artifact carries an id and nothing else, but the tab strip, the
+// panel header and the picker all have to NAME it and show its live status
+// dot. App publishes the (name, status) of every session here — the same
+// module-singleton bridge threadStore.publishSessionStatuses uses, and for the
+// same reason: no session list threaded through the panel into a tab.
+//
+// One published record per session, replaced only when its content actually
+// changes, so the panel re-renders on a real status flip and not on every
+// unrelated `sessions` array identity change.
+
+export type SessionLabel = { name: string; status: AgentStatus };
+
+let sessionLabels = new Map<string, SessionLabel>();
+
+/** App publishes the live session list (id → name + status). */
+export function publishSessionLabels(next: ReadonlyMap<string, SessionLabel>): void {
+  if (next.size === sessionLabels.size) {
+    let same = true;
+    for (const [id, label] of next) {
+      const prev = sessionLabels.get(id);
+      if (!prev || prev.name !== label.name || prev.status !== label.status) {
+        same = false;
+        break;
+      }
+    }
+    if (same) return;
+  }
+  sessionLabels = new Map(next);
+  bump();
+}
+
+/** Name + status for a session, or null when App knows no such session (a
+ *  session artifact whose session is gone — the panel renders a note rather
+ *  than a terminal). */
+export function sessionLabelFor(sessionId: string): SessionLabel | null {
+  return sessionLabels.get(sessionId) ?? null;
+}
+
+/** Narrow selector for one tab / one header. The snapshot is the stored record
+ *  itself, which is replaced only on a real change. */
+export function useSessionLabel(sessionId: string): SessionLabel | null {
+  return useSyncExternalStore(subscribe, () => sessionLabelFor(sessionId));
 }
 
 // ── `+` picker request (2026-08-02) ──────────────────────────────────────────
@@ -1192,11 +1571,15 @@ export function openArtifact(
 export function __resetPanelStoreForTests(): void {
   panels = new Map();
   lastPanelStates = new Map();
+  parkedSessions = new Set();
+  sessionLabels = new Map();
   activeTabSessionId = null;
   panelActions = null;
   pickerSessionId = null;
   poppedOut = null;
   panelWidth = DEFAULT_PANEL_WIDTH;
   cachedView = null;
+  cachedOwnedSessions = null;
+  cachedParkedSessions = null;
   listeners.clear();
 }

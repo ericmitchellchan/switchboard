@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState, lazy, Suspense, Component, Fragment } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense, Component, Fragment } from "react";
+import { flushSync } from "react-dom";
 import type { CSSProperties, ReactNode } from "react";
 import type { AgentStatus, Artifact, RepoConfig, ScreenId, Session, Thread } from "./types";
 import { TabBar } from "./components/TabBar";
@@ -74,6 +75,15 @@ import {
   setPoppedOutArtifact,
   clearPoppedOutArtifact,
   usePoppedOutIdentity,
+  // Increment H — panel-hosted terminals.
+  openInPanel,
+  isPanelOwnedSession,
+  usePanelOwnedSessions,
+  parkPanelSession,
+  releasePanelSession,
+  publishSessionLabels,
+  type NewPanelTerminal,
+  type SessionLabel,
 } from "./lib/panelStore";
 import { clearDevServerSession, setPreviewOpenCheck } from "./lib/devServer";
 import { dirtyCount, flushDrafts } from "./lib/editor";
@@ -174,7 +184,9 @@ async function resolveSpawnContext(sessionId: string): Promise<string | null> {
   // repo file's is mirrored into the hidden `_repo-pins/` KB tree. pinTargetFor
   // is the one place that knows which — and it reads out of the KB either way,
   // so the lookup below is unchanged.
-  if (artifact.kind !== "localhost") {
+  // (A `session` artifact has no file and no pins — and no ref either, so
+  // buildSpawnContext below returns null for it and the flag is omitted.)
+  if (artifact.kind === "kb-doc" || artifact.kind === "repo-file") {
     const { sidecarPath, docKey } = pinTargetFor(artifact);
     // Prefer the SHARED record when a view has it loaded: it is the same
     // record every mount edits and it is newer than disk during the write
@@ -208,6 +220,10 @@ type ConfirmState = {
    *  passes false so the destructive button cannot be fired by reflex —
    *  increment E, Decision 3. */
   enterConfirms?: boolean;
+  /** Non-destructive alternatives (increment H): the panel-terminal close
+   *  guard has three real outcomes, and two buttons could only offer them by
+   *  lying about one. */
+  extraActions?: Array<{ label: string; onClick: () => void }>;
   onConfirm: () => void;
 };
 
@@ -240,10 +256,26 @@ export default function App() {
     switchToSession: switchToSessionDirect,
     switchByIndex,
     switchRelative,
-    moveSession,
     reorderSession,
     bulkSetSessions,
-  } = useSessions();
+    // A panel terminal is a real session that is deliberately NOT in the tab
+    // bar (increment H), so every "which tab now?" decision inside the hook —
+    // Ctrl+1…9, Ctrl+[ / ], the next tab after a close — has to step over it.
+    // The predicate reads the panel store, which is current the instant a
+    // mutation lands, so `promote to tab` can release ownership and switch to
+    // the promoted session in the same breath.
+  } = useSessions(useCallback((s: Session) => !isPanelOwnedSession(s.id), []));
+
+  // Sessions the TAB BAR and the PANE TREE may show: everything the panel does
+  // not own. This is the load-bearing half of the one-live-view invariant —
+  // the single-pane branch below mounts EVERY session it is given, so a
+  // panel-owned session left in this list would be mounted twice and the
+  // registry would have to arbitrate a steal.
+  const panelOwnedSessions = usePanelOwnedSessions();
+  const tabSessions = useMemo(
+    () => (panelOwnedSessions.size === 0 ? sessions : sessions.filter((s) => !panelOwnedSessions.has(s.id))),
+    [sessions, panelOwnedSessions]
+  );
 
   const { toasts, addToast, dismissToast, dismissBySessionId } = useToasts();
   const { activeTasks, completedTasks, addTask, addAutoTask, resolveByFingerprint, toggleTask, removeTask, clearCompleted, clearAll, clearAutoTasks } = useTasks();
@@ -372,11 +404,14 @@ export default function App() {
   // Reinit pane layout when root becomes null but sessions still exist
   // (e.g. closing the only pane via tab X button leaves root=null)
   useEffect(() => {
-    if (!paneLayout.root && activeSessionId && sessions.length > 0) {
-      log.warn(`Pane layout root is null but ${sessions.length} sessions exist — reinitializing with id=${activeSessionId}`);
+    // TAB sessions, not all sessions: a workspace whose only shells are panel
+    // terminals has nothing for the pane tree to hold, and seeding it with one
+    // would mount that terminal a second time.
+    if (!paneLayout.root && activeSessionId && tabSessions.length > 0 && !isPanelOwnedSession(activeSessionId)) {
+      log.warn(`Pane layout root is null but ${tabSessions.length} tab sessions exist — reinitializing with id=${activeSessionId}`);
       paneLayout.initLayout(activeSessionId);
     }
-  }, [paneLayout.root, activeSessionId, sessions.length, paneLayout]);
+  }, [paneLayout.root, activeSessionId, tabSessions.length, paneLayout]);
 
   // Derive active session from focused pane when split
   const effectiveActiveSessionId = paneLayout.isSplit
@@ -495,8 +530,16 @@ export default function App() {
     // binding is severed and the side menu shows the revive chip.
     unbindThreadsForSession(id);
     // The tab's panel binding dies WITH the tab (per-tab state, nothing to
-    // revive) — unlike the thread record, which survives severed.
+    // revive) — unlike the thread record, which survives severed. Any PANEL
+    // TERMINALS in that strip are PARKED rather than killed (increment H — see
+    // removeSessionPanel): they keep running and stay reachable from any tab's
+    // `+`, because a dev server dying because its host tab closed is the same
+    // surprise the close guard exists to prevent.
     removeSessionPanel(id);
+    // If THIS session was itself a panel terminal, the panel stops owning it in
+    // the same batch as removeSession below — never before, or the pane tree
+    // would mount a session that is already disposed.
+    releasePanelSession(id);
     // Same for its dev-server detection state (increment F): the tail buffer,
     // the already-offered URLs and the cwd all die with the tab. Session ids
     // are never reused, so nothing would ever read them again.
@@ -1110,6 +1153,17 @@ export default function App() {
     publishSessionStatuses(statuses, effectiveActiveSessionId);
   }, [sessions, effectiveActiveSessionId]);
 
+  // The same publication, one layer over, for the PANEL (increment H): a
+  // `session` artifact carries an id and nothing else, so the tab strip, the
+  // header and the `+` picker read the name + live status from here. Separate
+  // from the thread bridge above because it carries the NAME too, and because
+  // panelStore must not import threadStore to get it.
+  useEffect(() => {
+    const labels = new Map<string, SessionLabel>();
+    for (const s of sessions) labels.set(s.id, { name: s.name, status: s.status });
+    publishSessionLabels(labels);
+  }, [sessions]);
+
   const handleStatusChange = useCallback(
     (sessionId: string, status: AgentStatus) => {
       updateSessionStatus(sessionId, status);
@@ -1149,6 +1203,45 @@ export default function App() {
       }
     },
     [updateSessionStatus, addToast, dismissBySessionId]
+  );
+
+  // Tab ORDER is expressed in the tab bar's own coordinates, and those are
+  // `tabSessions`' — a panel terminal sits in `sessions` but not in the strip
+  // (increment H), so a raw index from the drag would land one slot off, and a
+  // ±1 move could "swap" with a session nobody can see (a keystroke that does
+  // nothing). Both paths therefore resolve the NEIGHBOUR in the visible list
+  // and reorder to ITS position in the full array.
+  const tabSessionsRef = useRef(tabSessions);
+  tabSessionsRef.current = tabSessions;
+
+  const handleReorderTab = useCallback(
+    (sessionId: string, newIndex: number) => {
+      const visible = tabSessionsRef.current;
+      const all = sessionsRef.current;
+      if (visible.length === all.length) {
+        reorderSession(sessionId, newIndex);
+        return;
+      }
+      const target = visible[Math.max(0, Math.min(newIndex, visible.length - 1))];
+      if (!target) return;
+      const at = all.findIndex((s) => s.id === target.id);
+      if (at >= 0) reorderSession(sessionId, at);
+    },
+    [reorderSession]
+  );
+
+  const handleMoveTab = useCallback(
+    (delta: -1 | 1) => {
+      const id = effectiveActiveIdRef.current;
+      if (!id) return;
+      const visible = tabSessionsRef.current;
+      const from = visible.findIndex((s) => s.id === id);
+      const to = from + delta;
+      if (from < 0 || to < 0 || to >= visible.length) return;
+      const at = sessionsRef.current.findIndex((s) => s.id === visible[to].id);
+      if (at >= 0) reorderSession(id, at);
+    },
+    [reorderSession]
   );
 
   const handleRenameTab = useCallback(
@@ -1404,15 +1497,215 @@ export default function App() {
     []
   );
 
+  // ── PANEL TERMINALS (increment H) ────────────────────────────────────────
+  // A shell that lives in the panel instead of a pane. Three actions, all of
+  // them App's because they touch sessions, the pane layout or the confirm
+  // dialog — the panel owns only the artifact record.
+
+  /** `+ → new terminal` is in flight (double-submit guard). Its own ref, not
+   *  the Explorer's: a spawn from the tree must not silently swallow a `+`. */
+  const panelTerminalBusyRef = useRef(false);
+
+  // CREATE — through App's EXISTING creation path (doCreateSession), never a
+  // fork of it, then open the result as a `session` artifact in the tab that
+  // asked. The three store writes after the await are SYNCHRONOUS and
+  // deliberately so: `addSession` makes the new session active and (for that
+  // instant) a tab-bar candidate, and React 18 batches all of it into ONE
+  // commit — so the session is already panel-owned by the time anything
+  // renders, and the active tab never visibly moves.
+  const handleCreatePanelTerminal = useCallback(
+    (tabSessionId: string, target: NewPanelTerminal) => {
+      if (panelTerminalBusyRef.current) return;
+      panelTerminalBusyRef.current = true;
+      void (async () => {
+        try {
+          const info = await doCreateSession(
+            target.name,
+            target.repo,
+            target.workingDir,
+            target.repoColor,
+            target.group
+          );
+          log.info(`Panel terminal created id=${info.id} tab=${tabSessionId} dir=${target.workingDir}`);
+          openInPanel(tabSessionId, { kind: "session", sessionId: info.id });
+          switchToSessionDirect(tabSessionId);
+        } catch (err) {
+          log.error(`Failed to create panel terminal: ${err}`);
+          addToast(NO_SESSION, `Cannot open ${target.name}`, String(err));
+        } finally {
+          panelTerminalBusyRef.current = false;
+        }
+      })();
+    },
+    [doCreateSession, switchToSessionDirect, addToast]
+  );
+
+  // PROMOTE — MOVE the session to the tab bar. ONE LIVE VIEW ACROSS THE MOVE,
+  // guaranteed by taking two commits instead of one:
+  //
+  //   1. PARK inside flushSync. The artifact leaves the strip, so the panel
+  //      UNMOUNTS its TerminalPane — the instance parks in the keep-alive root
+  //      and keeps consuming PTY output. Ownership is RETAINED, so the pane
+  //      tree cannot mount it in this commit. flushSync is what makes the
+  //      unmount happen here rather than whenever React next renders.
+  //   2. RELEASE + place. Ownership ends and the tab bar / pane tree take it;
+  //      the single-pane branch mounts it and `acquireTerminal` ADOPTS the
+  //      parked instance (scrollback intact, nothing replayed).
+  //
+  // No steal can fire: at the moment acquireTerminal runs, the panel's mount
+  // has already released the instance, so `adopt` sees no owner.
+  const handlePromotePanelTerminal = useCallback(
+    (sessionId: string) => {
+      const session = sessionsRef.current.find((s) => s.id === sessionId);
+      if (!session) {
+        // Nothing to promote — just stop claiming it.
+        releasePanelSession(sessionId);
+        return;
+      }
+      log.info(`Promoting panel terminal to tab id=${sessionId}`);
+      flushSync(() => parkPanelSession(sessionId));
+      releasePanelSession(sessionId);
+      if (!paneLayout.root) paneLayout.initLayout(sessionId);
+      switchToSession(sessionId);
+    },
+    [paneLayout, switchToSession]
+  );
+
+  // CLOSE — and ASK when the process is alive. A dev server dying because a
+  // tab closed is exactly the surprise this app should not have, so the guard
+  // states what each outcome does instead of hiding two of them behind one
+  // button. Enter is unbound (increment E's rule for a destructive default):
+  // Cancel holds focus, and the destructive button here would end a process.
+  const handleClosePanelTerminal = useCallback(
+    (_tabSessionId: string, sessionId: string) => {
+      const session = sessionsRef.current.find((s) => s.id === sessionId);
+      // Nothing alive to protect: the record is gone, or the shell already
+      // exited (its buffer is the only thing left, and closing the tab is what
+      // the user just asked for). Even here the view is taken away FIRST —
+      // releasing ownership before `removeSession` lands would leave one commit
+      // in which the pane tree could mount a session that is being disposed.
+      if (!session) {
+        releasePanelSession(sessionId);
+        return;
+      }
+      if (session.status === "exited") {
+        flushSync(() => parkPanelSession(sessionId));
+        void destroySession(sessionId);
+        return;
+      }
+      const name = session.name;
+      setConfirmState({
+        open: true,
+        title: "This terminal is still running",
+        message:
+          `"${name}" has a live process in this panel tab.\n\n` +
+          `Keep it running — closes the tab only. The shell keeps going with no view; ` +
+          `reopen it from the panel's + under "running terminals" (this app session only — ` +
+          `a restart respawns it as an ordinary tab).\n\n` +
+          `Promote to tab — moves it to the tab bar, scrollback intact, still one live terminal.\n\n` +
+          `Kill it — ends the process and closes the session. Its scrollback goes with it.`,
+        confirmLabel: "Kill it",
+        enterConfirms: false,
+        extraActions: [
+          {
+            label: "Keep it running",
+            onClick: () => {
+              closeConfirm();
+              parkPanelSession(sessionId);
+            },
+          },
+          {
+            label: "Promote to tab",
+            onClick: () => {
+              closeConfirm();
+              handlePromotePanelTerminal(sessionId);
+            },
+          },
+        ],
+        onConfirm: () => {
+          closeConfirm();
+          // Take the view away FIRST (park + commit), then kill: the pane tree
+          // must never mount a session that is being disposed, and
+          // destroySession's own `releasePanelSession` ends ownership in the
+          // same batch as `removeSession`.
+          flushSync(() => parkPanelSession(sessionId));
+          void destroySession(sessionId);
+        },
+      });
+    },
+    [closeConfirm, destroySession, handlePromotePanelTerminal]
+  );
+
+  // THE ONE LIVE VIEW of a panel terminal. Handed to ArtifactPanel, which
+  // renders it in exactly one place (the body of the active tab of the active
+  // tab's panel) and nowhere else — ArtifactSurface deliberately refuses to
+  // draw a terminal, so no other host can become a second view.
+  //
+  // A plain function, not a useCallback: ArtifactPanel is not memoized, so it
+  // re-renders with App and this closure is always current.
+  const renderPanelSession = (panelSessionId: string): ReactNode => {
+    const session = sessions.find((s) => s.id === panelSessionId);
+    if (!session) {
+      // The artifact outlived its session (a failed restore, or a race with a
+      // close). Say so rather than painting an empty black column.
+      return (
+        <div
+          style={{
+            flex: 1,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 24,
+            textAlign: "center",
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            color: "var(--text-dim)",
+          }}
+        >
+          This terminal's session is gone.
+        </div>
+      );
+    }
+    return (
+      <TerminalPane
+        key={session.id}
+        session={session}
+        // The panel only renders on the terminal screen at all, so this is the
+        // same condition every other panel body gets — and it drives the same
+        // show/hide + WebGL path a pane's does. `isFocused` is FALSE: mounting
+        // a panel terminal must not steal the keyboard from the pane Eric is
+        // typing in. Clicking it focuses it, exactly like any terminal.
+        visible={route.screen === "terminal"}
+        searchOpen={false}
+        onCloseSearch={() => setSearchOpen(false)}
+        onExited={handleSessionExited}
+        onStatusChange={handleStatusChange}
+        onAutoTask={handleAutoTask}
+        onResolveTask={resolveByFingerprint}
+        onRestart={handleRestartSession}
+        isFocused={false}
+      />
+    );
+  };
+
   // Bridge them to the panel header + the wireframe pin rail (module singleton —
   // see panelStore.PanelActions).
   useEffect(() => {
     registerPanelActions({
       sendToThread: handleSendToThread,
       popOutArtifact: (artifact) => void handlePopOutArtifact(artifact),
+      createPanelTerminal: handleCreatePanelTerminal,
+      promotePanelTerminal: handlePromotePanelTerminal,
+      closePanelTerminal: handleClosePanelTerminal,
     });
     return () => registerPanelActions(null);
-  }, [handleSendToThread, handlePopOutArtifact]);
+  }, [
+    handleSendToThread,
+    handlePopOutArtifact,
+    handleCreatePanelTerminal,
+    handlePromotePanelTerminal,
+    handleClosePanelTerminal,
+  ]);
 
   // "Bring it back" (the panel's `↙ back`, and the placeholder's button) —
   // clearing the record is the panel's half; the WINDOW is App's, so it closes
@@ -1463,8 +1756,8 @@ export default function App() {
       onClosePane: handleClosePane,
       onMoveFocus: paneLayout.moveFocus,
       onExport: handleExport,
-      onMoveTabLeft: () => { if (effectiveActiveSessionId) moveSession(effectiveActiveSessionId, -1); },
-      onMoveTabRight: () => { if (effectiveActiveSessionId) moveSession(effectiveActiveSessionId, 1); },
+      onMoveTabLeft: () => handleMoveTab(-1),
+      onMoveTabRight: () => handleMoveTab(1),
       onTogglePip: handleTogglePip,
       onToggleSideMenu: toggleSideMenu,
       onTogglePanel: handleTogglePanel,
@@ -1759,6 +2052,16 @@ export default function App() {
           return;
         }
 
+        // Panels follow the same idMap, but an unmapped panel is DROPPED, not
+        // severed — a panel binding without its tab is meaningless. Done HERE,
+        // before the layout and active-tab decisions below, because increment H
+        // made those decisions depend on it: a restored PANEL TERMINAL must not
+        // be handed to the pane tree or made the active tab, and
+        // `isPanelOwnedSession` can only answer that once the remap has landed.
+        remapPanelSessions(idMap);
+        /** Restored sessions the TAB BAR can hold (i.e. not panel terminals). */
+        const restoredTabSessions = newSessions.filter((s) => !isPanelOwnedSession(s.id));
+
         // Remap pane layout IDs
         sessionCounterRef.current = restoredCounter;
         const savedPaneLayout = savedWorkspace.paneLayout as PaneNode | null;
@@ -1771,10 +2074,14 @@ export default function App() {
           restoredFocusedPaneId = savedWorkspace.focusedPaneId;
         }
 
-        // Determine active session
-        const remappedActiveId = savedWorkspace.activeSessionId
-          ? idMap.get(savedWorkspace.activeSessionId) ?? newSessions[0].id
-          : newSessions[0].id;
+        // Determine active session. A panel terminal is never it: the tab bar
+        // does not hold one, so making it active would show an empty workspace.
+        const fallbackActive = restoredTabSessions[0]?.id ?? null;
+        const savedActive = savedWorkspace.activeSessionId
+          ? idMap.get(savedWorkspace.activeSessionId) ?? null
+          : null;
+        const remappedActiveId =
+          savedActive && !isPanelOwnedSession(savedActive) ? savedActive : fallbackActive;
 
         // Bulk-set sessions and pane layout
         bulkSetSessions(newSessions, remappedActiveId);
@@ -1784,16 +2091,13 @@ export default function App() {
           if (restoredFocusedPaneId) {
             paneLayout.focusPane(restoredFocusedPaneId);
           }
-        } else {
-          paneLayout.initLayout(newSessions[0].id);
+        } else if (fallbackActive) {
+          paneLayout.initLayout(fallbackActive);
         }
 
         // Threads whose sessions restored keep their tab binding (remapped to
         // the new session ids); the rest are severed → dead → revivable.
         remapThreadSessionsInStore(idMap);
-        // Panels follow the same idMap, but an unmapped panel is DROPPED, not
-        // severed — a panel binding without its tab is meaningless.
-        remapPanelSessions(idMap);
       } else {
         // Fresh start — no sessions restored, so no thread or panel binding
         // can hold.
@@ -2012,12 +2316,15 @@ export default function App() {
       }}
     >
       <TabBar
-        sessions={sessions}
+        // TAB sessions only (increment H): a panel terminal has a home already
+        // and putting it here too would be the second surface the tab bar was
+        // meant to stop filling with dev servers.
+        sessions={tabSessions}
         activeId={effectiveActiveSessionId}
         onSelect={switchToSession}
         onClose={handleCloseSpecificTab}
         onRename={handleRenameTab}
-        onReorder={reorderSession}
+        onReorder={handleReorderTab}
         waitingCount={waitingCount}
         onToggleSideMenu={toggleSideMenu}
         // Per-TAB, like everything else about the panel: activeSessionId, not
@@ -2105,11 +2412,16 @@ export default function App() {
               isSplit
             />
           ) : (
-            // Single pane — render ALL sessions, toggle visibility via CSS.
+            // Single pane — render ALL TAB sessions, toggle visibility via CSS.
             // Keeps xterm instances mounted in the DOM so tab switches don't
             // trigger detach/reattach (which resets scroll position).
-            sessions.length > 0 ? (
-              sessions.map((s) => {
+            //
+            // `tabSessions`, NOT `sessions` (increment H): this branch mounts
+            // every session it is handed, so a panel-owned one here would be a
+            // SECOND mount of a terminal the panel is already showing — the
+            // steal case. The filter is the enforcement.
+            tabSessions.length > 0 ? (
+              tabSessions.map((s) => {
                 const isActive = s.id === effectiveActiveSessionId;
                 return (
                   <div
@@ -2136,38 +2448,14 @@ export default function App() {
                   </div>
                 );
               })
-            ) : null
+            ) : (
+              // Every session the workspace has is a PANEL terminal — the pane
+              // tree really is empty, and saying so beats a black rectangle.
+              <EmptyWorkspaceNote />
+            )
           )
         ) : (
-          <div
-            style={{
-              flex: 1,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              flexDirection: "column",
-              gap: 16,
-            }}
-          >
-            <span
-              style={{
-                fontFamily: "var(--font-mono)",
-                fontSize: 14,
-                color: "#52525B",
-              }}
-            >
-              No sessions open
-            </span>
-            <span
-              style={{
-                fontFamily: "var(--font-mono)",
-                fontSize: 12,
-                color: "#3F3F46",
-              }}
-            >
-              Press Ctrl+T to open a new terminal
-            </span>
-          </div>
+          <EmptyWorkspaceNote />
         )}
 
         {/* Artifact panel (workstation v2) — a SIBLING of the pane tree inside
@@ -2217,6 +2505,8 @@ export default function App() {
           <ArtifactPanel
             sessionId={activeSessionId}
             active={route.screen === "terminal"}
+            repos={config.repos}
+            renderSession={renderPanelSession}
           />
         </ScreenErrorBoundary>
         </div>
@@ -2318,9 +2608,34 @@ export default function App() {
         message={confirmState.message}
         confirmLabel={confirmState.confirmLabel}
         enterConfirms={confirmState.enterConfirms}
+        extraActions={confirmState.extraActions}
         onConfirm={confirmState.onConfirm}
         onCancel={closeConfirm}
       />
+    </div>
+  );
+}
+
+/** The pane tree with nothing in it. Two states reach it: no sessions at all,
+ *  and (increment H) a workspace whose only shells are panel terminals. */
+function EmptyWorkspaceNote() {
+  return (
+    <div
+      style={{
+        flex: 1,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexDirection: "column",
+        gap: 16,
+      }}
+    >
+      <span style={{ fontFamily: "var(--font-mono)", fontSize: 14, color: "#52525B" }}>
+        No sessions open
+      </span>
+      <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "#3F3F46" }}>
+        Press Ctrl+T to open a new terminal
+      </span>
     </div>
   );
 }

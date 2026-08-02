@@ -485,9 +485,9 @@ export function mergeThreads(
   return diskThreads ?? localThreads;
 }
 
-// ── SavedWorkspace v1/v2/v3 → v4 migration + staleness ───────────────────────
+// ── SavedWorkspace v1/v2/v3/v4 → v5 migration + staleness ────────────────────
 
-/** Migrate a raw parsed workspace blob to v4. Additive per version — each new
+/** Migrate a raw parsed workspace blob to v5. Additive per version — each new
  *  schema EXTENDS this table rather than forking a second migrator:
  *
  *  | from | sessions/layout | threads             | panels                       |
@@ -496,27 +496,37 @@ export function mergeThreads(
  *  | v2   | preserved       | sanitized           | `{}`                         |
  *  | v3   | preserved       | sanitized           | `Artifact` → one-tab strip   |
  *  | v4   | preserved       | sanitized           | tolerant-parsed strips       |
+ *  | v5   | preserved       | sanitized           | tolerant-parsed strips       |
+ *
+ *  v4 → v5 (increment H) is LOSSLESS AND SHAPELESS: a strip may now hold a
+ *  `session` artifact, which a v4 blob simply never contained, so the parse is
+ *  identical and a v4 payload is already a valid v5 one. The number still moves
+ *  because the CONTENT changed meaning — a v5 blob read by v4 code would drop
+ *  those entries silently, and the version is what makes that legible.
  *
  *  The width is clamped from whatever is present at every version (it has
  *  existed since v3 and is not session-bound). Anything else is rejected. */
 export function migrateSavedWorkspace(raw: unknown): SavedWorkspace | null {
   if (!raw || typeof raw !== "object") return null;
   const ws = raw as Record<string, unknown>;
-  if (ws.version !== 1 && ws.version !== 2 && ws.version !== 3 && ws.version !== 4) return null;
+  const version = ws.version;
+  if (version !== 1 && version !== 2 && version !== 3 && version !== 4 && version !== 5) {
+    return null;
+  }
   if (!Array.isArray(ws.sessions)) return null;
   return {
-    version: 4,
+    version: 5,
     sessions: ws.sessions as SavedSession[],
     activeSessionId: typeof ws.activeSessionId === "string" ? ws.activeSessionId : null,
     paneLayout: ws.paneLayout ?? null,
     focusedPaneId: typeof ws.focusedPaneId === "string" ? ws.focusedPaneId : null,
     sessionCounter: typeof ws.sessionCounter === "number" ? ws.sessionCounter : 0,
     savedAt: typeof ws.savedAt === "number" ? ws.savedAt : 0,
-    threads: ws.version === 1 ? [] : sanitizeThreads(ws.threads),
+    threads: version === 1 ? [] : sanitizeThreads(ws.threads),
     panels:
-      ws.version === 4
+      version >= 4
         ? parsePanels(ws.panels)
-        : ws.version === 3
+        : version === 3
           ? parsePanelsV3(ws.panels)
           : {},
     panelWidth: parsePanelWidth(ws.panelWidth),

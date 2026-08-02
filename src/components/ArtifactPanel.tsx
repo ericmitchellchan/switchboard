@@ -40,6 +40,22 @@
 // the strip spends none of it (the `+` lives OUTSIDE the scroller, so it stays
 // reachable at the 260px floor no matter how many tabs are open).
 //
+// INCREMENT H — the panel can host a LIVE PTY SESSION as an artifact, and it
+// is the ONLY host that ever will. The terminal is CREATED here (`+ → new
+// terminal`) and lives here; it is never mirrored from a pane, because one
+// session with two live views is exactly the ownership-steal case
+// terminalRegistry arbitrates. Three facts make that structural rather than
+// arbitrated:
+//   1. App renders ONE ArtifactPanel, for the ACTIVE tab, and only its ACTIVE
+//      artifact has a body;
+//   2. panelStore keeps a session artifact in AT MOST ONE strip (openInPanel);
+//   3. App filters panel-OWNED sessions out of the tab bar and the pane tree
+//      (panelStore.isPanelOwnedSession), including the single-pane branch,
+//      which otherwise mounts every session it is handed.
+// `promote to tab` therefore MOVES the session (park → commit → release) and
+// `×` on a live one ASKS first. The terminal itself is App's `renderSession`
+// prop: this file stays chrome + lifecycle and mounts no xterm of its own.
+//
 // ICONS (2026-08-02): the header's kind mark is an SVG from components/icons,
 // like both trees and the picker. The TAB STRIP deliberately stays text-only —
 // a tab caps at 150px and horizontal room is the scarce axis, so 14px spent on
@@ -48,7 +64,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
-import type { Artifact, PanelState } from "../types";
+import type { Artifact, PanelState, RepoConfig } from "../types";
 import { navigate } from "../lib/route";
 import {
   activateArtifact,
@@ -58,16 +74,20 @@ import {
   useArtifactPickerOpen,
   artifactShortTitle,
   closeArtifactAt,
-  closePanel,
+  closePanelTerminal,
+  createPanelTerminal,
   describeArtifact,
   fullWidthRoute,
   openInPanel,
   panelLayoutFor,
   panelStateFor,
   panelWidthFromDrag,
+  promotePanelTerminal,
   setPanelWidth,
   sendToThread,
   useSendToThreadAvailable,
+  useSessionLabel,
+  usePanelTerminalsAvailable,
   clearPoppedOutArtifact,
   popOutArtifact,
   usePopOutAvailable,
@@ -78,8 +98,10 @@ import {
 } from "../lib/panelStore";
 import { buildSendReference, refOptions } from "../lib/agentContext";
 import { useDirtyKeys } from "../lib/editor";
+import { STATUS_CONFIGS } from "../lib/statusConfig";
 import { ArtifactPicker } from "./ArtifactPicker";
 import { Icon } from "./icons";
+import { PulsingDot } from "./PulsingDot";
 import { ArtifactSurface } from "./kb/ArtifactSurface";
 
 /** Tone → paint. Exported because the KB SCREEN's breadcrumb renders the same
@@ -158,10 +180,15 @@ function TabStrip({
   sessionId,
   state,
   onAdd,
+  onClose,
 }: {
   sessionId: string;
   state: PanelState;
   onAdd: () => void;
+  /** Closing a tab is NOT always `closeArtifactAt` any more (increment H): a
+   *  live terminal's tab goes through App's guard first. One entry point, so
+   *  the `×` and the middle-click cannot diverge. */
+  onClose: (index: number) => void;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
   const [hovered, setHovered] = useState<number | null>(null);
@@ -229,7 +256,7 @@ function TabStrip({
               onAuxClick={(e) => {
                 if (e.button === 1) {
                   e.preventDefault();
-                  closeArtifactAt(sessionId, i);
+                  onClose(i);
                 }
               }}
               style={{
@@ -277,13 +304,21 @@ function TabStrip({
                   }}
                 />
               )}
+              {/* A LIVE SHELL gets a mark and a status dot (increment H) —
+                  the one place the text-only rule bends, and it earns it: the
+                  glyph says "this tab is a process, not a document" and the dot
+                  is the same statusConfig colour the tab bar shows, so a dev
+                  server going red is visible without opening the tab. */}
+              {artifact.kind === "session" && (
+                <SessionTabMark sessionId={artifact.sessionId} active={isActive} />
+              )}
               <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
                 {artifactShortTitle(artifact)}
               </span>
               <span
                 onClick={(e) => {
                   e.stopPropagation();
-                  closeArtifactAt(sessionId, i);
+                  onClose(i);
                 }}
                 title={`Close ${title}`}
                 style={{
@@ -339,6 +374,28 @@ function TabStrip({
         +
       </button>
     </div>
+  );
+}
+
+/** A session tab's leading mark: the terminal glyph plus its LIVE status dot.
+ *  Subscribes narrowly (useSessionLabel) so a status flip repaints this span
+ *  and nothing else — a strip with a running dev server in it must not re-render
+ *  the whole panel every time the detector moves. */
+function SessionTabMark({ sessionId, active }: { sessionId: string; active: boolean }) {
+  const label = useSessionLabel(sessionId);
+  // No label = App does not know this session (its record is gone). Grey
+  // "exited" is the honest read; an idle dot would claim a shell that is not
+  // there.
+  const cfg = label ? STATUS_CONFIGS[label.status] : STATUS_CONFIGS.exited;
+  return (
+    <span style={{ flex: "none", display: "flex", alignItems: "center", gap: 3 }}>
+      <Icon
+        name="terminal"
+        size={10}
+        style={{ color: active ? "var(--text-secondary)" : "var(--text-muted)" }}
+      />
+      <PulsingDot color={cfg.color} pulse={cfg.pulse} size={5} />
+    </span>
   );
 }
 
@@ -442,9 +499,21 @@ export function ArtifactPanel({
   /** tab active && terminal screen visible — forwarded to the hosted viewer so
    *  its polling pauses exactly like the keep-alive screens' does. */
   active,
+  /** Config repos, forwarded to the `+` picker's new-terminal level so it
+   *  offers the SAME merged registry list Ctrl+T does. */
+  repos,
+  /** THE ONE LIVE VIEW of a panel terminal (increment H). App owns it — it has
+   *  the session records and TerminalPane's whole callback set — and the panel
+   *  renders it in exactly one place: the body of the ACTIVE tab of the ACTIVE
+   *  tab's panel. Nothing else in the app may mount a panel-owned session
+   *  (App filters them out of the tab bar and the pane tree), which is what
+   *  makes "one session, one view" structural rather than arbitrated. */
+  renderSession,
 }: {
   sessionId: string | null;
   active: boolean;
+  repos: RepoConfig[];
+  renderSession: (sessionId: string) => ReactNode;
 }) {
   // usePanelsView is the SUBSCRIPTION (re-render on any store change, and the
   // panel does want the width); `panelStateFor` is the documented accessor for
@@ -465,6 +534,9 @@ export function ArtifactPanel({
   // holding, so this tab can show a placeholder instead of a second live copy.
   const canPopOut = usePopOutAvailable();
   const poppedIdentity = usePoppedOutIdentity();
+  // Are App's panel-terminal actions wired? (create / promote / guarded close.)
+  // Gates the affordances so none of them is ever a silent no-op.
+  const canHostTerminals = usePanelTerminalsAvailable();
   // The picker request lives in panelStore, keyed by TAB (see
   // §"`+` picker request"): the tab bar's panel button opens it for a tab whose
   // panel is EMPTY, and an empty panel renders nothing that could hold a
@@ -505,7 +577,9 @@ export function ArtifactPanel({
     // Nothing to draw — EXCEPT the picker, which this tab may have asked for
     // with an empty panel (the tab bar's panel button). It is `position:
     // fixed`, so it needs no panel behind it; picking builds the panel.
-    return pickerOpen && sessionId ? <PickerOverlay sessionId={sessionId} /> : null;
+    return pickerOpen && sessionId ? (
+      <PickerOverlay sessionId={sessionId} repos={repos} />
+    ) : null;
   }
 
   const layout = panelLayoutFor(containerWidth, panelWidth);
@@ -515,10 +589,12 @@ export function ArtifactPanel({
   // Crossover to the full-width screen. Shares panelStore's `fullWidthRoute`
   // with the routing helper's navigate branch, so "open full" and a
   // full-width click can never drift to different routes for the same
-  // artifact. (localhost has no full-width screen — the button is hidden for
-  // it below, and the type reflects that.)
+  // artifact. (localhost and session have no full-width screen — the button is
+  // hidden for both below, and the type reflects that. For a session,
+  // `promote to tab` IS the full-width move, and it is a different thing: it
+  // relocates the live view rather than opening a second look at content.)
   const openFull = () => {
-    if (artifact.kind === "localhost") return;
+    if (artifact.kind !== "kb-doc" && artifact.kind !== "repo-file") return;
     navigate(fullWidthRoute(artifact));
   };
 
@@ -529,6 +605,23 @@ export function ArtifactPanel({
 
   // Is THIS tab's active artifact the one in the floating window?
   const isPoppedOut = poppedIdentity === artifactIdentity(artifact);
+
+  // ── Panel terminals (increment H) ──
+  // A live shell is not a document: it cannot be opened full width, cannot be
+  // referenced to an agent, and must never float (a second live view). What it
+  // CAN do is move to the tab bar, and it always asks before it dies.
+  const isSession = artifact.kind === "session";
+  /** Closing a tab: a session's close goes through App's guard (which asks when
+   *  the process is alive), everything else closes immediately. ONE function,
+   *  used by the strip's `×`, the middle-click and the header's `×`. */
+  const closeTabAt = (index: number) => {
+    const target = state.artifacts[index];
+    if (target?.kind === "session" && canHostTerminals) {
+      closePanelTerminal(sessionId, target.sessionId);
+      return;
+    }
+    closeArtifactAt(sessionId, index);
+  };
 
   return (
     <>
@@ -568,6 +661,7 @@ export function ArtifactPanel({
           sessionId={sessionId}
           state={state}
           onAdd={() => openArtifactPicker(sessionId)}
+          onClose={closeTabAt}
         />
         <header style={HEAD_STYLE}>
           <Icon name={icon} style={{ color: "var(--text-faint)" }} />
@@ -594,6 +688,30 @@ export function ArtifactPanel({
               </span>
             ))}
           </span>
+          {/* PROMOTE TO TAB (increment H, Decision 2) — the panel's escape
+              hatch. It MOVES the session to the tab bar (park → commit →
+              release, App side), so at no point are there two views of it;
+              this tab strip loses the tab in the same gesture. Only ever shown
+              for a session artifact, and only when App is there to do it. */}
+          {isSession && canHostTerminals && (
+            <button
+              type="button"
+              onClick={() => promotePanelTerminal(artifact.sessionId)}
+              title={`Move ${title} to the tab bar — same session, same scrollback, full width`}
+              style={ACTION_STYLE}
+              onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-primary)")}
+              onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-dim)")}
+            >
+              promote to tab
+            </button>
+          )}
+          {/* `→ thread`, `float` and `open full` are all meaningless for a live
+              shell: there is nothing to reference, nothing a second window
+              could show without becoming a second live view, and no full-width
+              screen for a session (promotion is that). Hidden, not disabled —
+              a disabled row of three would be chrome that never lights up. */}
+          {!isSession && (
+          <>
           <button
             type="button"
             onClick={sendReference}
@@ -662,13 +780,21 @@ export function ArtifactPanel({
               <Icon name="open" size={12} />
             </button>
           )}
+          </>
+          )}
           <button
             type="button"
-            onClick={() => closePanel(sessionId)}
+            // The header `×` acts on the ACTIVE tab, and for a session that
+            // means the guard, not a silent kill — same entry point the strip's
+            // own `×` uses. (`closePanel` is exactly `closeArtifactAt` on the
+            // active index, which is what this now spells out.)
+            onClick={() => closeTabAt(state.artifacts.indexOf(artifact))}
             title={
-              state.artifacts.length > 1
-                ? `Close ${title} (Ctrl+Shift+P hides the panel)`
-                : "Close panel (Ctrl+Shift+P)"
+              isSession
+                ? `Close ${title} — asks what to do with the process`
+                : state.artifacts.length > 1
+                  ? `Close ${title} (Ctrl+Shift+P hides the panel)`
+                  : "Close panel (Ctrl+Shift+P)"
             }
             aria-label="Close artifact"
             style={{ ...ACTION_STYLE, fontSize: 13, padding: "0 2px 2px" }}
@@ -700,6 +826,28 @@ export function ArtifactPanel({
               </button>
             </CenteredNote>
           </div>
+        ) : isSession ? (
+          // THE ONE LIVE VIEW. Rendered HERE and nowhere else — before
+          // ArtifactSurface, which deliberately refuses to draw a terminal so
+          // no other host (the floating window above all) can become a second
+          // one. `minWidth: 0` is the LocalhostView lesson applied: this is a
+          // flex item wrapping a terminal whose min-content width is its
+          // columns, and without it the panel would overflow at the 260px
+          // floor instead of letting the terminal scroll horizontally (which
+          // the existing grow-only policy already handles — no resize code
+          // lives here either).
+          <div
+            style={{
+              flex: 1,
+              minWidth: 0,
+              minHeight: 0,
+              display: "flex",
+              flexDirection: "column",
+              background: "var(--bg-primary)",
+            }}
+          >
+            {renderSession(artifact.sessionId)}
+          </div>
         ) : (
           <ArtifactSurface artifact={artifact} active={active} />
         )}
@@ -709,7 +857,7 @@ export function ArtifactPanel({
           overlay/docked flip. It always ADDS TO THIS PANEL — openInPanel, not
           openArtifact: `+` is not a click on a tree row and must never navigate
           away from the shell it was pressed beside. */}
-      {pickerOpen && <PickerOverlay sessionId={sessionId} />}
+      {pickerOpen && <PickerOverlay sessionId={sessionId} repos={repos} />}
     </>
   );
 }
@@ -719,12 +867,21 @@ export function ArtifactPanel({
  *  artifacts yet — so the "always adds to THIS panel" rule is written once.
  *  `openInPanel`, never `openArtifact`: `+` is not a click on a tree row and
  *  must never navigate away from the shell it was pressed beside. */
-function PickerOverlay({ sessionId }: { sessionId: string }) {
+function PickerOverlay({ sessionId, repos }: { sessionId: string; repos: RepoConfig[] }) {
   return (
     <ArtifactPicker
       // Dismissal is the store's (openInPanel clears the request), so a pick
       // that lands on the already-active tab still closes the modal.
       onPick={(target: Artifact) => openInPanel(sessionId, target)}
+      // `new terminal` — App spawns through its EXISTING creation path and
+      // opens the result here. Dismissal is App's in this branch (the spawn is
+      // async and can fail), so the picker is closed up front: a modal left
+      // hanging over a shell that is booting reads as a hang.
+      onNewTerminal={(target) => {
+        closeArtifactPicker();
+        createPanelTerminal(sessionId, target);
+      }}
+      repos={repos}
       onClose={closeArtifactPicker}
     />
   );

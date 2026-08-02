@@ -13,6 +13,16 @@
 //   kb-doc     → DocView          (useKbDoc's 2500ms active-gated poll)
 //   repo-file  → FileViewer       (one-shot explorerRead, folded not blanked)
 //   localhost  → LocalhostView    (no read at all — a live frame + a health poll)
+//   session    → a NOTE, never a terminal (increment H — read on)
+//
+// THE SESSION ARM IS DELIBERATELY NOT A TERMINAL. A `session` artifact has
+// exactly one live view, and that view is mounted by the PANEL, which hosts it
+// directly (ArtifactPanel's body renders App's `renderSession` before it
+// reaches this switch). This surface is also what the FLOATING WINDOW renders,
+// and a terminal there would be the second live view of one session — the
+// steal case this whole increment is shaped to avoid. So every OTHER host says
+// so plainly instead of drawing one. (panelStore refuses to pop a session out
+// at all; this arm covers a `pip.html?artifact=` URL typed by hand.)
 //
 // `active` means "the tab is on screen AND its screen is showing", and every
 // branch that polls anything takes it, so a panel on a hidden tab costs
@@ -56,6 +66,26 @@ export function ArtifactSurface({
               URL inherits the previous one's pin mode, open note editor, health
               verdict and rail-collapse state — all of which are per-document. */}
           <LocalhostView key={artifactIdentity(artifact)} artifact={artifact} active={active} />
+        </div>
+      );
+    case "session":
+      return (
+        <div
+          style={{
+            flex: 1,
+            minHeight: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 24,
+            textAlign: "center",
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            color: "var(--text-dim)",
+          }}
+        >
+          This terminal is live in the panel that created it — one session, one
+          view.
         </div>
       );
   }

@@ -22,16 +22,42 @@
 //
 // Keyboard: type to filter · ↑/↓ move · Enter opens (or descends) · Esc
 // dismisses from any depth (the breadcrumb walks back up without leaving).
+//
+// INCREMENT H adds the two TERMINAL rows, because the panel can host a live
+// shell as well as a document:
+//
+//   · NEW TERMINAL descends into a third level — the same registry-backed repo
+//     list Ctrl+T offers (`explorer.mergeSessionRepos`), with THIS TAB's own
+//     project pinned at the top as the default. Picking one hands the choice to
+//     App's existing session-creation path; the picker never spawns anything.
+//   · RUNNING TERMINALS lists panel terminals that are alive with no view
+//     (`panelStore.parkedPanelSessions` — what "keep it running" leaves
+//     behind), so a shell you closed the tab of is one keystroke away instead
+//     of being an invisible process.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import type { Artifact } from "../types";
+import type { Artifact, RepoConfig } from "../types";
 import { docKind, useKbDocList } from "../lib/kb";
-import { explorerList, explorerProjects, liveProjectFor } from "../lib/explorer";
+import {
+  explorerList,
+  explorerProjects,
+  liveProjectFor,
+  mergeSessionRepos,
+} from "../lib/explorer";
 import type { ExplorerEntry, ExplorerProject } from "../lib/explorer";
-import { FILE_ICON, FOLDER_ICON, getActiveTabSession } from "../lib/panelStore";
+import {
+  FILE_ICON,
+  FOLDER_ICON,
+  SESSION_ICON,
+  getActiveTabSession,
+  sessionLabelFor,
+  useParkedPanelSessions,
+  type NewPanelTerminal,
+} from "../lib/panelStore";
 import { parseManualUrl, sessionDirFor, useDevServerKnown } from "../lib/devServer";
 import type { DevServerSource } from "../lib/devServer";
+import { STATUS_CONFIGS } from "../lib/statusConfig";
 import { ICON_SIZE, Icon, type IconName } from "./icons";
 
 /** Render cap. A KB with thousands of docs must not paint thousands of rows on
@@ -62,10 +88,21 @@ type Row =
       url: string;
       project: string;
       detected?: DevServerSource;
-    };
+    }
+  /** THE `new terminal` ENTRY (increment H) — Enter descends into the repo
+   *  list. It is a level, not a one-click spawn, because a shell has to start
+   *  SOMEWHERE and guessing the directory is the one thing that would make it
+   *  useless. */
+  | { kind: "new-terminal"; id: string; label: string }
+  /** A working directory for the new terminal (the repo level). */
+  | { kind: "spawn"; id: string; label: string; meta: string; target: NewPanelTerminal }
+  /** A panel terminal that is running with no view — bring it back. */
+  | { kind: "session"; id: string; label: string; meta: string; color: string; sessionId: string };
 
 export function ArtifactPicker({
   onPick,
+  onNewTerminal,
+  repos,
   onClose,
 }: {
   /** Chosen artifact. The caller opens it in ITS panel — the picker never
@@ -73,10 +110,20 @@ export function ArtifactPicker({
    *  full `Artifact` in increment F: a typed URL is a `localhost` artifact,
    *  which has no full-width screen and is therefore not `OpenableArtifact`. */
   onPick: (artifact: Artifact) => void;
+  /** `+ → new terminal` (increment H): a working directory was chosen. The
+   *  caller SPAWNS — through App's existing session-creation path — and opens
+   *  the result here. The picker knows nothing about PTYs. */
+  onNewTerminal: (target: NewPanelTerminal) => void;
+  /** Config repos, merged with the registry exactly as NewSessionDialog merges
+   *  them, so `+ → new terminal` and Ctrl+T offer the same list. */
+  repos: RepoConfig[];
   onClose: () => void;
 }) {
   const [project, setProject] = useState<string | null>(null);
   const [dir, setDir] = useState("");
+  /** Which LEVEL is on screen: the root list, or the new-terminal repo list.
+   *  (`project !== null` is the third: a repo's file tree.) */
+  const [level, setLevel] = useState<"root" | "terminal">("root");
   const [filter, setFilter] = useState("");
   const [selected, setSelected] = useState(0);
 
@@ -89,6 +136,9 @@ export function ArtifactPicker({
   // Dev-server URLs THIS tab's session announced, best-ranked first. The chip
   // can only carry one; this is where the others stay reachable.
   const knownUrls = useDevServerKnown(getActiveTabSession());
+
+  // Panel terminals running with no view (increment H).
+  const parkedSessions = useParkedPanelSessions();
 
   const [projects, setProjects] = useState<ExplorerProject[] | null>(null);
   const [projectsError, setProjectsError] = useState<string | null>(null);
@@ -121,6 +171,50 @@ export function ArtifactPicker({
   const rows = useMemo<Row[]>(() => {
     const needle = filter.trim().toLowerCase();
     const hit = (haystack: string) => needle.length === 0 || haystack.toLowerCase().includes(needle);
+
+    if (level === "terminal") {
+      // THE SAME LIST Ctrl+T OFFERS (mergeSessionRepos), with THIS TAB's own
+      // project pinned first as the default — a terminal opened beside a
+      // document is almost always for the project that document belongs to,
+      // and the tab's own cwd is the honest source for that.
+      const out: Row[] = [];
+      const tabDir = sessionDirFor(getActiveTabSession());
+      const tabProject = liveProjectFor(projects ?? [], tabDir);
+      // Separator- and case-insensitive, because the registry writes forward
+      // slashes and a session's cwd comes back however Windows spelled it —
+      // otherwise the pinned row and its registry twin would both be listed.
+      const samePath = (a: string, b: string) =>
+        a.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase() ===
+        b.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+      if (tabDir.length > 0 && hit(tabProject)) {
+        out.push({
+          kind: "spawn",
+          id: "s:tab",
+          label: tabProject,
+          meta: "this tab's project",
+          target: { name: tabProject, repo: tabProject, workingDir: tabDir },
+        });
+      }
+      for (const option of mergeSessionRepos(projects ?? [], repos)) {
+        if (tabDir.length > 0 && samePath(option.path, tabDir)) continue; // already pinned above
+        if (!hit(option.name) && !hit(option.path)) continue;
+        out.push({
+          kind: "spawn",
+          id: `s:${option.path}`,
+          label: option.name,
+          meta: option.status || option.group,
+          target: {
+            name: option.name,
+            repo: option.name,
+            workingDir: option.path,
+            repoColor: option.color,
+            group: option.group,
+          },
+        });
+        if (out.length >= MAX_ROWS) break;
+      }
+      return out;
+    }
 
     if (project !== null) {
       const out: Row[] = [];
@@ -173,6 +267,28 @@ export function ArtifactPicker({
         detected: detected.source,
       });
     }
+    // NEW TERMINAL (increment H) — beside the doc/file options, above the
+    // projects, because it is an ACTION rather than a place and actions belong
+    // where the eye lands first. It filters like everything else.
+    if (hit("new terminal") || hit("shell")) {
+      out.push({ kind: "new-terminal", id: "t:new", label: "new terminal" });
+    }
+    // RUNNING TERMINALS — panel shells that are alive with no view.
+    for (const sessionId of parkedSessions) {
+      const label = sessionLabelFor(sessionId);
+      const name = label?.name ?? "terminal";
+      if (!hit(name)) continue;
+      out.push({
+        kind: "session",
+        id: `t:${sessionId}`,
+        label: name,
+        // "no view" is the fact that matters — it is why this row exists — and
+        // the live status says what the shell is doing while nobody watches.
+        meta: label ? `no view · ${STATUS_CONFIGS[label.status].label.toLowerCase()}` : "no view",
+        color: label ? STATUS_CONFIGS[label.status].color : "var(--text-dim)",
+        sessionId,
+      });
+    }
     // Projects next — few rows, and they are the gateway to everything the
     // flat KB list cannot reach.
     for (const p of projects ?? []) {
@@ -199,7 +315,7 @@ export function ArtifactPicker({
       if (out.length >= MAX_ROWS) break;
     }
     return out;
-  }, [project, dir, entries, projects, docs, filter, knownUrls]);
+  }, [level, project, dir, entries, projects, docs, filter, knownUrls, parkedSessions, repos]);
 
   // Keep the cursor on a real row as the list changes under it.
   useEffect(() => {
@@ -208,7 +324,7 @@ export function ArtifactPicker({
 
   useEffect(() => {
     inputRef.current?.focus();
-  }, [project, dir]);
+  }, [project, dir, level]);
 
   useEffect(() => {
     const item = listRef.current?.children[selected] as HTMLElement | undefined;
@@ -236,11 +352,24 @@ export function ArtifactPicker({
         case "url":
           onPick({ kind: "localhost", project: row.project, url: row.url });
           return;
+        case "new-terminal":
+          setLevel("terminal");
+          setFilter("");
+          setSelected(0);
+          return;
+        case "spawn":
+          onNewTerminal(row.target);
+          return;
+        case "session":
+          // Bringing a parked terminal back is an ordinary open: the store's
+          // one-home rule takes it out of the parked set as it lands here.
+          onPick({ kind: "session", sessionId: row.sessionId });
+          return;
         case "file":
           if (project !== null) onPick({ kind: "repo-file", project, path: row.path });
       }
     },
-    [onPick, project]
+    [onPick, onNewTerminal, project]
   );
 
   /** Breadcrumb navigation: `null` = back to the root list, a path = that
@@ -249,6 +378,7 @@ export function ArtifactPicker({
     if (nextDir === null) {
       setProject(null);
       setDir("");
+      setLevel("root");
     } else {
       setDir(nextDir);
     }
@@ -281,17 +411,21 @@ export function ArtifactPicker({
   // ── Paint ──────────────────────────────────────────────────────────────────
   const dirSegments = dir.length > 0 ? dir.split("/") : [];
   const emptyNote =
-    project !== null
-      ? entriesError !== null
-        ? `cannot list: ${entriesError}`
-        : entries === null
-          ? "loading…"
-          : "no matches"
-      : docsError !== null && projectsError !== null
-        ? `KB unavailable: ${docsError}`
-        : docs === null && projects === null
-          ? "loading…"
-          : "no matches";
+    level === "terminal"
+      ? projects === null
+        ? "loading…"
+        : "no matches"
+      : project !== null
+        ? entriesError !== null
+          ? `cannot list: ${entriesError}`
+          : entries === null
+            ? "loading…"
+            : "no matches"
+        : docsError !== null && projectsError !== null
+          ? `KB unavailable: ${docsError}`
+          : docs === null && projects === null
+            ? "loading…"
+            : "no matches";
 
   return (
     <>
@@ -318,9 +452,26 @@ export function ArtifactPicker({
         }}
       >
         <div style={LABEL_STYLE}>
-          <Crumb onClick={() => goTo(null)} active={project === null}>
+          <Crumb onClick={() => goTo(null)} active={project === null && level === "root"}>
             open artifact
           </Crumb>
+          {level === "terminal" && (
+            <>
+              <span style={{ color: "var(--text-faint)" }}>/</span>
+              {/* The level you are IN — clicking it clears the filter rather
+                  than leaving, exactly like the last directory crumb below.
+                  The `open artifact` crumb to its left is the way back. */}
+              <Crumb
+                onClick={() => {
+                  setFilter("");
+                  setSelected(0);
+                }}
+                active
+              >
+                new terminal
+              </Crumb>
+            </>
+          )}
           {project !== null && (
             <>
               <span style={{ color: "var(--text-faint)" }}>/</span>
@@ -352,9 +503,11 @@ export function ArtifactPicker({
             }}
             onKeyDown={onKeyDown}
             placeholder={
-              project === null
-                ? "Filter KB docs and projects, or type a URL / port…"
-                : `Filter in ${project}…`
+              level === "terminal"
+                ? "Where should the shell start?"
+                : project === null
+                  ? "Filter KB docs and projects, or type a URL / port…"
+                  : `Filter in ${project}…`
             }
             style={{
               width: "100%",
@@ -398,7 +551,10 @@ export function ArtifactPicker({
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  color: "var(--text-faint)",
+                  // A running terminal's mark carries its STATUS colour — the
+                  // same statusConfig value its tab-strip dot uses, so the row
+                  // and the tab it becomes say the same thing.
+                  color: row.kind === "session" ? row.color : "var(--text-faint)",
                 }}
               >
                 <Icon name={iconFor(row)} />
@@ -529,6 +685,12 @@ function iconFor(row: Row): IconName {
       // The same globe describeArtifact gives a localhost artifact in the
       // panel header — a row and the tab it becomes read as the same thing.
       return "localhost";
+    case "new-terminal":
+    case "spawn":
+    case "session":
+      // ONE vocabulary again: the prompt mark the panel header and the tab
+      // strip give a session artifact.
+      return SESSION_ICON;
     case "kb":
     case "file":
       return FILE_ICON;
@@ -553,6 +715,13 @@ function metaFor(row: Row): string {
       return row.detected
         ? `${row.detected} · ${row.project}`
         : `live preview · ${row.project}`;
+    case "new-terminal":
+      // Says where it will live, because that is the whole decision this row
+      // represents — a shell in the PANEL, not a new tab.
+      return "a shell in this panel";
+    case "spawn":
+    case "session":
+      return row.meta;
     case "kb":
       // Truncated from the LEFT: the deep end of a KB path
       // (…/artifact-panel) is what disambiguates two docs with the same file
