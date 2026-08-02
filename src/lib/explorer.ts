@@ -14,8 +14,11 @@ export {
   explorerWrite,
 } from "./ipc";
 export type { ExplorerProject, ExplorerEntry } from "./ipc";
-import { useCallback, useEffect, useState } from "react";
-import { explorerRead } from "./ipc";
+import { useCallback, useEffect, useMemo, useState } from "react";
+// Aliased because the SAME name is re-exported above (the IPC surface lives in
+// ipc.ts by convention) — `useSessionRepos` needs to CALL it, not just pass it
+// through.
+import { explorerRead, explorerProjects as explorerProjectsIpc } from "./ipc";
 import type { ExplorerProject } from "./ipc";
 import type { RepoConfig } from "../types";
 
@@ -211,6 +214,110 @@ export function mergeSessionRepos(
   }
 
   return [...live, ...extras, ...archived];
+}
+
+// ── THE repo source both dialogs use ─────────────────────────────────────────
+// `+ new thread` (NewThreadDialog) still read `config.repos` alone long after
+// increment B moved `Ctrl+T` (NewSessionDialog) onto the registry — Eric's
+// config.json holds no repos, so the thread dialog matched NOTHING he typed
+// and its empty state told him to go edit a file that is not the source of
+// truth any more. Two dialogs that mean "pick a repo" must not have two
+// answers, so the fetch AND the merge live here and both of them call it.
+//
+// FAILURE POSTURE, the same one NewSessionDialog already had: a registry that
+// does not answer degrades to the config list (`sessionRepoOptions(null, …)`
+// is exactly `mergeSessionRepos([], …)`), never to an empty dialog and never
+// to a throw.
+
+/** Merge a registry answer that may not have arrived (`null`) or may have
+ *  failed (`null`) with the config list. PURE — the hook below is the only
+ *  effectful half. */
+export function sessionRepoOptions(
+  projects: readonly ExplorerProject[] | null,
+  configRepos: readonly RepoConfig[]
+): SessionRepoOption[] {
+  return mergeSessionRepos(projects ?? [], configRepos);
+}
+
+export interface SessionReposState {
+  /** The browsable list: registry projects merged with config repos. */
+  options: SessionRepoOption[];
+  /** Registry projects as fetched (`null` until the fetch settles) — callers
+   *  that need to name a project for a DIRECTORY (`liveProjectFor`) need the
+   *  raw list, not the merged one. */
+  projects: ExplorerProject[] | null;
+  /** The registry fetch has not settled yet. */
+  loading: boolean;
+  /** The registry fetch REJECTED — the list below is config-only. */
+  failed: boolean;
+}
+
+/** THE registry fetch + merge, shared by NewThreadDialog and NewSessionDialog.
+ *  One fetch per mount, cancelled on unmount; a rejection is recorded and
+ *  degrades to the config list rather than propagating. */
+export function useSessionRepos(configRepos: readonly RepoConfig[]): SessionReposState {
+  const [projects, setProjects] = useState<ExplorerProject[] | null>(null);
+  const [settled, setSettled] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    explorerProjectsIpc()
+      .then((list) => {
+        if (cancelled) return;
+        setProjects(list);
+        setSettled(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setFailed(true);
+        setSettled(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const options = useMemo(() => sessionRepoOptions(projects, configRepos), [projects, configRepos]);
+  return { options, projects, loading: !settled, failed };
+}
+
+// ── Quick create: a thread with NO repo chosen ───────────────────────────────
+// The escape hatch for "just give me a thread". It never asks a question it
+// cannot answer honestly: the directory comes from the tab Eric is looking at,
+// and the dialog SAYS which directory it is, so the shell's cwd is never a
+// surprise.
+
+export interface QuickThreadTarget {
+  /** Absolute directory the thread's shell starts in ("" when nothing is
+   *  known — createSession then falls back to the process default). */
+  path: string;
+  /** Repo label for the session and the default thread title. */
+  name: string;
+  /** WHERE the directory came from — the label states this verbatim. */
+  source: "tab" | "home" | "unknown";
+}
+
+/**
+ * The directory a repo-less thread starts in: the ACTIVE TAB's working
+ * directory when there is one, else the user's home directory, else nothing.
+ * Pure — callers supply the tab's cwd (devServer.sessionDirFor) and the home
+ * dir (ipc.getHomeDir).
+ */
+export function quickThreadTarget(
+  projects: readonly ExplorerProject[] | null,
+  tabDir: string,
+  homeDir: string
+): QuickThreadTarget {
+  const tab = (tabDir ?? "").trim();
+  if (tab.length > 0) {
+    return { path: tab, name: liveProjectFor(projects ?? [], tab), source: "tab" };
+  }
+  const home = (homeDir ?? "").trim();
+  if (home.length > 0) {
+    return { path: home, name: liveProjectFor(projects ?? [], home), source: "home" };
+  }
+  return { path: "", name: "shell", source: "unknown" };
 }
 
 // ── Repo file reads: the fold, and the hook both hosts share ─────────────────

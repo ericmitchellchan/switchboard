@@ -55,6 +55,150 @@ import { serverKey } from "./devServer";
 // store keeps zero runtime dependency on React components (its tests import it
 // in a plain node environment).
 import type { IconName } from "../components/icons";
+import { log } from "./logger";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REMOVAL AUDIT (2026-08-02)
+// ─────────────────────────────────────────────────────────────────────────────
+// Eric watched a markdown doc leave the panel by itself a few times and then
+// stop; he could not tie it to an action and it is NOT reproducible. A guess
+// at the cause would have been a second defect plus false confidence, so the
+// next occurrence is made SELF-EXPLAINING instead: every path that takes an
+// artifact out of a strip, or drops a strip, says so with a REASON.
+//
+// The reason vocabulary is closed on purpose. "It closed" is what Eric can
+// see; the whole value here is telling an INTENDED close (`user-close`) apart
+// from a mystery one (`sanitize-dropped-invalid`, `remap-unmapped-tab`,
+// `store-reseeded`) without having to reason backwards from a stack trace.
+//
+// STORE INSTANCE — the one thing a removal log alone could never catch.
+// `panels` is a module singleton, so if this MODULE is ever evaluated twice
+// the strip does not get emptied, it gets REPLACED by a fresh empty map, and
+// no removal function runs at all. That is a real possibility in dev: a Vite
+// HMR update to this file (or to anything below it in the graph) re-imports it
+// under the running app, and every panel would appear to close at once with
+// perfect silence. So each load stamps an instance id and every line carries
+// it: two different instance ids in one session IS the diagnosis.
+const STORE_INSTANCE = Math.random().toString(36).slice(2, 8);
+
+/** Why an artifact left a strip, or why a strip went away. */
+export type PanelRemovalReason =
+  /** The strip's own `×` / middle-click on an artifact tab. */
+  | "user-close"
+  /** The panel header's `×` (closes the ACTIVE tab). */
+  | "header-close"
+  /** Ctrl+Shift+P (or the tab-bar button) hid the whole strip — recoverable. */
+  | "toggle-hide"
+  /** The host TAB was destroyed (App.destroySession). */
+  | "session-destroyed"
+  /** initPanelStore replaced the whole store (boot / re-seed). */
+  | "store-reseeded"
+  /** An entry failed `sanitizeArtifact` on a load/save path. */
+  | "sanitize-dropped-invalid"
+  /** A persisted strip was unusable and its whole entry was dropped. */
+  | "parse-dropped-strip"
+  /** A live strip failed re-sanitizing on the way OUT to the workspace blob. */
+  | "serialize-dropped-strip"
+  /** Workspace restore: the strip's tab has no restored counterpart. */
+  | "remap-unmapped-tab"
+  /** Workspace restore: a `session` artifact's session did not come back. */
+  | "remap-unmapped-session"
+  /** The last artifact left, so the strip itself went away. */
+  | "strip-emptied"
+  /** A panel terminal was opened in ANOTHER tab's strip, which takes it. */
+  | "session-taken"
+  /** `parkPanelSession` — the view is taken away, ownership retained. */
+  | "session-parked"
+  /** `releasePanelSession` — the panel stops owning the session entirely. */
+  | "session-released"
+  /** `promote to tab` — the SAME park+release pair, but a MOVE, not a loss. */
+  | "promote-move";
+
+export interface PanelRemoval {
+  reason: PanelRemovalReason;
+  /** The TAB whose strip lost something ("" when the path is not per-tab). */
+  tab: string;
+  /** The artifact, named enough to recognize (kind + path/url/sessionId). */
+  artifact: string;
+  /** Anything else that distinguishes this occurrence. */
+  note: string;
+}
+
+/** Name an artifact for a log line: KIND plus the one field that identifies it
+ *  to a human reading the console. Tolerant of malformed input — this runs on
+ *  the paths that exist BECAUSE input can be malformed. */
+export function auditName(raw: unknown): string {
+  if (!isRecord(raw)) return `<${typeof raw}>`;
+  const kind = typeof raw.kind === "string" ? raw.kind : "?";
+  const field =
+    typeof raw.path === "string"
+      ? raw.path
+      : typeof raw.url === "string"
+        ? raw.url
+        : typeof raw.sessionId === "string"
+          ? raw.sessionId
+          : "?";
+  const project = typeof raw.project === "string" ? `${raw.project}/` : "";
+  return `${kind}:${project}${field}`;
+}
+
+/** THE one line format. Pure, so the wording is testable without a logger. */
+export function formatPanelRemoval(r: PanelRemoval): string {
+  const parts = [
+    "panel-remove",
+    `reason=${r.reason}`,
+    `store=${STORE_INSTANCE}`,
+    `tab=${r.tab.length > 0 ? r.tab : "-"}`,
+    `artifact=${r.artifact.length > 0 ? r.artifact : "-"}`,
+  ];
+  if (r.note.length > 0) parts.push(`note=${r.note}`);
+  return parts.join(" ");
+}
+
+/** Vitest transforms this module exactly as Vite does, so the mode flag is
+ *  readable in both. Under test the audit is SILENT by default: several suites
+ *  feed deliberately-invalid fixtures through `sanitizePanelState`, and a
+ *  console line per rejected fixture is noise, not evidence. */
+const UNDER_TEST = import.meta.env?.MODE === "test";
+
+/** Where audit lines go. `null` = the app logger (info level: one line per
+ *  removal, which is an ACTION, not a tick — it will not drown a dev console).
+ *  Tests install their own via `__setPanelAuditSink`. */
+let auditSink: ((line: string) => void) | null = UNDER_TEST ? () => {} : null;
+
+/** Test-only: capture (or silence) audit lines. */
+export function __setPanelAuditSink(sink: ((line: string) => void) | null): void {
+  auditSink = sink;
+}
+
+function audit(
+  reason: PanelRemovalReason,
+  tab: string,
+  artifact: unknown,
+  note = ""
+): void {
+  const line = formatPanelRemoval({
+    reason,
+    tab,
+    artifact: typeof artifact === "string" ? artifact : auditName(artifact),
+    note,
+  });
+  if (auditSink) auditSink(line);
+  else log.info(line);
+}
+
+/** Every artifact in a strip, named. Used when a WHOLE strip goes away — the
+ *  point of the log is to say what was on screen, not merely that a panel
+ *  vanished. */
+function auditNames(state: PanelState | null | undefined): string {
+  if (!state || state.artifacts.length === 0) return "-";
+  return state.artifacts.map((a) => auditName(a)).join(",");
+}
+
+// This is the line that distinguishes "a strip was emptied" from "this module
+// was evaluated again and took the whole store with it". One per load — a
+// SECOND one inside a single app session is the diagnosis by itself.
+if (!UNDER_TEST) log.info(`panel-store loaded instance=${STORE_INSTANCE}`);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure helpers
@@ -461,7 +605,7 @@ export function closeArtifactIn(state: PanelState, index: number): PanelState | 
  *  yields 0, not 1: 9 names no content, so clamping toward B would be a guess
  *  dressed up as a rule. (The in-range `clampActiveIndex` below is a different
  *  job: keeping a LIVE index inside a strip that changed under it.) */
-export function sanitizePanelState(raw: unknown): PanelState | null {
+export function sanitizePanelState(raw: unknown, tab = ""): PanelState | null {
   if (!isRecord(raw) || !Array.isArray(raw.artifacts)) return null;
   const wanted =
     typeof raw.activeIndex === "number" && Number.isFinite(raw.activeIndex)
@@ -471,7 +615,12 @@ export function sanitizePanelState(raw: unknown): PanelState | null {
   let activeIndex = 0;
   raw.artifacts.forEach((entry, i) => {
     const clean = sanitizeArtifact(entry);
-    if (!clean) return;
+    if (!clean) {
+      // An artifact that FAILED validation and silently disappeared is the
+      // single most plausible shape of "it closed by itself" on a load path.
+      audit("sanitize-dropped-invalid", tab, entry, `index=${i}`);
+      return;
+    }
     const existing = indexOfArtifact(artifacts, clean);
     const at = existing >= 0 ? existing : artifacts.push(clean) - 1;
     if (i === wanted) activeIndex = at;
@@ -488,8 +637,9 @@ export function parsePanels(raw: unknown): Record<string, PanelState> {
   const out: Record<string, PanelState> = {};
   for (const [sessionId, value] of Object.entries(raw)) {
     if (sessionId.length === 0) continue;
-    const state = sanitizePanelState(value);
+    const state = sanitizePanelState(value, sessionId);
     if (state) out[sessionId] = state;
+    else audit("parse-dropped-strip", sessionId, "-", "load=v4");
   }
   return out;
 }
@@ -506,6 +656,7 @@ export function parsePanelsV3(raw: unknown): Record<string, PanelState> {
     if (sessionId.length === 0) continue;
     const artifact = sanitizeArtifact(value);
     if (artifact) out[sessionId] = { artifacts: [artifact], activeIndex: 0 };
+    else audit("sanitize-dropped-invalid", sessionId, value, "migrate=v3");
   }
   return out;
 }
@@ -523,8 +674,13 @@ export function serializePanels(
 ): Record<string, PanelState> {
   const out: Record<string, PanelState> = {};
   for (const [sessionId, value] of panels) {
-    const state = sanitizePanelState(value);
+    const state = sanitizePanelState(value, sessionId);
     if (sessionId.length > 0 && state) out[sessionId] = state;
+    else {
+      // A LIVE strip that cannot survive its own serializer would come back
+      // missing after the next restart, with nothing on screen to explain it.
+      audit("serialize-dropped-strip", sessionId, auditNames(value), "save");
+    }
   }
   return out;
 }
@@ -547,9 +703,13 @@ export function remapPanels(
   const out: Record<string, PanelState> = {};
   for (const [oldId, state] of Object.entries(panels)) {
     const newId = idMap.get(oldId);
-    if (!newId) continue;
-    const remapped = remapPanelState(state, idMap);
+    if (!newId) {
+      audit("remap-unmapped-tab", oldId, auditNames(state), "restore");
+      continue;
+    }
+    const remapped = remapPanelState(state, idMap, oldId);
     if (remapped) out[newId] = remapped;
+    else audit("strip-emptied", oldId, auditNames(state), "restore");
   }
   return out;
 }
@@ -557,7 +717,11 @@ export function remapPanels(
 /** One strip through the idMap: session artifacts rewritten or dropped,
  *  everything else untouched, the active tab preserved BY CONTENT (same rule
  *  sanitizePanelState follows). Returns null when nothing survives. */
-function remapPanelState(state: PanelState, idMap: Map<string, string>): PanelState | null {
+function remapPanelState(
+  state: PanelState,
+  idMap: Map<string, string>,
+  tab = ""
+): PanelState | null {
   const activeBefore = state.artifacts[clampActiveIndex(state.artifacts.length, state.activeIndex)];
   const artifacts: Artifact[] = [];
   let activeIndex = 0;
@@ -566,6 +730,7 @@ function remapPanelState(state: PanelState, idMap: Map<string, string>): PanelSt
     if (artifact.kind === "session") {
       const mapped = idMap.get(artifact.sessionId);
       next = mapped ? { kind: "session", sessionId: mapped } : null;
+      if (!next) audit("remap-unmapped-session", tab, artifact, "restore");
     }
     if (!next) continue;
     if (artifact === activeBefore) activeIndex = artifacts.length;
@@ -720,6 +885,12 @@ export function initPanelStore(
   initial: Record<string, PanelState>,
   width: number = DEFAULT_PANEL_WIDTH
 ): void {
+  // A re-seed REPLACES every strip. Boot calls this once; anything else
+  // calling it mid-session would look exactly like "everything closed".
+  for (const [tab, state] of panels) audit("store-reseeded", tab, auditNames(state));
+  for (const [tab, state] of lastPanelStates) {
+    audit("store-reseeded", tab, auditNames(state), "hidden");
+  }
   panels = new Map(Object.entries(parsePanels(initial)));
   // Seeding is a fresh start for the toggle memory too: `lastPanelStates` is
   // keyed by session ids belonging to the workspace being replaced, so
@@ -771,7 +942,7 @@ export function openInPanel(sessionId: string, artifact: Artifact): void {
     // between hosts, and both strips would claim it. Opening it here takes it
     // out of wherever it was (and out of the parked set), which is exactly what
     // "the panel that holds it" should mean.
-    dropSessionArtifact(clean.sessionId, sessionId);
+    dropSessionArtifact(clean.sessionId, sessionId, "session-taken", `to=${sessionId}`);
     if (parkedSessions.has(clean.sessionId)) {
       parkedSessions = new Set(parkedSessions);
       parkedSessions.delete(clean.sessionId);
@@ -809,13 +980,19 @@ export function activateArtifact(sessionId: string, index: number): void {
 /** Close ONE tab of a session's strip (the strip's own `×`). Closing the last
  *  tab removes the session's panel entirely — and only THEN is the strip filed
  *  into the toggle memory, because only then is there a panel to bring back. */
-export function closeArtifactAt(sessionId: string, index: number): void {
+export function closeArtifactAt(
+  sessionId: string,
+  index: number,
+  reason: PanelRemovalReason = "user-close"
+): void {
   const state = panels.get(sessionId);
   if (!state) return;
   const next = closeArtifactIn(state, index);
   if (next === state) return; // out of range — nothing happened
+  audit(reason, sessionId, state.artifacts[index], `index=${index} of=${state.artifacts.length}`);
   panels = new Map(panels);
   if (next === null) {
+    audit("strip-emptied", sessionId, auditNames(state), `after=${reason}`);
     rememberPanel(sessionId, state);
     panels.delete(sessionId);
   } else {
@@ -882,7 +1059,11 @@ function forgetPanel(sessionId: string): void {
 export function closePanel(sessionId: string): void {
   const state = panels.get(sessionId);
   if (!state) return;
-  closeArtifactAt(sessionId, clampActiveIndex(state.artifacts.length, state.activeIndex));
+  closeArtifactAt(
+    sessionId,
+    clampActiveIndex(state.artifacts.length, state.activeIndex),
+    "header-close"
+  );
 }
 
 /** Ctrl+Shift+P — the true toggle (A3): hide the WHOLE panel (remembering the
@@ -896,6 +1077,10 @@ export function togglePanel(sessionId: string | null): void {
   if (!sessionId) return;
   const open = panels.get(sessionId);
   if (open) {
+    // RECOVERABLE — the whole strip goes into `lastPanelStates` and the same
+    // chord brings it back. Logged anyway: from the screen it is identical to
+    // a close, and telling the two apart is the entire point of this seam.
+    audit("toggle-hide", sessionId, auditNames(open));
     rememberPanel(sessionId, open);
     panels = new Map(panels);
     panels.delete(sessionId);
@@ -955,10 +1140,12 @@ export function removeSessionPanel(sessionId: string): void {
     if (state) for (const a of state.artifacts) if (a.kind === "session") orphans.push(a.sessionId);
   }
   if (hadPanel) {
+    audit("session-destroyed", sessionId, auditNames(panels.get(sessionId)));
     panels = new Map(panels);
     panels.delete(sessionId);
   }
   if (hadMemory) {
+    audit("session-destroyed", sessionId, auditNames(lastPanelStates.get(sessionId)), "hidden");
     lastPanelStates = new Map(lastPanelStates);
     lastPanelStates.delete(sessionId);
   }
@@ -1072,7 +1259,12 @@ export function useParkedPanelSessions(): readonly string[] {
  *  A strip left empty is DELETED rather than remembered: remembering it would
  *  keep the session panel-owned through `lastPanelStates`, which is exactly the
  *  ownership we are trying to end. */
-function dropSessionArtifact(sessionId: string, exceptTab?: string): boolean {
+function dropSessionArtifact(
+  sessionId: string,
+  exceptTab?: string,
+  reason: PanelRemovalReason = "session-released",
+  note = ""
+): boolean {
   let changed = false;
   let panelsCloned = false;
   for (const [tab, state] of Array.from(panels)) {
@@ -1084,8 +1276,11 @@ function dropSessionArtifact(sessionId: string, exceptTab?: string): boolean {
       panelsCloned = true;
     }
     changed = true;
-    if (next === null) panels.delete(tab);
-    else panels.set(tab, next);
+    audit(reason, tab, { kind: "session", sessionId }, note);
+    if (next === null) {
+      audit("strip-emptied", tab, auditNames(state), `after=${reason}`);
+      panels.delete(tab);
+    } else panels.set(tab, next);
   }
   let memoryCloned = false;
   for (const [tab, state] of Array.from(lastPanelStates)) {
@@ -1096,6 +1291,7 @@ function dropSessionArtifact(sessionId: string, exceptTab?: string): boolean {
       memoryCloned = true;
     }
     changed = true;
+    audit(reason, tab, { kind: "session", sessionId }, `hidden ${note}`.trim());
     if (next === null) lastPanelStates.delete(tab);
     else lastPanelStates.set(tab, next);
   }
@@ -1114,9 +1310,12 @@ function withoutSession(state: PanelState, sessionId: string): PanelState | null
 
 /** PARK a panel terminal: take its view away, keep ownership. This is "keep it
  *  running" from the close guard, and the middle step of promote/kill. */
-export function parkPanelSession(sessionId: string): void {
+export function parkPanelSession(
+  sessionId: string,
+  reason: PanelRemovalReason = "session-parked"
+): void {
   if (sessionId.length === 0) return;
-  const changed = dropSessionArtifact(sessionId);
+  const changed = dropSessionArtifact(sessionId, undefined, reason);
   if (parkedSessions.has(sessionId) && !changed) return;
   parkedSessions = new Set(parkedSessions);
   parkedSessions.add(sessionId);
@@ -1126,9 +1325,12 @@ export function parkPanelSession(sessionId: string): void {
 /** RELEASE a panel terminal: the panel stops owning it entirely. Used by
  *  `promote to tab` (the tab bar takes it) and by teardown (it is gone). Safe
  *  to call for a session the panel never owned. */
-export function releasePanelSession(sessionId: string): void {
+export function releasePanelSession(
+  sessionId: string,
+  reason: PanelRemovalReason = "session-released"
+): void {
   if (sessionId.length === 0) return;
-  let changed = dropSessionArtifact(sessionId);
+  let changed = dropSessionArtifact(sessionId, undefined, reason);
   if (parkedSessions.has(sessionId)) {
     parkedSessions = new Set(parkedSessions);
     parkedSessions.delete(sessionId);
@@ -1567,8 +1769,12 @@ export function openArtifact(
   return decision;
 }
 
-/** Test-only: reset the store to a blank state. */
+/** Test-only: reset the store to a blank state. Also SILENCES the removal
+ *  audit — most suites feed it deliberately-invalid input, and a console line
+ *  per rejected fixture is noise. A test that wants the lines installs its own
+ *  sink with `__setPanelAuditSink` after calling this. */
 export function __resetPanelStoreForTests(): void {
+  auditSink = () => {};
   panels = new Map();
   lastPanelStates = new Map();
   parkedSessions = new Set();

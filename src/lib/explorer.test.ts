@@ -12,6 +12,8 @@ import {
   liveProjectFor,
   mergeFileRead,
   mergeSessionRepos,
+  quickThreadTarget,
+  sessionRepoOptions,
 } from "./explorer";
 import type { ExplorerProject, OpenFile } from "./explorer";
 import type { RepoConfig } from "../types";
@@ -183,6 +185,79 @@ describe("mergeSessionRepos", () => {
     );
     expect(out[0].group).toBe("");
     expect(out[0].status).toBe("active");
+  });
+});
+
+// ── THE repo source both dialogs use ─────────────────────────────────────────
+// `+ new thread` read `config.repos` alone (EMPTY on Eric's machine) while
+// Ctrl+T had been on the registry since increment B, so the thread dialog
+// matched nothing he typed. Both now call `sessionRepoOptions`.
+
+describe("sessionRepoOptions", () => {
+  it("offers the REGISTRY's projects, which is what `+ new thread` was missing", () => {
+    const out = sessionRepoOptions(
+      [project("switchboard", ["C:/p/switchboard"]), project("lodestar", ["C:/p/lodestar"])],
+      []
+    );
+    expect(out.map((o) => o.name)).toEqual(["switchboard", "lodestar"]);
+    expect(out.map((o) => o.source)).toEqual(["registry", "registry"]);
+    // The absolute path is what makes the thread's shell START there.
+    expect(out.map((o) => o.path)).toEqual(["C:/p/switchboard", "C:/p/lodestar"]);
+  });
+
+  it("degrades to the CONFIG list when the registry fetch failed or has not landed", () => {
+    // `null` is both "not settled yet" and "rejected" — the dialog must show
+    // the config repos in either case, never an empty list and never a throw.
+    const out = sessionRepoOptions(null, [repo("C:/p/only-in-config", "#abcdef", "personal")]);
+    expect(out.map((o) => [o.name, o.path, o.source])).toEqual([
+      ["only-in-config", "C:/p/only-in-config", "config"],
+    ]);
+  });
+
+  it("keeps both sides when the registry answers and config has extras", () => {
+    const out = sessionRepoOptions(
+      [project("orbit", ["C:/p/orbit"])],
+      [repo("C:/p/orbit", "#123456"), repo("C:/p/scratch")]
+    );
+    expect(out.map((o) => o.name)).toEqual(["orbit", "scratch"]);
+    // A config repo the registry covers disappears as a duplicate but donates
+    // its colour.
+    expect(out[0].color).toBe("#123456");
+  });
+});
+
+// ── Quick create: a thread with no repo chosen ───────────────────────────────
+
+describe("quickThreadTarget", () => {
+  const projects = [project("switchboard", ["C:/p/switchboard"])];
+
+  it("uses the ACTIVE TAB's directory, named by the registry project", () => {
+    const t = quickThreadTarget(projects, "C:/p/switchboard/src", "C:/Users/ericm");
+    expect(t).toEqual({ path: "C:/p/switchboard/src", name: "switchboard", source: "tab" });
+  });
+
+  it("falls back to HOME when the tab has no working directory", () => {
+    const t = quickThreadTarget(projects, "", "C:/Users/ericm");
+    expect(t.path).toBe("C:/Users/ericm");
+    expect(t.source).toBe("home");
+  });
+
+  it("treats whitespace as no directory at all", () => {
+    expect(quickThreadTarget(projects, "   ", "C:/Users/ericm").source).toBe("home");
+  });
+
+  it("names a directory the registry has never seen after its own folder", () => {
+    const t = quickThreadTarget(projects, "C:/tmp/oneoff", "C:/Users/ericm");
+    expect(t).toEqual({ path: "C:/tmp/oneoff", name: "oneoff", source: "tab" });
+  });
+
+  it("says UNKNOWN rather than inventing a directory when nothing is known", () => {
+    expect(quickThreadTarget(null, "", "")).toEqual({ path: "", name: "shell", source: "unknown" });
+  });
+
+  it("works before the registry has answered (projects still null)", () => {
+    const t = quickThreadTarget(null, "C:/p/switchboard", "C:/Users/ericm");
+    expect(t).toEqual({ path: "C:/p/switchboard", name: "switchboard", source: "tab" });
   });
 });
 

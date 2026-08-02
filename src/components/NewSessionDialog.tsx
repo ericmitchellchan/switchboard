@@ -7,12 +7,16 @@
 // entries kept, dedupe by resolved path, archived last); every entry carries
 // an ABSOLUTE path that goes straight through as `working_dir`, so the new
 // session STARTS in that repo — no `cd` is ever typed anywhere.
+//
+// The fetch + merge itself lives in `explorer.useSessionRepos`, shared with
+// NewThreadDialog: two dialogs that both mean "pick a repo" must not have two
+// answers, which is exactly the drift that left `+ new thread` reading an
+// empty config.json list for two increments.
 
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import type { RepoConfig } from "../types";
 import { getHomeDir } from "../lib/ipc";
-import { explorerProjects, mergeSessionRepos } from "../lib/explorer";
-import type { ExplorerProject } from "../lib/explorer";
+import { useSessionRepos } from "../lib/explorer";
 
 interface NewSessionDialogProps {
   repos: RepoConfig[];
@@ -35,32 +39,19 @@ export function NewSessionDialog({ repos, onCreateSession, onClose }: NewSession
   const [filter, setFilter] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [homeDir, setHomeDir] = useState<string>("");
-  const [projects, setProjects] = useState<ExplorerProject[] | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+
+  // Registry projects, merged with config.repos. A failure is NOT fatal: the
+  // hook degrades to exactly the old config-only list, so a broken
+  // registry.json costs Eric the extra projects, never the dialog.
+  const { options: repoOptions } = useSessionRepos(repos);
 
   // Resolve home dir from Rust (~ on Unix, %USERPROFILE% on Windows)
   useEffect(() => {
     getHomeDir()
       .then(setHomeDir)
       .catch(() => setHomeDir(""));
-  }, []);
-
-  // Registry projects. A failure is NOT fatal: mergeSessionRepos([], repos)
-  // degrades to exactly the old config-only list, so a broken registry.json
-  // costs Eric the extra projects, never the dialog.
-  useEffect(() => {
-    let cancelled = false;
-    explorerProjects()
-      .then((list) => {
-        if (!cancelled) setProjects(list);
-      })
-      .catch(() => {
-        if (!cancelled) setProjects([]);
-      });
-    return () => {
-      cancelled = true;
-    };
   }, []);
 
   // Build options list: plain shell + merged registry/config repos
@@ -75,7 +66,7 @@ export function NewSessionDialog({ repos, onCreateSession, onClose }: NewSession
         status: "",
         archived: false,
       },
-      ...mergeSessionRepos(projects ?? [], repos).map((o) => ({
+      ...repoOptions.map((o) => ({
         type: "repo" as const,
         name: o.name,
         path: o.path,
@@ -85,7 +76,7 @@ export function NewSessionDialog({ repos, onCreateSession, onClose }: NewSession
         archived: o.archived,
       })),
     ],
-    [homeDir, projects, repos]
+    [homeDir, repoOptions]
   );
 
   const filtered = filter

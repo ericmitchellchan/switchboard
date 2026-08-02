@@ -25,7 +25,7 @@ src/
 │   ├── ThreadRowMenu.tsx        → The shared `⋯` row menu (portalled, keyboard-navigable) + the inline title editor, used by BOTH thread surfaces
 │   ├── KbTreeSection.tsx        → Side-menu KB doc tree (inline navigator) + shared tree row primitives
 │   ├── ExplorerTreeSection.tsx  → Side-menu registry projects + IDE-style inline file tree
-│   ├── NewThreadDialog.tsx      → Repo picker for creating a thread
+│   ├── NewThreadDialog.tsx      → Repo picker for creating a thread: the SAME merged registry+config list Ctrl+T offers (`explorer.useSessionRepos`), browsable before a key is pressed, plus QUICK CREATE (a thread with no repo, in the active tab's directory — which the row names)
 │   ├── NewSessionDialog.tsx     → Repo picker / new session config (lazy-loaded)
 │   ├── ExplorerView.tsx         → Explorer screen body: BACK control + breadcrumb + file viewer (tree lives in the side menu); repo files route through the SHARED ArtifactBody kind switch
 │   ├── BackButton.tsx           → THE back control on the full-width screens (route.navigateBack; renders only when there is somewhere to go)
@@ -65,7 +65,7 @@ src/
 │   ├── threadStore.ts           → Durable agent threads: records (explicit + promoted), revive decisions, shell-ready wait, history selection/filter/relative-time helpers, action bridge
 │   ├── composer.ts              → Composer wire format (`composeWrite`: single line vs bracketed paste), send-history + caret rules, and the per-session visibility/draft/history store. PURE helpers + module singleton
 │   ├── threadPromotion.ts       → Tab→thread promotion (increment C): what a discovery MEANS for the thread list (`planPromotion`) + the poll pass. PURE decision + injected IO; observe-only
-│   ├── panelStore.ts            → Artifact panel state (per-TAB `PanelState` = artifact strip + activeIndex, global width), the POPPED-OUT record (which artifact the floating window holds), strip ops (`appendOrActivate`/`closeArtifactIn`), layout/drag math, header breadcrumbs, the shared ICON NAMES (`FILE_ICON`/`folderIcon`/`SESSION_ICON`/`describeArtifact().icon` — drawn by components/icons), open-in-panel decision (`decideOpen`/`fullWidthRoute`), toggle memory, `+`-picker request, active-tab + send-to-thread bridges, and PANEL-OWNED SESSIONS (`isPanelOwnedSession`/`parkPanelSession`/`releasePanelSession` + the published session labels) — the store half of one-session-one-view
+│   ├── panelStore.ts            → Artifact panel state (per-TAB `PanelState` = artifact strip + activeIndex, global width), the POPPED-OUT record (which artifact the floating window holds), strip ops (`appendOrActivate`/`closeArtifactIn`), layout/drag math, header breadcrumbs, the shared ICON NAMES (`FILE_ICON`/`folderIcon`/`SESSION_ICON`/`describeArtifact().icon` — drawn by components/icons), open-in-panel decision (`decideOpen`/`fullWidthRoute`), toggle memory, `+`-picker request, active-tab + send-to-thread bridges, PANEL-OWNED SESSIONS (`isPanelOwnedSession`/`parkPanelSession`/`releasePanelSession` + the published session labels) — the store half of one-session-one-view — and THE REMOVAL AUDIT (`PanelRemovalReason`/`formatPanelRemoval`/`__setPanelAuditSink`): every path that takes an artifact out of a strip says WHY, and every line carries the module's STORE INSTANCE
 │   ├── agentContext.ts          → Agent context injection (T8): shell-safe sanitizer + the two seam builders (`buildSpawnContext`, `buildSendReference`) + KB-root cache. PURE — the effectful ends live in App/threadStore/panelStore
 │   ├── kb.ts                    → KB doc list/read data layer (poll while active)
 │   ├── pins.ts                  → Pin/note file model (pure ops over pins JSON) + `pinTargetFor` (KB sidecar vs the hidden `_repo-pins/` mirror) + `livePinTargetFor`/`createLivePin`/`routeScopeOf` for LIVE preview pins (`<project>/live-pins.json`, keyed by route)
@@ -73,7 +73,7 @@ src/
 │   ├── pinsStore.ts             → ONE shared `.pins.json` record per sidecar (refcounted mounts, one debounced writer, injected IO) — the panel and the KB screen can host the same wireframe at once
 │   ├── devServer.ts             → Dev-server URL detection (pure `detectDevServerHits` — ANSI-stripped PTY text → `{url, source}`, tagged from the banner — + `parseManualUrl`) and the per-session RANKED candidate store (`rankHits`: frontend > static > unknown > api; + the injected `setPreviewOpenCheck` that suppresses an offer for a URL already framed). Also THE server-identity fold (`serverKey`/`sameServer` — one server, however it spells its loopback host) and `siblingServersFor` (what else that shell announced)
 │   ├── pinsRail.ts              → Pins-rail collapse rule (pure: a stored preference wins, else collapsed iff the doc has no pins) + the sessionStorage key
-│   ├── explorer.ts              → Explorer data layer (projects/listing/read/WRITE via IPC, live-thread annotation, session-repo merge) + THE repo-file read both hosts share (`useRepoFile` / `mergeFileRead`; polls ONLY while the file has an open edit buffer)
+│   ├── explorer.ts              → Explorer data layer (projects/listing/read/WRITE via IPC, live-thread annotation, session-repo merge) + THE repo source both repo dialogs share (`useSessionRepos`/`sessionRepoOptions`) + `quickThreadTarget` + THE repo-file read both hosts share (`useRepoFile` / `mergeFileRead`; polls ONLY while the file has an open edit buffer)
 │   ├── editor.ts                → THE markdown edit buffer: explicit save, the disk-vs-buffer fold (`foldDisk`) that raises a conflict instead of clobbering, keep-mine/take-theirs, the save-time re-read, and the localStorage draft mirror. PURE rules + module singleton + injected IO
 │   ├── sandbox.ts               → THE iframe posture: the frame Content-Security-Policy + `injectCsp` (planted into wireframe srcDoc AND the component-preview shell)
 │   ├── diagramZoom.ts           → Pure pan/zoom math for the diagram surface
@@ -218,6 +218,18 @@ These are recurring problem areas from git history — be aware when working in 
 - **Status detection false positives** from ANSI escape sequences in PTY output
 - **Stale closures** in React hooks with async PTY callbacks (use refs)
 - **Black screen on alternate buffer switch** (e.g., vim/less opening in terminal)
+- **A panel artifact disappearing with no action** (reported 2026-08-02, NOT reproduced). Do not
+  guess-fix it. Every removal path is instrumented instead: look for `panel-remove reason=…` in the
+  dev console. A `user-close`/`header-close`/`toggle-hide` line means it WAS a gesture (the tab's
+  `×` is a 13px target that appears on hover). **NO removal line at all, plus a second
+  `panel-store loaded instance=…`, means the MODULE was evaluated twice** — a Vite HMR update to
+  `panelStore.ts` or anything up its importer chain re-imports the module under the running app, and
+  every strip goes with the module singleton while the terminals (a different module, still cached)
+  carry on. That is dev-only and is the leading hypothesis for the original report. Reading the code
+  cold: nothing mid-session can remove a DOC artifact except `closeArtifactAt` / `closePanel` /
+  `togglePanel` / `removeSessionPanel`, all user gestures — the park/promote paths match
+  `kind === "session"` ONLY, `initPanelStore` runs once at boot, and `sanitizePanelState` validates
+  shape, never the filesystem, so a path that momentarily fails to read cannot drop a tab.
 
 ## Key Docs
 

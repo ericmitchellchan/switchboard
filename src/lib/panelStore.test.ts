@@ -85,6 +85,10 @@ import {
   publishSessionLabels,
   sessionLabelFor,
   SESSION_ICON,
+  // 2026-08-02: the removal audit
+  __setPanelAuditSink,
+  auditName,
+  formatPanelRemoval,
   type OpenableArtifact,
   type OpenContext,
   type SessionLabel,
@@ -2217,5 +2221,128 @@ describe("migrateSavedWorkspace v5 (panel terminals)", () => {
     const v4 = mkWorkspaceV1({ version: 4, panels: { "s1": strip([KB_DOC, REPO_FILE], 1) } });
     const v5 = mkWorkspaceV1({ version: 5, panels: { "s1": strip([KB_DOC, REPO_FILE], 1) } });
     expect(migrateSavedWorkspace(v4)!.panels).toEqual(migrateSavedWorkspace(v5)!.panels);
+  });
+});
+
+// ─── Removal audit (2026-08-02) ──────────────────────────────────────────────
+// A markdown doc left the panel by itself a few times and then stopped, with
+// nothing to tie it to an action. No guess-fix: every removal path now NAMES
+// itself, so the next occurrence explains itself instead of needing a theory.
+
+describe("panel removal audit", () => {
+  let lines: string[] = [];
+
+  beforeEach(() => {
+    __resetPanelStoreForTests();
+    lines = [];
+    __setPanelAuditSink((line) => lines.push(line));
+  });
+
+  const reasons = () =>
+    lines.map((l) => l.match(/reason=([\w-]+)/)?.[1] ?? "?");
+
+  it("names the artifact, the tab and the reason for an ordinary close", () => {
+    openInPanel("s1", KB_DOC);
+    openInPanel("s1", REPO_FILE);
+    lines = [];
+    closeArtifactAt("s1", 0);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("reason=user-close");
+    expect(lines[0]).toContain("tab=s1");
+    expect(lines[0]).toContain(`artifact=kb-doc:${KB_DOC.path}`);
+  });
+
+  it("distinguishes the header × from the strip's ×", () => {
+    openInPanel("s1", KB_DOC);
+    openInPanel("s1", REPO_FILE);
+    lines = [];
+    closePanel("s1");
+    expect(reasons()).toContain("header-close");
+  });
+
+  it("records the strip going away on top of the close that emptied it", () => {
+    openInPanel("s1", KB_DOC);
+    lines = [];
+    closeArtifactAt("s1", 0);
+    expect(reasons()).toEqual(["user-close", "strip-emptied"]);
+  });
+
+  it("separates a RECOVERABLE hide from a close", () => {
+    openInPanel("s1", KB_DOC);
+    lines = [];
+    togglePanel("s1");
+    expect(reasons()).toEqual(["toggle-hide"]);
+    // ...and bringing it back is not a removal at all.
+    lines = [];
+    togglePanel("s1");
+    expect(lines).toEqual([]);
+  });
+
+  it("names the tab destruction that took a whole strip with it", () => {
+    openInPanel("s1", KB_DOC);
+    openInPanel("s1", REPO_FILE);
+    lines = [];
+    removeSessionPanel("s1");
+    expect(reasons()).toEqual(["session-destroyed"]);
+    expect(lines[0]).toContain("kb-doc:");
+    expect(lines[0]).toContain("repo-file:");
+  });
+
+  it("reports an artifact silently dropped by the load-path sanitizer", () => {
+    // The most plausible shape of "it closed by itself" on a load path: an
+    // entry that fails validation and simply is not there any more.
+    sanitizePanelState({ artifacts: [KB_DOC, { kind: "kb-doc" }], activeIndex: 0 }, "s1");
+    expect(reasons()).toEqual(["sanitize-dropped-invalid"]);
+    expect(lines[0]).toContain("index=1");
+  });
+
+  it("reports a restore that dropped a binding whose tab did not come back", () => {
+    expect(remapPanels({ old: strip([KB_DOC]) }, new Map())).toEqual({});
+    expect(reasons()).toEqual(["remap-unmapped-tab"]);
+    expect(lines[0]).toContain("tab=old");
+  });
+
+  it("calls a promote a MOVE, not two unexplained drops", () => {
+    openInPanel("s1", SESSION_A);
+    lines = [];
+    parkPanelSession("pty-a", "promote-move");
+    releasePanelSession("pty-a", "promote-move");
+    expect(reasons()).toEqual(["promote-move", "strip-emptied"]);
+  });
+
+  it("every line carries the STORE INSTANCE — a second one means the module was re-evaluated", () => {
+    openInPanel("s1", KB_DOC);
+    lines = [];
+    closeArtifactAt("s1", 0);
+    const stamps = new Set(lines.map((l) => l.match(/store=(\w+)/)?.[1]));
+    expect(stamps.size).toBe(1);
+    expect([...stamps][0]).toBeTruthy();
+  });
+});
+
+describe("auditName / formatPanelRemoval", () => {
+  it("names each kind by the field that identifies it to a human", () => {
+    expect(auditName(KB_DOC)).toBe(`kb-doc:${KB_DOC.path}`);
+    expect(auditName(REPO_FILE)).toBe("repo-file:switchboard/src/App.tsx");
+    expect(auditName({ kind: "localhost", project: "lodestar", url: "http://127.0.0.1:5273/" })).toBe(
+      "localhost:lodestar/http://127.0.0.1:5273/"
+    );
+    expect(auditName(SESSION_A)).toBe("session:pty-a");
+  });
+
+  it("survives the malformed input it exists to describe", () => {
+    expect(auditName(null)).toBe("<object>");
+    expect(auditName(undefined)).toBe("<undefined>");
+    expect(auditName({})).toBe("?:?");
+  });
+
+  it("omits an empty note and marks missing fields rather than printing blanks", () => {
+    expect(formatPanelRemoval({ reason: "user-close", tab: "", artifact: "", note: "" })).toBe(
+      formatPanelRemoval({ reason: "user-close", tab: "", artifact: "", note: "" })
+    );
+    const line = formatPanelRemoval({ reason: "user-close", tab: "", artifact: "", note: "" });
+    expect(line).toContain("tab=-");
+    expect(line).toContain("artifact=-");
+    expect(line).not.toContain("note=");
   });
 });

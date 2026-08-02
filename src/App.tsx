@@ -1563,8 +1563,10 @@ export default function App() {
         return;
       }
       log.info(`Promoting panel terminal to tab id=${sessionId}`);
-      flushSync(() => parkPanelSession(sessionId));
-      releasePanelSession(sessionId);
+      // Both halves are tagged `promote-move` so the removal audit reads as a
+      // MOVE rather than as two unexplained drops (see panelStore's audit).
+      flushSync(() => parkPanelSession(sessionId, "promote-move"));
+      releasePanelSession(sessionId, "promote-move");
       if (!paneLayout.root) paneLayout.initLayout(sessionId);
       switchToSession(sessionId);
     },
@@ -2709,6 +2711,13 @@ class ScreenErrorBoundary extends Component<BoundaryProps, BoundaryState> {
 
   componentDidUpdate(prev: BoundaryProps) {
     if (prev.resetKey !== this.props.resetKey && this.state.error) {
+      // Part of the panel-removal audit (panelStore): a boundary NEVER removes
+      // an artifact — it swaps the surface for a crash card and swaps back —
+      // but from the screen a crash card can read as "the doc went away", so
+      // both edges of that state are on the record.
+      log.info(
+        `Screen boundary reset ${prev.resetKey} -> ${this.props.resetKey} (crash card cleared)`
+      );
       this.setState({ error: null });
     }
   }
