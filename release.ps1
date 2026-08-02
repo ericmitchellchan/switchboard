@@ -105,8 +105,25 @@ $latest = [ordered]@{
 }
 
 $latestPath = Join-Path $nsisDir "latest.json"
-$latest | ConvertTo-Json -Depth 5 | Out-File $latestPath -Encoding utf8
-Write-Host "Wrote $latestPath" -ForegroundColor Green
+
+# NO BOM. Windows PowerShell's `Out-File -Encoding utf8` always prepends a UTF-8
+# BOM, and serde_json -- what the Rust updater parses latest.json with -- does
+# NOT skip one: it fails at line 1 column 1. The release looks perfect from
+# every angle (asset present, correct JSON, 200 OK anonymously) and the app just
+# never sees an update. Write the bytes explicitly.
+$json = $latest | ConvertTo-Json -Depth 5
+[System.IO.File]::WriteAllText(
+    (Join-Path (Resolve-Path $nsisDir) "latest.json"),
+    $json,
+    (New-Object System.Text.UTF8Encoding $false)
+)
+
+$firstByte = [System.IO.File]::ReadAllBytes($latestPath)[0]
+if ($firstByte -eq 0xEF) {
+    Write-Error "latest.json still starts with a BOM - the updater will not parse it."
+    exit 1
+}
+Write-Host "Wrote $latestPath (no BOM)" -ForegroundColor Green
 
 if ($DryRun) {
     Write-Host "`n--- DRY RUN - nothing published ---" -ForegroundColor Yellow
@@ -123,8 +140,12 @@ if ($active -ne "ericmitchellchan") {
     exit 1
 }
 
-$existing = & gh release view $tag --repo $REPO 2>$null
-if ($LASTEXITCODE -eq 0) {
+# Do NOT probe with `gh release view ... 2>$null`: redirecting a native exe's
+# stderr in Windows PowerShell wraps each line in a NativeCommandError, which
+# $ErrorActionPreference="Stop" turns into a terminating error on the perfectly
+# normal "release not found". Listing tags never writes to stderr.
+$existingTags = & gh release list --repo $REPO --json tagName --jq '.[].tagName'
+if ($existingTags -contains $tag) {
     Write-Host "Release $tag exists - replacing its assets" -ForegroundColor Yellow
     & gh release upload $tag $installer.FullName $sigFile $latestPath --repo $REPO --clobber
 } else {
