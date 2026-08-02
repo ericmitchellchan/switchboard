@@ -25,6 +25,7 @@ const VALID_SCREENS: ReadonlySet<ScreenId> = new Set<ScreenId>([
   "terminal",
   "kb",
   "explorer",
+  "threads",
 ]);
 
 /** Every query-param key the router owns. applyRouteToParams deletes ALL of
@@ -32,7 +33,8 @@ const VALID_SCREENS: ReadonlySet<ScreenId> = new Set<ScreenId>([
  *  leak into the next one — while non-route params survive untouched.
  *  New screens append their param keys here (must stay in sync with the
  *  Route union in src/types.ts — currently screen + kb's doc + explorer's
- *  project/path). */
+ *  project/path). A PARAM-LESS screen (terminal, threads) adds nothing: it is
+ *  already covered by the shared `screen` key. */
 export const ROUTE_PARAM_KEYS = ["screen", "doc", "project", "path"] as const;
 
 /** Parse a route from query params. Pure: unknown screens and malformed or
@@ -44,6 +46,8 @@ export function parseRoute(params: URLSearchParams): Route {
   switch (screen) {
     case "terminal":
       return { screen: "terminal" };
+    case "threads":
+      return { screen: "threads" };
     case "kb": {
       const doc = params.get("doc");
       return { screen: "kb", doc: doc ? doc : undefined };
@@ -76,6 +80,7 @@ export function routeToParams(route: Route): URLSearchParams {
   params.set("screen", route.screen);
   switch (route.screen) {
     case "terminal":
+    case "threads":
       break;
     case "kb":
       if (route.doc) params.set("doc", route.doc);

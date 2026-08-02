@@ -138,13 +138,30 @@ export function clearWorkspaceStorage(): void {
  * (create / chatStarted flip / delete — losing chatSessionId or chatStarted
  * to a crash inside the 30s window would strand a conversation).
  */
-export async function saveThreadsToDisk(): Promise<void> {
-  try {
-    await saveThreads(serializeThreadsForDisk(getThreads()));
-  } catch {
-    // disk mirror is best-effort; localStorage still has the records
-  }
+export function saveThreadsToDisk(): Promise<void> {
+  // Snapshot NOW, write IN CALL ORDER. Every caller is fire-and-forget
+  // (`void saveThreadsToDisk()`), so two of them — say an explicit thread
+  // create racing a promotion pass's flush — used to have their IPC round
+  // trips in flight simultaneously, and whichever RESOLVED last won. That is
+  // last-writer-wins on completion order, not on call order: the older
+  // snapshot could land on top of the newer one. Because disk WINS over
+  // localStorage at boot (mergeThreads), the losing record then vanishes
+  // across a restart — precisely the durability this mirror exists for.
+  //
+  // Chaining onto a single promise makes the writes strictly sequential in
+  // call order. Each link swallows its own failure so one bad write can never
+  // reject the chain and strand every later save.
+  const payload = serializeThreadsForDisk(getThreads());
+  diskWriteChain = diskWriteChain.then(() =>
+    saveThreads(payload).catch(() => {
+      // disk mirror is best-effort; localStorage still has the records
+    })
+  );
+  return diskWriteChain;
 }
+
+/** Tail of the serialized thread-mirror write queue. Never rejects. */
+let diskWriteChain: Promise<void> = Promise.resolve();
 
 // --- Periodic save ---
 

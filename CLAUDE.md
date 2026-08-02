@@ -19,7 +19,8 @@ src/
 │   ├── SearchBar.tsx            → Ctrl+F terminal search
 │   ├── StatusBar.tsx            → Bottom bar (task count, session count, update chip)
 │   ├── SideMenu.tsx             → Left navigator menu (Ctrl+Shift+B / wordmark click): threads + inline KB + explorer trees
-│   ├── ThreadsSection.tsx       → Thread rows in the side menu (status dot, revive chip)
+│   ├── ThreadsSection.tsx       → Thread rows in the side menu (status dot, revive chip); recent 8 + `See all (N)`
+│   ├── ThreadsScreen.tsx        → Thread HISTORY screen (`{screen:"threads"}`): every thread + repo + last activity + filter + per-row revive/delete
 │   ├── KbTreeSection.tsx        → Side-menu KB doc tree (inline navigator) + shared tree row primitives
 │   ├── ExplorerTreeSection.tsx  → Side-menu registry projects + IDE-style inline file tree
 │   ├── NewThreadDialog.tsx      → Repo picker for creating a thread
@@ -51,7 +52,8 @@ src/
 │   ├── resizePolicy.ts          → Settled resize policy (grow-only width, snapshot-reflow on widen, mid-stream defer)
 │   ├── fitQueue.ts              → Debounced per-session fit pipeline (show/resize coalescing)
 │   ├── route.ts                 → URL-backed route model + nav store (screen switching)
-│   ├── threadStore.ts           → Durable agent threads: records, revive decisions, shell-ready wait, action bridge
+│   ├── threadStore.ts           → Durable agent threads: records (explicit + promoted), revive decisions, shell-ready wait, history selection/filter/relative-time helpers, action bridge
+│   ├── threadPromotion.ts       → Tab→thread promotion (increment C): what a discovery MEANS for the thread list (`planPromotion`) + the poll pass. PURE decision + injected IO; observe-only
 │   ├── panelStore.ts            → Artifact panel state (per-TAB `PanelState` = artifact strip + activeIndex, global width), strip ops (`appendOrActivate`/`closeArtifactIn`), layout/drag math, header breadcrumbs, the shared ICON NAMES (`FILE_ICON`/`folderIcon`/`describeArtifact().icon` — drawn by components/icons), open-in-panel decision (`decideOpen`/`fullWidthRoute`), toggle memory, `+`-picker request, active-tab + send-to-thread bridges
 │   ├── agentContext.ts          → Agent context injection (T8): shell-safe sanitizer + the two seam builders (`buildSpawnContext`, `buildSendReference`) + KB-root cache. PURE — the effectful ends live in App/threadStore/panelStore
 │   ├── kb.ts                    → KB doc list/read data layer (poll while active)
@@ -80,6 +82,7 @@ src-tauri/
 │   ├── kb.rs                    → KB backend: traversal-guarded doc tree/read over the personal-kb checkout
 │   ├── explorer.rs              → Explorer backend: registry.json-driven repo listing/read (same guard posture)
 │   ├── power.rs                 → Win32 power monitor (sleep/wake events)
+│   ├── discovery.rs             → Claude discovery: PTY shell pid → descendant pids → `~/.claude/sessions/<pid>.json`. Toolhelp snapshot, freshness + ambiguity guards, observe-only
 │   └── pty/
 │       ├── mod.rs               → PtyManager: session registry + reader thread
 │       └── session.rs           → PtySession: portable-pty wrapper + Drop cleanup
@@ -137,7 +140,9 @@ pnpm test:watch        # Vitest (watch mode)
 - **Keep-alive registry, never replay** — xterm instances survive React unmount in a hidden DOM root and keep receiving PTY writes; remount adopts the same element back (a snapshot/replay cycle garbles claude's repaint-based TUI). Exit never disposes; only session close does
 - **Spawn generations** — every PTY event carries the spawn's generation; the expectation is bumped BEFORE each restart invoke so a dying old reader thread's output/exit events are dropped, never rendered
 - **Grow-only resize policy** — terminal cols never shrink on pane narrow (horizontal scroll instead); widen = snapshot-reflow; mid-stream grid changes deferred until output settles (`resizePolicy.ts`)
-- **Threads** — a thread binds a tab to a claude conversation via `chatSessionId` (minted by us) + `chatStarted` (UI hint); the revive `--resume` vs `--session-id` choice comes from disk GROUND TRUTH (`claude_session_exists`), never from the hint
+- **Threads** — a thread binds a tab to a claude conversation via `chatSessionId` + `chatStarted` (UI hint); the revive `--resume` vs `--session-id` choice comes from disk GROUND TRUTH (`claude_session_exists`), never from the hint. `chatSessionId` is MINTED by the explicit `+ new thread` path and DISCOVERED by the promotion path — same field, so revive needs no special-casing
+- **Tab/thread parity — promote on claude, never on tab creation** — a plain `Ctrl+T` shell gets no record (history would fill with throwaway `git status` shells, and a revive chip on a never-persisted session lies). The moment a claude conversation is actually running in ANY tab, that tab is promoted to a thread. Detection is a PROCESS-TREE walk (`discovery.rs`): the PTY's shell pid → descendants → whichever owns a `~/.claude/sessions/<pid>.json`, which keys on the claude PID and carries the conversation uuid + cwd. Not cwd/start-time matching — that cannot tell two tabs in the same repo apart. Two guards are load-bearing: a candidate must have STARTED AFTER our shell (Windows pid reuse makes unrelated processes look like descendants), and AMBIGUITY REFUSES (two claudes under one tab, or one claude under two tabs → promote NEITHER and log). The whole path is OBSERVE-ONLY: a process snapshot plus JSON reads, never a `writeToSession`. Polling stops entirely when every tab is bound
+- **Threads list = recent 8 + `See all (N)`** — the 218px rail caps at `MENU_THREAD_LIMIT`, EXCEPT that live threads are never truncated out (`selectMenuThreads` widens the slice rather than hiding a conversation you are having). The overflow row and the section label both open `{screen:"threads"}`, the param-less, deep-linkable history screen
 - **One shared record per `.pins.json`, never per mount** — the artifact panel and the keep-alive KB screen can host the SAME wireframe simultaneously (`display:none` is not unmount). Component-local pin state meant two copies and a silent last-writer-wins clobber, so all mounts go through `pinsStore` (refcounted subscribe, one debounced writer per sidecar, flush on last release). `pins.ts` stays pure and owns the file's contents; the store owns sharing and IO
 - **Artifact panel is per-TAB, never per-pane** — `panelStore` keys on the TAB's `activeSessionId`, not `effectiveActiveSessionId` (the focused pane). A split terminal + panel just shares the width: moving pane focus never swaps or blanks the panel, and persistence never forks one binding per pane
 - **Panel geometry is measured against the WORKSPACE container** — App nests `[pane tree | divider | ArtifactPanel]` in a container that EXCLUDES the TaskSidebar, so the panel's right edge is the container's right edge. Every width rule in `panelStore` (`panelLayoutFor`, `panelWidthFromDrag`, the MIN_TERMINAL_WIDTH floor, overlay's `right: 0`) assumes that nesting; re-parenting the panel next to the sidebar makes all of them wrong by exactly the sidebar's width (0/38/280px)

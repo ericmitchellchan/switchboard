@@ -117,6 +117,35 @@ export async function claudeSessionExists(
   return invoke("claude_session_exists", { workingDir, sessionId });
 }
 
+/** Claude discovery (increment C): which of these tabs currently has a claude
+ *  conversation running inside it, and which conversation?
+ *
+ *  Resolved in Rust by walking each tab's PTY process tree down to a process
+ *  that owns a `~/.claude/sessions/<pid>.json` — see src-tauri/src/discovery.rs
+ *  for the mechanism and the two guards. AMBIGUOUS tabs (two claude
+ *  descendants) and ambiguous conversations (one claude under two tabs) are
+ *  omitted and logged server-side, never guessed at.
+ *
+ *  OBSERVE-ONLY. This whole path reads a process snapshot and some JSON; it
+ *  cannot type into a shell. */
+export interface ClaudeDiscovery {
+  /** Switchboard session (tab) id. */
+  sessionId: string;
+  /** The claude conversation uuid — DISCOVERED, not minted by us. */
+  chatSessionId: string;
+  /** CLAUDE's cwd (the user may have `cd`'d first), which is what the
+   *  transcript path is munged from — so it is what a promoted thread stores
+   *  as its workingDir. */
+  cwd: string;
+  startedAt: number;
+}
+
+export async function discoverClaudeSessions(
+  sessionIds: string[]
+): Promise<ClaudeDiscovery[]> {
+  return invoke("discover_claude_sessions", { sessionIds });
+}
+
 // ── Knowledge Base (T6) ──────────────────────────────────────────────────────
 // All KB commands are rooted at the personal-kb checkout (env
 // SWITCHBOARD_KB_PATH → config kb_path → built-in default) and traversal-

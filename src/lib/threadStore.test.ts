@@ -33,6 +33,15 @@ import {
   getThreadsView,
   setThreadBooting,
   publishSessionStatuses,
+  promoteThreadRecord,
+  adoptChatSession,
+  threadRepoName,
+  sameWorkingDir,
+  sortThreadsForHistory,
+  selectMenuThreads,
+  filterThreads,
+  relativeActivity,
+  MENU_THREAD_LIMIT,
   __resetThreadStoreForTests,
 } from "./threadStore";
 
@@ -494,5 +503,243 @@ describe("waitForShellReady", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(h.isResolved()).toBe(true);
     expect(h.unsub).toHaveBeenCalled();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Increment C — promotion records + thread history selection
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("threadRepoName", () => {
+  it("takes the basename of either separator style", () => {
+    expect(threadRepoName("C:\\Users\\ericm\\projects\\orbit")).toBe("orbit");
+    expect(threadRepoName("/home/e/projects/orbit")).toBe("orbit");
+  });
+
+  it("tolerates trailing separators and degenerate input", () => {
+    expect(threadRepoName("C:\\repos\\orbit\\")).toBe("orbit");
+    expect(threadRepoName("")).toBe("");
+  });
+});
+
+describe("sameWorkingDir", () => {
+  // Revive compares the bound TAB's cwd against the thread's. A promoted
+  // thread's dir comes from claude's session file; the tab's comes from our
+  // own config — so the two strings routinely differ in shape while naming
+  // the same directory.
+  it("ignores separator style, trailing separators and case", () => {
+    expect(sameWorkingDir("C:\\repos\\Orbit", "C:/repos/orbit")).toBe(true);
+    expect(sameWorkingDir("C:\\repos\\orbit\\", "C:\\repos\\orbit")).toBe(true);
+  });
+
+  it("ignores the Windows verbatim prefix", () => {
+    expect(sameWorkingDir("\\\\?\\C:\\repos\\orbit", "C:\\repos\\orbit")).toBe(true);
+    expect(sameWorkingDir("\\\\?\\UNC\\srv\\share", "\\\\srv\\share")).toBe(true);
+  });
+
+  it("still distinguishes genuinely different directories", () => {
+    // The whole point: `Ctrl+T` in the parent, `cd` into the child, `claude`.
+    expect(sameWorkingDir("C:\\repos", "C:\\repos\\orbit")).toBe(false);
+    expect(sameWorkingDir("C:\\repos\\orbit", "C:\\repos\\orbit2")).toBe(false);
+  });
+});
+
+describe("promoteThreadRecord", () => {
+  beforeEach(() => __resetThreadStoreForTests());
+
+  it("ADOPTS claude's uuid instead of minting one", () => {
+    const t = promoteThreadRecord({
+      title: "orbit · Aug 2",
+      workingDir: "C:\\repos\\orbit",
+      chatSessionId: "discovered-uuid",
+      chatStarted: true,
+      sessionId: "tab-a",
+    });
+    expect(t.chatSessionId).toBe("discovered-uuid");
+    expect(t.chatStarted).toBe(true);
+    expect(t.sessionId).toBe("tab-a");
+    // Its own thread id is still freshly minted — only the CONVERSATION id
+    // comes from claude.
+    expect(t.id).toMatch(UUID_RE);
+    expect(t.id).not.toBe("discovered-uuid");
+    expect(getThreads()).toHaveLength(1);
+  });
+
+  it("dates the record from CLAUDE's launch, not from the poll that saw it", () => {
+    const t = promoteThreadRecord({
+      title: "x",
+      workingDir: "C:\\repos\\orbit",
+      chatSessionId: "abc",
+      chatStarted: true,
+      sessionId: "tab-a",
+      startedAt: 1_700_000_000_000,
+    });
+    expect(t.createdAt).toBe(1_700_000_000_000);
+    // Being seen alive IS activity, so lastActivityAt is now, not then.
+    expect(t.lastActivityAt).toBeGreaterThan(t.createdAt);
+  });
+
+  it("ignores a missing or impossible startedAt", () => {
+    const base = { title: "x", workingDir: "C:\\repos\\orbit", chatSessionId: "abc", chatStarted: false, sessionId: "tab-a" };
+    expect(promoteThreadRecord(base).createdAt).toBeGreaterThan(0);
+    expect(promoteThreadRecord({ ...base, startedAt: 0 }).createdAt).toBeGreaterThan(0);
+    // A future timestamp would sort the row above everything forever.
+    const future = Date.now() + 1_000_000;
+    expect(promoteThreadRecord({ ...base, startedAt: future }).createdAt).toBeLessThan(future);
+  });
+
+  it("produces a record that survives the sanitize gate unchanged", () => {
+    // Promoted records ride the SAME persistence path as explicit ones — a
+    // shape the lean-record gate rejected would silently never persist.
+    const t = promoteThreadRecord({
+      title: "orbit · Aug 2",
+      workingDir: "C:\\repos\\orbit",
+      chatSessionId: "discovered-uuid",
+      chatStarted: false,
+      sessionId: "tab-a",
+    });
+    expect(sanitizeThread(t)).toEqual(t);
+  });
+
+  it("is indistinguishable from an explicit thread at revive time", () => {
+    // The whole point of the shared field: revive reads chatSessionId and disk
+    // ground truth, never "how did this record get here".
+    const promoted = promoteThreadRecord({
+      title: "x",
+      workingDir: "C:\\repos\\orbit",
+      chatSessionId: "abc",
+      chatStarted: true,
+      sessionId: "tab-a",
+    });
+    expect(launchCommand({ chatSessionId: promoted.chatSessionId, resume: true }))
+      .toBe("claude --resume abc");
+  });
+});
+
+describe("adoptChatSession", () => {
+  beforeEach(() => __resetThreadStoreForTests());
+
+  it("updates the existing record rather than adding a second", () => {
+    const t = createThreadRecord({ title: "x", workingDir: "C:\\repos\\orbit" });
+    adoptChatSession(t.id, "restarted-uuid", true);
+    expect(getThreads()).toHaveLength(1);
+    expect(getThreadById(t.id)?.chatSessionId).toBe("restarted-uuid");
+    expect(getThreadById(t.id)?.chatStarted).toBe(true);
+  });
+
+  it("leaves the record untouched when the uuid already matches", () => {
+    const t = createThreadRecord({ title: "x", workingDir: "C:\\repos\\orbit" });
+    const before = getThreadById(t.id);
+    adoptChatSession(t.id, t.chatSessionId, false);
+    expect(getThreadById(t.id)).toBe(before);
+  });
+
+  it("ignores an unknown thread id", () => {
+    createThreadRecord({ title: "x", workingDir: "C:\\repos\\orbit" });
+    adoptChatSession("nope", "other", true);
+    expect(getThreads()).toHaveLength(1);
+  });
+});
+
+// ── History selection ────────────────────────────────────────────────────────
+
+function ht(id: string, lastActivityAt: number, over: Partial<Thread> = {}): Thread {
+  return {
+    id,
+    title: id,
+    workingDir: "C:\\repos\\orbit",
+    chatSessionId: `c-${id}`,
+    chatStarted: false,
+    sessionId: null,
+    createdAt: lastActivityAt,
+    lastActivityAt,
+    ...over,
+  };
+}
+
+describe("sortThreadsForHistory", () => {
+  it("puts live threads first, then most recent activity", () => {
+    const list = [ht("a", 300), ht("b", 100), ht("c", 200)];
+    const out = sortThreadsForHistory(list, new Set(["b"]));
+    expect(out.map((t) => t.id)).toEqual(["b", "a", "c"]);
+  });
+
+  it("is a total, stable order when timestamps tie", () => {
+    const list = [ht("z", 100), ht("a", 100)];
+    const out = sortThreadsForHistory(list, new Set());
+    expect(out.map((t) => t.id)).toEqual(["a", "z"]);
+    // …and does not mutate the input.
+    expect(list.map((t) => t.id)).toEqual(["z", "a"]);
+  });
+});
+
+describe("selectMenuThreads", () => {
+  it("caps the rail at the limit", () => {
+    const list = Array.from({ length: 20 }, (_, i) => ht(`t${i}`, i));
+    expect(selectMenuThreads(list, new Set())).toHaveLength(MENU_THREAD_LIMIT);
+  });
+
+  it("keeps every LIVE thread visible however old it is", () => {
+    // t0 is the oldest of 20 — it would be cut, but it is live.
+    const list = Array.from({ length: 20 }, (_, i) => ht(`t${i}`, i));
+    const out = selectMenuThreads(list, new Set(["t0"]));
+    expect(out).toHaveLength(MENU_THREAD_LIMIT);
+    expect(out[0].id).toBe("t0");
+  });
+
+  it("grows past the limit rather than hiding a live thread", () => {
+    const list = Array.from({ length: 20 }, (_, i) => ht(`t${i}`, i));
+    const live = new Set(list.slice(0, 12).map((t) => t.id));
+    const out = selectMenuThreads(list, live);
+    expect(out).toHaveLength(12);
+    expect(out.every((t) => live.has(t.id))).toBe(true);
+  });
+
+  it("returns everything when there is less than a limit's worth", () => {
+    const list = [ht("a", 1), ht("b", 2)];
+    expect(selectMenuThreads(list, new Set())).toHaveLength(2);
+  });
+});
+
+describe("filterThreads", () => {
+  const list = [
+    ht("a", 1, { title: "orbit · Aug 2", workingDir: "C:\\repos\\orbit" }),
+    ht("b", 2, { title: "nightly sweep", workingDir: "C:\\repos\\lodestar" }),
+  ];
+
+  it("matches title case-insensitively", () => {
+    expect(filterThreads(list, "ORBIT").map((t) => t.id)).toEqual(["a"]);
+  });
+
+  it("matches the repo name too", () => {
+    expect(filterThreads(list, "lodestar").map((t) => t.id)).toEqual(["b"]);
+  });
+
+  it("returns everything for a blank or whitespace query", () => {
+    expect(filterThreads(list, "")).toHaveLength(2);
+    expect(filterThreads(list, "   ")).toHaveLength(2);
+  });
+
+  it("returns nothing when nothing matches", () => {
+    expect(filterThreads(list, "zzz")).toEqual([]);
+  });
+});
+
+describe("relativeActivity", () => {
+  const NOW = 1_000_000_000;
+
+  it("reads as minutes, hours then days", () => {
+    expect(relativeActivity(NOW - 30_000, NOW)).toBe("just now");
+    expect(relativeActivity(NOW - 12 * 60_000, NOW)).toBe("12m ago");
+    expect(relativeActivity(NOW - 2 * 3_600_000, NOW)).toBe("2h ago");
+    expect(relativeActivity(NOW - 3 * 86_400_000, NOW)).toBe("3d ago");
+  });
+
+  it("prints an honest dash for a record with no activity", () => {
+    expect(relativeActivity(0, NOW)).toBe("—");
+  });
+
+  it("clamps a future timestamp instead of printing a negative age", () => {
+    expect(relativeActivity(NOW + 60_000, NOW)).toBe("just now");
   });
 });

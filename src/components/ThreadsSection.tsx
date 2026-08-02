@@ -13,16 +13,18 @@
 import { useState } from "react";
 import type { CSSProperties } from "react";
 import type { AgentStatus, Thread } from "../types";
-import { useThreadsView, getThreadActions } from "../lib/threadStore";
+import {
+  useThreadsView,
+  getThreadActions,
+  selectMenuThreads,
+  threadRepoName,
+} from "../lib/threadStore";
+import { navigate } from "../lib/route";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
 
-const EXITED_COLOR = "#52525B"; // --st-exited
-
-/** Cross-platform basename of the thread's workingDir — the dim repo meta. */
-function repoMeta(workingDir: string): string {
-  const parts = workingDir.split(/[/\\]/).filter(Boolean);
-  return parts[parts.length - 1] ?? workingDir;
-}
+/** Dead rows use the EXITED status colour — read from statusConfig, the
+ *  single source of truth, so a palette change lands here too. */
+const EXITED_COLOR = STATUS_CONFIGS.exited.color;
 
 const ROW_STYLE: CSSProperties = {
   display: "flex",
@@ -53,9 +55,16 @@ const CHIP_STYLE: CSSProperties = {
 export function ThreadsSection() {
   const view = useThreadsView();
 
+  // Threads are the long history; this rail is 218px wide and has a Knowledge
+  // Base and an Explorer under it. Show the most recent handful — but never
+  // truncate a LIVE thread out of the list (you must always be able to reach
+  // the conversation you are having), which is selectMenuThreads' whole job.
+  const shown = selectMenuThreads(view.threads, view.launched);
+  const hidden = view.threads.length - shown.length;
+
   return (
     <>
-      {view.threads.map((t) => (
+      {shown.map((t) => (
         <ThreadRow
           key={t.id}
           thread={t}
@@ -65,6 +74,7 @@ export function ThreadsSection() {
           active={t.sessionId !== null && t.sessionId === view.activeSessionId}
         />
       ))}
+      {hidden > 0 && <SeeAllRow total={view.threads.length} />}
       <NewThreadRow />
     </>
   );
@@ -172,9 +182,32 @@ function ThreadRow({
         </span>
       ) : (
         <span style={{ flex: "none", fontSize: 9.5, color: "var(--text-dim)" }}>
-          {repoMeta(thread.workingDir)}
+          {threadRepoName(thread.workingDir)}
         </span>
       )}
+    </button>
+  );
+}
+
+/** The overflow affordance: opens the full history SCREEN rather than
+ *  expanding in place — a long list in this rail buries Knowledge Base and
+ *  Explorer, and unbounded scroll degrades quietly as history accumulates. */
+function SeeAllRow({ total }: { total: number }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={() => navigate({ screen: "threads" })}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title="Open the full thread history"
+      style={{
+        ...ROW_STYLE,
+        color: hover ? "var(--text-secondary)" : "var(--text-dim)",
+      }}
+    >
+      <span style={{ width: 8, flex: "none" }} />
+      <span>See all ({total})</span>
     </button>
   );
 }

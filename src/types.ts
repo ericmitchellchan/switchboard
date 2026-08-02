@@ -91,7 +91,7 @@ export interface SavedWorkspace {
 
 /** Every screen the workstation shell can show. "terminal" is the classic
  *  Switchboard workspace and the default route. */
-export type ScreenId = "terminal" | "kb" | "explorer";
+export type ScreenId = "terminal" | "kb" | "explorer" | "threads";
 
 /** Discriminated route union keyed on `screen`. Param-carrying screens extend
  *  their variant inline (params are optional deep-link state, not identity —
@@ -102,7 +102,12 @@ export type ScreenId = "terminal" | "kb" | "explorer";
 export type Route =
   | { screen: "terminal" }
   | { screen: "kb"; doc?: string }
-  | { screen: "explorer"; project?: string; path?: string };
+  | { screen: "explorer"; project?: string; path?: string }
+  // The thread HISTORY screen (increment C's `See all (N)`). Param-less: its
+  // filter box is screen-local UI state, not identity, so it joins the
+  // keep-alive cache and the URL stays `?screen=threads` — deep-linkable and
+  // reachable with the side menu hidden.
+  | { screen: "threads" };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Threads (T5) — an agent session that survives app/machine restarts.
@@ -155,9 +160,18 @@ export interface Thread {
   /** Switchboard thread id (uuid). */
   id: string;
   title: string;
-  /** Repo working directory the thread's sessions spawn in. */
+  /** The directory the CONVERSATION lives in — where revive spawns a shell,
+   *  and what claude's transcript path is munged from. For an explicitly
+   *  created thread that is also the tab's spawn dir; for a PROMOTED one it is
+   *  claude's own cwd, which can differ (`Ctrl+T`, `cd repo`, `claude`), so
+   *  revive checks before reusing a bound tab (App.handleReviveThread). */
   workingDir: string;
-  /** ★ The claude conversation UUID — WE mint it (`crypto.randomUUID()`). */
+  /** ★ The claude conversation UUID. MINTED by us (`crypto.randomUUID()`)
+   *  when the thread is created explicitly — `claude --session-id <uuid>` then
+   *  pins it; DISCOVERED from claude's own session file when a plain tab is
+   *  PROMOTED (increment C), because claude already chose one. Same field
+   *  either way, which is why revive needs no special-casing: the `--resume`
+   *  vs `--session-id` choice reads disk, not provenance. */
   chatSessionId: string;
   /** ★ UI hint: the first REAL user turn happened (Enter in the TUI, not a
    *  bracketed paste). The revive launch decision itself comes from disk

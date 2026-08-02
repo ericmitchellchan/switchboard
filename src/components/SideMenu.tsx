@@ -74,7 +74,11 @@ export function SideMenu({ route }: { route: Route }) {
           plus the "+ new thread" affordance. Data comes from the threadStore
           singleton; actions bridge back to App via registerThreadActions —
           no prop plumbing through here. */}
-      <SectionLabel>Threads</SectionLabel>
+      {/* The label jumps to the full history screen, exactly as the KB and
+          Explorer labels jump to theirs — so the history is reachable even
+          when the inline list is short enough that no `See all (N)` row is
+          shown (a "See all (3)" over 3 visible rows would be dead chrome). */}
+      <SectionLabel onClick={() => navigateToScreen("threads")}>Threads</SectionLabel>
       <ThreadsSection />
 
       {/* The KB doc tree, inline — clicking a doc navigates the kb screen.

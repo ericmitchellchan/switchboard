@@ -113,6 +113,33 @@ export function defaultThreadTitle(repoName: string, now: Date = new Date()): st
   return `${repoName} · ${MONTHS[now.getMonth()]} ${now.getDate()}`;
 }
 
+/** Do two paths name the same directory? Windows-shaped comparison: separator
+ *  style, a trailing separator, the verbatim `\\?\` prefix and CASE are all
+ *  insignificant here (NTFS is case-insensitive, and the two strings reach us
+ *  from different sources — our own config vs claude's session file).
+ *
+ *  Used at revive time: a PROMOTED thread's workingDir is CLAUDE's cwd, which
+ *  is not necessarily the cwd its tab was spawned in (`Ctrl+T`, `cd`, then
+ *  `claude`). Resuming from the wrong directory silently finds no transcript,
+ *  because claude locates it by munging its own cwd. */
+export function sameWorkingDir(a: string, b: string): boolean {
+  const norm = (p: string) => {
+    let s = p.replace(/\\/g, "/");
+    if (s.startsWith("//?/UNC/")) s = `//${s.slice(8)}`;
+    else if (s.startsWith("//?/")) s = s.slice(4);
+    return s.replace(/\/+$/, "").toLowerCase();
+  };
+  return norm(a) === norm(b);
+}
+
+/** Cross-platform basename of a thread's workingDir — the repo meta shown in
+ *  the side menu and the history screen, and the name a PROMOTED thread's
+ *  default title is built from (so promoted and explicit titles read alike). */
+export function threadRepoName(workingDir: string): string {
+  const parts = workingDir.split(/[/\\]/).filter(Boolean);
+  return parts[parts.length - 1] ?? workingDir;
+}
+
 /** Lean-record gate: rebuild a Thread from unknown input keeping ONLY the
  *  schema fields (drops any scrollback/messages/derived state that might have
  *  leaked into a persisted blob), or reject it. Every load path — localStorage
@@ -301,6 +328,76 @@ export function remapThreadSessions(
   return threads.map((t) =>
     t.sessionId ? { ...t, sessionId: idMap.get(t.sessionId) ?? null } : t
   );
+}
+
+// ── Thread history selection (increment C) ───────────────────────────────────
+// Threads are the LONG history; the side menu is a 218px rail. These pure
+// helpers decide what the rail shows and how the See-all screen orders and
+// filters. Kept here (not in the components) so the "a live thread is never
+// scrolled out of the list" rule is unit-tested rather than eyeballed.
+
+/** Rows the side-menu Threads section shows before the `See all (N)` row. */
+export const MENU_THREAD_LIMIT = 8;
+
+/** Canonical history order: LIVE threads first, then most-recent activity
+ *  first, then newest-created, then id — the last two only so the order is
+ *  total and stable (equal timestamps must not reshuffle between renders). */
+export function sortThreadsForHistory(
+  threads: readonly Thread[],
+  live: ReadonlySet<string>
+): Thread[] {
+  return [...threads].sort((a, b) => {
+    const liveDelta = Number(live.has(b.id)) - Number(live.has(a.id));
+    if (liveDelta !== 0) return liveDelta;
+    if (b.lastActivityAt !== a.lastActivityAt) return b.lastActivityAt - a.lastActivityAt;
+    if (b.createdAt !== a.createdAt) return b.createdAt - a.createdAt;
+    return a.id.localeCompare(b.id);
+  });
+}
+
+/** The side menu's rows: at most `limit` — EXCEPT that every LIVE thread is
+ *  always present regardless of recency. A live thread scrolled out of the
+ *  list would be a bug (you cannot reach the conversation you are having), so
+ *  when more than `limit` threads are live the list grows to fit them rather
+ *  than truncating. Live threads sort first, so this is a widened slice. */
+export function selectMenuThreads(
+  threads: readonly Thread[],
+  live: ReadonlySet<string>,
+  limit: number = MENU_THREAD_LIMIT
+): Thread[] {
+  const sorted = sortThreadsForHistory(threads, live);
+  let liveCount = 0;
+  for (const t of sorted) if (live.has(t.id)) liveCount++;
+  return sorted.slice(0, Math.max(limit, liveCount));
+}
+
+/** Free-text filter for the See-all screen: case-insensitive substring over
+ *  TITLE + repo name. A blank/whitespace query matches everything. */
+export function filterThreads(threads: readonly Thread[], query: string): Thread[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [...threads];
+  return threads.filter(
+    (t) =>
+      t.title.toLowerCase().includes(q) ||
+      threadRepoName(t.workingDir).toLowerCase().includes(q)
+  );
+}
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
+
+/** Relative last-activity label ("just now" / "12m ago" / "2h ago" / "3d ago").
+ *  A record with no recorded activity reads "—" rather than "56y ago" — an
+ *  honest blank beats a wrong number. Future timestamps (clock skew) clamp to
+ *  "just now" instead of printing a negative age. */
+export function relativeActivity(timestamp: number, now: number = Date.now()): string {
+  if (!timestamp) return "—";
+  const delta = now - timestamp;
+  if (delta < MINUTE_MS) return "just now";
+  if (delta < HOUR_MS) return `${Math.floor(delta / MINUTE_MS)}m ago`;
+  if (delta < DAY_MS) return `${Math.floor(delta / HOUR_MS)}h ago`;
+  return `${Math.floor(delta / DAY_MS)}d ago`;
 }
 
 // ── Disk mirror (de)serialization + merge ────────────────────────────────────
@@ -506,6 +603,70 @@ export function createThreadRecord(args: { title: string; workingDir: string }):
   return t;
 }
 
+/** Create + insert a PROMOTED thread: a claude conversation was discovered
+ *  running in a plain tab (increment C), so the record adopts the uuid claude
+ *  ALREADY chose instead of minting one.
+ *
+ *  Deliberately built on newThread() rather than forking it — same shape, same
+ *  sanitize gate, same disk mirror. Only three fields differ from the explicit
+ *  path, and they are exactly the three the discovery knows better than we do:
+ *   · chatSessionId — claude's, not ours;
+ *   · chatStarted   — from claude_session_exists (a discovered conversation
+ *                     with a transcript on disk IS started; the caller passes
+ *                     that ground truth in);
+ *   · sessionId     — bound at birth, because the tab is right there.
+ *  Revive needs no special-casing: it re-reads disk ground truth to choose
+ *  --resume vs --session-id, and this uuid is in the same field either way.
+ *
+ *  `startedAt` (claude's own launch time) becomes createdAt when supplied: the
+ *  conversation is as old as ITSELF, not as old as the poll that noticed it,
+ *  and history sorts on these timestamps. lastActivityAt stays "now" — being
+ *  seen alive IS activity. */
+export function promoteThreadRecord(args: {
+  title: string;
+  workingDir: string;
+  chatSessionId: string;
+  chatStarted: boolean;
+  sessionId: string;
+  startedAt?: number;
+}): Thread {
+  const base = newThread({ title: args.title, workingDir: args.workingDir });
+  const t: Thread = {
+    ...base,
+    chatSessionId: args.chatSessionId,
+    chatStarted: args.chatStarted,
+    sessionId: args.sessionId,
+    createdAt:
+      args.startedAt && args.startedAt > 0 && args.startedAt <= base.createdAt
+        ? args.startedAt
+        : base.createdAt,
+  };
+  threads = [...threads, t];
+  bump();
+  return t;
+}
+
+/** claude restarted inside a tab that already has a thread, under a DIFFERENT
+ *  conversation uuid. Per the increment-C idempotency rule this updates the
+ *  EXISTING record rather than creating a second one for the same tab — the
+ *  live conversation is the discovered one, so a row still pointing at the old
+ *  uuid would revive the wrong history.
+ *
+ *  Field-level update on the existing record (never a bulk replace — see the
+ *  Ky-bug note at the top of this file). */
+export function adoptChatSession(
+  threadId: string,
+  chatSessionId: string,
+  chatStarted: boolean
+): void {
+  threads = threads.map((t) =>
+    t.id === threadId && t.chatSessionId !== chatSessionId
+      ? { ...t, chatSessionId, chatStarted, lastActivityAt: Date.now() }
+      : t
+  );
+  bump();
+}
+
 /** Bind a live Switchboard session (tab) to the thread. */
 export function bindThreadSession(threadId: string, sessionId: string): void {
   threads = threads.map((t) =>
@@ -637,6 +798,11 @@ export type ThreadActions = {
   newThread: () => void;
   /** × affordance: delete the record (session tab survives). */
   deleteThread: (threadId: string) => void;
+  /** Same delete, behind a ConfirmDialog. Used by the history SCREEN, where a
+   *  row is a deliberate target rather than a hover affordance in a dense rail
+   *  — and where deleting the record is the only thing standing between the
+   *  user and an unreachable conversation. */
+  confirmDeleteThread: (threadId: string) => void;
 };
 
 let threadActions: ThreadActions | null = null;

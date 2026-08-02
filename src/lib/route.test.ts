@@ -60,6 +60,28 @@ describe("parseRoute / routeToParams round-trips", () => {
     expect(roundTrip({ screen: "terminal" })).toEqual({ screen: "terminal" });
   });
 
+  it("round-trips the threads history route (param-less)", () => {
+    expect(roundTrip({ screen: "threads" })).toEqual({ screen: "threads" });
+  });
+
+  it("threads is deep-linkable from a bare screen param", () => {
+    // The See-all screen must be reachable with the side menu hidden — it is a
+    // route, so the URL alone gets you there.
+    expect(parseRoute(new URLSearchParams("screen=threads"))).toEqual({ screen: "threads" });
+  });
+
+  it("threads carries no params of its own", () => {
+    expect([...routeToParams({ screen: "threads" }).keys()]).toEqual(["screen"]);
+  });
+
+  it("navigating to threads clears another screen's stale params", () => {
+    const existing = new URLSearchParams("screen=explorer&project=orbit&path=src/a.ts");
+    const next = applyRouteToParams(existing, { screen: "threads" });
+    expect(next.get("screen")).toBe("threads");
+    expect(next.get("project")).toBeNull();
+    expect(next.get("path")).toBeNull();
+  });
+
   it("round-trips kb without a doc", () => {
     expect(roundTrip({ screen: "kb" })).toEqual({ screen: "kb" });
   });
@@ -160,6 +182,7 @@ describe("applyRouteToParams (router-owned key clearing)", () => {
       { screen: "kb", doc: "d.md" },
       { screen: "explorer", project: "p" },
       { screen: "explorer", project: "p", path: "src/a.ts" },
+      { screen: "threads" },
     ];
     const owned = new Set<string>(ROUTE_PARAM_KEYS);
     for (const route of variants) {

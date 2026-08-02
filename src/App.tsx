@@ -18,7 +18,7 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot } from "./lib/ipc";
+import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot } from "./lib/ipc";
 import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty, isSessionDirty, serializeForPip, setTerminalScreenVisible } from "./lib/terminal";
 import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing } from "./lib/pipBridge";
 import { bumpSessionGeneration, addSessionInputListener, getSessionGeneration } from "./lib/terminalRegistry";
@@ -33,6 +33,11 @@ import {
   clearThreadLaunched,
   isThreadLaunched,
   markChatStarted,
+  sameWorkingDir,
+  promoteThreadRecord,
+  adoptChatSession,
+  getThreads,
+  threadRepoName,
   setThreadBooting,
   markThreadSessionExited,
   unbindThreadsForSession,
@@ -69,6 +74,7 @@ import {
   getKbRootForContext,
   setKbRootForContext,
 } from "./lib/agentContext";
+import { runPromotionPass, PROMOTION_POLL_MS } from "./lib/threadPromotion";
 import { explorerProjects, registerExplorerActions } from "./lib/explorer";
 import { docFileName, parsePinsFile, pinsForDoc, sidecarPathFor } from "./lib/pins";
 import { configurePinsIO, getPinsFile } from "./lib/pinsStore";
@@ -76,6 +82,7 @@ import { ArtifactPanel, CRUMB_TONE } from "./components/ArtifactPanel";
 import { NewThreadDialog } from "./components/NewThreadDialog";
 import { DocView } from "./components/kb/DocView";
 import { ExplorerView } from "./components/ExplorerView";
+import { ThreadsScreen } from "./components/ThreadsScreen";
 import { enqueueFit } from "./lib/fitQueue";
 import { useRoute, navigate, readRouteFromUrl, getNavState } from "./lib/route";
 import {
@@ -179,6 +186,10 @@ type ConfirmState = {
   open: boolean;
   title: string;
   message: string;
+  /** Verb on the destructive button. Omitted = ConfirmDialog's "Close"
+   *  default, which is right for the session-close callers but not for a
+   *  delete — the button must name what it actually does. */
+  confirmLabel?: string;
   onConfirm: () => void;
 };
 
@@ -820,9 +831,29 @@ export default function App() {
       // chip clears on a timer (no output parsing in v1).
       window.setTimeout(() => setThreadBooting(threadId, false), 12_000);
       try {
-        const bound = thread.sessionId
+        const boundTab = thread.sessionId
           ? sessionsRef.current.find((s) => s.id === thread.sessionId)
           : undefined;
+        // The bound tab is only reusable if its shell is actually IN the
+        // thread's directory. For an explicitly-created thread that is always
+        // true (we spawned the tab there), so this changes nothing for T5.
+        // For a PROMOTED thread it need not be: `Ctrl+T` (spawns in the
+        // configured dir), `cd repo`, `claude` binds the conversation to
+        // `repo`, and after a restart the restored tab is back at its ORIGINAL
+        // cwd. Typing `claude --resume` there would look for the transcript
+        // under the wrong munged path and quietly find nothing. We cannot `cd`
+        // the shell (never mutate a live shell), so we SPAWN a fresh tab in
+        // the right directory instead — the same "only ever spawn" posture the
+        // Explorer's open-terminal-here affordance takes.
+        const bound =
+          boundTab && sameWorkingDir(boundTab.working_dir, thread.workingDir)
+            ? boundTab
+            : undefined;
+        if (boundTab && !bound) {
+          log.info(
+            `Revive id=${threadId}: bound tab cwd ${boundTab.working_dir} != thread dir ${thread.workingDir}, spawning a fresh shell there`
+          );
+        }
         let sessionId: string;
         if (bound) {
           // The thread kept a tab binding (restored workspace, or its claude
@@ -883,6 +914,28 @@ export default function App() {
     void saveThreadsToDisk();
   }, []);
 
+  // Same delete, gated by the shared ConfirmDialog (increment C's history
+  // screen). The record is the ONLY route back to the conversation — the
+  // transcript stays on disk but its uuid is gone with the row — so the
+  // message says so rather than a generic "are you sure".
+  const handleConfirmDeleteThread = useCallback(
+    (threadId: string) => {
+      const thread = getThreadById(threadId);
+      if (!thread) return;
+      setConfirmState({
+        open: true,
+        title: "Delete thread?",
+        confirmLabel: "Delete",
+        message: `"${thread.title}" will be removed from your thread history.\n\nThe conversation transcript stays on disk, but Switchboard will no longer know its id — this thread cannot be revived afterwards. Its terminal tab, if open, is unaffected.`,
+        onConfirm: () => {
+          closeConfirm();
+          handleDeleteThread(threadId);
+        },
+      });
+    },
+    [closeConfirm, handleDeleteThread]
+  );
+
   // Bridge App's handlers to ThreadsSection (module singleton — see
   // threadStore.ThreadActions).
   useEffect(() => {
@@ -891,9 +944,53 @@ export default function App() {
       reviveThread: (id) => void handleReviveThread(id),
       newThread: () => setNewThreadDialogOpen(true),
       deleteThread: handleDeleteThread,
+      confirmDeleteThread: handleConfirmDeleteThread,
     });
     return () => registerThreadActions(null);
-  }, [handleOpenThread, handleReviveThread, handleDeleteThread]);
+  }, [handleOpenThread, handleReviveThread, handleDeleteThread, handleConfirmDeleteThread]);
+
+  // ── Tab/thread parity (increment C) ────────────────────────────────────────
+  // A conversation started by typing `claude` into a plain tab used to be
+  // ORPHANED: no thread row, no revive chip, unrecoverable after a restart.
+  // This interval notices it and promotes the tab to a real thread.
+  //
+  // OBSERVE-ONLY, by construction: the pass calls discoverClaudeSessions
+  // (a process snapshot + JSON reads in Rust) and claudeSessionExists (a stat).
+  // There is no writeToSession anywhere on this path — the standing
+  // never-mutate-a-live-shell rule is not a review note here, it is the reason
+  // discovery reads process trees instead of asking the shell anything.
+  //
+  // Cadence is deliberately lazy (PROMOTION_POLL_MS), and a tick where every
+  // tab already has a thread costs ZERO IPC (shouldRunPromotionPass). Reads go
+  // through refs/getters rather than the deps array so the interval is
+  // installed exactly once and never restarts on a session change.
+  useEffect(() => {
+    let running = false;
+    const tick = () => {
+      // A pass is async; overlapping passes could plan two records from one
+      // discovery. One at a time.
+      if (running) return;
+      running = true;
+      void runPromotionPass({
+        liveSessionIds: () => sessionsRef.current.map((s) => s.id),
+        threads: () => getThreads(),
+        discover: discoverClaudeSessions,
+        chatStartedOnDisk: claudeSessionExists,
+        createThread: (args) => promoteThreadRecord(args).id, // startedAt → createdAt
+        bindThread: bindThreadSession,
+        adoptThread: adoptChatSession,
+        markLaunched: markThreadLaunched,
+        persist: () => void saveThreadsToDisk(),
+        defaultTitle: (repoName) => defaultThreadTitle(repoName),
+        repoName: threadRepoName,
+        log: (message) => log.info(message),
+      }).finally(() => {
+        running = false;
+      });
+    };
+    const id = window.setInterval(tick, PROMOTION_POLL_MS);
+    return () => window.clearInterval(id);
+  }, []);
 
   // Bridge "open terminal here" (Explorer project rows) to the SAME creation
   // path the repo picker uses — handleCreateSession → doCreateSession →
@@ -1984,6 +2081,25 @@ export default function App() {
             </ScreenErrorBoundary>
           </div>
         )}
+        {/* Thread history (increment C) — the side menu's `See all (N)`
+            destination, and a deep-linkable route in its own right
+            (?screen=threads), so it is reachable with the menu hidden. */}
+        {activatedScreens.has("threads") && (
+          <div
+            style={{
+              display: route.screen === "threads" ? "flex" : "none",
+              flex: 1,
+              minWidth: 0,
+            }}
+          >
+            <ScreenErrorBoundary resetKey="threads">
+              <ThreadsScreen
+                active={route.screen === "threads"}
+                menuHidden={!sideMenuVisible}
+              />
+            </ScreenErrorBoundary>
+          </div>
+        )}
 
       </div>
 
@@ -2011,6 +2127,7 @@ export default function App() {
         open={confirmState.open}
         title={confirmState.title}
         message={confirmState.message}
+        confirmLabel={confirmState.confirmLabel}
         onConfirm={confirmState.onConfirm}
         onCancel={closeConfirm}
       />
@@ -2050,9 +2167,10 @@ function NewSessionDialogLazy({
 /** Param-less nav destinations kept mounted after first visit (inactive =
  *  display:none). New param-less screens APPEND here; a screen whose params
  *  are per-navigation identity would instead render fresh (re-mount per
- *  navigation) outside the activation cache — none exist today (threads
- *  became tab bindings on the terminal screen, not a screen of their own). */
-const KEEP_ALIVE_SCREENS = ["terminal", "kb", "explorer"] as const satisfies readonly ScreenId[];
+ *  navigation) outside the activation cache — none exist today. ("threads"
+ *  joined in increment C: the thread HISTORY is a param-less screen, while a
+ *  thread itself is still a tab binding on the terminal screen.) */
+const KEEP_ALIVE_SCREENS = ["terminal", "kb", "explorer", "threads"] as const satisfies readonly ScreenId[];
 const KEEP_ALIVE_SET: ReadonlySet<ScreenId> = new Set(KEEP_ALIVE_SCREENS);
 
 function isKeepAliveScreen(screen: ScreenId): boolean {
