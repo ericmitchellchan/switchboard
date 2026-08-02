@@ -153,7 +153,15 @@ import {
 } from "../../lib/pins";
 import type { Pin, PinsFile } from "../../lib/pins";
 import { mutatePins as mutateSharedPins, usePinsFile } from "../../lib/pinsStore";
-import { artifactIdentity, sendToThread, useSendToThreadAvailable } from "../../lib/panelStore";
+import {
+  artifactIdentity,
+  getActiveTabSession,
+  openInPanel,
+  sendToThread,
+  useSendToThreadAvailable,
+} from "../../lib/panelStore";
+import { useSiblingServers } from "../../lib/devServer";
+import type { DevServerHit } from "../../lib/devServer";
 import { buildSendReference, refOptions } from "../../lib/agentContext";
 import { PinsRail } from "./PinsRail";
 
@@ -172,8 +180,43 @@ type Health = "checking" | "up" | "down";
 
 // ── Styles (kit tokens, mono, 11px scale — the wireframe toolbar's twins) ────
 
+/** THE ROOT, and why it carries `flex: 1; min-width: 0` when WireframeView's
+ *  visually identical root does not (measured 2026-08-02).
+ *
+ *  This component is a direct FLEX ITEM: ArtifactSurface's localhost branch
+ *  wraps it in `display: flex`, so `width` here is the flex main axis.
+ *  WireframeView's root, which this style set was copied from, is a BLOCK child
+ *  of DocView's `overflow-y: auto` scroller, where a block box fills its
+ *  container for free. Copying the style into a flex context silently changed
+ *  what it means, and the bill was measured in headless Chromium against the
+ *  real ArtifactPanel chain, framing lodestar's vite server in a 960px panel:
+ *
+ *    aside[panel]           w=960      ← the panel
+ *      tab strip            w=959      ← chrome spanned the panel …
+ *      header               w=959      ← … so the panel LOOKED right
+ *      ArtifactSurface wrap w=959
+ *        LocalhostView root w=326      ← 633px of dead gray to its right
+ *          main column      w=300
+ *            toolbar        w=300
+ *            frame box      w=300
+ *              iframe       w=300      ← an iframe's INTRINSIC width
+ *          pins rail        w=26
+ *
+ *  Without `flex-grow`, a flex item's `flex-basis: auto` resolves to its
+ *  max-content width, and an `<iframe>` is a replaced element whose intrinsic
+ *  width is 300px no matter what `width: 100%` says — so the whole preview sat
+ *  at 300px + the rail and the framed app rendered in its phone layout.
+ *
+ *  `min-width: 0` is the other half and is NOT decoration: with `flex-basis: 0`
+ *  the item wants to grow, but the automatic minimum size of a flex item is its
+ *  min-content width — again 300px from the iframe — so at the 260px panel
+ *  floor the preview would overflow the panel instead of shrinking. The frame
+ *  box below needs no such override: it lives in a COLUMN flex container, where
+ *  width is the cross axis and stretch already lets it shrink. */
 const ROOT_STYLE: CSSProperties = {
   display: "flex",
+  flex: 1,
+  minWidth: 0,
   height: "100%",
   minHeight: 0,
   fontFamily: "var(--font-mono)",
@@ -315,6 +358,138 @@ function useServerHealth(url: string, active: boolean): { health: Health; recove
   return { health, recoveredAt };
 }
 
+/** Host:port, the way the toolbar says a URL. */
+function shortUrl(url: string): string {
+  return url.replace(/^https?:\/\//, "").replace(/\/$/, "");
+}
+
+/**
+ * THE LIVENESS STRIP (2026-08-02) — the other servers this shell announced.
+ *
+ * Eric's ask was *"It'd be nice to have the backend thing there too just
+ * because we know what's actually alive. It's not kind of ghost running."* The
+ * answer is a DOT, not a tab: framing an API renders JSON or a 404, which says
+ * less than an indicator does, so the backend gets the same cheap probe the
+ * frontend's own dot gets and one line of chrome — and clicking it frames it
+ * anyway, for the case where that is genuinely what you want.
+ *
+ * WHAT THE DOT HONESTLY MEANS, and it is written into the tooltip rather than
+ * left as folklore: `fetch(url, {mode: "no-cors"})` RESOLVES when something
+ * accepted the connection and answered, and REJECTS when nothing is listening.
+ * The response is opaque — a 500, a 404 and a 200 are indistinguishable from
+ * here — so this separates "a socket is open" from "that port is dead" and
+ * nothing more. It is never labelled "healthy", because it does not know that.
+ */
+function SiblingServer({
+  hit,
+  project,
+  active,
+}: {
+  hit: DevServerHit;
+  /** The framed artifact's project — a sibling announced by the same shell
+   *  belongs to the same one, so a click files it identically. */
+  project: string;
+  active: boolean;
+}) {
+  const { health } = useServerHealth(hit.url, active);
+  const label = shortUrl(hit.url);
+  const state =
+    health === "up"
+      ? "listening — something accepted the probe"
+      : health === "down"
+        ? "not answering — nothing is listening on that port"
+        : "checking…";
+
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        const target = getActiveTabSession();
+        if (target) openInPanel(target, { kind: "localhost", project, url: hit.url });
+      }}
+      title={
+        `${hit.source} — ${hit.url}\n` +
+        `${state}\n\n` +
+        `Announced by the same shell as the preview. The check is a no-cors ` +
+        `probe, so it distinguishes "something is listening" from "nothing is ` +
+        `listening" and NOT much else — the response is opaque, so a 500 and a ` +
+        `200 look identical from here. It is not a health check.\n\n` +
+        `Click to frame it in its own tab (an API usually renders as JSON, ` +
+        `which is why it is a dot here and not a tab already).`
+      }
+      style={{
+        flex: "0 1 auto",
+        display: "flex",
+        alignItems: "center",
+        gap: 4,
+        minWidth: 0,
+        overflow: "hidden",
+        padding: "0 4px",
+        background: "transparent",
+        border: "none",
+        fontFamily: "var(--font-mono)",
+        fontSize: 10,
+        lineHeight: "18px",
+        color: "var(--text-faint)",
+        cursor: "pointer",
+        whiteSpace: "nowrap",
+      }}
+      onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-secondary)")}
+      onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-faint)")}
+    >
+      <span
+        style={{
+          flex: "none",
+          width: 5,
+          height: 5,
+          borderRadius: 3,
+          background: HEALTH_TONE[health],
+        }}
+      />
+      <span style={{ flex: "none" }}>{hit.source}</span>
+      <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>
+    </button>
+  );
+}
+
+/** How many sibling dots fit before the toolbar starts eating the URL. Three is
+ *  every full-stack session anyone actually runs; the rest are counted, and the
+ *  `+` picker is where they are all reachable (it always was). */
+const MAX_SIBLING_DOTS = 3;
+
+function SiblingServers({
+  url,
+  project,
+  active,
+}: {
+  url: string;
+  project: string;
+  active: boolean;
+}) {
+  const siblings = useSiblingServers(url);
+  if (siblings.length === 0) return null;
+  const shown = siblings.slice(0, MAX_SIBLING_DOTS);
+  const rest = siblings.slice(MAX_SIBLING_DOTS);
+  return (
+    <>
+      <span style={{ flex: "none", color: "var(--text-faint)" }}>│</span>
+      {shown.map((hit) => (
+        <SiblingServer key={hit.url} hit={hit} project={project} active={active} />
+      ))}
+      {rest.length > 0 && (
+        <span
+          style={{ flex: "none", fontSize: 10, color: "var(--text-faint)" }}
+          title={`Also announced by this shell (open them from +):\n${rest
+            .map((hit) => `${hit.source} — ${hit.url}`)
+            .join("\n")}`}
+        >
+          {`+${rest.length}`}
+        </span>
+      )}
+    </>
+  );
+}
+
 export function LocalhostView({
   artifact,
   active,
@@ -443,7 +618,10 @@ export function LocalhostView({
               {url}
             </span>
           </span>
-          <span style={{ flex: 1 }} />
+          {/* The OTHER servers this shell announced — a dot each, never a tab.
+              See SiblingServers for what the dot does and does not claim. */}
+          <SiblingServers url={url} project={project} active={active} />
+          <span style={{ flex: 1, minWidth: 0 }} />
           <button
             type="button"
             style={{

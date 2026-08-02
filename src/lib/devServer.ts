@@ -251,6 +251,78 @@ export function rankHits(hits: readonly DevServerHit[]): DevServerHit[] {
     .map((entry) => entry.hit);
 }
 
+// ── ONE SERVER, ONE IDENTITY (2026-08-02, a real bug — read this before ──────
+// ── "simplifying" normalizeMatch to just rewrite the host) ───────────────────
+//
+// `localhost` and `127.0.0.1` are two SPELLINGS of one server, and everything
+// downstream used to compare URL strings, so one dev server could occupy two
+// identities: two candidates, two offers, two panel tabs. From Eric's own
+// scrollback, verbatim (one `pnpm dev:web`, one vite):
+//
+//   [lodestar] desktop  -> browser http://localhost:5273     ← the script's label
+//     VITE v6.4.3  ready in 240 ms
+//     ➜  Local:   http://127.0.0.1:5273/                     ← vite's own banner
+//
+// The label prints on spawn and the banner ~2s later, so taking the first offer
+// framed `localhost:5273`, and the banner then looked NEW: not in `known`, not
+// matched by `isLocalhostUrlOpen`'s string compare, so the chip came back and
+// the second click appended a SECOND tab for the SAME vite server.
+//
+// The fix is a comparison key, not a rewrite of the URL. The URL is still
+// framed VERBATIM — `normalizeMatch` deliberately leaves a specific loopback
+// address alone (a server bound only to IPv4 loopback is reachable at
+// 127.0.0.1 for certain, whereas rewriting it to `localhost` bets on the
+// resolver; lodestar's vite config pins `host: "127.0.0.1"` for exactly that
+// reason). What is folded is only the question "is this the same server?".
+//
+// HONEST LIMIT: two processes CAN bind the same port separately on 127.0.0.1
+// and [::1], and this key calls those one server. That is a trade taken with
+// open eyes — a dev machine running two different apps on one port number over
+// two IP stacks is vanishingly rarer than one dev server announcing itself
+// twice, which is what every full-stack dev script does.
+
+/** Every spelling of "this machine", folded to one token. `0.0.0.0` and `[::]`
+ *  never reach here (normalizeMatch already rewrites those wildcard binds to
+ *  `localhost`); they are listed anyway so a manually typed one folds too. */
+const LOOPBACK_ALIASES = new Set([
+  "localhost",
+  "127.0.0.1",
+  "[::1]",
+  "::1",
+  "0.0.0.0",
+  "[::]",
+]);
+
+/**
+ * THE comparison key for a dev-server URL: "which server is this?", not "which
+ * string is this". Scheme, port and path are kept verbatim (a path is a ROUTE,
+ * and a localhost artifact names one — two routes are two artifacts by design);
+ * only the loopback HOST is folded.
+ *
+ * A non-loopback host (the manual `+` path accepts `box.local:9000`) is left
+ * exactly as it is, lowercased — nothing is being claimed about it.
+ */
+export function serverKey(url: string): string {
+  if (typeof url !== "string" || url.length === 0) return "";
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return url.toLowerCase();
+  }
+  const host = parsed.hostname.toLowerCase();
+  const canonical = LOOPBACK_ALIASES.has(host) || LOOPBACK_ALIASES.has(`[${host}]`)
+    ? "loopback"
+    : host;
+  const path = parsed.pathname === "" ? "/" : parsed.pathname;
+  return `${parsed.protocol}//${canonical}:${parsed.port}${path}${parsed.search}`;
+}
+
+/** Do these two URLs name the same running server (and the same route on it)? */
+export function sameServer(a: string, b: string): boolean {
+  return serverKey(a) === serverKey(b);
+}
+
 /** Trailing sentence punctuation is not part of a URL: uvicorn prints
  *  `... http://127.0.0.1:8000 (Press CTRL+C to quit)` and prose ends
  *  `at http://localhost:3000.` — `(` and `)` are already excluded from the
@@ -442,7 +514,12 @@ function alreadyPreviewed(url: string): boolean {
   }
 }
 
+/** Monotonic change counter — the memoized derivations below (sibling lookups)
+ *  hold their results until it moves. */
+let version = 0;
+
 function bump(): void {
+  version += 1;
   for (const l of listeners) l();
 }
 
@@ -501,16 +578,37 @@ export function noteDevServerOutput(sessionId: string, text: string): void {
   if (hits.length === 0) return;
   let changed = false;
   for (const hit of hits) {
-    const existing = state.known.find((k) => k.url === hit.url);
+    // MATCHED BY SERVER, NOT BY STRING (see "ONE SERVER, ONE IDENTITY" above).
+    // `http://localhost:5273/` and `http://127.0.0.1:5273/` are one vite, and
+    // a dev script that prints its own label line before the tool boots
+    // announces both.
+    const key = serverKey(hit.url);
+    const existing = state.known.find((k) => serverKey(k.url) === key);
     if (existing) {
-      // ALREADY KNOWN — never a second offer (the anti-nag rule). But a URL can
-      // legitimately be announced TWICE with different specificity: lodestar's
-      // dev script prints `backend  -> http://127.0.0.1:8799` as a plain label
-      // BEFORE uvicorn boots and names itself. The first sighting is `unknown`,
-      // the second is `api`, and the later, more specific one is the true one.
-      // Refining never re-offers; it only corrects the ranking.
+      // ALREADY KNOWN — never a second offer (the anti-nag rule). But a server
+      // can legitimately be announced TWICE with different specificity:
+      // lodestar's dev script prints `backend  -> http://127.0.0.1:8799` as a
+      // plain label BEFORE uvicorn boots and names itself. The first sighting
+      // is `unknown`, the second is `api`, and the later, more specific one is
+      // the true one. Refining never re-offers; it only corrects the ranking.
+      // Only ever unknown → named. Deliberately NOT a rank comparison: an
+      // `api` re-seen on a line with no banner would "upgrade" to `unknown`
+      // (rank 1 > rank 0), unlearning what uvicorn already told us.
       if (existing.source === "unknown" && hit.source !== "unknown") {
         existing.source = hit.source;
+        // The better-evidenced sighting wins the SPELLING too: a tool's own
+        // banner states the address it actually bound, while a hand-written
+        // label line states what its author assumed. Framing what vite printed
+        // is the difference between a preview and a blank frame when
+        // `localhost` resolves to ::1 and the server is on 127.0.0.1 only.
+        if (existing.url !== hit.url) {
+          const pending = state.candidates.indexOf(existing.url);
+          existing.url = hit.url;
+          // Only REWRITE a candidate that is still pending. Adding one here
+          // would resurrect an offer the user already took or dismissed —
+          // which is the duplicate-tab bug wearing a different hat.
+          if (pending >= 0) state.candidates[pending] = hit.url;
+        }
         state.rankedKnown = null;
         changed = true;
       }
@@ -567,6 +665,67 @@ export function devServerKnownFor(sessionId: string | null): readonly DevServerH
   return state.rankedKnown;
 }
 
+// ── SIBLING SERVERS — "what else is alive in this session?" ──────────────────
+// The live preview frames ONE server (the frontend, by the ranking). Eric's
+// ask, verbatim: *"It'd be nice to have the backend thing there too just
+// because we know what's actually alive. It's not kind of ghost running."*
+//
+// The answer is deliberately NOT a second panel tab. Framing an API renders
+// JSON or a 404, which tells him less than a dot does. So the preview names
+// the OTHER servers the same shell announced, and probes each one.
+//
+// Keyed on the URL rather than on a session id because that is the join the
+// caller can actually make: LocalhostView is handed an ARTIFACT (a URL and a
+// project), not a session — it renders in the panel of whichever tab holds it
+// and in the floating window, which has no session at all. Looking the URL up
+// in the announcement store answers "which shell printed this?" without
+// threading a session id through two hosts and a pop-out window. A URL nothing
+// announced (typed into `+`) has no siblings, which is the honest answer: we
+// know of no others.
+
+/** Sibling lookups are memoized per URL and invalidated wholesale on any store
+ *  change, so the array a component receives is reference-stable between
+ *  changes — a fresh `[]` (or a fresh array) every render would spin
+ *  useSyncExternalStore. */
+let siblingCache = new Map<string, readonly DevServerHit[]>();
+let siblingCacheVersion = -1;
+
+/**
+ * Every OTHER server known to the session(s) that announced `url`, best-ranked
+ * first. Deduped by `serverKey`, so a server two shells both announced appears
+ * once, and the framed server itself never appears in its own sibling list.
+ */
+export function siblingServersFor(url: string): readonly DevServerHit[] {
+  if (typeof url !== "string" || url.length === 0) return NO_HITS;
+  if (siblingCacheVersion !== version) {
+    siblingCache = new Map();
+    siblingCacheVersion = version;
+  }
+  const cached = siblingCache.get(url);
+  if (cached) return cached;
+  const self = serverKey(url);
+  const collected: DevServerHit[] = [];
+  const seenKeys = new Set<string>([self]);
+  for (const state of sessions.values()) {
+    if (!state.known.some((hit) => serverKey(hit.url) === self)) continue;
+    for (const hit of state.known) {
+      const key = serverKey(hit.url);
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      collected.push(hit);
+    }
+  }
+  const result: readonly DevServerHit[] = collected.length === 0 ? NO_HITS : rankHits(collected);
+  siblingCache.set(url, result);
+  return result;
+}
+
+/** The preview's liveness strip. Stable between store changes (see
+ *  `siblingCache`), so it is a legal useSyncExternalStore snapshot. */
+export function useSiblingServers(url: string): readonly DevServerHit[] {
+  return useSyncExternalStore(subscribe, () => siblingServersFor(url));
+}
+
 /** React hook for the offer chip. A STRING snapshot, so subscribers re-render
  *  only when the offer itself changes. */
 export function useDevServerOffer(sessionId: string | null): string | null {
@@ -609,4 +768,7 @@ export function __resetDevServerForTests(): void {
   sessions.clear();
   listeners.clear();
   previewOpenCheck = null;
+  version += 1;
+  siblingCache = new Map();
+  siblingCacheVersion = -1;
 }

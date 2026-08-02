@@ -45,6 +45,11 @@
 import { useSyncExternalStore } from "react";
 import type { Artifact, PanelState, Route, ScreenId } from "../types";
 import { getNavState, navigate } from "./route";
+// PURE helper only (no store state crosses this seam, and devServer imports
+// nothing but React, so there is no cycle): "which server is this URL?" is
+// decided in ONE place, and the panel's dedupe has to agree with the
+// detector's or a URL that was not offered twice can still open twice.
+import { serverKey } from "./devServer";
 // TYPE-ONLY, and deliberately so: the icon vocabulary is named here and DRAWN
 // in components/icons.tsx, and a type import is erased at build time — this
 // store keeps zero runtime dependency on React components (its tests import it
@@ -330,7 +335,16 @@ export function artifactIdentity(artifact: Artifact): string {
     case "repo-file":
       return `repo-file:${artifact.project}:${artifact.path}`;
     case "localhost":
-      return `localhost:${artifact.project}:${artifact.url}`;
+      // BY SERVER, NOT BY URL STRING (2026-08-02). One dev server announces
+      // itself in more than one spelling — lodestar's dev script prints
+      // `http://localhost:5273` and vite then prints `http://127.0.0.1:5273/`
+      // for that same vite — and two spellings of one server defeated every
+      // dedupe downstream: the strip appended a second tab, the offer chip
+      // came back for a server already framed. `serverKey` folds the loopback
+      // host and nothing else, so two ROUTES on one server are still two
+      // artifacts (which is what the positional-pin scoping requires).
+      // The artifact keeps its own `url` — only the comparison folds.
+      return `localhost:${artifact.project}:${serverKey(artifact.url)}`;
   }
 }
 
@@ -978,17 +992,23 @@ export function usePoppedOutIdentity(): string {
  *  while it is out there its panel tab holds a PLACEHOLDER — checking only the
  *  strips would call a preview that is visibly on screen "not open".
  *
- *  URL comparison is `artifactIdentity`'s tail: the store holds normalized
- *  URLs (devServer/parseManualUrl produce them) so a string compare is the
- *  same decision `appendOrActivate` makes, and the PROJECT is deliberately not
- *  part of it — the same port filed under two projects is still one server. */
+ *  URL comparison is `serverKey`'s — the SAME fold `artifactIdentity` applies,
+ *  so "the strip would activate an existing tab" and "the chip stays quiet"
+ *  can never disagree. A plain string compare was the bug: vite's
+ *  `http://127.0.0.1:5273/` did not match the dev script's
+ *  `http://localhost:5273` that was already framed, so the offer came back for
+ *  a server Eric was looking at. The PROJECT is deliberately not part of it —
+ *  the same port filed under two projects is still one server. */
 export function isLocalhostUrlOpen(url: string): boolean {
   if (typeof url !== "string" || url.length === 0) return false;
+  const key = serverKey(url);
+  const matches = (artifact: Artifact): boolean =>
+    artifact.kind === "localhost" && serverKey(artifact.url) === key;
   const out = poppedOut?.artifact;
-  if (out && out.kind === "localhost" && out.url === url) return true;
+  if (out && matches(out)) return true;
   for (const state of panels.values()) {
     for (const artifact of state.artifacts) {
-      if (artifact.kind === "localhost" && artifact.url === url) return true;
+      if (matches(artifact)) return true;
     }
   }
   return false;

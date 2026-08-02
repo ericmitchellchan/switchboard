@@ -638,6 +638,28 @@ describe("appendOrActivate (acceptance 4 — one document, one live record)", ()
     expect(appendOrActivate(state, { ...REPO_FILE })).toBe(state);
   });
 
+  // ── THE DUPLICATE-TAB REGRESSION (2026-08-02), at the strip level ─────────
+  // Even with the offer suppressed, the `+` picker still lists every URL a
+  // session announced, so picking the OTHER spelling of a framed server must
+  // land on the tab that is already open rather than appending a twin.
+  it("two SPELLINGS of one server are one tab, not two", () => {
+    const byLabel: Artifact = { kind: "localhost", project: "lodestar", url: "http://localhost:5273/" };
+    const byBanner: Artifact = { kind: "localhost", project: "lodestar", url: "http://127.0.0.1:5273/" };
+    const state = appendOrActivate(appendOrActivate(null, byLabel), byBanner);
+    expect(state.artifacts).toHaveLength(1);
+    // The FIRST spelling stays — the strip never rewrites what a tab is
+    // pointing at behind the user's back; the detector is where a better-
+    // evidenced address wins (devServer.noteDevServerOutput).
+    expect(state.artifacts[0]).toEqual(byLabel);
+    expect(state.activeIndex).toBe(0);
+  });
+
+  it("two different PORTS are still two tabs", () => {
+    const app: Artifact = { kind: "localhost", project: "lodestar", url: "http://127.0.0.1:5273/" };
+    const api: Artifact = { kind: "localhost", project: "lodestar", url: "http://127.0.0.1:8799/" };
+    expect(appendOrActivate(appendOrActivate(null, app), api).artifacts).toHaveLength(2);
+  });
+
   it("repeated opens of the same three docs never grow the strip past three", () => {
     let state: PanelState | null = null;
     for (const artifact of [KB_DOC, REPO_FILE, KB_DOC, { ...REPO_FILE }, KB_DOC]) {
@@ -1924,10 +1946,28 @@ describe("isLocalhostUrlOpen", () => {
     expect(isLocalhostUrlOpen(null as unknown as string)).toBe(false);
   });
 
-  it("matches the URL EXACTLY — a different path is a different preview", () => {
+  it("matches the SERVER, so a different ROUTE is still a different preview", () => {
     openInPanel("sess-1", LIVE);
-    expect(isLocalhostUrlOpen("http://localhost:5173")).toBe(false);
+    // A route is what a localhost artifact names (positional pins are scoped to
+    // it), so two paths stay two previews…
     expect(isLocalhostUrlOpen("http://localhost:5173/admin")).toBe(false);
+    // …but the empty path IS "/" per the URL spec, and a caller that spells it
+    // without the slash is naming the same page.
+    expect(isLocalhostUrlOpen("http://localhost:5173")).toBe(true);
+  });
+
+  // ── THE DUPLICATE-TAB REGRESSION (2026-08-02) ──────────────────────────────
+  // One vite, two spellings, from Eric's own scrollback: his dev script prints
+  // `http://localhost:5273` on spawn and vite prints `http://127.0.0.1:5273/`
+  // two seconds later. A string compare called the second one a server nobody
+  // was looking at, so the offer chip came back and the second click appended a
+  // SECOND tab for the SAME server.
+  it("sees a framed server through ANOTHER SPELLING of the same address", () => {
+    openInPanel("sess-1", { kind: "localhost", project: "lodestar", url: "http://localhost:5273/" });
+    expect(isLocalhostUrlOpen("http://127.0.0.1:5273/")).toBe(true);
+    expect(isLocalhostUrlOpen("http://[::1]:5273/")).toBe(true);
+    // …and does not over-fold: a different port is a different server.
+    expect(isLocalhostUrlOpen("http://127.0.0.1:5274/")).toBe(false);
   });
 
   it("goes false again once the preview is closed", () => {

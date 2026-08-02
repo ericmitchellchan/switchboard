@@ -16,6 +16,9 @@ import {
   registerSessionDir,
   sessionDirFor,
   setPreviewOpenCheck,
+  serverKey,
+  sameServer,
+  siblingServersFor,
   __resetDevServerForTests,
 } from "./devServer";
 
@@ -569,5 +572,144 @@ describe("offer store — a full-stack session", () => {
     noteDevServerOutput(SID, VITE_PLAIN);
     expect(devServerKnownFor(SID)).toBe(devServerKnownFor(SID));
     expect(devServerKnownFor("nothing-here")).toBe(devServerKnownFor("also-nothing"));
+  });
+});
+
+// ── ONE SERVER, ONE IDENTITY ─────────────────────────────────────────────────
+// The duplicate-tab bug of 2026-08-02, reproduced from Eric's OWN scrollback
+// (`%LOCALAPPDATA%/switchboard/scrollback`, one `pnpm dev:web`, one vite):
+// the dev script prints its own label with `localhost`, vite prints its banner
+// with `127.0.0.1` about two seconds later, and every layer compared URL
+// STRINGS — so one vite became two candidates, two offers and two panel tabs.
+
+describe("serverKey — which SERVER is this URL?", () => {
+  it("folds every loopback spelling of one server", () => {
+    const key = serverKey("http://localhost:5273/");
+    expect(serverKey("http://127.0.0.1:5273/")).toBe(key);
+    expect(serverKey("http://[::1]:5273/")).toBe(key);
+    // The empty path IS "/" per the URL spec.
+    expect(serverKey("http://127.0.0.1:5273")).toBe(key);
+  });
+
+  it("does NOT fold what is genuinely different", () => {
+    const key = serverKey("http://localhost:5273/");
+    expect(serverKey("http://localhost:5274/")).not.toBe(key); // port
+    expect(serverKey("https://localhost:5273/")).not.toBe(key); // scheme
+    expect(serverKey("http://localhost:5273/admin")).not.toBe(key); // route
+    expect(serverKey("http://box.local:5273/")).not.toBe(key); // not loopback
+  });
+
+  it("survives junk without throwing", () => {
+    expect(serverKey("")).toBe("");
+    expect(serverKey("not a url")).toBe("not a url");
+    expect(sameServer("http://localhost:1/", "http://127.0.0.1:1/")).toBe(true);
+  });
+});
+
+describe("offer store — one server announced twice (Eric's session, verbatim)", () => {
+  // The dev script's label line, printed on spawn. No banner of its own.
+  const SCRIPT_LABEL =
+    "[lodestar] backend  -> http://127.0.0.1:8799\r\n" +
+    "[lodestar] desktop  -> browser http://localhost:5273\r\n";
+  // Vite's banner ~2s later, ANSI and all — it bolds the PORT mid-URL, and it
+  // names 127.0.0.1 because the config pins `host: "127.0.0.1"`.
+  const VITE_LATER =
+    `${ESC}[0m  ${ESC}[32;1mVITE${ESC}[22m v6.4.3  ${ESC}[39;2mready in ${ESC}[0m240 ms\r\n` +
+    "\r\n" +
+    `  ${ESC}[32m➜  ${ESC}[39;1mLocal${ESC}[0m:   ${ESC}[36mhttp://127.0.0.1:${ESC}[1m5273${ESC}[22m/\r\n`;
+
+  beforeEach(() => {
+    __resetDevServerForTests();
+  });
+
+  it("keeps ONE candidate for the one vite, not one per spelling", () => {
+    noteDevServerOutput(SID, SCRIPT_LABEL);
+    noteDevServerOutput(SID, VITE_LATER);
+    const known = devServerKnownFor(SID);
+    expect(known).toHaveLength(2); // the app and the backend — not three
+    expect(known.map((h) => h.source)).toEqual(["frontend", "unknown"]);
+  });
+
+  it("adopts the BANNER's address — the tool states what it actually bound", () => {
+    noteDevServerOutput(SID, SCRIPT_LABEL);
+    expect(devServerOfferFor(SID)).toBe("http://localhost:5273/");
+    noteDevServerOutput(SID, VITE_LATER);
+    // Same single candidate, now pointing at the address vite printed.
+    expect(devServerOfferFor(SID)).toBe("http://127.0.0.1:5273/");
+    expect(devServerOfferExtrasFor(SID)).toBe(1); // the backend, unchanged
+  });
+
+  // THE regression. This is the sequence that produced two tabs: take the
+  // offer, then let vite's banner arrive.
+  it("does NOT re-offer the server whose offer was already taken", () => {
+    noteDevServerOutput(SID, SCRIPT_LABEL);
+    // Eric clicks `frame localhost:5273`; SessionHeader clears the offer and
+    // the panel frames it, so the panel now answers "yes" for that URL.
+    setPreviewOpenCheck((url) => sameServer(url, "http://localhost:5273/"));
+    clearDevServerOffer(SID);
+    expect(devServerOfferFor(SID)).toBeNull();
+
+    noteDevServerOutput(SID, VITE_LATER);
+
+    expect(devServerOfferFor(SID)).toBeNull();
+    expect(devServerOfferExtrasFor(SID)).toBe(0);
+  });
+
+  it("still offers a genuinely new server after one was taken", () => {
+    noteDevServerOutput(SID, VITE_LATER);
+    setPreviewOpenCheck((url) => sameServer(url, "http://127.0.0.1:5273/"));
+    clearDevServerOffer(SID);
+    noteDevServerOutput(SID, "INFO:  Uvicorn running on http://127.0.0.1:8799\r\n");
+    expect(devServerOfferFor(SID)).toBe("http://127.0.0.1:8799/");
+  });
+
+  it("suppression matches the framed server through ANY spelling", () => {
+    // The panel frames what vite announced; the script's label for the SAME
+    // server must not raise a chip.
+    setPreviewOpenCheck((url) => sameServer(url, "http://127.0.0.1:5273/"));
+    noteDevServerOutput(SID, SCRIPT_LABEL);
+    expect(devServerOfferFor(SID)).toBe("http://127.0.0.1:8799/");
+    expect(devServerOfferExtrasFor(SID)).toBe(0);
+  });
+});
+
+describe("siblingServersFor — what else this shell announced", () => {
+  beforeEach(() => {
+    __resetDevServerForTests();
+  });
+
+  it("names the OTHER servers of the session that announced this one", () => {
+    noteDevServerOutput(SID, "[lodestar] backend  -> http://127.0.0.1:8799\r\n");
+    noteDevServerOutput(SID, "INFO:  Uvicorn running on http://127.0.0.1:8799\r\n");
+    noteDevServerOutput(SID, VITE_PLAIN);
+    const siblings = siblingServersFor("http://localhost:5173/");
+    expect(siblings.map((h) => `${h.source} ${h.url}`)).toEqual(["api http://127.0.0.1:8799/"]);
+  });
+
+  it("excludes the framed server itself, through any spelling", () => {
+    noteDevServerOutput(SID, "  ➜  Local:   http://127.0.0.1:5273/\r\n");
+    expect(siblingServersFor("http://localhost:5273/")).toEqual([]);
+  });
+
+  it("knows nothing about a URL no shell announced (a typed one)", () => {
+    noteDevServerOutput(SID, VITE_PLAIN);
+    expect(siblingServersFor("http://localhost:9999/")).toEqual([]);
+  });
+
+  it("is a STABLE snapshot between store changes", () => {
+    noteDevServerOutput(SID, VITE_PLAIN);
+    noteDevServerOutput(SID, "INFO:  Uvicorn running on http://127.0.0.1:8799\r\n");
+    const first = siblingServersFor("http://localhost:5173/");
+    expect(siblingServersFor("http://localhost:5173/")).toBe(first);
+    // …and a new announcement invalidates it rather than going stale.
+    noteDevServerOutput(SID, "Serving HTTP on 0.0.0.0 port 8080 (http://0.0.0.0:8080/)\r\n");
+    expect(siblingServersFor("http://localhost:5173/")).not.toBe(first);
+    expect(siblingServersFor("http://localhost:5173/")).toHaveLength(2);
+  });
+
+  it("does not cross sessions that never announced this server", () => {
+    noteDevServerOutput("tab-a", VITE_PLAIN);
+    noteDevServerOutput("tab-b", "INFO:  Uvicorn running on http://127.0.0.1:8799\r\n");
+    expect(siblingServersFor("http://localhost:5173/")).toEqual([]);
   });
 });
