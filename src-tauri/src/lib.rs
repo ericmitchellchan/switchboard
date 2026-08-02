@@ -1,10 +1,12 @@
 mod config;
+mod discovery;
 mod explorer;
 mod kb;
 mod power;
 mod pty;
 
 use config::{load_config, Config};
+use discovery::ClaudeDiscovery;
 use pty::{PtyManager, SessionInfo};
 use std::sync::Arc;
 use tauri::{image::Image, Emitter, Manager, State};
@@ -406,6 +408,43 @@ mod claude_munge_tests {
     }
 }
 
+// ── Claude discovery (increment C) ──────────────────────────────────────────
+// Answers "is a claude conversation running inside any of these tabs, and
+// which one?" by walking each tab's PTY process tree — see discovery.rs for
+// the mechanism, the two guards, and why session-file cwd matching was
+// rejected. OBSERVE-ONLY: a process snapshot plus some JSON reads. Nothing on
+// this path can write to a shell.
+#[tauri::command]
+async fn discover_claude_sessions(
+    state: State<'_, Arc<AppState>>,
+    session_ids: Vec<String>,
+) -> Result<Vec<ClaudeDiscovery>, String> {
+    if session_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let shells = state.pty_manager.shell_candidates(&session_ids)?;
+    if shells.is_empty() {
+        return Ok(Vec::new());
+    }
+    let files = discovery::read_claude_session_files();
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+    let edges = discovery::process_edges();
+    let (found, refused) = discovery::resolve_bindings(&shells, &edges, &files);
+    // Refusals are NEVER silent: a promotion that didn't happen because two
+    // candidates matched is the exact thing that would otherwise look like a
+    // bug with no trace.
+    for reason in refused {
+        log::warn!("Claude discovery refused: {}", reason);
+    }
+    // Deliberately NO per-discovery log line: this command runs on a poll, so a
+    // line per bound tab would be thousands of identical entries a day. The
+    // frontend logs the state CHANGES (promoted / rebound / adopted), which is
+    // the part worth reading; refusals above are rare and always logged.
+    Ok(found)
+}
+
 #[tauri::command]
 async fn write_file(path: String, content: String) -> Result<(), String> {
     std::fs::write(&path, content.as_bytes()).map_err(|e| e.to_string())
@@ -595,6 +634,7 @@ pub fn run() {
             save_threads,
             load_threads,
             claude_session_exists,
+            discover_claude_sessions,
             clear_scrollback,
             clear_session_scrollback,
             get_home_dir,

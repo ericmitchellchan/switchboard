@@ -1,5 +1,6 @@
 pub mod session;
 
+use crate::discovery::ShellCandidate;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use session::PtySession;
@@ -180,6 +181,30 @@ impl PtyManager {
             })
             .collect();
         Ok(infos)
+    }
+
+    /// Shell roots for claude discovery: for each requested session id, the pid
+    /// of its shell and when we spawned it. Sessions with no reported pid (or
+    /// no live PTY) are simply omitted — they are never promotion candidates.
+    /// READ-ONLY: nothing here touches a shell.
+    pub fn shell_candidates(&self, ids: &[String]) -> Result<Vec<ShellCandidate>, String> {
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(s) = sessions.get(id) {
+                if let Some(pid) = s.shell_pid {
+                    out.push(ShellCandidate {
+                        session_id: id.clone(),
+                        shell_pid: pid,
+                        spawned_at_ms: s.spawned_at_ms,
+                    });
+                }
+            }
+        }
+        Ok(out)
     }
 }
 

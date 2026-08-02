@@ -15,6 +15,26 @@ pub struct PtySession {
     pub name: String,
     pub repo: String,
     pub working_dir: String,
+    /// OS pid of the shell this PTY spawned — the ROOT of the process-tree
+    /// walk that finds a claude conversation running inside this tab
+    /// (discovery.rs). `None` only if portable-pty couldn't report one, in
+    /// which case the tab is simply never a promotion candidate.
+    pub shell_pid: Option<u32>,
+    /// Wall-clock ms when the shell above was spawned. Discovery requires a
+    /// candidate claude to have STARTED AFTER this instant — the guard against
+    /// Windows pid reuse, where a long-dead process's recycled pid can make an
+    /// unrelated process look like our descendant (its real parent held the pid
+    /// before we did, so it necessarily predates our shell).
+    pub spawned_at_ms: u64,
+}
+
+/// Unix-epoch milliseconds, saturating at 0 before 1970 (unreachable in
+/// practice; avoids an unwrap on a clock skewed behind the epoch).
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 impl PtySession {
@@ -95,6 +115,11 @@ impl PtySession {
                 format!("Failed to spawn shell: {}", e)
             })?;
         let killer = child.clone_killer();
+        // Captured BEFORE the child handle is dropped — this pid is the root of
+        // the discovery walk (see PtySession::shell_pid).
+        let shell_pid = child.process_id();
+        let spawned_at_ms = now_ms();
+        log::info!("PTY shell spawned pid={:?} at={}", shell_pid, spawned_at_ms);
 
         let reader = pair
             .master
@@ -119,6 +144,8 @@ impl PtySession {
             name,
             repo,
             working_dir,
+            shell_pid,
+            spawned_at_ms,
         };
 
         Ok((session, reader))

@@ -39,4 +39,7 @@ windows-sys = { version = "0.59", features = [
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
   "Win32_System_Power",
+  # Process-tree enumeration for claude discovery (src/discovery.rs) — the
+  # Toolhelp snapshot is the no-new-crate way to get every (pid, ppid) pair.
+  "Win32_System_Diagnostics_ToolHelp",
 ] }
