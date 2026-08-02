@@ -16,6 +16,7 @@ import {
   mutatePins,
   flushPins,
   hasPendingWrite,
+  hasInFlightWrite,
   usePinsFile,
   PINS_WRITE_DEBOUNCE_MS,
   __resetPinsStoreForTests,
@@ -379,5 +380,127 @@ describe("load lifecycle", () => {
 
   it("exports the hook the views consume", () => {
     expect(typeof usePinsFile).toBe("function");
+  });
+});
+
+// ─── Ordering: flush → re-read must never serve pre-write content ────────────
+// The REAL mount lifecycle on increment B's headline path. Two wireframes in
+// ONE folder share a sidecar; switching between their panel TABS unmounts one
+// WireframeView and mounts the other in a single commit — React destroys
+// BEFORE it creates. So:
+//
+//   release → mounts 1→0 → pending → flushEntry issues a write
+//           → subscribe → wasIdle → loadStarted=false → ensureLoaded reads
+//
+// No mutation happens between the two, so `mutations !== at` cannot save it,
+// and kb_read_doc / kb_write_doc are independent async tokio commands with no
+// ordering guarantee (the write does strictly more work — create_dir_all). If
+// the read is served first, the just-placed pin is overwritten in memory and
+// the NEXT edit persists that loss.
+//
+// The IO below forces exactly that ordering: the write is held open while the
+// read resolves instantly against still-stale disk contents.
+
+describe("a tab switch that flushes and immediately re-reads", () => {
+  /** IO whose write is held until `land()` is called, and whose read always
+   *  resolves IMMEDIATELY from whatever is on "disk" right now. */
+  function racingIO(initial: string) {
+    let disk = initial;
+    const order: string[] = [];
+    let land: () => void = () => {};
+    const landed = new Promise<void>((resolve) => {
+      land = resolve;
+    });
+    const io: PinsIO = {
+      read: async () => {
+        order.push("read");
+        return disk;
+      },
+      write: async (_path, text) => {
+        order.push("write-issued");
+        await landed;
+        disk = text;
+        order.push("write-landed");
+      },
+    };
+    return { io, order, land: () => land(), disk: () => disk };
+  }
+
+  it("does NOT clobber the in-memory record with pre-write disk content", async () => {
+    const race = racingIO(fileWith("p1", "p2", "p3"));
+    configurePinsIO(race.io);
+
+    // Tab A mounts and loads.
+    const releaseA = subscribeToPins(SIDECAR, () => {});
+    await settle();
+    expect(idsIn(getPinsFile(SIDECAR))).toEqual(["p1", "p2", "p3"]);
+
+    // A pin is placed on tab A's wireframe.
+    mutatePins(SIDECAR, (f) => addPin(f, pin("p4")));
+    expect(hasPendingWrite(SIDECAR)).toBe(true);
+
+    // THE SWITCH, in one commit: A unmounts (flushing the write) …
+    releaseA();
+    expect(hasPendingWrite(SIDECAR)).toBe(false);
+    expect(hasInFlightWrite(SIDECAR)).toBe(true);
+    // … and B mounts, which re-reads because the record went idle.
+    const releaseB = subscribeToPins(SIDECAR, () => {});
+
+    // Let every already-resolvable promise run. The read is GATED behind the
+    // unacknowledged write, so it has not even been issued — and p4 survives.
+    await settle();
+    await settle();
+    await settle();
+    // THE assertion: p4 is still there. Without the gate the read lands here
+    // with stale disk contents and silently drops it.
+    expect(idsIn(getPinsFile(SIDECAR))).toEqual(["p1", "p2", "p3", "p4"]);
+    expect(race.order).toEqual(["read", "write-issued"]); // no second read yet
+
+    // Now let the write land; the gated read follows and agrees with it.
+    race.land();
+    await settle();
+    await settle();
+    await settle();
+    expect(race.order).toEqual(["read", "write-issued", "write-landed", "read"]);
+    expect(idsIn(getPinsFile(SIDECAR))).toEqual(["p1", "p2", "p3", "p4"]);
+    // …and the pin is on disk, not just in memory.
+    expect(idsIn(JSON.parse(race.disk()))).toEqual(["p1", "p2", "p3", "p4"]);
+    releaseB();
+  });
+
+  it("still re-reads external edits when no write is owed", async () => {
+    // The gate must not disable the idle re-read — an agent or a rebase can
+    // change the sidecar while the app runs, and that is why it exists.
+    const race = racingIO(fileWith("p1"));
+    configurePinsIO(race.io);
+    const a = subscribeToPins(SIDECAR, () => {});
+    await settle();
+    expect(idsIn(getPinsFile(SIDECAR))).toEqual(["p1"]);
+    a(); // nothing owed — no write issued
+
+    expect(hasInFlightWrite(SIDECAR)).toBe(false);
+    const b = subscribeToPins(SIDECAR, () => {});
+    await settle();
+    expect(race.order).toEqual(["read", "read"]); // issued straight away
+    b();
+  });
+
+  it("a mutation DURING the gated read still wins (mutations guard holds)", async () => {
+    const race = racingIO(fileWith("p1"));
+    configurePinsIO(race.io);
+    const a = subscribeToPins(SIDECAR, () => {});
+    await settle();
+    mutatePins(SIDECAR, (f) => addPin(f, pin("p2")));
+    a(); // flush → write in flight
+
+    const b = subscribeToPins(SIDECAR, () => {}); // read gated
+    mutatePins(SIDECAR, (f) => addPin(f, pin("p3"))); // local edit meanwhile
+    race.land();
+    await settle();
+    await settle();
+    await settle();
+    // The read resolved against [p1,p2] and was DISCARDED — p3 is newer.
+    expect(idsIn(getPinsFile(SIDECAR))).toEqual(["p1", "p2", "p3"]);
+    b();
   });
 });

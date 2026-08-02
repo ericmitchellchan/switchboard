@@ -413,12 +413,18 @@ export function closeArtifactIn(state: PanelState, index: number): PanelState | 
 
 /** Rebuild a PanelState from unknown input: every entry through the lean
  *  artifact gate, duplicates collapsed (the invariant holds for RESTORED
- *  strips too, not just live ones), `activeIndex` clamped into range.
+ *  strips too, not just live ones).
  *
  *  Returns null — i.e. DROP this session's entry — when nothing survives:
  *  an empty strip is not a panel. The active tab is preserved by CONTENT, not
  *  by number, so a dropped-out neighbour cannot silently change which artifact
- *  comes back active. */
+ *  comes back active.
+ *
+ *  An `activeIndex` that names no surviving entry FALLS BACK TO THE FIRST TAB
+ *  — it is not clamped to the nearest valid index. `{[A,B], activeIndex: 9}`
+ *  yields 0, not 1: 9 names no content, so clamping toward B would be a guess
+ *  dressed up as a rule. (The in-range `clampActiveIndex` below is a different
+ *  job: keeping a LIVE index inside a strip that changed under it.) */
 export function sanitizePanelState(raw: unknown): PanelState | null {
   if (!isRecord(raw) || !Array.isArray(raw.artifacts)) return null;
   const wanted =
@@ -630,14 +636,37 @@ export function initPanelStore(
  *
  *  Name and signature are unchanged from Phase A because every caller means
  *  the same thing by it ("show me this, here"); only the "one artifact per
- *  tab, replace" half of the old contract is gone. */
+ *  tab, replace" half of the old contract is gone.
+ *
+ *  A HIDDEN panel still owns its strip. Ctrl+Shift+P files the whole strip
+ *  into `lastPanelStates` and deletes the live entry, so a tab with a hidden
+ *  panel is ABSENT from `panels` while very much still having one. Reading
+ *  only `panels` here started a fresh one-tab strip on top of it — and the
+ *  next Ctrl+Shift+P then filed THAT over the memory, destroying the hidden
+ *  tabs for good:
+ *
+ *    open A,B,C → Ctrl+Shift+P (memory {[A,B,C],2}) → click D in the tree
+ *    (panel shows ONLY D) → Ctrl+Shift+P (memory := {[D],0}) → A,B,C gone.
+ *
+ *  That is exactly the loss the widened memory (see `lastPanelStates`) exists
+ *  to prevent, so opening into a hidden panel REVIVES its strip and appends
+ *  to it — the same strip the chord would have brought back. */
 export function openInPanel(sessionId: string, artifact: Artifact): void {
   if (sessionId.length === 0) return;
   const clean = sanitizeArtifact(artifact);
   if (!clean) return;
-  const current = panels.get(sessionId) ?? null;
+  const live = panels.get(sessionId) ?? null;
+  const revived = live === null ? lastPanelStates.get(sessionId) ?? null : null;
+  const current = live ?? revived;
   const next = appendOrActivate(current, clean);
-  if (next === current) return; // already the active tab — no churn
+  // `next === current` means "already the ACTIVE tab". For a live panel that
+  // is a genuine no-op; for a revived one the panel must still come back on
+  // screen, so only the live case returns early.
+  if (next === current && revived === null) return;
+  // The strip is live again — the memory is only ever for panels that are
+  // currently hidden, and leaving a copy behind would let a later hide be
+  // undone by a stale one.
+  if (revived !== null) forgetPanel(sessionId);
   panels = new Map(panels);
   panels.set(sessionId, next);
   bump();
@@ -710,6 +739,15 @@ function rememberPanel(sessionId: string, state: PanelState): void {
   lastPanelStates.set(sessionId, state);
 }
 
+/** Drop a tab's remembered strip. Called whenever that strip becomes LIVE
+ *  again, so the invariant holds: `lastPanelStates` holds a strip only for
+ *  tabs whose panel is currently hidden. */
+function forgetPanel(sessionId: string): void {
+  if (!lastPanelStates.has(sessionId)) return;
+  lastPanelStates = new Map(lastPanelStates);
+  lastPanelStates.delete(sessionId);
+}
+
 /** Close the ACTIVE tab of a session's panel (the header `×`). When it was the
  *  last tab the panel is removed entirely, REMEMBERING the strip so the toggle
  *  can bring it back. No-op when the session has no panel. */
@@ -738,6 +776,9 @@ export function togglePanel(sessionId: string | null): void {
   }
   const last = lastPanelStates.get(sessionId);
   if (!last) return;
+  // Same invariant openInPanel's revive keeps: a strip that is live again is
+  // no longer "remembered".
+  forgetPanel(sessionId);
   panels = new Map(panels);
   panels.set(sessionId, last);
   bump();

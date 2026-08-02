@@ -187,7 +187,10 @@ describe("sanitizePanelState (strip invariants at every load path)", () => {
       .toEqual(strip([KB_DOC, REPO_FILE], 0));
   });
 
-  it("clamps an out-of-range / junk activeIndex instead of rejecting the entry", () => {
+  it("an out-of-range / junk activeIndex FALLS BACK to the first tab, entry kept", () => {
+    // Not "clamped to the nearest valid index": the active tab is preserved by
+    // CONTENT, and index 9 names no content, so there is nothing to clamp
+    // toward — tab 0 is the honest answer, and 9 → 1 would be a guess.
     expect(sanitizePanelState(strip([KB_DOC, REPO_FILE], 9))).toEqual(strip([KB_DOC, REPO_FILE], 0));
     expect(sanitizePanelState(strip([KB_DOC, REPO_FILE], -4))).toEqual(strip([KB_DOC, REPO_FILE], 0));
     expect(
@@ -1124,8 +1127,19 @@ describe("tree glyphs (folder vs file, kind-aware)", () => {
       0x25ab, // ▫ small white square — data
       0x25a0, // ■ black square       — plain file (describeArtifact repo-file)
       0x25e7, // ◧ square, left half  — folder
+      0x25c9, // ◉ fisheye            — localhost (describeArtifact)
     ]);
-    for (const glyph of [...ALL_KINDS.map(glyphForDocKind), FOLDER_GLYPH]) {
+    const everyGlyph = [
+      ...ALL_KINDS.map(glyphForDocKind),
+      FOLDER_GLYPH,
+      // The panel header's own glyphs go through the same guard — they are
+      // the anchors this vocabulary is built from, and `localhost` is the one
+      // that no DocKind maps to, so nothing else would cover it.
+      describeArtifact(KB_DOC).glyph,
+      describeArtifact(REPO_FILE).glyph,
+      describeArtifact({ kind: "localhost", project: "p", url: "http://localhost:1" }).glyph,
+    ];
+    for (const glyph of everyGlyph) {
       expect(MONO_SAFE_CODEPOINTS).toContain(glyph.codePointAt(0));
     }
   });
@@ -1459,6 +1473,84 @@ describe("togglePanel (true toggle)", () => {
     closeArtifactAt("s1", 0); // the last one — panel collapses
     togglePanel("s1");
     expect(panelStateFor("s1")).toEqual(one(REPO_FILE));
+  });
+
+  // ── Regression: a HIDDEN strip must not be silently discarded ─────────────
+  // The loss this suite's widened memory exists to prevent, reached through
+  // the OPEN path instead of the chord:
+  //   open A,B,C → Ctrl+Shift+P → click D in the tree → panel showed ONLY D
+  //   → Ctrl+Shift+P filed {[D],0} OVER {[A,B,C],2} → A,B,C unreachable.
+  // openInPanel read `panels` alone, and a hidden panel does not live there.
+  const A = KB_DOC;
+  const B = REPO_FILE;
+  const C: Artifact = { kind: "kb-doc", path: "switchboard/features/artifact-panel/architecture.md" };
+  const D: Artifact = { kind: "repo-file", project: "switchboard", path: "src/lib/panelStore.ts" };
+
+  it("opening into a HIDDEN panel revives its strip instead of replacing it", () => {
+    openInPanel("s1", A);
+    openInPanel("s1", B);
+    openInPanel("s1", C);
+    expect(panelStateFor("s1")).toEqual(strip([A, B, C], 2));
+
+    togglePanel("s1"); // hidden — the strip now lives only in the memory
+    expect(panelStateFor("s1")).toBeNull();
+
+    openInPanel("s1", D); // a click in the side-menu tree
+    // The panel comes back with ALL FOUR, D active — not a fresh [D].
+    expect(panelStateFor("s1")).toEqual(strip([A, B, C, D], 3));
+  });
+
+  it("…and the next hide/show round-trips all four, the old memory gone", () => {
+    openInPanel("s1", A);
+    openInPanel("s1", B);
+    openInPanel("s1", C);
+    togglePanel("s1");
+    openInPanel("s1", D);
+
+    togglePanel("s1"); // hide: files {[A,B,C,D],3}, NOT {[D],0}
+    expect(panelStateFor("s1")).toBeNull();
+    togglePanel("s1"); // show
+    expect(panelStateFor("s1")).toEqual(strip([A, B, C, D], 3));
+  });
+
+  it("re-opening an ALREADY-OPEN tab of a hidden strip brings the panel back", () => {
+    openInPanel("s1", A);
+    openInPanel("s1", B);
+    togglePanel("s1");
+    // B is already the active tab of the hidden strip — appendOrActivate
+    // returns the same object, which must NOT be read as "nothing to do".
+    openInPanel("s1", B);
+    expect(panelStateFor("s1")).toEqual(strip([A, B], 1));
+  });
+
+  it("re-opening a NON-active tab of a hidden strip activates it, no duplicate", () => {
+    openInPanel("s1", A);
+    openInPanel("s1", B);
+    togglePanel("s1");
+    openInPanel("s1", A);
+    expect(panelStateFor("s1")).toEqual(strip([A, B], 0));
+  });
+
+  it("a revived strip leaves NO stale memory behind (chip gate stays honest)", () => {
+    openInPanel("s1", A);
+    togglePanel("s1");
+    openInPanel("s1", B);
+    // Panel is live, so the chord hides it…
+    togglePanel("s1");
+    expect(panelStateFor("s1")).toBeNull();
+    // …and what comes back is the revived strip, never the pre-revive copy.
+    togglePanel("s1");
+    expect(panelStateFor("s1")).toEqual(strip([A, B], 1));
+  });
+
+  it("inheritPanel into a tab with a hidden panel appends rather than replacing", () => {
+    openInPanel("s1", A);
+    openInPanel("s1", B);
+    togglePanel("s1");
+    // Same store path (inheritPanel → openInPanel), so it must not be the
+    // one caller that quietly drops the hidden strip.
+    expect(inheritPanel(C, "s1")).toBe(true);
+    expect(panelStateFor("s1")).toEqual(strip([A, B, C], 2));
   });
 
   it("a restart starts with no memory to reopen", () => {

@@ -127,7 +127,14 @@ const SCROLL_STYLE: CSSProperties = {
 };
 
 export function DocView({ path, active }: { path: string; active: boolean }) {
-  const { content, error } = useKbDoc(path, active);
+  // `loadedPath` is which doc `content`/`error` actually BELONG to. useKbDoc
+  // keeps the previous doc's content until the new read resolves (deliberate —
+  // the poll must not blank the view), so a tab switch has a window where
+  // `content` is the OLD doc while `kind` is already the NEW one. Rendering
+  // through that window mounted DiagramView with markdown in hand and flashed
+  // a mermaid parse error. Nothing renders until the two agree.
+  const { path: loadedPath, content, error } = useKbDoc(path, active);
+  const ready = loadedPath === path;
   const kind = docKind(path);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -140,7 +147,7 @@ export function DocView({ path, active }: { path: string; active: boolean }) {
   return (
     <div ref={scrollRef} style={SCROLL_STYLE}>
       <style>{DOC_CSS}</style>
-      {error !== null && content === null ? (
+      {!ready ? null : error !== null && content === null ? (
         <CenteredNote>cannot read {path}: {error}</CenteredNote>
       ) : content === null ? null : kind === "markdown" ? (
         <MarkdownBody content={content} />

@@ -247,7 +247,13 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
  *  produces for the same project. */
 function OpenTerminalHere({ project }: { project: ExplorerProject }) {
   const dir = project.repos[0];
-  if (dir === undefined || getExplorerActions() === null) return null;
+  // Rendered on repo presence ALONE — never on `getExplorerActions() !== null`.
+  // The bridge is a plain module singleton with no subscription, and App
+  // registers it in an effect that runs AFTER first render, so gating the
+  // markup on it made the affordance's appearance depend on an unrelated
+  // re-render happening to follow. The click no-ops (`?.`) in the window
+  // before registration, which is the honest fallback.
+  if (dir === undefined) return null;
   return (
     <span
       role="button"

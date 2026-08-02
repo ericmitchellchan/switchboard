@@ -28,7 +28,7 @@ import type { CSSProperties } from "react";
 import { docKind, useKbDocList } from "../lib/kb";
 import { explorerList, explorerProjects } from "../lib/explorer";
 import type { ExplorerEntry, ExplorerProject } from "../lib/explorer";
-import { describeArtifact, type OpenableArtifact } from "../lib/panelStore";
+import { FOLDER_GLYPH, describeArtifact, type OpenableArtifact } from "../lib/panelStore";
 
 /** Render cap. A KB with thousands of docs must not paint thousands of rows on
  *  every keystroke; the filter is how you reach the tail. */
@@ -441,13 +441,15 @@ function Crumb({
   );
 }
 
-/** Kind glyph — the artifact kinds reuse the panel header's own glyphs so a
- *  row and the tab it becomes read as the same thing. */
+/** Kind glyph — ONE vocabulary with the side-menu trees and the panel header
+ *  (panelStore): the artifact kinds reuse describeArtifact's own glyphs so a
+ *  row and the tab it becomes read as the same thing, and containers use the
+ *  trees' FOLDER_GLYPH rather than a second folder mark. */
 function glyphFor(row: Row): string {
   switch (row.kind) {
     case "project":
     case "dir":
-      return "▸";
+      return FOLDER_GLYPH;
     case "kb":
       return KB_GLYPH;
     case "file":

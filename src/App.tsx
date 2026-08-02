@@ -275,6 +275,9 @@ export default function App() {
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [newSessionDialogOpen, setNewSessionDialogOpen] = useState(false);
+  // Session id for a toast that belongs to NO session (a spawn that failed —
+  // there is nothing to focus). ToastStack's click handler skips it.
+  const NO_SESSION = "";
   // How many projects the REGISTRY knows (increment B). The repo picker now
   // offers registry projects merged with config.repos, so "is there anything
   // to pick from?" can no longer be answered by config.repos alone — with an
@@ -292,6 +295,8 @@ export default function App() {
   // signal can never arrive before main is listening, and PTY chunks are
   // sequenced through main so PiP and main render the same byte stream.
   const pipRouterCleanupRef = useRef<(() => void) | null>(null);
+  /** An "open terminal here" spawn is in flight (double-submit guard). */
+  const openTerminalBusyRef = useRef(false);
 
   // Active chatStarted detectors, keyed by session id (T5). Entries are
   // removed when the detector fires, when a revive re-arms the same session,
@@ -362,16 +367,6 @@ export default function App() {
     [addSession]
   );
 
-  // KNOWN, DELIBERATE divergence from acceptance criterion 3's first clause
-  // ("opening a new shell tab does NOT close or blank the panel"): panel state
-  // is per-TAB (Decision 1, resolved AFTER that criterion was written), so a
-  // brand-new shell has no panel and the panel visually disappears until you
-  // switch back — the binding is intact, it just isn't this tab's. Only the
-  // THREAD create path inherits (handleCreateThread → inheritPanel), because
-  // there the inheritance also makes the spawn-context sentence true. Do not
-  // "fix" this by making Ctrl+T inherit without deciding that a plain shell
-  // should carry the previous tab's artifact — that is a product call, not a
-  // bug.
   useEffect(() => {
     let cancelled = false;
     explorerProjects()
@@ -387,6 +382,16 @@ export default function App() {
   /** Is there anything for the repo picker to offer beyond a plain shell? */
   const repoPickerAvailable = config.repos.length > 0 || registryProjectCount > 0;
 
+  // KNOWN, DELIBERATE divergence from acceptance criterion 3's first clause
+  // ("opening a new shell tab does NOT close or blank the panel"): panel state
+  // is per-TAB (Decision 1, resolved AFTER that criterion was written), so a
+  // brand-new shell has no panel and the panel visually disappears until you
+  // switch back — the binding is intact, it just isn't this tab's. Only the
+  // THREAD create path inherits (handleCreateThread → inheritPanel), because
+  // there the inheritance also makes the spawn-context sentence true. Do not
+  // "fix" this by making Ctrl+T inherit without deciding that a plain shell
+  // should carry the previous tab's artifact — that is a product call, not a
+  // bug.
   const handleNewTab = useCallback(async () => {
     if (repoPickerAvailable) {
       setNewSessionDialogOpen(true);
@@ -417,10 +422,15 @@ export default function App() {
           paneLayout.focusOrSwapSession(info.id);
         }
       } catch (err) {
+        // A spawn failure used to be log-only. That was survivable for the
+        // DIALOG (which closes, so you see it did nothing) but not for the
+        // Explorer's `>_`, where a renamed or deleted repo turns the
+        // affordance into a click that silently does nothing at all.
         log.error(`Failed to create session: ${err}`);
+        addToast(NO_SESSION, `Cannot open ${name}`, String(err));
       }
     },
-    [doCreateSession, paneLayout]
+    [doCreateSession, paneLayout, addToast]
   );
 
   // Tear down a session: terminal, PTY, scrollback, listeners, state.
@@ -895,10 +905,20 @@ export default function App() {
   // writeToSession, no `cd`, no keystroke aimed at an existing terminal —
   // every existing shell (mid-command, running claude, or in a REPL) is
   // untouched. Decision 2 keeps the useful half and drops the risky one.
+  //
+  // Double-submit guard: the dialog path is protected by closing itself on
+  // select, but `>_` stays under the cursor, and a session spawn is a slow
+  // async call — a double-click would otherwise create two sessions in the
+  // same repo. A ref, not state: the affordance unmounts when hover ends, so
+  // component-local state would forget the in-flight spawn.
   useEffect(() => {
     registerExplorerActions({
       openTerminalHere: (name, workingDir) => {
-        void handleCreateSession(name, name, workingDir);
+        if (openTerminalBusyRef.current) return;
+        openTerminalBusyRef.current = true;
+        void handleCreateSession(name, name, workingDir).finally(() => {
+          openTerminalBusyRef.current = false;
+        });
       },
     });
     return () => registerExplorerActions(null);
@@ -1944,7 +1964,13 @@ export default function App() {
       <ToastStack
         toasts={toasts}
         onDismiss={dismissToast}
-        onClickToast={(sessionId) => switchToSession(sessionId)}
+        // Guarded: a toast can outlive its session (it closed while the toast
+        // was up) and a spawn-failure toast never had one (NO_SESSION).
+        // switchToSession would navigate AND swap the focused pane to a dead
+        // id, blanking it — so only switch to a session that still exists.
+        onClickToast={(sessionId) => {
+          if (sessions.some((s) => s.id === sessionId)) switchToSession(sessionId);
+        }}
       />
 
       <StatusBar

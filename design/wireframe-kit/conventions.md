@@ -51,16 +51,29 @@ that stop being true.
   breadcrumb, the `→ thread` / `open full` / `×` actions, the divider) is white/zinc
   only, same ramp and same 1px hairlines as the rest of the app. Status colors stay
   functional-only — nothing in the panel is colored to decorate it.
-- 2026-08-02 — The PANEL IS A DISTINCT SURFACE, one step up the SAME zinc ramp
-  (Eric, driving the shipped panel): terminal side `--bg-primary` #0C0C0E, panel
-  `--bg-elevated` #0F0F11, plus a 1px `--border-subtle` #27272A left edge inside the
+- 2026-08-02 — The PANEL IS A DISTINCT SURFACE within the SAME zinc ramp (Eric,
+  driving the shipped panel): terminal side `--bg-primary` #0C0C0E, panel
+  `--bg-panel` #1A1A1D, plus a 1px `--border-subtle` #27272A left edge inside the
   4px divider. That step is the whole move — never a new hue, never tinted text,
   never a status color. The panel's tab strip, header and body are ONE surface: its
   viewers (DocView, FileViewer, WireframeView letterbox, DiagramView canvas) paint
-  `transparent` and take their host's value, so the same doc reads #0F0F11 in the
+  `transparent` and take their host's value, so the same doc reads #1A1A1D in the
   panel and #0C0C0E full-width. Anything painting `--bg-primary` inside the panel is
   a bug — it punches a terminal-colored hole in it. Mock it as two flat values with a
   hard edge; do NOT reach for a shadow or a gradient to sell the difference.
+- 2026-08-02 — MEASURE A SURFACE STEP, don't eyeball the hex. The panel first shipped
+  at `--bg-elevated` #0F0F11, which is 3/255 per channel from the terminal —
+  **1.021:1**, invisible, and acceptance 6 was really being carried by the divider
+  (and in overlay mode, where there IS no divider, by one hairline). A surface
+  intended to read as DIFFERENT needs ~**1.10–1.25:1** WCAG relative luminance in
+  this dark ramp; #1A1A1D lands at 1.126:1. Quote the ratio in design-state.md
+  whenever a new surface value is introduced.
+- 2026-08-02 — When a surface moves up the ramp, RE-TONE what sits on it. Raising the
+  panel put `--bg-active` #151518 BELOW it, so the panel's tab strip flipped to the
+  IDE reading: inactive tab recessed to `--bg-primary` (the terminal value = "not
+  this document"), hover `--bg-active`, ACTIVE tab = the panel surface itself,
+  continuous with the body beneath it. Existing tokens only — a new surface value is
+  not a licence to invent tab colors.
 - 2026-08-02 — FOLDER vs FILE SYMBOLS in both trees: a directory row is expander +
   `◧`, a file row is a blank expander slot + a kind glyph (`◆` markdown · `◈`
   wireframe · `◇` diagram · `▪` code · `▫` data · `■` anything else). Diamonds =

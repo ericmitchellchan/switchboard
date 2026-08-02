@@ -55,6 +55,7 @@ import {
   fullWidthRoute,
   openInPanel,
   panelLayoutFor,
+  panelStateFor,
   panelWidthFromDrag,
   setPanelWidth,
   sendToThread,
@@ -81,19 +82,25 @@ export const CRUMB_TONE: Record<ArtifactCrumb["tone"], CSSProperties> = {
 
 /** The panel's surface value (Increment B, Decision 4 / acceptance 6).
  *
- *  The terminal side is `--bg-primary` #0C0C0E; the panel is `--bg-elevated`
- *  #0F0F11 — ONE step up the same zinc ramp, ~1.2% luminance, which is enough
- *  to read as a second surface across a hard vertical edge and far too little
- *  to read as a colour. No new hue, no tinted text, no status colour touched:
- *  the soft palette holds (2026-08-01 convention), and the divider/left border
- *  does the rest of the work.
+ *  The terminal side is `--bg-primary` #0C0C0E; the panel is `--bg-panel`
+ *  #1A1A1D — several steps up the SAME zinc ramp, measured at **1.126:1**.
+ *  The first pass used `--bg-elevated` #0F0F11, which is 3/255 per channel
+ *  and **1.021:1** — arithmetically a step, visually nothing; acceptance 6
+ *  was being carried entirely by the divider, and in OVERLAY mode (no
+ *  divider) by a single hairline. #1A1A1D is a difference you can see without
+ *  looking for it, and still sits BELOW `--border` #1E1E22 so the 4px divider
+ *  keeps reading against the panel.
  *
- *  It is applied to the STRIP, the header (by inheritance) and the body
- *  together — the panel's own viewers paint `transparent` so they take
- *  whichever surface hosts them (#0F0F11 here, #0C0C0E on the full-width
- *  screens). Anything painting `--bg-primary` inside the panel would punch a
- *  terminal-coloured hole in it. */
-const PANEL_SURFACE = "var(--bg-elevated)";
+ *  Still no new hue, no tinted text, no status colour touched: same neutral
+ *  zinc, +3 blue like every other value in the ramp. The soft palette holds
+ *  (2026-08-01 convention).
+ *
+ *  Applied to the STRIP, the header (by inheritance) and the body together —
+ *  the panel's own viewers paint `transparent` so they take whichever surface
+ *  hosts them (#1A1A1D here, #0C0C0E on the full-width screens). Anything
+ *  painting `--bg-primary` inside the panel punches a terminal-coloured hole
+ *  in it. */
+const PANEL_SURFACE = "var(--bg-panel)";
 
 const HEAD_STYLE: CSSProperties = {
   height: 36,
@@ -126,8 +133,14 @@ const ACTION_STYLE: CSSProperties = {
  *
  *  The tab list SCROLLS horizontally; the `+` is its sibling, not its last
  *  child, so it never scrolls out of reach on a 260px panel with eight tabs
- *  open. Active styling is the terminal TabBar's, minus the status hue it has
- *  no equivalent of: `--bg-active` + bright text + a 2px zinc rule on top. No
+ *  open.
+ *
+ *  Tab ramp (raised with the panel surface): an INACTIVE tab is recessed to
+ *  `--bg-primary` — deliberately the terminal's value, i.e. "not this
+ *  document" — hover lifts it to `--bg-active`, and the ACTIVE tab is the
+ *  panel surface itself, continuous with the header and body beneath it, plus
+ *  a 2px zinc rule on top and weight 600. That is the IDE reading (the active
+ *  tab belongs to the document) and it keeps the whole panel one surface. No
  *  new accent (Decision 4 keeps colour functional-only). */
 function TabStrip({
   sessionId,
@@ -208,12 +221,13 @@ function TabStrip({
                 padding: "0 4px 0 9px",
                 borderRight: "1px solid var(--border)",
                 boxShadow: isActive ? "inset 0 2px 0 var(--text-muted)" : "none",
-                // The strip's own background IS --bg-elevated now, so hover no
-                // longer has a distinct step below --bg-active to use without
-                // colliding with the active tab. Hover feedback is the text
-                // ramp + the revealed `×`; the active tab keeps the raised
-                // --bg-active, the 2px rule and the bolder weight.
-                background: isActive ? "var(--bg-active)" : "transparent",
+                // active = the panel surface (transparent over the strip);
+                // inactive recesses to the terminal value; hover lifts halfway.
+                background: isActive
+                  ? "transparent"
+                  : isHovered
+                    ? "var(--bg-active)"
+                    : "var(--bg-primary)",
                 color: isActive
                   ? "var(--text-primary)"
                   : isHovered
@@ -396,8 +410,11 @@ export function ArtifactPanel({
   sessionId: string | null;
   active: boolean;
 }) {
-  const { panels, panelWidth } = usePanelsView();
-  const state: PanelState | null = sessionId ? panels.get(sessionId) ?? null : null;
+  // usePanelsView is the SUBSCRIPTION (re-render on any store change, and the
+  // panel does want the width); `panelStateFor` is the documented accessor for
+  // the strip itself, so the lookup rule lives in exactly one place.
+  const { panelWidth } = usePanelsView();
+  const state: PanelState | null = panelStateFor(sessionId);
   // The ACTIVE tab is what the header, the body and every header action mean by
   // "the artifact". The strip invariants (non-empty, in-range index) are the
   // store's, so this index is trusted — but read defensively anyway, since a
@@ -409,6 +426,13 @@ export function ArtifactPanel({
   const canSend = useSendToThreadAvailable();
   const [pickerOpen, setPickerOpen] = useState(false);
 
+  // The picker belongs to the panel that opened it: a tab switch, or the panel
+  // closing under it, dismisses it rather than leaving a modal that would
+  // reappear (and open into a different tab) the next time the panel renders.
+  useEffect(() => {
+    setPickerOpen(false);
+  }, [sessionId, open]);
+
   // Measure the WORKSPACE CONTAINER (our flex parent — pane tree + divider +
   // panel, TaskSidebar excluded by construction in App.tsx) to decide docked
   // vs overlay. A hidden terminal screen (display:none on a non-terminal
@@ -417,13 +441,6 @@ export function ArtifactPanel({
   //
   // useLayoutEffect, not useEffect: the first paint would otherwise use the
   // initial 0 (→ docked) and flip to overlay a frame later on a narrow window.
-  // The picker belongs to the panel that opened it: a tab switch, or the panel
-  // closing under it, dismisses it rather than leaving a modal that would
-  // reappear (and open into a different tab) the next time the panel renders.
-  useEffect(() => {
-    setPickerOpen(false);
-  }, [sessionId, open]);
-
   const asideRef = useRef<HTMLElement>(null);
   const [containerWidth, setContainerWidth] = useState(0);
   useLayoutEffect(() => {

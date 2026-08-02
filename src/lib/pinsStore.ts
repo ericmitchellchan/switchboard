@@ -73,6 +73,29 @@ type Entry = {
   /** A write is OWED. Sole gate on flushing, which is what makes
    *  "flush exactly once" true across timer-fire and last-unmount. */
   pending: boolean;
+  /** The write currently IN FLIGHT (null = none owed to the disk).
+   *
+   *  WHY (A5-class data loss, found on increment B's headline path): two
+   *  wireframes in the SAME folder share one sidecar, and switching between
+   *  their panel TABS unmounts one WireframeView and mounts the other in a
+   *  single React commit — destroy before create. That is
+   *  release → mounts 1→0 → flushEntry issues a write (fire-and-forget) →
+   *  subscribe → wasIdle → loadStarted=false → ensureLoaded reads. No
+   *  mutation happens in between, so `mutations !== at` cannot help, and
+   *  kb_read_doc / kb_write_doc are independent async tokio commands with NO
+   *  ordering guarantee (the write does strictly more work — create_dir_all).
+   *  A read served before the write lands overwrites the in-memory record
+   *  with pre-write disk content: the pin you just placed vanishes, and the
+   *  next edit persists that loss.
+   *
+   *  The fix is a real happens-before: a load is not ISSUED until the write
+   *  it would race has settled. Writes only ever follow mutations, so the
+   *  reverse order (write issued while a read is in flight) is already
+   *  covered by the `mutations` guard in applyLoad. */
+  inFlight: Promise<unknown> | null;
+  /** Monotonic count of writes ISSUED — lets a late-settling older write
+   *  avoid clearing a newer write's gate. */
+  writesIssued: number;
   listeners: Set<() => void>;
 };
 
@@ -88,6 +111,8 @@ function entryFor(sidecarPath: string): Entry {
       mutations: 0,
       timer: null,
       pending: false,
+      inFlight: null,
+      writesIssued: 0,
       listeners: new Set(),
     };
     entries.set(sidecarPath, entry);
@@ -112,12 +137,19 @@ function ensureLoaded(sidecarPath: string, entry: Entry): void {
   }
   entry.loadStarted = true;
   const at = entry.mutations;
-  reader.read(sidecarPath).then(
-    (text) => applyLoad(entry, parsePinsFile(text), at),
-    // A read error means "no sidecar yet" — kb_read_doc errors on missing
-    // files — so an empty v1 file is the correct starting point.
-    () => applyLoad(entry, emptyPinsFile(), at)
-  );
+  const issue = () =>
+    reader.read(sidecarPath).then(
+      (text) => applyLoad(entry, parsePinsFile(text), at),
+      // A read error means "no sidecar yet" — kb_read_doc errors on missing
+      // files — so an empty v1 file is the correct starting point.
+      () => applyLoad(entry, emptyPinsFile(), at)
+    );
+  // ORDERING GATE (see Entry.inFlight): never issue a read while a write for
+  // this sidecar is still unacknowledged, or the read can be served
+  // pre-write content and clobber the record. Nothing in flight → issue
+  // SYNCHRONOUSLY, exactly as before, so the common path is unchanged.
+  if (entry.inFlight === null) void issue();
+  else void entry.inFlight.then(issue);
 }
 
 function applyLoad(entry: Entry, file: PinsFile, at: number): void {
@@ -223,15 +255,30 @@ function flushEntry(sidecarPath: string, entry: Entry): void {
     log.error(`pinsStore: no IO configured, dropping write for ${sidecarPath}`);
     return;
   }
-  writer.write(sidecarPath, serializePinsFile(entry.file)).catch((e: unknown) => {
-    log.error(`pinsStore: pins write failed for ${sidecarPath}: ${String(e)}`);
-  });
+  const issued = (entry.writesIssued += 1);
+  entry.inFlight = writer
+    .write(sidecarPath, serializePinsFile(entry.file))
+    .catch((e: unknown) => {
+      log.error(`pinsStore: pins write failed for ${sidecarPath}: ${String(e)}`);
+    })
+    .then(() => {
+      // Only the NEWEST write clears the gate. An older write settling late
+      // must not let a read overtake one that is still in flight.
+      if (entry.writesIssued === issued) entry.inFlight = null;
+    });
 }
 
 /** Is a write still owed for this sidecar? (Test/diagnostic surface — the
  *  scheduling rules are invisible from the record alone.) */
 export function hasPendingWrite(sidecarPath: string): boolean {
   return entries.get(sidecarPath)?.pending ?? false;
+}
+
+/** Is a write still unacknowledged for this sidecar? A load issued now would
+ *  be GATED behind it (test/diagnostic surface — the ordering rule is
+ *  invisible from the record alone). */
+export function hasInFlightWrite(sidecarPath: string): boolean {
+  return entries.get(sidecarPath)?.inFlight != null;
 }
 
 /** Test-only: drop every record, timer and the injected IO. */
