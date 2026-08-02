@@ -24,6 +24,7 @@ import { useSessionRepos, quickThreadTarget } from "../lib/explorer";
 import type { QuickThreadTarget } from "../lib/explorer";
 import { sessionDirFor } from "../lib/devServer";
 import { getActiveTabSession } from "../lib/panelStore";
+import { defaultThreadTitle } from "../lib/threadStore";
 
 interface NewThreadDialogProps {
   /** config.json repos — MERGED with the registry here, never the whole
@@ -149,7 +150,18 @@ export function NewThreadDialog({ repos, onCreate, onClose }: NewThreadDialogPro
       if (submittedRef.current) return;
       submittedRef.current = true;
       if (option.type === "quick") {
-        onCreate(option.target.name, option.target.path, undefined, undefined, title.trim());
+        // The row says "no repo", so it must not invent one — see
+        // QuickThreadTarget.project. The directory's LABEL is still the best
+        // default title ("ericm · Aug 2" says where the shell is), so it goes
+        // in as the title rather than leaking in as the session's identity;
+        // `defaultThreadTitle("")` would otherwise render a leading " · ".
+        onCreate(
+          option.target.project,
+          option.target.path,
+          undefined,
+          undefined,
+          title.trim() || defaultThreadTitle(option.target.name)
+        );
         return;
       }
       onCreate(option.name, option.path, option.color, option.group, title.trim());

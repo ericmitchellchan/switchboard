@@ -233,7 +233,12 @@ describe("quickThreadTarget", () => {
 
   it("uses the ACTIVE TAB's directory, named by the registry project", () => {
     const t = quickThreadTarget(projects, "C:/p/switchboard/src", "C:/Users/ericm");
-    expect(t).toEqual({ path: "C:/p/switchboard/src", name: "switchboard", source: "tab" });
+    expect(t).toEqual({
+      path: "C:/p/switchboard/src",
+      project: "switchboard",
+      name: "switchboard",
+      source: "tab",
+    });
   });
 
   it("falls back to HOME when the tab has no working directory", () => {
@@ -246,18 +251,42 @@ describe("quickThreadTarget", () => {
     expect(quickThreadTarget(projects, "   ", "C:/Users/ericm").source).toBe("home");
   });
 
-  it("names a directory the registry has never seen after its own folder", () => {
+  it("names a directory the registry has never seen after its own folder, but claims NO project", () => {
     const t = quickThreadTarget(projects, "C:/tmp/oneoff", "C:/Users/ericm");
-    expect(t).toEqual({ path: "C:/tmp/oneoff", name: "oneoff", source: "tab" });
+    expect(t).toEqual({ path: "C:/tmp/oneoff", project: "", name: "oneoff", source: "tab" });
+  });
+
+  // The reported bug: `+ new thread` → quick create from a shell sitting in the
+  // home directory produced a session whose REPO was "ericm", which stamped a
+  // dim badge on the tab and made TabBar draw an "ERICM" group divider in front
+  // of it (its group key is `session.group || session.repo`). The folder is
+  // still a fine LABEL — it becomes the default title — but it is not a repo.
+  it("does NOT treat the home directory as a project", () => {
+    const t = quickThreadTarget(projects, "", "C:/Users/ericm");
+    expect(t.project).toBe("");
+    expect(t.name).toBe("ericm");
+    expect(t.source).toBe("home");
   });
 
   it("says UNKNOWN rather than inventing a directory when nothing is known", () => {
-    expect(quickThreadTarget(null, "", "")).toEqual({ path: "", name: "shell", source: "unknown" });
+    expect(quickThreadTarget(null, "", "")).toEqual({
+      path: "",
+      project: "",
+      name: "shell",
+      source: "unknown",
+    });
   });
 
   it("works before the registry has answered (projects still null)", () => {
+    // No registry ⇒ no project can be CLAIMED, even though the folder name
+    // happens to match one. A label may guess; an identity may not.
     const t = quickThreadTarget(null, "C:/p/switchboard", "C:/Users/ericm");
-    expect(t).toEqual({ path: "C:/p/switchboard", name: "switchboard", source: "tab" });
+    expect(t).toEqual({
+      path: "C:/p/switchboard",
+      project: "",
+      name: "switchboard",
+      source: "tab",
+    });
   });
 });
 

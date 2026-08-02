@@ -292,7 +292,18 @@ export interface QuickThreadTarget {
   /** Absolute directory the thread's shell starts in ("" when nothing is
    *  known — createSession then falls back to the process default). */
   path: string;
-  /** Repo label for the session and the default thread title. */
+  /** The REGISTRY PROJECT this directory belongs to, or "" when it belongs to
+   *  none. Distinct from `name` on purpose, and the distinction is the whole
+   *  point: `name` comes from `liveProjectFor`, which is TOTAL by design (it
+   *  labels a pins bucket, so it always answers — falling back to the folder's
+   *  own name). Passing that answer on as the session's REPO made a home
+   *  directory look like a project called "ericm": the tab grew a dim `ericm`
+   *  badge, and TabBar — whose group key is `session.group || session.repo` —
+   *  opened a GROUP DIVIDER reading "ERICM" in front of it, for a repo the user
+   *  never chose and a row that says "no repo". A label and an identity are
+   *  different things, so they are different fields. */
+  project: string;
+  /** Display label for the row and the default thread title. */
   name: string;
   /** WHERE the directory came from — the label states this verbatim. */
   source: "tab" | "home" | "unknown";
@@ -311,13 +322,23 @@ export function quickThreadTarget(
 ): QuickThreadTarget {
   const tab = (tabDir ?? "").trim();
   if (tab.length > 0) {
-    return { path: tab, name: liveProjectFor(projects ?? [], tab), source: "tab" };
+    return {
+      path: tab,
+      project: projectKeyForDir(projects ?? [], tab) ?? "",
+      name: liveProjectFor(projects ?? [], tab),
+      source: "tab",
+    };
   }
   const home = (homeDir ?? "").trim();
   if (home.length > 0) {
-    return { path: home, name: liveProjectFor(projects ?? [], home), source: "home" };
+    return {
+      path: home,
+      project: projectKeyForDir(projects ?? [], home) ?? "",
+      name: liveProjectFor(projects ?? [], home),
+      source: "home",
+    };
   }
-  return { path: "", name: "shell", source: "unknown" };
+  return { path: "", project: "", name: "shell", source: "unknown" };
 }
 
 // ── Repo file reads: the fold, and the hook both hosts share ─────────────────
@@ -354,7 +375,7 @@ export type FileReadResult = { ok: true; content: string } | { ok: false; error:
 
 /** Document identity for a repo file. */
 export function fileKey(project: string, path: string): string {
-  return `${project} ${path}`;
+  return `${project}\0${path}`;
 }
 
 /** State to show while a read for `key` is in flight. A re-read of the SAME
