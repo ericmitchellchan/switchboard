@@ -2,6 +2,11 @@ import { describe, it, expect, beforeEach } from "vitest";
 import {
   detectDevServerUrl,
   detectDevServerUrls,
+  detectDevServerHits,
+  classifySourceAt,
+  rankHits,
+  devServerOfferExtrasFor,
+  devServerKnownFor,
   stripAnsi,
   parseManualUrl,
   noteDevServerOutput,
@@ -328,5 +333,241 @@ describe("offer store — a URL already being previewed", () => {
     });
     noteDevServerOutput(SID, VITE_PLAIN);
     expect(devServerOfferFor(SID)).toBe("http://localhost:5173/");
+  });
+});
+
+// ── SOURCE TAGGING ───────────────────────────────────────────────────────────
+// The banner says which tool printed a URL, and that is the ONLY signal used to
+// rank one candidate above another. Taken at parse time against the same real
+// banners the detector itself is calibrated on — never re-sniffed from the URL,
+// and never guessed from the port (8000 is uvicorn's default AND python
+// http.server's, which is exactly why port heuristics are not used).
+
+describe("source tagging — real banners", () => {
+  const sourceOf = (chunk: string, url: string) =>
+    detectDevServerHits(chunk).find((h) => h.url === url)?.source;
+
+  it("tags vite as frontend — marker sits TWO lines above the URL", () => {
+    expect(sourceOf(VITE_PLAIN, "http://localhost:5173/")).toBe("frontend");
+  });
+
+  it("tags vite as frontend through its ANSI colouring too", () => {
+    expect(sourceOf(VITE_ANSI, "http://localhost:5173/")).toBe("frontend");
+  });
+
+  it("tags Next.js as frontend, plain and ANSI", () => {
+    expect(sourceOf(NEXT_PLAIN, "http://localhost:3000/")).toBe("frontend");
+    expect(sourceOf(NEXT_ANSI, "http://localhost:3000/")).toBe("frontend");
+  });
+
+  it("tags webpack-dev-server as frontend (marker on the URL's own line)", () => {
+    expect(sourceOf(WEBPACK, "http://localhost:8080/")).toBe("frontend");
+  });
+
+  it("tags CRA as frontend — it names no product, so its prose IS the signature", () => {
+    expect(sourceOf(CRA, "http://localhost:3000/")).toBe("frontend");
+  });
+
+  it("tags uvicorn as api", () => {
+    expect(sourceOf(UVICORN, "http://127.0.0.1:8000/")).toBe("api");
+  });
+
+  it("tags Django's runserver as api", () => {
+    expect(sourceOf(DJANGO, "http://127.0.0.1:8000/")).toBe("api");
+  });
+
+  it("tags python http.server as static, on both binds", () => {
+    expect(sourceOf(PY_HTTP_IPV4, "http://localhost:8000/")).toBe("static");
+    expect(sourceOf(PY_HTTP_IPV6, "http://localhost:8000/")).toBe("static");
+  });
+
+  it("tags a bare URL with no banner as unknown", () => {
+    expect(sourceOf("starting up on http://localhost:4321/\r\n", "http://localhost:4321/")).toBe(
+      "unknown"
+    );
+  });
+
+  it("uses the NEAREST preceding marker, so an interleaved boot is not smeared", () => {
+    // uvicorn names itself on its own URL's line; vite's marker comes later.
+    const both = `${UVICORN}\r\n${VITE_PLAIN}`;
+    expect(sourceOf(both, "http://127.0.0.1:8000/")).toBe("api");
+    expect(sourceOf(both, "http://localhost:5173/")).toBe("frontend");
+    // …and the same holds with the banners the other way round.
+    const reversed = `${VITE_PLAIN}\r\n${UVICORN}`;
+    expect(sourceOf(reversed, "http://localhost:5173/")).toBe("frontend");
+    expect(sourceOf(reversed, "http://127.0.0.1:8000/")).toBe("api");
+  });
+
+  it("does not let a marker FAR above classify an unrelated URL", () => {
+    const stale = `VITE v5.2.11 ready\r\n${"filler output\r\n".repeat(60)}http://localhost:9999/\r\n`;
+    expect(sourceOf(stale, "http://localhost:9999/")).toBe("unknown");
+  });
+
+  it("classifySourceAt is pure and index-driven", () => {
+    const text = "Uvicorn running on http://127.0.0.1:8000";
+    expect(classifySourceAt(text, text.indexOf("http"))).toBe("api");
+    expect(classifySourceAt("no markers here", 5)).toBe("unknown");
+    expect(classifySourceAt("", 0)).toBe("unknown");
+  });
+
+  it("detectDevServerUrls still returns plain strings (unchanged contract)", () => {
+    expect(detectDevServerUrls(VITE_PLAIN)).toEqual(["http://localhost:5173/"]);
+    expect(detectDevServerUrl(VITE_PLAIN)).toBe("http://localhost:5173/");
+  });
+});
+
+// ── RANKING ──────────────────────────────────────────────────────────────────
+
+describe("rankHits", () => {
+  it("orders frontend > static > unknown > api", () => {
+    const ranked = rankHits([
+      { url: "api", source: "api" },
+      { url: "unknown", source: "unknown" },
+      { url: "static", source: "static" },
+      { url: "frontend", source: "frontend" },
+    ]);
+    expect(ranked.map((h) => h.url)).toEqual(["frontend", "static", "unknown", "api"]);
+  });
+
+  it("breaks ties toward the LATER sighting — a retried port is the settled one", () => {
+    const ranked = rankHits([
+      { url: "http://localhost:5173/", source: "frontend" },
+      { url: "http://localhost:5174/", source: "frontend" },
+    ]);
+    expect(ranked[0].url).toBe("http://localhost:5174/");
+  });
+
+  it("is a pure sort — the input array is not mutated", () => {
+    const input: Array<{ url: string; source: "api" | "frontend" }> = [
+      { url: "a", source: "api" },
+      { url: "b", source: "frontend" },
+    ];
+    rankHits(input);
+    expect(input.map((h) => h.url)).toEqual(["a", "b"]);
+  });
+
+  it("handles the empty list", () => {
+    expect(rankHits([])).toEqual([]);
+  });
+});
+
+// ── THE REGRESSION: a full-stack session ─────────────────────────────────────
+// lodestar's `pnpm dev` spawns the FastAPI backend FIRST and the app second.
+// With a single last-writer-wins offer slot, whichever printed last won — so
+// the ordering the dev script actually produces offered the API. Both orderings
+// must now offer the app.
+
+describe("offer store — a full-stack session", () => {
+  const LODESTAR_BACKEND =
+    "[lodestar] backend  -> http://127.0.0.1:8799\r\n" +
+    "INFO:     Uvicorn running on http://127.0.0.1:8799 (Press CTRL+C to quit)\r\n";
+  const LODESTAR_VITE = "  ➜  Local:   http://127.0.0.1:5273/\r\n";
+  const VITE_BANNER = "\r\n  VITE v6.4.3  ready in 255 ms\r\n";
+
+  beforeEach(() => {
+    __resetDevServerForTests();
+  });
+
+  it("offers the FRONTEND when the backend printed first (the real ordering)", () => {
+    noteDevServerOutput(SID, LODESTAR_BACKEND);
+    noteDevServerOutput(SID, VITE_BANNER + LODESTAR_VITE);
+    expect(devServerOfferFor(SID)).toBe("http://127.0.0.1:5273/");
+  });
+
+  it("offers the FRONTEND when the frontend printed first, too", () => {
+    noteDevServerOutput(SID, VITE_BANNER + LODESTAR_VITE);
+    noteDevServerOutput(SID, LODESTAR_BACKEND);
+    expect(devServerOfferFor(SID)).toBe("http://127.0.0.1:5273/");
+  });
+
+  it("counts the runner-up rather than pretending it was never seen", () => {
+    noteDevServerOutput(SID, LODESTAR_BACKEND);
+    noteDevServerOutput(SID, VITE_BANNER + LODESTAR_VITE);
+    expect(devServerOfferExtrasFor(SID)).toBe(1);
+    expect(devServerKnownFor(SID).map((h) => h.url)).toEqual([
+      "http://127.0.0.1:5273/",
+      "http://127.0.0.1:8799/",
+    ]);
+  });
+
+  it("REFINES an unknown URL when a later banner names its tool", () => {
+    // The dev script's own label prints the URL before uvicorn boots, so the
+    // first sighting has no marker at all.
+    noteDevServerOutput(SID, "[lodestar] backend  -> http://127.0.0.1:8799\r\n");
+    expect(devServerKnownFor(SID)[0].source).toBe("unknown");
+    noteDevServerOutput(
+      SID,
+      "INFO:     Uvicorn running on http://127.0.0.1:8799 (Press CTRL+C to quit)\r\n"
+    );
+    expect(devServerKnownFor(SID)[0].source).toBe("api");
+    // Refining must not produce a second offer.
+    expect(devServerOfferExtrasFor(SID)).toBe(0);
+  });
+
+  it("a backend-only session still offers the backend — better than nothing", () => {
+    noteDevServerOutput(SID, LODESTAR_BACKEND);
+    expect(devServerOfferFor(SID)).toBe("http://127.0.0.1:8799/");
+    expect(devServerOfferExtrasFor(SID)).toBe(0);
+  });
+
+  it("an UNKNOWN server outranks a known api but loses to a frontend", () => {
+    noteDevServerOutput(SID, UVICORN);
+    noteDevServerOutput(SID, "listening at http://localhost:4321/\r\n");
+    expect(devServerOfferFor(SID)).toBe("http://localhost:4321/");
+    noteDevServerOutput(SID, VITE_PLAIN);
+    expect(devServerOfferFor(SID)).toBe("http://localhost:5173/");
+  });
+
+  it("a static server outranks an unknown one", () => {
+    noteDevServerOutput(SID, "listening at http://localhost:4321/\r\n");
+    noteDevServerOutput(SID, PY_HTTP_IPV4);
+    expect(devServerOfferFor(SID)).toBe("http://localhost:8000/");
+  });
+
+  it("dismissal clears EVERY pending candidate, not just the one on display", () => {
+    noteDevServerOutput(SID, LODESTAR_BACKEND);
+    noteDevServerOutput(SID, VITE_BANNER + LODESTAR_VITE);
+    clearDevServerOffer(SID);
+    expect(devServerOfferFor(SID)).toBeNull();
+    expect(devServerOfferExtrasFor(SID)).toBe(0);
+    // Answering "not now" must not hand you the runner-up instead.
+    noteDevServerOutput(SID, VITE_BANNER + LODESTAR_VITE);
+    expect(devServerOfferFor(SID)).toBeNull();
+  });
+
+  it("…but the URLs stay reachable through the picker after a dismissal", () => {
+    noteDevServerOutput(SID, LODESTAR_BACKEND);
+    noteDevServerOutput(SID, VITE_BANNER + LODESTAR_VITE);
+    clearDevServerOffer(SID);
+    expect(devServerKnownFor(SID).map((h) => h.url)).toEqual([
+      "http://127.0.0.1:5273/",
+      "http://127.0.0.1:8799/",
+    ]);
+  });
+
+  it("already-framed suppression applies per URL across the list", () => {
+    setPreviewOpenCheck((url) => url === "http://127.0.0.1:5273/");
+    noteDevServerOutput(SID, LODESTAR_BACKEND);
+    noteDevServerOutput(SID, VITE_BANNER + LODESTAR_VITE);
+    // The frontend is already on screen, so the API — the only thing left to
+    // say — is what gets offered.
+    expect(devServerOfferFor(SID)).toBe("http://127.0.0.1:8799/");
+    expect(devServerOfferExtrasFor(SID)).toBe(0);
+    // Both are still listed for the picker.
+    expect(devServerKnownFor(SID)).toHaveLength(2);
+  });
+
+  it("keeps known URLs per session and forgets them when the tab closes", () => {
+    noteDevServerOutput("tab-a", VITE_PLAIN);
+    expect(devServerKnownFor("tab-b")).toEqual([]);
+    expect(devServerKnownFor(null)).toEqual([]);
+    clearDevServerSession("tab-a");
+    expect(devServerKnownFor("tab-a")).toEqual([]);
+  });
+
+  it("returns a STABLE reference for the picker's snapshot", () => {
+    noteDevServerOutput(SID, VITE_PLAIN);
+    expect(devServerKnownFor(SID)).toBe(devServerKnownFor(SID));
+    expect(devServerKnownFor("nothing-here")).toBe(devServerKnownFor("also-nothing"));
   });
 });

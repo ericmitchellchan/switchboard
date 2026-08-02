@@ -30,7 +30,8 @@ import { docKind, useKbDocList } from "../lib/kb";
 import { explorerList, explorerProjects, liveProjectFor } from "../lib/explorer";
 import type { ExplorerEntry, ExplorerProject } from "../lib/explorer";
 import { FILE_ICON, FOLDER_ICON, getActiveTabSession } from "../lib/panelStore";
-import { parseManualUrl, sessionDirFor } from "../lib/devServer";
+import { parseManualUrl, sessionDirFor, useDevServerKnown } from "../lib/devServer";
+import type { DevServerSource } from "../lib/devServer";
 import { ICON_SIZE, Icon, type IconName } from "./icons";
 
 /** Render cap. A KB with thousands of docs must not paint thousands of rows on
@@ -49,8 +50,19 @@ type Row =
   /** THE MANUAL URL PATH (increment F). Appears at the top of the root list
    *  the moment what you have typed parses as a URL or a bare port. It is the
    *  fallback for a dev server whose banner the detector does not recognise —
-   *  detection is the common path, this is the guarantee. */
-  | { kind: "url"; id: string; label: string; url: string; project: string };
+   *  detection is the common path, this is the guarantee.
+   *
+   *  Also the shape of a DETECTED url this session announced (`detected`), so a
+   *  candidate that lost the offer chip to a better-ranked one is one `+` away
+   *  instead of being a URL you have to have remembered. */
+  | {
+      kind: "url";
+      id: string;
+      label: string;
+      url: string;
+      project: string;
+      detected?: DevServerSource;
+    };
 
 export function ArtifactPicker({
   onPick,
@@ -73,6 +85,10 @@ export function ArtifactPicker({
 
   // ── Sources ────────────────────────────────────────────────────────────────
   const { docs, error: docsError } = useKbDocList(true);
+
+  // Dev-server URLs THIS tab's session announced, best-ranked first. The chip
+  // can only carry one; this is where the others stay reachable.
+  const knownUrls = useDevServerKnown(getActiveTabSession());
 
   const [projects, setProjects] = useState<ExplorerProject[] | null>(null);
   const [projectsError, setProjectsError] = useState<string | null>(null);
@@ -130,15 +146,31 @@ export function ArtifactPicker({
     // live preview's pins live in `<project>/live-pins.json`, so the artifact
     // needs a bucket, and the tab you pressed `+` in is the honest source. A
     // cwd the registry has never seen still yields one (acceptance 6).
+    const liveProject = liveProjectFor(projects ?? [], sessionDirFor(getActiveTabSession()));
     const manualUrl = parseManualUrl(filter);
     if (manualUrl) {
-      const project = liveProjectFor(projects ?? [], sessionDirFor(getActiveTabSession()));
       out.push({
         kind: "url",
         id: `u:${manualUrl}`,
         label: manualUrl,
         url: manualUrl,
-        project,
+        project: liveProject,
+      });
+    }
+    // DETECTED, best-ranked first. A full-stack `pnpm dev` announces several
+    // servers and only one can hold the chip; these rows are where the rest
+    // stay reachable, and where a dismissed offer can be taken back. A URL the
+    // filter already produced by hand is not listed twice.
+    for (const detected of knownUrls) {
+      if (detected.url === manualUrl) continue;
+      if (!hit(detected.url)) continue;
+      out.push({
+        kind: "url",
+        id: `u:${detected.url}`,
+        label: detected.url,
+        url: detected.url,
+        project: liveProject,
+        detected: detected.source,
       });
     }
     // Projects next — few rows, and they are the gateway to everything the
@@ -167,7 +199,7 @@ export function ArtifactPicker({
       if (out.length >= MAX_ROWS) break;
     }
     return out;
-  }, [project, dir, entries, projects, docs, filter]);
+  }, [project, dir, entries, projects, docs, filter, knownUrls]);
 
   // Keep the cursor on a real row as the list changes under it.
   useEffect(() => {
@@ -515,7 +547,12 @@ function metaFor(row: Row): string {
     case "url":
       // Which bucket its pins will land in — worth stating before you open it,
       // because that is the one thing a typed URL does not say for itself.
-      return `live preview · ${row.project}`;
+      // For a DETECTED row, what announced it is the more useful fact: it is
+      // why this row sits above or below the others, and it is the difference
+      // between "your app" and "your API, which frames as JSON".
+      return row.detected
+        ? `${row.detected} · ${row.project}`
+        : `live preview · ${row.project}`;
     case "kb":
       // Truncated from the LEFT: the deep end of a KB path
       // (…/artifact-panel) is what disambiguates two docs with the same file

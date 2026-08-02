@@ -1,7 +1,7 @@
 import { memo, useCallback } from "react";
 import type { Session } from "../types";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
-import { clearDevServerOffer, useDevServerOffer } from "../lib/devServer";
+import { clearDevServerOffer, useDevServerOffer, useDevServerOfferExtras } from "../lib/devServer";
 import { explorerProjects, liveProjectFor } from "../lib/explorer";
 import { getActiveTabSession, openInPanel } from "../lib/panelStore";
 import { navigate, getNavState } from "../lib/route";
@@ -37,6 +37,7 @@ interface SessionHeaderProps {
  *      records an offer at all. */
 function DevServerOffer({ session, compact }: { session: Session; compact: boolean }) {
   const offer = useDevServerOffer(session.id);
+  const extras = useDevServerOfferExtras(session.id);
 
   const take = useCallback(async () => {
     if (!offer) return;
@@ -75,7 +76,11 @@ function DevServerOffer({ session, compact }: { session: Session; compact: boole
         // to any window you already have open.
         title={
           `Frame ${offer} in the artifact panel, beside this shell.\n` +
-          `Nothing opens in a browser and no window of yours is touched.`
+          `Nothing opens in a browser and no window of yours is touched.` +
+          (extras > 0
+            ? `\n\nThis shell announced ${extras + 1} servers; this is the one most ` +
+              `likely to be an app. The others are listed under +.`
+            : "")
         }
         style={{
           display: "flex",
@@ -99,6 +104,12 @@ function DevServerOffer({ session, compact }: { session: Session; compact: boole
       >
         <span style={{ color: "var(--text-dim)" }}>frame</span>
         <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{short}</span>
+        {/* A full-stack boot announces several servers and only the best-ranked
+            one gets the chip. Saying so is the honest minimum — without it the
+            others look like they were never noticed. `+` is where they live. */}
+        {extras > 0 && (
+          <span style={{ color: "var(--text-dim)", flex: "none" }}>{`+${extras}`}</span>
+        )}
       </button>
       <span
         role="button"
