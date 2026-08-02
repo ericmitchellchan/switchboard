@@ -9,7 +9,9 @@ import type { ClaudeDiscovery } from "./ipc";
 import {
   planPromotion,
   shouldRunPromotionPass,
+  promotionPassReason,
   runPromotionPass,
+  BOUND_SWEEP_MS,
   PROMOTION_POLL_MS,
 } from "./threadPromotion";
 
@@ -119,6 +121,40 @@ describe("planPromotion", () => {
       expect(plan.reason).toContain("t-tab");
       expect(plan.reason).toContain("t-conv");
     }
+  });
+});
+
+describe("promotionPassReason (the gate, sweep included)", () => {
+  const bound = [thread({ sessionId: "tab-a" })];
+
+  it("runs immediately when a live tab has no thread", () => {
+    expect(promotionPassReason(["tab-a"], [], 10_000, 10_000)).toBe("unbound");
+  });
+
+  it("still costs zero IPC with no tabs at all, however long it has been", () => {
+    expect(promotionPassReason([], bound, 1_000_000, 0)).toBeNull();
+  });
+
+  it("SWEEPS an all-bound workspace rather than going silent forever", () => {
+    // The bug this closes: one tab, bound, user restarts claude in it. The old
+    // gate returned false for good and supersede could never fire.
+    expect(promotionPassReason(["tab-a"], bound, BOUND_SWEEP_MS, 0)).toBe("sweep");
+  });
+
+  it("holds the sweep until its cadence is due", () => {
+    expect(promotionPassReason(["tab-a"], bound, BOUND_SWEEP_MS - 1, 0)).toBeNull();
+    // …which is what keeps the steady state cheap: most 4s ticks do nothing.
+    expect(promotionPassReason(["tab-a"], bound, PROMOTION_POLL_MS, 0)).toBeNull();
+  });
+
+  it("is markedly lazier than the base tick, and not a disguised constant poll", () => {
+    expect(BOUND_SWEEP_MS).toBeGreaterThanOrEqual(PROMOTION_POLL_MS * 4);
+  });
+
+  it("an unbound pass resets the sweep clock too — one snapshot covers every tab", () => {
+    // Caller contract: `lastPassAt` is when a pass RAN, either reason.
+    expect(promotionPassReason(["tab-a", "tab-b"], bound, 5_000, 0)).toBe("unbound");
+    expect(promotionPassReason(["tab-a"], bound, 5_000 + BOUND_SWEEP_MS - 1, 5_000)).toBeNull();
   });
 });
 
@@ -317,6 +353,39 @@ describe("runPromotionPass", () => {
       discoveries: [discovery()],
     });
     expect(await runPromotionPass(h.fx)).toBe(0);
+    expect(h.fx.discover).not.toHaveBeenCalled();
+  });
+
+  it("a SWEEP runs over an all-bound workspace and supersedes a restart", async () => {
+    // The single-tab shape the old gate could never see: one bound tab whose
+    // claude restarted under a new uuid. With the reason supplied, the pass
+    // runs and Decision 1 applies as usual.
+    const h = harness({
+      sessions: ["tab-a"],
+      threads: [thread({ sessionId: "tab-a", chatSessionId: "uuid-old" })],
+      discoveries: [discovery({ sessionId: "tab-a", chatSessionId: "uuid-new" })],
+      onDisk: true,
+    });
+    expect(await runPromotionPass(h.fx, "sweep")).toBe(1);
+    expect(h.fx.discover).toHaveBeenCalledTimes(1);
+    expect(h.unbound).toEqual(["t1"]);
+    expect(h.created).toHaveLength(1);
+    expect(h.created[0].chatSessionId).toBe("uuid-new");
+  });
+
+  it("a sweep with nothing new is still a clean no-op", async () => {
+    const h = harness({
+      sessions: ["tab-a"],
+      threads: [thread({ sessionId: "tab-a", chatSessionId: "uuid-1" })],
+      discoveries: [discovery({ sessionId: "tab-a", chatSessionId: "uuid-1" })],
+    });
+    expect(await runPromotionPass(h.fx, "sweep")).toBe(0);
+    expect(h.persist).not.toHaveBeenCalled();
+  });
+
+  it("a sweep over zero tabs issues no IPC", async () => {
+    const h = harness({ sessions: [], threads: [], discoveries: [discovery()] });
+    expect(await runPromotionPass(h.fx, "sweep")).toBe(0);
     expect(h.fx.discover).not.toHaveBeenCalled();
   });
 

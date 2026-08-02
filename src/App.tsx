@@ -76,7 +76,7 @@ import {
   getKbRootForContext,
   setKbRootForContext,
 } from "./lib/agentContext";
-import { runPromotionPass, PROMOTION_POLL_MS } from "./lib/threadPromotion";
+import { runPromotionPass, promotionPassReason, PROMOTION_POLL_MS } from "./lib/threadPromotion";
 import { explorerProjects, registerExplorerActions } from "./lib/explorer";
 import { parsePinsFile, pinsForDoc, pinTargetFor } from "./lib/pins";
 import { configurePinsIO, getPinsFile } from "./lib/pinsStore";
@@ -1014,10 +1014,26 @@ export default function App() {
   // installed exactly once and never restarts on a session change.
   useEffect(() => {
     let running = false;
+    // When a pass last actually ran. Drives the BOUND SWEEP: with every tab
+    // bound the gate would otherwise never fire again, and a `claude` restarted
+    // inside the one open tab would never be noticed (increment E's supersede
+    // unreachable in its commonest shape). See promotionPassReason.
+    let lastPassAt = 0;
     const tick = () => {
       // A pass is async; overlapping passes could plan two records from one
       // discovery. One at a time.
       if (running) return;
+      const reason = promotionPassReason(
+        sessionsRef.current.map((s) => s.id),
+        getThreads(),
+        Date.now(),
+        lastPassAt
+      );
+      if (!reason) return;
+      lastPassAt = Date.now();
+      if (reason === "sweep") {
+        log.debug("Promotion sweep — every tab is bound, re-checking for a restarted claude");
+      }
       running = true;
       void runPromotionPass({
         liveSessionIds: () => sessionsRef.current.map((s) => s.id),
@@ -1035,7 +1051,7 @@ export default function App() {
         defaultTitle: (repoName) => defaultThreadTitle(repoName),
         repoName: threadRepoName,
         log: (message) => log.info(message),
-      }).finally(() => {
+      }, reason).finally(() => {
         running = false;
       });
     };

@@ -33,7 +33,7 @@ impl PtyManager {
         app_handle: AppHandle,
     ) -> Result<(), String> {
         let (session, reader) =
-            PtySession::spawn(name, repo, working_dir, cols, rows, shell)?;
+            PtySession::spawn(name, repo, working_dir, cols, rows, shell, gen)?;
 
         {
             let mut sessions = self
@@ -53,8 +53,9 @@ impl PtyManager {
         // app if this is ever called from a sync path.
         let session_id = id.clone();
         let handle = app_handle.clone();
+        let sessions = Arc::clone(&self.sessions);
         std::thread::spawn(move || {
-            read_pty_output(reader, session_id, gen, handle);
+            read_pty_output(reader, session_id, gen, handle, sessions);
         });
 
         Ok(())
@@ -95,7 +96,7 @@ impl PtyManager {
 
         // Create new PTY with same session ID
         let (session, reader) =
-            PtySession::spawn(name, repo, working_dir, cols, rows, shell)?;
+            PtySession::spawn(name, repo, working_dir, cols, rows, shell, gen)?;
 
         {
             let mut sessions = self
@@ -110,8 +111,9 @@ impl PtyManager {
         // Plain OS thread — see the note in create_session.
         let session_id = id.clone();
         let handle = app_handle.clone();
+        let sessions = Arc::clone(&self.sessions);
         std::thread::spawn(move || {
-            read_pty_output(reader, session_id, gen, handle);
+            read_pty_output(reader, session_id, gen, handle, sessions);
         });
 
         Ok(())
@@ -184,9 +186,19 @@ impl PtyManager {
     }
 
     /// Shell roots for claude discovery: for each requested session id, the pid
-    /// of its shell and when we spawned it. Sessions with no reported pid (or
-    /// no live PTY) are simply omitted — they are never promotion candidates.
+    /// of its shell and when we spawned it. Sessions with no reported pid are
+    /// simply omitted — they are never promotion candidates.
     /// READ-ONLY: nothing here touches a shell.
+    ///
+    /// A session whose SHELL HAS EXITED is omitted too, and that omission is a
+    /// correctness guard, not tidiness. A tab outlives its shell (the user
+    /// types `exit`, the tab stays open with its scrollback), and this manager
+    /// keeps holding no OS handle on the dead child — so Windows is free to
+    /// hand `shell_pid` to an unrelated process immediately. Anything that
+    /// process then launches looks like OUR descendant AND passes the
+    /// freshness guard (it started long after we spawned), so discovery would
+    /// bind a stranger's claude conversation to this tab, and a later revive
+    /// would `--resume` it. A dead shell is not a walk root.
     pub fn shell_candidates(&self, ids: &[String]) -> Result<Vec<ShellCandidate>, String> {
         let sessions = self
             .sessions
@@ -195,6 +207,9 @@ impl PtyManager {
         let mut out = Vec::new();
         for id in ids {
             if let Some(s) = sessions.get(id) {
+                if s.shell_exited {
+                    continue;
+                }
                 if let Some(pid) = s.shell_pid {
                     out.push(ShellCandidate {
                         session_id: id.clone(),
@@ -236,6 +251,7 @@ fn read_pty_output(
     session_id: String,
     gen: u64,
     app_handle: AppHandle,
+    sessions: Arc<Mutex<HashMap<String, PtySession>>>,
 ) {
     use std::sync::Condvar;
 
@@ -328,6 +344,31 @@ fn read_pty_output(
         cvar.notify_one();
     }
     let _ = flusher.join();
+
+    // The shell process is GONE. Record it on the session BEFORE the event goes
+    // out, so nothing can observe "exited" while discovery still treats the pid
+    // as a live walk root (see PtyManager::shell_candidates for what that would
+    // cost). Sessions are removed only by close/restart, so this flag is the
+    // only thing that can tell a dead shell from a live one.
+    //
+    // GENERATION-GUARDED for the same reason the events are: a restart reuses
+    // the session id, and this thread may reach EOF long after the replacement
+    // shell is running. Marking blind would declare the NEW shell dead and
+    // silently drop the tab out of discovery for good.
+    if let Ok(mut map) = sessions.lock() {
+        if let Some(session) = map.get_mut(&session_id) {
+            if session.gen == gen {
+                session.shell_exited = true;
+                log::info!(
+                    "Shell exited id={} gen={} pid={:?} — no longer a discovery walk root",
+                    session_id,
+                    gen,
+                    session.shell_pid
+                );
+            }
+        }
+    }
+
     let _ = app_handle.emit(&exited_event, ExitedPayload { gen });
 }
 

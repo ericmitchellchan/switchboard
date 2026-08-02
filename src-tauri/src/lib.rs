@@ -422,7 +422,28 @@ async fn discover_claude_sessions(
     if session_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let shells = state.pty_manager.shell_candidates(&session_ids)?;
+    // shell_candidates has already dropped tabs whose shell EXITED (a dead
+    // shell's pid is reusable, so it must not be a walk root — see
+    // PtyManager::shell_candidates). Guard 3's second half runs here: ask the
+    // OS when the process currently holding each pid was created and drop any
+    // root that post-dates our own spawn. That catches the window where the
+    // shell is gone but its reader has not reached EOF yet.
+    let shells: Vec<_> = state
+        .pty_manager
+        .shell_candidates(&session_ids)?
+        .into_iter()
+        .filter(|s| {
+            let created = discovery::process_start_time_ms(s.shell_pid);
+            let ours = discovery::shell_pid_is_ours(created, s.spawned_at_ms);
+            if !ours {
+                log::warn!(
+                    "Claude discovery refused: tab {} shell pid {} was created at {:?}, after our spawn at {} — the pid was recycled, not walking it",
+                    s.session_id, s.shell_pid, created, s.spawned_at_ms
+                );
+            }
+            ours
+        })
+        .collect();
     if shells.is_empty() {
         return Ok(Vec::new());
     }

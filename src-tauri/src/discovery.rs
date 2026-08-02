@@ -31,7 +31,7 @@
 //   claude.exe(35860) <- powershell.exe(38792) <- switchboard.exe(14940)
 // and 35860.json holds `{"pid":35860,"sessionId":"d283d6aa-…","cwd":"…"}`.
 //
-// ── The two guards ──────────────────────────────────────────────────────────
+// ── The three guards ────────────────────────────────────────────────────────
 //
 // 1. FRESHNESS. Windows recycles pids, and a recycled pid makes an unrelated
 //    process look like our descendant (real chains observed on this machine
@@ -40,10 +40,35 @@
 //    BEFORE our shell — requiring `startedAt >= shell spawn` eliminates it.
 //    Session files also outlive their claude, and a stale file is likewise old.
 //
+//    THAT ARGUMENT HAS A PRECONDITION, and it is guard 3: it holds only while
+//    we still own the shell pid.
+//
 // 2. AMBIGUITY REFUSES. If a tab has two claude descendants (nested claude), or
 //    if one conversation resolves to two tabs, NEITHER is reported — the caller
 //    gets nothing and a warning goes to the log. Mis-binding would attach a
 //    conversation to the wrong tab and, on revive, resume the wrong history.
+//
+// 3. THE WALK ROOT IS STILL OURS. A tab outlives its shell: `exit` leaves the
+//    tab open with its scrollback, the session stays in PtyManager's map, and
+//    nothing holds an OS handle on the dead child — so the pid is reusable at
+//    once. Interleave it: tab T's shell is pid 9000 spawned at t=1000; the user
+//    exits at t=2000; Windows recycles 9000 at t=5000; that stranger launches
+//    claude at t=6000. Toolhelp reports (claude, 9000), the walk calls it our
+//    descendant, and guard 1 WAVES IT THROUGH (6000 >= 1000) because it is
+//    genuinely newer than our shell. The result is a foreign conversation bound
+//    to a dead tab — or, since increment E, T's real thread superseded by a
+//    bogus one — and revive would `--resume` a stranger's history.
+//
+//    Two independent answers, because this one is expensive to get wrong:
+//      (a) PtyManager marks a session's shell dead at reader EOF and
+//          shell_candidates skips it, so a dead tab is not a walk root at all
+//          (the primary fix — it also costs nothing per pass);
+//      (b) process_start_time_ms below asks the OS when the pid's CURRENT
+//          process was created and refuses a root that post-dates our spawn.
+//          Toolhelp carries no creation time, so this is a separate
+//          OpenProcess/GetProcessTimes call — one per candidate TAB, not per
+//          process. It also covers the case (a) cannot see: a shell that died
+//          without its reader reaching EOF yet.
 //
 // This module OBSERVES only: it reads a process snapshot and some JSON. It
 // never writes to a PTY (the standing never-mutate-a-live-shell rule).
@@ -186,14 +211,33 @@ pub fn resolve_bindings(
 
     for shell in shells {
         let kids = descendants_of(shell.shell_pid, &children);
-        let mut hits: Vec<&ClaudeSessionFile> = kids
-            .iter()
-            .filter_map(|pid| by_pid.get(pid).copied())
+        let mut hits: Vec<&ClaudeSessionFile> = Vec::new();
+        for f in kids.iter().filter_map(|pid| by_pid.get(pid).copied()) {
             // Guard 1 — freshness. See the header: a claude that started before
             // our shell did cannot be running INSIDE it, whatever the snapshot's
             // recycled parent links claim.
-            .filter(|f| f.started_at >= shell.spawned_at_ms)
-            .collect();
+            if f.started_at >= shell.spawned_at_ms {
+                hits.push(f);
+                continue;
+            }
+            // A DROPPED candidate is a refusal like any other. It matters most
+            // for `startedAt: 0`, which is what a claude release that stopped
+            // writing the field would look like: every descendant would fail
+            // the guard and promotion would go quietly dead. Naming it in the
+            // log is the difference between a five-minute diagnosis and a
+            // mystery.
+            refused.push(if f.started_at == 0 {
+                format!(
+                    "tab {} descendant pid {} (conversation {}) has no startedAt — cannot verify freshness, ignoring",
+                    shell.session_id, f.pid, f.session_id
+                )
+            } else {
+                format!(
+                    "tab {} descendant pid {} (conversation {}) started {} before the shell's {} — stale file or recycled pid, ignoring",
+                    shell.session_id, f.pid, f.session_id, f.started_at, shell.spawned_at_ms
+                )
+            });
+        }
         hits.sort_by_key(|f| f.pid);
 
         match hits.len() {
@@ -270,6 +314,72 @@ pub fn read_claude_session_files() -> Vec<ClaudeSessionFile> {
         }
     }
     out
+}
+
+/// Slack between "we called spawn" and "the OS created the process". Our
+/// `spawned_at_ms` is read AFTER the spawn returns, so a truthful creation time
+/// is normally slightly BEFORE it; the allowance only has to cover clock
+/// granularity and a slow spawn. A recycled pid is off by seconds to hours, so
+/// nothing hinges on the exact value.
+pub const SHELL_PID_SLACK_MS: u64 = 2_000;
+
+/// Guard 3, as a pure decision: is the process currently holding our shell pid
+/// still the shell WE spawned?
+///
+/// `created_ms` is the OS's creation time for that pid (None = unknown).
+/// Unknown is ACCEPTED: the query fails for a process that already exited or
+/// that we may not open, and refusing every tab whose shell we cannot inspect
+/// would break promotion on exactly the machines where it works today. The
+/// dead-session guard is the primary defence; this is the cross-check.
+pub fn shell_pid_is_ours(created_ms: Option<u64>, spawned_at_ms: u64) -> bool {
+    match created_ms {
+        None => true,
+        Some(created) => created <= spawned_at_ms.saturating_add(SHELL_PID_SLACK_MS),
+    }
+}
+
+/// Unix-epoch ms at which the process now holding `pid` was created, per the
+/// OS. `None` when the process is gone or cannot be opened.
+///
+/// PROCESS_QUERY_LIMITED_INFORMATION deliberately — the weakest right that
+/// answers this question, and it works across integrity levels where
+/// PROCESS_QUERY_INFORMATION does not. READ-ONLY: opening a handle to read
+/// times touches nothing.
+#[cfg(windows)]
+pub fn process_start_time_ms(pid: u32) -> Option<u64> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // FILETIME counts 100ns ticks from 1601-01-01; unix time starts 11644473600
+    // seconds later.
+    const TICKS_PER_MS: u64 = 10_000;
+    const EPOCH_DIFF_MS: u64 = 11_644_473_600_000;
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let mut creation: FILETIME = std::mem::zeroed();
+        let mut exit: FILETIME = std::mem::zeroed();
+        let mut kernel: FILETIME = std::mem::zeroed();
+        let mut user: FILETIME = std::mem::zeroed();
+        let ok = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user);
+        CloseHandle(handle);
+        if ok == 0 {
+            return None;
+        }
+        let ticks = ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64;
+        let ms = ticks / TICKS_PER_MS;
+        ms.checked_sub(EPOCH_DIFF_MS)
+    }
+}
+
+#[cfg(not(windows))]
+pub fn process_start_time_ms(_pid: u32) -> Option<u64> {
+    None
 }
 
 /// Every (pid, parent pid) pair on the machine.
@@ -435,6 +545,99 @@ mod tests {
             &[file(200, "uuid-old", 1000)],
         );
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_dropped_stale_candidate_is_always_named_in_refused() {
+        // Nit 1: a silently dropped candidate is invisible. This one is stale.
+        let (out, refused) = resolve_bindings(
+            &[shell("tab-a", 100, 5000)],
+            &[(200, 100)],
+            &[file(200, "uuid-old", 1000)],
+        );
+        assert!(out.is_empty());
+        assert_eq!(refused.len(), 1);
+        assert!(refused[0].contains("tab-a"));
+        assert!(refused[0].contains("uuid-old"));
+    }
+
+    #[test]
+    fn a_session_file_without_started_at_refuses_out_loud() {
+        // The failure mode that matters: a future claude release stops writing
+        // `startedAt`, every descendant fails the freshness guard, and
+        // promotion dies quietly. The log must say why.
+        let raw = r#"{"pid":200,"sessionId":"a-b","cwd":"C:\\r"}"#;
+        let parsed = parse_session_file(raw).expect("a file without startedAt still parses");
+        assert_eq!(parsed.started_at, 0);
+
+        let (out, refused) = resolve_bindings(&[shell("tab-a", 100, 1000)], &[(200, 100)], &[parsed]);
+        assert!(out.is_empty());
+        assert_eq!(refused.len(), 1);
+        assert!(refused[0].contains("no startedAt"), "got: {}", refused[0]);
+    }
+
+    #[test]
+    fn recycled_shell_pid_after_the_shell_exited_needs_guard_3() {
+        // THE interleaving, exactly as it happens on Windows:
+        //   t=1000  tab T's shell spawns as pid 9000
+        //   t=2000  the user types `exit` — the tab STAYS OPEN
+        //   t=5000  Windows recycles 9000 for an unrelated process
+        //   t=6000  that process launches claude
+        // Toolhelp now reports (claude=9100, parent=9000), so the walk calls it
+        // our descendant, and guard 1 lets it through because 6000 >= 1000.
+        let (out, _) = resolve_bindings(
+            &[shell("tab-a", 9000, 1000)],
+            &[(9100, 9000)],
+            &[file(9100, "a-strangers-conversation", 6000)],
+        );
+        assert_eq!(
+            out.len(),
+            1,
+            "freshness ALONE cannot see this — which is why guard 3 exists"
+        );
+
+        // Guard 3 is what stops it, in both halves:
+        //  (a) PtyManager::shell_candidates never offers a dead shell, so this
+        //      tab contributes no ShellCandidate at all →
+        let (out, refused) = resolve_bindings(&[], &[(9100, 9000)], &[file(9100, "x", 6000)]);
+        assert!(out.is_empty());
+        assert!(refused.is_empty());
+        //  (b) and the creation-time cross-check refuses the root even if the
+        //      session is somehow still listed: the pid's CURRENT process was
+        //      created at 5000, long after our 1000 spawn.
+        assert!(!shell_pid_is_ours(Some(5000), 1000));
+    }
+
+    #[test]
+    fn shell_pid_is_ours_accepts_our_own_shell_and_an_unknown_answer() {
+        // Created just before we read the clock — the normal case.
+        assert!(shell_pid_is_ours(Some(990), 1000));
+        // Exactly at spawn, and inside the slack either way.
+        assert!(shell_pid_is_ours(Some(1000), 1000));
+        assert!(shell_pid_is_ours(Some(1000 + SHELL_PID_SLACK_MS), 1000));
+        // Unknown (process gone, or not openable) is ACCEPTED — the dead-session
+        // guard is the primary defence and this must not break promotion.
+        assert!(shell_pid_is_ours(None, 1000));
+        // Beyond the slack is a recycled pid.
+        assert!(!shell_pid_is_ours(Some(1000 + SHELL_PID_SLACK_MS + 1), 1000));
+    }
+
+    /// FFI smoke test for guard 3's edge: this process's own creation time must
+    /// be readable, sane, and in the past.
+    #[cfg(windows)]
+    #[test]
+    fn process_start_time_reads_this_process() {
+        let me = std::process::id();
+        let created = process_start_time_ms(me).expect("our own creation time must be readable");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        assert!(created <= now, "created {} is in the future (now {})", created, now);
+        // Sanity: after 2020, i.e. the epoch conversion is not off by centuries.
+        assert!(created > 1_577_836_800_000, "created {} predates 2020", created);
+        // A pid that cannot exist answers None rather than lying.
+        assert_eq!(process_start_time_ms(u32::MAX - 1), None);
     }
 
     #[test]

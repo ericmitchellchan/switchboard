@@ -143,20 +143,55 @@ export type PromotionEffects = {
   log: (message: string) => void;
 };
 
-/** True when a pass is worth running at all: some live tab has no thread.
+/** How often a pass runs when EVERY tab is already bound — the sweep that
+ *  catches a `claude` restarted inside a bound tab (increment E's supersede).
  *
- *  This is the "stop polling when nothing is unbound" rule. When every tab is
- *  bound the tick costs ZERO IPC — no snapshot, no file reads. (A pass that
- *  does run still asks about every tab, since it is one snapshot either way,
- *  which is what makes the claude-restarted-in-a-bound-tab case free.)
+ *  Six times the base cadence. The gate below used to return false outright in
+ *  this state, which made supersede unreachable in the commonest shape of all:
+ *  one tab, bound, in which the user Ctrl+C's claude and types `claude` again.
+ *  Nothing would ever notice, and the new conversation stayed orphaned — the
+ *  exact failure increment C existed to remove.
  *
- *  KNOWN BOUNDARY, unchanged by increment E: because of this gate, the
- *  supersede branch is opportunistic — a restart inside a bound tab is noticed
- *  on the next pass some OTHER tab triggers, and if every tab is bound no pass
- *  runs at all. Closing that would mean polling forever, which is exactly the
- *  cost this gate was added to avoid, so it stays a deliberate trade rather
- *  than a silent one. Nothing is lost meanwhile: the old thread keeps its uuid
- *  either way, and the new conversation is recorded the moment a pass runs. */
+ *  A sweep is one process snapshot plus a few small JSON reads, so at this
+ *  cadence it is background noise; dropping the gate entirely (a full pass
+ *  every 4s forever) is what it was added to avoid. Detection latency for a
+ *  restart in an otherwise-idle workspace is therefore ≤ this, not ≤ 4s, which
+ *  is well inside "within a few seconds" for a record nobody is waiting on. */
+export const BOUND_SWEEP_MS = 24_000;
+
+/** Why a pass is running — the caller logs it and the pass trusts it. */
+export type PassReason =
+  /** Some live tab has no thread: the classic promotion case. */
+  | "unbound"
+  /** Every tab is bound; this is the periodic re-check for a claude that
+   *  restarted under a new uuid inside one of them. */
+  | "sweep";
+
+/** THE pass gate, with the sweep folded in. Returns the reason to run, or null
+ *  for a tick that costs ZERO IPC — no snapshot, no file reads.
+ *
+ *  `lastPassAt` is when a pass last ACTUALLY ran (either reason). A full pass
+ *  asks about every tab, bound ones included — one snapshot covers all of them
+ *  — so an unbound pass resets the sweep clock exactly like a sweep does. */
+export function promotionPassReason(
+  liveSessionIds: readonly string[],
+  threads: readonly Thread[],
+  now: number,
+  lastPassAt: number
+): PassReason | null {
+  if (liveSessionIds.length === 0) return null;
+  if (shouldRunPromotionPass(liveSessionIds, threads)) return "unbound";
+  return now - lastPassAt >= BOUND_SWEEP_MS ? "sweep" : null;
+}
+
+/** True when a pass is worth running because some live tab has no thread.
+ *
+ *  This is the "stop polling when nothing is unbound" rule, and it is now the
+ *  FIRST half of promotionPassReason rather than the whole gate — see
+ *  BOUND_SWEEP_MS for why an all-bound workspace still needs an occasional
+ *  look. (A pass that does run asks about every tab regardless, since it is one
+ *  snapshot either way, which is what makes the claude-restarted-in-a-bound-tab
+ *  case free whenever another tab is unbound.) */
 export function shouldRunPromotionPass(
   liveSessionIds: readonly string[],
   threads: readonly Thread[]
@@ -168,10 +203,20 @@ export function shouldRunPromotionPass(
 }
 
 /** Run one promotion pass. Returns the number of records created/updated
- *  (0 on a no-op pass), which the caller uses only for logging. */
-export async function runPromotionPass(fx: PromotionEffects): Promise<number> {
+ *  (0 on a no-op pass), which the caller uses only for logging.
+ *
+ *  `reason` is the caller's gate decision (promotionPassReason). Passing it is
+ *  what makes a SWEEP possible: the internal check below only knows about
+ *  unbound tabs, so an all-bound sweep would gate itself out. Omitting it keeps
+ *  the original behaviour — run iff some tab is unbound — which is what every
+ *  caller that does not own a sweep clock wants. */
+export async function runPromotionPass(
+  fx: PromotionEffects,
+  reason?: PassReason
+): Promise<number> {
   const sessionIds = fx.liveSessionIds();
-  if (!shouldRunPromotionPass(sessionIds, fx.threads())) return 0;
+  if (!reason && !shouldRunPromotionPass(sessionIds, fx.threads())) return 0;
+  if (sessionIds.length === 0) return 0;
 
   let discoveries: ClaudeDiscovery[];
   try {

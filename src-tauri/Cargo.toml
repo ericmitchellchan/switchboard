@@ -42,4 +42,8 @@ windows-sys = { version = "0.59", features = [
   # Process-tree enumeration for claude discovery (src/discovery.rs) — the
   # Toolhelp snapshot is the no-new-crate way to get every (pid, ppid) pair.
   "Win32_System_Diagnostics_ToolHelp",
+  # OpenProcess + GetProcessTimes: a Toolhelp snapshot carries no creation
+  # time, and discovery needs one to prove a shell pid is still OURS and not a
+  # recycled one (see discovery::process_start_time_ms).
+  "Win32_System_Threading",
 ] }

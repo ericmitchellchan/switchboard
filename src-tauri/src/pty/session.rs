@@ -25,7 +25,29 @@ pub struct PtySession {
     /// Windows pid reuse, where a long-dead process's recycled pid can make an
     /// unrelated process look like our descendant (its real parent held the pid
     /// before we did, so it necessarily predates our shell).
+    ///
+    /// That argument only holds WHILE WE STILL OWN THE PID. Once the shell
+    /// exits the OS may hand `shell_pid` to anything, and a process started
+    /// under the recycled pid passes the freshness test trivially — hence
+    /// `shell_exited` below, plus the creation-time cross-check in
+    /// discovery::process_start_time_ms.
     pub spawned_at_ms: u64,
+    /// The spawn generation this session was created under. The reader thread
+    /// carries the same stamp, so a DYING reader from a previous spawn can be
+    /// told apart from the live one (restart_session reuses the session id).
+    pub gen: u64,
+    /// The shell process is gone (reader hit EOF): the user typed `exit` or the
+    /// shell crashed, but the TAB is still open, so the session stays in the
+    /// map (its scrollback is still readable and restart reuses the entry).
+    ///
+    /// LOAD-BEARING for discovery: a dead shell must never be a process-walk
+    /// root. `killer` keeps no OS handle on the child, so the pid is reusable
+    /// the instant the shell exits, and walking a recycled pid can bind a
+    /// STRANGER's claude conversation to this tab — which revive would then
+    /// `--resume`. Sessions only ever leave the map on close/restart, so
+    /// without this flag there was nothing to distinguish a live shell from a
+    /// dead one.
+    pub shell_exited: bool,
 }
 
 /// Unix-epoch milliseconds, saturating at 0 before 1970 (unreachable in
@@ -45,6 +67,7 @@ impl PtySession {
         cols: u16,
         rows: u16,
         shell: Option<String>,
+        gen: u64,
     ) -> Result<(Self, Box<dyn Read + Send>), String> {
         // Set parent process console to UTF-8 before creating ConPTY
         #[cfg(windows)]
@@ -146,6 +169,8 @@ impl PtySession {
             working_dir,
             shell_pid,
             spawned_at_ms,
+            gen,
+            shell_exited: false,
         };
 
         Ok((session, reader))
