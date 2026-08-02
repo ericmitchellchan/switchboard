@@ -11,6 +11,12 @@ jobs:
       fail-fast: false
       matrix:
         platform:
+          # arm64 FIRST and non-negotiable: the updater matches on the running
+          # app's target triple, and the primary install is Windows arm64. An
+          # x64-only release is invisible to it -- and invisible silently, as
+          # "no update available" rather than an error. Free arm64 runners are
+          # a public-repo benefit.
+          - windows-11-arm
           - windows-latest
           - macos-14
     runs-on: ${{ matrix.platform }}

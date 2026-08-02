@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicedoc/tauri/refs/tags/tauri-v2.1.1/crates/tauri-schema-generator/schemas/config.schema.json",
   "productName": "Switchboard",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "identifier": "com.switchboard.app",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -44,7 +44,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVDMkFBRDg3MUZBNTdBQjAKUldTd2VxVWZoNjBxN0ZySEF0cnVpclR3YlRQQkZWNmtZRnluV2FrUEdzbTBFWW5zNU9IdUNHdVUK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDA5M0E3NkVDQjRGOEUyN0EKUldSNjR2aTA3SFk2Q1g1bHhJNEV1ekJBVEhBK0xkMlczTXBnQmd0ZXNsKzZwZTd2NGYzQlhMZ1UK",
       "endpoints": [
         "https://github.com/ericmitchellchan/switchboard/releases/latest/download/latest.json"
       ]
