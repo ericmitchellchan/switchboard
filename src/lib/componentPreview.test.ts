@@ -66,11 +66,27 @@ describe("buildPreviewDocument", () => {
     const doc = buildPreviewDocument(TSX, "Card.tsx");
     expect(doc.startsWith("<!doctype html>")).toBe(true);
     expect(doc).toContain("sb-preview-root");
-    // React's UMD builds are inlined — the frame is an opaque origin with no
-    // network, so nothing can be fetched at runtime.
+    // React's UMD builds are INLINED. Not because the frame has no network —
+    // an opaque origin is fully networked — but because nothing may be fetched
+    // at runtime, which the frame CSP now actually enforces (see below).
     expect(doc).toContain("react.production.min.js");
     expect(doc).toContain("react-dom.production.min.js");
     expect(doc).toContain("React.createElement");
+  });
+
+  it("carries the frame CSP first in the head, before styles or scripts", () => {
+    // The posture correction: `allow-scripts` alone blocks no network at all,
+    // so the preview shell plants the same policy the wireframe surface does.
+    const doc = buildPreviewDocument(TSX, "Card.tsx");
+    const csp = doc.indexOf("Content-Security-Policy");
+    expect(csp).toBeGreaterThan(doc.indexOf("<head>"));
+    expect(csp).toBeLessThan(doc.indexOf("<style>"));
+    expect(csp).toBeLessThan(doc.indexOf("<script>"));
+    expect(doc).toContain("connect-src 'none'");
+  });
+
+  it("puts the CSP on the ERROR document too — a failure is still a frame", () => {
+    expect(previewErrorDocument("nope", "detail")).toContain("connect-src 'none'");
   });
 
   it("emits three script blocks, the last of which PARSES as JS", () => {

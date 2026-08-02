@@ -324,6 +324,10 @@ function HistoryRow({
       onMouseLeave={() => setHover(false)}
       onClick={editing ? undefined : activateRow}
       onDoubleClick={(e) => {
+        // ARCHIVED rows are not renameable, matching threadMenuItems, which
+        // deliberately offers an archived row only Unarchive + Delete. A
+        // shortcut that reaches a verb the menu withholds is the menu lying.
+        if (archived) return;
         e.preventDefault();
         setEditing(true);
       }}

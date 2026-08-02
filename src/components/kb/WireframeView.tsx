@@ -11,12 +11,19 @@
 // a special case anywhere below. Repo pins are MIRRORED into the KB
 // (pins.pinTargetFor); the shared pinsStore is still the only writer.
 //
-// SANDBOX POSTURE — the two load-bearing lines (do not weaken either):
+// SANDBOX POSTURE — the three load-bearing lines (do not weaken any):
 //   1. <iframe sandbox="allow-scripts"> — allow-scripts WITHOUT
 //      allow-same-origin. The mockup runs as an opaque origin: it cannot
 //      touch app storage/cookies or reach into the parent DOM. Never add
-//      more sandbox tokens.
-//   2. Inbound messages pass `e.source === iframeRef.current?.contentWindow`
+//      more sandbox tokens. NOTE what this does NOT do: an opaque origin is
+//      still fully NETWORKED. That is what line 2 is for.
+//   2. injectCsp (lib/sandbox.ts) plants a Content-Security-Policy into the
+//      document: `connect-src 'none'` kills fetch/XHR/WebSocket/sendBeacon,
+//      `script-src 'unsafe-inline'` stops remote code loading, and remote
+//      fonts/styles/images stay allowed because Eric's real mockups use them.
+//      Read that module for the honest limits — this reduces the surface, it
+//      does not eliminate it.
+//   3. Inbound messages pass `e.source === iframeRef.current?.contentWindow`
 //      before anything else. The `source: "sb-wireframe"` payload tag is
 //      forgeable and the workstation keeps multiple KB tabs MOUNTED
 //      (keep-alive) — without the contentWindow identity check one mockup's
@@ -32,11 +39,22 @@
 //
 // The toolbar's ⟳ is that same path, on demand: it calls the HOST's `onReload`
 // (never a read of its own — the loading policy stays where it lives), the
-// host's next read arrives as new `content`, and the memo does the rest. Zoom
-// and pins are untouched by construction: zoom is component state keyed on the
-// artifact, pins live in the shared pinsStore, and neither is derived from
-// `content`. Shown for repo files AND KB docs — a repo read is one-shot and a
-// KB poll pauses while its host is hidden, so both genuinely need it.
+// host's next read arrives as new `content`, and the memo does the rest. Shown
+// for repo files AND KB docs — a repo read is one-shot and a KB poll pauses
+// while its host is hidden, so both genuinely need it.
+//
+// What survives a reload, precisely — the first pass overstated this and the
+// repo path did not hold:
+//   · zoom is COMPONENT STATE, so it survives because the reload does not
+//     REMOUNT this component. That is a property of the host's fold (kb's
+//     mergeDocRead / explorer's mergeFileRead keep the previous content on
+//     screen instead of blanking to null), not of this file. Across a genuine
+//     remount or a doc switch it is the sessionStorage write-through that
+//     carries zoom, which is a different mechanism with a different lifetime.
+//   · pins survive because they live in the shared pinsStore, keyed by sidecar
+//     path — that one IS by construction.
+//   · pin-mode and the open note editor are component state like zoom: same
+//     rule, same dependency on not being unmounted.
 //
 // Zoom: transform:scale(z) + width/height 100/z% virtual viewport — the box
 // stays container-sized, scrolling stays inside the iframe, content reflows
@@ -71,6 +89,7 @@ import {
   WIREFRAME_MSG_SOURCE,
 } from "../../lib/pins";
 import type { PinsFile } from "../../lib/pins";
+import { injectCsp } from "../../lib/sandbox";
 import type { FileArtifact } from "../../types";
 import { mutatePins as mutateSharedPins, usePinsFile } from "../../lib/pinsStore";
 import { artifactIdentity, sendToThread, useSendToThreadAvailable } from "../../lib/panelStore";
@@ -294,8 +313,14 @@ export function WireframeView({
   const frameBoxRef = useRef<HTMLDivElement>(null);
 
   // srcDoc depends on CONTENT ONLY — pin/zoom/mode churn never reloads the
-  // iframe (rule 2 of the sandbox contract in the module header).
-  const srcDoc = useMemo(() => content + INSTRUMENT, [content]);
+  // iframe (the srcDoc-memoization rule in the module header).
+  //
+  // injectCsp plants the frame policy as early in the document as a policy can
+  // legally take effect (lib/sandbox.ts owns the policy and the placement).
+  // `allow-scripts` alone gives an opaque origin, NOT a network block — a
+  // mockup could otherwise `fetch` anywhere, which matters now that repo HTML
+  // executes instead of rendering as source.
+  const srcDoc = useMemo(() => injectCsp(content) + INSTRUMENT, [content]);
 
   const path = artifact.path;
   const identity = artifactIdentity(artifact);

@@ -122,6 +122,17 @@ export function Composer({ sessionId }: { sessionId: string }) {
     // Ctrl+C'ing claude would falsely mark the thread started). A composer send
     // is unambiguous user intent, so it sets the flag directly. The detector is
     // untouched — typing into the terminal still flips the flag through it.
+    //
+    // ONE HONEST GAP, and it is a HINT, not the T5 class: Ctrl+Shift+M can
+    // force a composer onto a plain shell whose session is still BOUND to a
+    // dead thread, and a send there marks that thread started even though the
+    // text went to a shell prompt. Nothing downstream believes it — the revive
+    // decision reads DISK GROUND TRUTH (claude_session_exists), which is
+    // exactly why T5 demoted this field to a hint — but the row's chip can read
+    // "resume" until the next launch re-syncs it. Gating on liveness would mean
+    // re-deriving "is claude actually running" here, which is the detector this
+    // path deliberately does not re-open. Left as-is, documented, and it
+    // self-heals at the next launch.
     const thread = findThreadBySessionId(sessionId);
     if (thread && !thread.chatStarted) {
       log.info(`Composer send — chatStarted id=${thread.id}`);

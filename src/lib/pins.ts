@@ -125,6 +125,14 @@ export function pinTargetFor(artifact: FileArtifact): PinTarget {
   if (artifact.kind === "kb-doc") {
     return { sidecarPath: sidecarPathFor(artifact.path), docKey: docFileName(artifact.path) };
   }
+  // COLLISION-FREE, and this is the assumption it rests on: a registry
+  // project KEY is FLAT — one segment, no `/`. (explorer.rs reads keys as
+  // registry.json object names and they title a project, never a route.) A key
+  // containing `/` would split into several mirror segments and could land on
+  // the same sidecar as a different project plus a leading directory:
+  // `a/b` + `x.html` and `a` + `b/x.html` join identically. Nothing can
+  // produce such a key today; if that ever changes this join needs an escape,
+  // not a comment.
   const segments = [...mirrorSegments(artifact.project), ...mirrorSegments(artifact.path)];
   const mirrored = [REPO_PINS_ROOT, ...segments].join("/");
   return {

@@ -83,6 +83,14 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
   }, []);
 
   // Live-thread annotation (unchanged logic from the old rail).
+  //
+  // ARCHIVING IS NOT FILTERED HERE, deliberately. `launched` means "a claude
+  // process is running behind this record in this app run", and archiving does
+  // not stop a process — it hides a ROW. Archiving a live thread (allowed, see
+  // selectMenuThreads) therefore leaves this project's dot lit, which is
+  // correct: the dot reports the shell, not the thread list. What archiving
+  // guarantees is only that the thread is not on the rail; it cannot
+  // retroactively make a running conversation stop running.
   const { threads, launched } = useThreadsView();
   const liveDirs = useMemo(
     () => threads.filter((t) => launched.has(t.id)).map((t) => t.workingDir),

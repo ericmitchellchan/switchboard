@@ -22,12 +22,16 @@
 // LEFT when no renderer claims the extension, which for a repo (unlike the
 // KB) is still the right answer. Oversize (>512KB) and unreadable files
 // surface the backend's error string dimly. Reads are one-shot per
-// (project, path) — no polling, matching the old behavior.
+// (project, path) — no polling, matching the old behavior — plus an explicit
+// ⟳ on the wireframe toolbar, which re-runs the read WITHOUT unmounting the
+// renderer (lib/explorer.useRepoFile / mergeFileRead own that rule for this
+// screen and the artifact panel alike).
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import type { FileArtifact } from "../types";
-import { explorerRead } from "../lib/explorer";
+import { useRepoFile } from "../lib/explorer";
+import type { OpenFile } from "../lib/explorer";
 import { navigate } from "../lib/route";
 import { ArtifactBody } from "./kb/ArtifactBody";
 
@@ -65,15 +69,6 @@ const CRUMB_BTN_STYLE: CSSProperties = {
   textOverflow: "ellipsis",
 };
 
-/** A read attempt for one repo file: `content` and `error` are both null while
- *  the read is in flight. Exported for the artifact panel, which hosts the
- *  same FileViewer over its own read. */
-export type OpenFile = {
-  path: string;
-  content: string | null;
-  error: string | null;
-};
-
 export function ExplorerView({
   project,
   path,
@@ -86,32 +81,10 @@ export function ExplorerView({
   /** Side menu hidden — the empty state hints how to open the navigator. */
   menuHidden: boolean;
 }) {
-  const [openFile, setOpenFile] = useState<OpenFile | null>(null);
-  // Repo reads are ONE-SHOT — there is no poll to wait for, so a repo file
-  // opened before an edit would otherwise show the old text until you closed
-  // and reopened it. `reload` re-runs this same effect; nothing else about the
-  // read changes.
-  const [reloadNonce, setReloadNonce] = useState(0);
-  const reload = useCallback(() => setReloadNonce((n) => n + 1), []);
-
-  useEffect(() => {
-    if (!project || !path) {
-      setOpenFile(null);
-      return;
-    }
-    let cancelled = false;
-    setOpenFile({ path, content: null, error: null });
-    explorerRead(project, path)
-      .then((content) => {
-        if (!cancelled) setOpenFile({ path, content, error: null });
-      })
-      .catch((e) => {
-        if (!cancelled) setOpenFile({ path, content: null, error: String(e) });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [project, path, reloadNonce]);
+  // The read (and its ⟳) lives in lib/explorer.useRepoFile — the SAME hook the
+  // artifact panel uses, so the two hosts cannot drift and a reload never
+  // unmounts the renderer.
+  const { file: openFile, reload } = useRepoFile(project, path);
 
   const segments = path ? path.split("/") : [];
   const fileName = segments[segments.length - 1];
@@ -197,15 +170,20 @@ export function FileViewer({
 }: {
   project: string;
   file: OpenFile;
-  /** Re-read this file from disk. The HOST owns the read (this screen and the
-   *  artifact panel each have their own), so each passes its own. */
+  /** Re-read this file from disk (the wireframe toolbar's ⟳). Supplied by the
+   *  HOST — both hosts get it from the same `useRepoFile`. */
   onReload?: () => void;
 }) {
   const artifact = useMemo<FileArtifact>(
     () => ({ kind: "repo-file", project, path: file.path }),
     [project, file.path]
   );
-  if (file.error !== null) {
+  // ERROR ONLY WHEN THERE IS NOTHING TO SHOW — DocView's rule, and now
+  // reachable here: a FAILED RE-READ keeps the last good content (mergeFileRead)
+  // and reporting the error over a perfectly good document would blank the
+  // renderer for a transient failure, which is exactly what the ⟳ must not do.
+  // A first read that fails has no content and still shows the note.
+  if (file.content === null && file.error !== null) {
     // Includes the backend's >512KB refusal — shown dimly, per spec.
     return <CenteredNote>cannot read {file.path}: {file.error}</CenteredNote>;
   }

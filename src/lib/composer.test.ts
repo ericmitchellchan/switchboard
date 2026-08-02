@@ -74,6 +74,32 @@ describe("composeWrite", () => {
     expect(composeWrite("a\rb")).toBe(composeWrite("a\nb"));
   });
 
+  it("treats U+2028 / U+2029 / U+0085 as newlines too", () => {
+    // Dictation, PDFs and Word emit these. None is a C0 control, so none was
+    // stripped OR normalized: a paragraph broken only by U+2028 contained no
+    // \n, took the single-line branch, and reached the PTY UNBRACKETED — the
+    // "4 lines become 4 submissions" shape the bracketing exists to prevent.
+    expect(composeWrite("a\u2028b")).toBe(composeWrite("a\nb"));
+    expect(composeWrite("a\u2029b")).toBe(composeWrite("a\nb"));
+    expect(composeWrite("a\u0085b")).toBe(composeWrite("a\nb"));
+  });
+
+  it("a paragraph broken only by U+2028 goes as ONE bracketed paste", () => {
+    const out = composeWrite("first line\u2028second line\u2028third line");
+    expect(out.startsWith(PASTE_START)).toBe(true);
+    expect(out).toBe(
+      `${PASTE_START}first line${CR}second line${CR}third line${PASTE_END}${CR}`
+    );
+    // One submit, not three.
+    expect(out.split(CR).length - 1).toBe(3);
+    expect(out.endsWith(`${PASTE_END}${CR}`)).toBe(true);
+  });
+
+  it("still strips them from a single-line send rather than passing them through", () => {
+    // A trailing separator is trailing blank space, exactly like a stray \n.
+    expect(composeWrite("just one line\u2029")).toBe(`just one line${CR}`);
+  });
+
   it("is a no-op for empty and whitespace-only text (never a bare Enter)", () => {
     expect(composeWrite("")).toBe("");
     expect(composeWrite("   ")).toBe("");

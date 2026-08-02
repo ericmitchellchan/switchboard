@@ -32,13 +32,19 @@
 //   · the harness resolves `require("react")`/`require("react-dom")` to the
 //     inlined UMD globals and every other specifier to an inert stub, so a
 //     mockup importing a design-system package renders instead of exploding.
-//     There is no network inside the frame to fetch a real one from.
+//     It cannot fetch a real one: `connect-src 'none'` in the frame CSP below
+//     blocks every scripted request. (An earlier version of this comment said
+//     "there is no network inside the frame" — that was FALSE. `allow-scripts`
+//     without `allow-same-origin` is an opaque ORIGIN, not a network block;
+//     the CSP is what makes the sentence true, and only for scripted requests
+//     — see lib/sandbox.ts for what remains reachable and why.)
 //   · every failure mode — transpile diagnostics, a throwing module body, a
 //     component that throws during render, a missing export — ends as a DIM
 //     MESSAGE inside the frame. Never a blank panel, never a thrown error in
 //     the app.
 
 import ts from "typescript";
+import { cspMeta } from "./sandbox";
 // Real paths, not package specifiers — see the module header.
 import reactUmd from "../../node_modules/react/umd/react.production.min.js?raw";
 import reactDomUmd from "../../node_modules/react-dom/umd/react-dom.production.min.js?raw";
@@ -124,9 +130,13 @@ const PREVIEW_CSS = `
 `;
 
 function documentShell(bodyHtml: string, scripts: string): string {
+  // The CSP goes FIRST in the head — before the styles, and long before the
+  // harness scripts it governs. Same policy the wireframe surface plants
+  // (lib/sandbox.ts); this shell is built here rather than passed through
+  // injectCsp because we own every byte of it.
   return `<!doctype html>
 <html>
-<head><meta charset="utf-8"><style>${PREVIEW_CSS}</style></head>
+<head>${cspMeta()}<meta charset="utf-8"><style>${PREVIEW_CSS}</style></head>
 <body>${bodyHtml}${scripts}</body>
 </html>`;
 }

@@ -50,7 +50,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import type { CSSProperties, ReactNode } from "react";
 import type { Artifact, PanelState } from "../types";
 import { navigate } from "../lib/route";
-import { explorerRead } from "../lib/explorer";
+import { useRepoFile } from "../lib/explorer";
 import {
   activateArtifact,
   artifactIdentity,
@@ -78,7 +78,7 @@ import { buildSendReference, refOptions } from "../lib/agentContext";
 import { ArtifactPicker } from "./ArtifactPicker";
 import { Icon } from "./icons";
 import { DocView } from "./kb/DocView";
-import { FileViewer, type OpenFile } from "./ExplorerView";
+import { FileViewer } from "./ExplorerView";
 
 /** Tone → paint. Exported because the KB SCREEN's breadcrumb renders the same
  *  crumbs from the same `describeArtifact` — panel and screen must not drift
@@ -661,28 +661,12 @@ function PickerOverlay({ sessionId }: { sessionId: string }) {
  *  only buy a re-read on every screen switch back. Matches ExplorerView's
  *  read exactly. */
 function RepoFileBody({ project, path }: { project: string; path: string }) {
-  const [file, setFile] = useState<OpenFile | null>(null);
-  // One-shot reads need an explicit way to run again — the wireframe toolbar's
-  // ⟳ (see WireframeView). Re-running THIS effect keeps the panel's read and
-  // the Explorer screen's read identical, which is the whole point of them
-  // being the same two lines.
-  const [reloadNonce, setReloadNonce] = useState(0);
-  const reload = useCallback(() => setReloadNonce((n) => n + 1), []);
-
-  useEffect(() => {
-    let cancelled = false;
-    setFile({ path, content: null, error: null });
-    explorerRead(project, path)
-      .then((content) => {
-        if (!cancelled) setFile({ path, content, error: null });
-      })
-      .catch((e) => {
-        if (!cancelled) setFile({ path, content: null, error: String(e) });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [project, path, reloadNonce]);
+  // ONE read implementation for both hosts (lib/explorer.useRepoFile) — the
+  // panel is chrome + lifecycle, and that now includes not owning a second
+  // copy of the Explorer screen's effect. It also carries the ⟳'s rule: a
+  // reload folds into the existing state instead of blanking it, so the
+  // renderer is never unmounted mid-edit.
+  const { file, reload } = useRepoFile(project, path);
 
   if (!file) return null;
   return <FileViewer project={project} file={file} onReload={reload} />;

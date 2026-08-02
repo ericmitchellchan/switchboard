@@ -13,6 +13,8 @@ export {
   explorerRead,
 } from "./ipc";
 export type { ExplorerProject, ExplorerEntry } from "./ipc";
+import { useCallback, useEffect, useState } from "react";
+import { explorerRead } from "./ipc";
 import type { ExplorerProject } from "./ipc";
 import type { RepoConfig } from "../types";
 
@@ -155,6 +157,113 @@ export function mergeSessionRepos(
   }
 
   return [...live, ...extras, ...archived];
+}
+
+// ── Repo file reads: the fold, and the hook both hosts share ─────────────────
+// The Explorer SCREEN and the artifact panel each own a read of the same shape.
+// They used to be two copies of the same effect, and the reload button exposed
+// what that costs: both blanked `content` to null before every read, so a ⟳ on
+// a repo file UNMOUNTED the renderer — in-mockup scroll lost, pin-mode reset
+// (an armed click-to-place dropped), an open note editor closed, a component
+// preview back to "compiling…" and recompiled from zero. The KB path never had
+// that bug because `mergeDocRead` folds a result into the previous state and
+// keeps the old content until the new one resolves.
+//
+// So: the same discipline, in one pure function plus one hook.
+//   · blank ONLY when the DOCUMENT changes (project+path), never for a re-read;
+//   · on a re-read, swap content only when it actually differs — identity is
+//     preserved otherwise, so React bails out of the re-render exactly as it
+//     does for a KB poll tick;
+//   · a failed re-read keeps the last good content and surfaces the error
+//     alongside (a read racing an editor's atomic save must not blank the
+//     view) — the same rule mergeDocRead applies.
+
+/** One repo file read attempt. `content` and `error` are both null only while
+ *  the FIRST read of a document is in flight. `key` is the document identity
+ *  (project + path): `path` alone is not enough, since two projects can hold
+ *  the same relative path. */
+export type OpenFile = {
+  key: string;
+  path: string;
+  content: string | null;
+  error: string | null;
+};
+
+export type FileReadResult = { ok: true; content: string } | { ok: false; error: string };
+
+/** Document identity for a repo file. */
+export function fileKey(project: string, path: string): string {
+  return `${project} ${path}`;
+}
+
+/** State to show while a read for `key` is in flight. A re-read of the SAME
+ *  document returns the previous state untouched (identity-equal → no
+ *  re-render, no unmount); a different document blanks, because showing the
+ *  previous file's body under the new file's name is a lie. */
+export function beginFileRead(
+  prev: OpenFile | null,
+  key: string,
+  path: string
+): OpenFile | null {
+  if (prev && prev.key === key) return prev;
+  return { key, path, content: null, error: null };
+}
+
+/** Fold one read result into the previous state — the repo-file twin of
+ *  kb.mergeDocRead, including its return-the-previous-object rule. */
+export function mergeFileRead(
+  prev: OpenFile | null,
+  key: string,
+  path: string,
+  result: FileReadResult
+): OpenFile | null {
+  if (result.ok) {
+    if (prev && prev.key === key && prev.content === result.content && prev.error === null) {
+      return prev;
+    }
+    return { key, path, content: result.content, error: null };
+  }
+  // Keep the last good content of the SAME document; a first read has none.
+  const content = prev && prev.key === key ? prev.content : null;
+  if (prev && prev.key === key && prev.error === result.error && prev.content === content) {
+    return prev;
+  }
+  return { key, path, content, error: result.error };
+}
+
+/** THE repo-file read, for both hosts. One-shot per document (repo reads have
+ *  never polled) plus an explicit `reload` for the wireframe toolbar's ⟳ —
+ *  which re-runs this read WITHOUT unmounting anything, per the fold above. */
+export function useRepoFile(
+  project: string | undefined,
+  path: string | undefined
+): { file: OpenFile | null; reload: () => void } {
+  const [file, setFile] = useState<OpenFile | null>(null);
+  const [nonce, setNonce] = useState(0);
+  const reload = useCallback(() => setNonce((n) => n + 1), []);
+
+  useEffect(() => {
+    if (!project || !path) {
+      setFile(null);
+      return;
+    }
+    const key = fileKey(project, path);
+    let cancelled = false;
+    setFile((prev) => beginFileRead(prev, key, path));
+    explorerRead(project, path)
+      .then((content) => {
+        if (!cancelled) setFile((prev) => mergeFileRead(prev, key, path, { ok: true, content }));
+      })
+      .catch((e) => {
+        if (!cancelled)
+          setFile((prev) => mergeFileRead(prev, key, path, { ok: false, error: String(e) }));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project, path, nonce]);
+
+  return { file, reload };
 }
 
 // ── Actions bridge: "open terminal here" (Increment B, acceptance 7) ─────────

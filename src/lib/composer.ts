@@ -41,9 +41,25 @@ export const PASTE_END = "\x1b[201~";
  *     the wrapping exists to prevent. */
 const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
 
-/** Normalize line endings to \n and drop control characters. Idempotent. */
+/** Every character that means "line break" in text that reaches this box,
+ *  not just the three ASCII ones. Dictation, PDFs, Word and a fair amount of
+ *  the web emit U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR or U+0085
+ *  NEL, and none of them is in CONTROL_CHARS (U+0085 is C1, the other two are
+ *  punctuation) — so they used to survive sanitization intact.
+ *
+ *  That mattered for the WIRE FORMAT, not for safety: a paragraph whose only
+ *  breaks were U+2028 contained no \n, took composeWrite's SINGLE-LINE branch,
+ *  and went to the PTY UNBRACKETED — the exact "4 lines become 4 submissions"
+ *  shape the bracketing exists to prevent. (A wrong shape, never a breakout:
+ *  none of these can terminate a bracketed paste, only ESC can, and ESC is
+ *  stripped above.) Folding them into \n puts such text back on the multi-line
+ *  path where it belongs. */
+const LINE_TERMINATORS = /\r\n?|\u0085|\u2028|\u2029/g;
+
+/** Normalize every line terminator to \n and drop control characters.
+ *  Idempotent. */
 export function sanitizeComposerText(text: string): string {
-  return text.replace(/\r\n?/g, "\n").replace(CONTROL_CHARS, "");
+  return text.replace(LINE_TERMINATORS, "\n").replace(CONTROL_CHARS, "");
 }
 
 /** THE wire-format decision: what bytes a composer send puts on the PTY.
