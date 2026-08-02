@@ -87,6 +87,45 @@ export function startUpdater(): void {
   setInterval(() => void runCheck(), CHECK_INTERVAL_MS);
 }
 
+/** Auto-clear for the transient "up to date" ack. */
+let uptodateTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * User pressed "check for updates". Distinct from the background `runCheck`
+ * in the two ways that matter: it reports its RESULT (an explicit "up to date"
+ * ack) and it reports its FAILURE — a silent no-op reads as a broken button.
+ */
+export async function checkNow(): Promise<void> {
+  // Reducer rejects a check from a non-resting phase; don't fire the plugin
+  // call either, or a mid-download check would waste a request.
+  const phase = state.phase;
+  if (phase !== "idle" && phase !== "uptodate" && phase !== "error") return;
+  if (uptodateTimer) {
+    clearTimeout(uptodateTimer);
+    uptodateTimer = null;
+  }
+  dispatch({ type: "check-started" });
+  try {
+    const update = await check();
+    if (update) {
+      pendingUpdate = update;
+      log.info(`Update available: ${update.version}`);
+      dispatch({ type: "update-found", version: update.version });
+    } else {
+      log.info("Manual check: already up to date");
+      dispatch({ type: "no-update" });
+      // Transient — the status bar shouldn't wear a permanent "up to date".
+      uptodateTimer = setTimeout(() => {
+        uptodateTimer = null;
+        if (getUpdaterState().phase === "uptodate") dispatch({ type: "reset" });
+      }, 4000);
+    }
+  } catch (e) {
+    log.warn(`Manual update check failed: ${e}`);
+    dispatch({ type: "check-failed", message: String(e) });
+  }
+}
+
 /** User clicked the "available" chip: download with progress, install, relaunch. */
 export async function installUpdate(): Promise<void> {
   const update = pendingUpdate;
@@ -135,9 +174,10 @@ export async function retryUpdate(): Promise<void> {
     dispatch({ type: "update-found", version: pendingUpdate.version });
     await installUpdate();
   } else {
-    // No held update (shouldn't happen — error implies one existed); heal by
-    // clearing the chip and re-checking.
+    // No held update — the error came from a failed CHECK, not a failed
+    // install. Heal by re-checking through the user-initiated path so the
+    // retry reports its outcome instead of silently returning to nothing.
     dispatch({ type: "reset" });
-    await runCheck();
+    await checkNow();
   }
 }

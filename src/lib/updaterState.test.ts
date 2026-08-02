@@ -186,16 +186,68 @@ describe("progressPercent", () => {
   });
 });
 
+describe("manual check", () => {
+  it("check-started only from a resting phase", () => {
+    expect(run([{ type: "check-started" }]).phase).toBe("checking");
+    expect(
+      run([{ type: "check-started" }, { type: "no-update" }, { type: "check-started" }]).phase,
+    ).toBe("checking"); // from uptodate
+
+    // must NOT interrupt a live flow
+    const downloading = run([
+      { type: "update-found", version: "0.3.0" },
+      { type: "download-started", contentLength: 10 },
+    ]);
+    expect(reduceUpdater(downloading, { type: "check-started" })).toBe(downloading);
+
+    // must not hide an install affordance the user is reaching for
+    const available = run([{ type: "update-found", version: "0.3.0" }]);
+    expect(reduceUpdater(available, { type: "check-started" })).toBe(available);
+  });
+
+  it("a user-run check reports both outcomes", () => {
+    expect(run([{ type: "check-started" }, { type: "no-update" }]).phase).toBe("uptodate");
+
+    const found = run([{ type: "check-started" }, { type: "update-found", version: "0.4.0" }]);
+    expect(found.phase).toBe("available");
+    expect(found.version).toBe("0.4.0");
+  });
+
+  it("check-failed surfaces (unlike the silent background check)", () => {
+    const s = run([{ type: "check-started" }, { type: "check-failed", message: "offline" }]);
+    expect(s.phase).toBe("error");
+    expect(s.error).toBe("offline");
+    expect(isChipClickable(s)).toBe(true); // retry is reachable
+  });
+
+  it("a stray check-failed outside a check is ignored", () => {
+    expect(
+      reduceUpdater(initialUpdaterState, { type: "check-failed", message: "x" }),
+    ).toBe(initialUpdaterState);
+  });
+});
+
 describe("chipLabel / isChipClickable", () => {
   it("hidden in idle", () => {
     expect(chipLabel(initialUpdaterState)).toBeNull();
     expect(isChipClickable(initialUpdaterState)).toBe(false);
   });
 
-  it("available: restart-to-install wording, clickable", () => {
+  it("available: install wording, clickable", () => {
     const s = run([{ type: "update-found", version: "0.3.0" }]);
-    expect(chipLabel(s)).toBe("update v0.3.0 — restart to install");
+    // "install", not "restart to install" — the click does the whole thing.
+    expect(chipLabel(s)).toBe("update v0.3.0 — install");
     expect(isChipClickable(s)).toBe(true);
+  });
+
+  it("checking / up-to-date are shown but not clickable", () => {
+    const checking = run([{ type: "check-started" }]);
+    expect(chipLabel(checking)).toBe("checking for updates…");
+    expect(isChipClickable(checking)).toBe(false);
+
+    const uptodate = run([{ type: "check-started" }, { type: "no-update" }]);
+    expect(chipLabel(uptodate)).toBe("up to date");
+    expect(isChipClickable(uptodate)).toBe(false);
   });
 
   it("downloading: percent when total known, ellipsis when not", () => {

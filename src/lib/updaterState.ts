@@ -4,13 +4,22 @@
 //
 // Phases:
 //   idle        → no chip (no update known)
-//   available   → chip "update vX.Y.Z — restart to install" (click = install)
+//   checking    → chip "checking for updates…" (user pressed check; not clickable)
+//   uptodate    → chip "up to date" (transient ack that the check RAN)
+//   available   → chip "update vX.Y.Z — install" (click = download+install+relaunch)
 //   downloading → chip shows download progress (not clickable)
 //   installing  → chip "installing vX.Y.Z…" (not clickable)
 //   error       → dim chip "update failed — retry" (click = retry)
+//
+// `checking`/`uptodate` exist because the background check runs only at launch
+// and every 6h, and its failures are deliberately silent — so with no manual
+// check there was NO way to ask "is there an update?" short of restarting the
+// app, and no feedback that anything happened (owner 2026-08-02).
 
 export type UpdatePhase =
   | "idle"
+  | "checking"
+  | "uptodate"
   | "available"
   | "downloading"
   | "installing"
@@ -34,6 +43,8 @@ export const initialUpdaterState: UpdaterUiState = {
 };
 
 export type UpdaterEvent =
+  | { type: "check-started" }
+  | { type: "check-failed"; message: string }
   | { type: "update-found"; version: string }
   | { type: "no-update" }
   | { type: "download-started"; contentLength: number | null }
@@ -47,6 +58,23 @@ export function reduceUpdater(
   event: UpdaterEvent
 ): UpdaterUiState {
   switch (event.type) {
+    case "check-started":
+      // Only from a resting phase — a check must never interrupt a live
+      // download/install, and re-checking while an update is already surfaced
+      // would hide the install affordance the user is reaching for.
+      if (
+        state.phase !== "idle" &&
+        state.phase !== "uptodate" &&
+        state.phase !== "error"
+      ) {
+        return state;
+      }
+      return { ...initialUpdaterState, phase: "checking" };
+    case "check-failed":
+      // Unlike the SILENT background check, a check the user asked for must
+      // report its failure — otherwise the button looks broken.
+      if (state.phase !== "checking") return state;
+      return { ...initialUpdaterState, phase: "error", error: event.message };
     case "update-found":
       // A periodic re-check racing an active download/install must not reset
       // the in-flight flow.
@@ -59,6 +87,11 @@ export function reduceUpdater(
         version: event.version,
       };
     case "no-update":
+      // A check the user ran gets an explicit "up to date" ack — silence would
+      // be indistinguishable from the button doing nothing.
+      if (state.phase === "checking") {
+        return { ...initialUpdaterState, phase: "uptodate" };
+      }
       // Only a chip that isn't mid-flow can be cleared (e.g. a release was
       // pulled between checks).
       if (state.phase === "idle") return state;
@@ -107,8 +140,14 @@ export function chipLabel(state: UpdaterUiState): string | null {
   switch (state.phase) {
     case "idle":
       return null;
+    case "checking":
+      return "checking for updates…";
+    case "uptodate":
+      return "up to date";
     case "available":
-      return `update v${state.version} — restart to install`;
+      // "install", not "restart to install" — clicking downloads, installs AND
+      // relaunches; the old wording implied the user had to go restart it.
+      return `update v${state.version} — install`;
     case "downloading": {
       const pct = progressPercent(state);
       return pct === null
