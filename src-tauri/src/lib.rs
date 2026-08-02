@@ -1,6 +1,7 @@
 mod config;
 mod discovery;
 mod explorer;
+mod ipc_guard;
 mod kb;
 mod power;
 mod pty;
@@ -592,6 +593,16 @@ pub fn run() {
         )
         .manage(app_state)
         .setup(move |app| {
+            // THE IPC ORIGIN ALLOWLIST — installed BEFORE anything can invoke.
+            // Derived from the app's own config, never from a webview round
+            // trip (see ipc_guard.rs for why per-invoke `Webview::url()` is not
+            // an option). `is_dev` gates the dev server's origin so the same
+            // tauri.conf.json cannot hand IPC to port 1620 in a shipped build.
+            ipc_guard::install_app_origins(
+                app.config().build.dev_url.as_ref().map(|u| u.as_str()),
+                tauri::is_dev(),
+            );
+
             // Set window icon from bundled PNG
             if let Some(window) = app.get_webview_window("main") {
                 if let Ok(icon) = Image::from_bytes(include_bytes!("../icons/icon.png")) {
@@ -664,37 +675,79 @@ pub fn run() {
                 _ => {}
             }
         })
-        .invoke_handler(tauri::generate_handler![
-            create_session,
-            restart_session,
-            close_session,
-            write_to_session,
-            resize_session,
-            rename_session,
-            list_sessions,
-            get_config,
-            save_scrollback,
-            load_scrollback,
-            save_threads,
-            load_threads,
-            claude_session_exists,
-            discover_claude_sessions,
-            clear_scrollback,
-            clear_session_scrollback,
-            get_home_dir,
-            kb::kb_root,
-            kb::kb_list_docs,
-            kb::kb_read_doc,
-            kb::kb_write_doc,
-            explorer::explorer_projects,
-            explorer::explorer_list,
-            explorer::explorer_read,
-            write_file,
-            confirm_app_close,
-            open_pip_window,
-            close_pip_window,
-            is_pip_window_open,
-        ])
+        // EVERY app command goes through the origin gate first (ipc_guard.rs).
+        // `generate_handler!` expands to a plain closure, so wrapping it is the
+        // whole mechanism — there is no second entry point into these commands.
+        //
+        // What this covers and what it does NOT: `plugin:`/`core:` commands
+        // never reach here (tauri dispatches them to `extend_api` earlier) and
+        // do not need to — they are already ACL-gated to `ExecutionContext::
+        // Local` because capabilities/default.json declares no `remote` URLs.
+        // The app's own commands were the ones falling through, and this closes
+        // exactly that gap. Anything added to the list below inherits the gate
+        // by construction.
+        .invoke_handler(move |invoke| {
+            let origin = invoke
+                .message
+                .headers()
+                .get("origin")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            if !ipc_guard::is_app_origin(origin.as_deref()) {
+                log::error!(
+                    "IPC REJECTED: command {:?} from origin {:?} (webview {:?}) — not the app's own document",
+                    invoke.message.command(),
+                    origin.as_deref().unwrap_or("<none>"),
+                    invoke.message.webview_ref().label(),
+                );
+                invoke.resolver.reject(ipc_guard::REJECTION);
+                return true;
+            }
+            app_commands(invoke)
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// The app's command table. Split out of the builder so the origin gate above
+/// reads as one decision rather than being buried in a macro invocation.
+fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
+    // The `fn` ascription is load-bearing, not decoration: `generate_handler!`
+    // expands to a capture-less closure whose parameter type is normally pinned
+    // by `invoke_handler`'s trait bound. Wrapping it removes that bound, and
+    // without an expected type the closure body cannot be inferred (E0282).
+    // Capture-less means it coerces to a plain fn pointer, so this costs
+    // nothing.
+    let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+        create_session,
+        restart_session,
+        close_session,
+        write_to_session,
+        resize_session,
+        rename_session,
+        list_sessions,
+        get_config,
+        save_scrollback,
+        load_scrollback,
+        save_threads,
+        load_threads,
+        claude_session_exists,
+        discover_claude_sessions,
+        clear_scrollback,
+        clear_session_scrollback,
+        get_home_dir,
+        kb::kb_root,
+        kb::kb_list_docs,
+        kb::kb_read_doc,
+        kb::kb_write_doc,
+        explorer::explorer_projects,
+        explorer::explorer_list,
+        explorer::explorer_read,
+        write_file,
+        confirm_app_close,
+        open_pip_window,
+        close_pip_window,
+        is_pip_window_open,
+    ];
+    handler(invoke)
 }
