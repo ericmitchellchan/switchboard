@@ -50,7 +50,6 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import type { CSSProperties, ReactNode } from "react";
 import type { Artifact, PanelState } from "../types";
 import { navigate } from "../lib/route";
-import { useRepoFile } from "../lib/explorer";
 import {
   activateArtifact,
   artifactIdentity,
@@ -69,16 +68,18 @@ import {
   setPanelWidth,
   sendToThread,
   useSendToThreadAvailable,
+  clearPoppedOutArtifact,
+  popOutArtifact,
+  usePopOutAvailable,
+  usePoppedOutIdentity,
   DIVIDER_WIDTH,
   usePanelsView,
   type ArtifactCrumb,
-  type OpenableArtifact,
 } from "../lib/panelStore";
 import { buildSendReference, refOptions } from "../lib/agentContext";
 import { ArtifactPicker } from "./ArtifactPicker";
 import { Icon } from "./icons";
-import { DocView } from "./kb/DocView";
-import { FileViewer } from "./ExplorerView";
+import { ArtifactSurface } from "./kb/ArtifactSurface";
 
 /** Tone → paint. Exported because the KB SCREEN's breadcrumb renders the same
  *  crumbs from the same `describeArtifact` — panel and screen must not drift
@@ -434,6 +435,11 @@ export function ArtifactPanel({
   // T8 seam 2 gate — no terminal to type into means the `→ thread` action is
   // DISABLED, never a silent no-op. Hook order: before the early return below.
   const canSend = useSendToThreadAvailable();
+  // Pop-out (increment F, Decision 2). `canPopOut` is App's handler being
+  // registered; `poppedIdentity` is WHICH artifact the floating window is
+  // holding, so this tab can show a placeholder instead of a second live copy.
+  const canPopOut = usePopOutAvailable();
+  const poppedIdentity = usePoppedOutIdentity();
   // The picker request lives in panelStore, keyed by TAB (see
   // §"`+` picker request"): the tab bar's panel button opens it for a tab whose
   // panel is EMPTY, and an empty panel renders nothing that could hold a
@@ -495,6 +501,9 @@ export function ArtifactPanel({
   // terminal — no Enter. The user reviews/edits and sends it himself.
   const reference = buildSendReference(artifact, null, refOptions());
   const sendReference = () => sendToThread(reference);
+
+  // Is THIS tab's active artifact the one in the floating window?
+  const isPoppedOut = poppedIdentity === artifactIdentity(artifact);
 
   return (
     <>
@@ -581,6 +590,36 @@ export function ArtifactPanel({
           >
             → thread
           </button>
+          {/* POP OUT (increment F, Decision 2) — hand this artifact to the
+              floating PiP window. The same window the Ctrl+Shift+O terminal
+              mirror uses: one window lifecycle, and it finally has a
+              discoverable entry point (this button and the status bar's). */}
+          <button
+            type="button"
+            onClick={() => (isPoppedOut ? clearPoppedOutArtifact() : popOutArtifact(artifact))}
+            disabled={!canPopOut}
+            title={
+              !canPopOut
+                ? "Floating window unavailable"
+                : isPoppedOut
+                  ? `Bring ${title} back into the panel`
+                  : `Show ${title} in the floating window`
+            }
+            style={{
+              ...ACTION_STYLE,
+              color: isPoppedOut ? "var(--text-primary)" : "var(--text-dim)",
+              opacity: canPopOut ? 1 : 0.35,
+              cursor: canPopOut ? "pointer" : "default",
+            }}
+            onMouseEnter={(e) => {
+              if (canPopOut) e.currentTarget.style.color = "var(--text-primary)";
+            }}
+            onMouseLeave={(e) =>
+              (e.currentTarget.style.color = isPoppedOut ? "var(--text-primary)" : "var(--text-dim)")
+            }
+          >
+            {isPoppedOut ? "↙ back" : "↗ float"}
+          </button>
           {artifact.kind !== "localhost" && (
             <button
               type="button"
@@ -610,19 +649,29 @@ export function ArtifactPanel({
           </button>
         </header>
 
-        {/* Body by kind — the SAME components the screens render. */}
-        {artifact.kind === "kb-doc" ? (
-          <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
-            <DocView path={artifact.path} active={active} />
-          </div>
-        ) : artifact.kind === "repo-file" ? (
+        {/* Body by kind — the SAME components the screens render, through the
+            SAME surface the floating window renders (kb/ArtifactSurface), so a
+            popped-out artifact and a panelled one can never diverge.
+            While it is popped out the panel deliberately renders a PLACEHOLDER
+            rather than a second live copy: two frames on one dev server, two
+            health polls and two mounts of one pin sidecar is not co-presence,
+            it is duplication. */}
+        {isPoppedOut ? (
           <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-            <RepoFileBody project={artifact.project} path={artifact.path} />
+            <CenteredNote>
+              showing in the floating window
+              <br />
+              <button
+                type="button"
+                onClick={clearPoppedOutArtifact}
+                style={{ ...ACTION_STYLE, marginTop: 8, color: "var(--text-secondary)" }}
+              >
+                ↙ bring it back
+              </button>
+            </CenteredNote>
           </div>
         ) : (
-          <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-            <CenteredNote>live localhost artifacts land in phase B</CenteredNote>
-          </div>
+          <ArtifactSurface artifact={artifact} active={active} />
         )}
       </aside>
       {/* The `+` picker. A SIBLING of the panel (position:fixed, out of flow)
@@ -645,31 +694,10 @@ function PickerOverlay({ sessionId }: { sessionId: string }) {
     <ArtifactPicker
       // Dismissal is the store's (openInPanel clears the request), so a pick
       // that lands on the already-active tab still closes the modal.
-      onPick={(target: OpenableArtifact) => openInPanel(sessionId, target)}
+      onPick={(target: Artifact) => openInPanel(sessionId, target)}
       onClose={closeArtifactPicker}
     />
   );
-}
-
-/** Repo-file body: one read per (project, path) feeding the Explorer's own
- *  FileViewer — which since increment C routes by the SAME `docKind` switch a
- *  KB doc goes through, so an `.html` mockup in a repo renders here exactly as
- *  it does from the KB tree.
- *
- *  No `active` gate here, deliberately — explorer reads are ONE-SHOT (no poll
- *  to pause, unlike DocView's 2.5s doc poll), so gating on visibility would
- *  only buy a re-read on every screen switch back. Matches ExplorerView's
- *  read exactly. */
-function RepoFileBody({ project, path }: { project: string; path: string }) {
-  // ONE read implementation for both hosts (lib/explorer.useRepoFile) — the
-  // panel is chrome + lifecycle, and that now includes not owning a second
-  // copy of the Explorer screen's effect. It also carries the ⟳'s rule: a
-  // reload folds into the existing state instead of blanking it, so the
-  // renderer is never unmounted mid-edit.
-  const { file, reload } = useRepoFile(project, path);
-
-  if (!file) return null;
-  return <FileViewer project={project} file={file} onReload={reload} />;
 }
 
 function CenteredNote({ children }: { children: ReactNode }) {

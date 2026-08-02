@@ -26,6 +26,15 @@ import {
   artifactShortTitle,
   appendOrActivate,
   closeArtifactIn,
+  // increment F: pop-out to the floating window
+  setPoppedOutArtifact,
+  clearPoppedOutArtifact,
+  getPoppedOutArtifact,
+  poppedOutIdentity,
+  popOutArtifact,
+  popOutAvailable,
+  subscribeToPanelStore,
+  registerPanelActions,
   // store
   initPanelStore,
   openInPanel,
@@ -1767,5 +1776,100 @@ describe("panel tabs x shared pins store (one record per sidecar)", () => {
     expect(sidecarPathFor((artifactFor("s1") as { path: string }).path)).toBe(sidecar);
     expect(getPinsFile(sidecar)!.pins).toHaveLength(1);
     release();
+  });
+});
+
+
+// ── Pop-out to the floating window (increment F, Decision 2) ─────────────────
+// The store's whole job here is to record WHICH artifact is out of the panel,
+// so the panel can show a placeholder instead of a second live copy of it. The
+// WINDOW is App's; nothing below opens or closes one.
+
+describe("popped-out artifact", () => {
+  const DOC: Artifact = { kind: "kb-doc", path: "a/b.md" };
+  const LIVE: Artifact = { kind: "localhost", project: "lodestar", url: "http://localhost:5173/" };
+
+  beforeEach(() => {
+    __resetPanelStoreForTests();
+  });
+
+  it("starts with nothing out", () => {
+    expect(getPoppedOutArtifact()).toBeNull();
+    expect(poppedOutIdentity()).toBe("");
+  });
+
+  it("records and clears", () => {
+    setPoppedOutArtifact("s1", DOC);
+    expect(getPoppedOutArtifact()).toEqual(DOC);
+    expect(poppedOutIdentity()).toBe("kb-doc:a/b.md");
+    clearPoppedOutArtifact();
+    expect(getPoppedOutArtifact()).toBeNull();
+    expect(poppedOutIdentity()).toBe("");
+  });
+
+  it("holds ONE artifact — there is one floating window", () => {
+    setPoppedOutArtifact("s1", DOC);
+    setPoppedOutArtifact("s2", LIVE);
+    expect(getPoppedOutArtifact()).toEqual(LIVE);
+  });
+
+  it("runs the lean gate on the way in", () => {
+    setPoppedOutArtifact("s1", { kind: "kb-doc", path: "a.md", junk: 1 } as unknown as Artifact);
+    expect(getPoppedOutArtifact()).toEqual({ kind: "kb-doc", path: "a.md" });
+    setPoppedOutArtifact("s1", { kind: "nope" } as unknown as Artifact);
+    // Unusable input leaves the previous record alone rather than blanking it.
+    expect(getPoppedOutArtifact()).toEqual({ kind: "kb-doc", path: "a.md" });
+  });
+
+  it("refuses an empty session id", () => {
+    setPoppedOutArtifact("", DOC);
+    expect(getPoppedOutArtifact()).toBeNull();
+  });
+
+  it("notifies subscribers on both transitions", () => {
+    const seen: string[] = [];
+    const unsubscribe = subscribeToPanelStore(() => seen.push(poppedOutIdentity()));
+    setPoppedOutArtifact("s1", DOC);
+    clearPoppedOutArtifact();
+    clearPoppedOutArtifact(); // idempotent: no third notification
+    unsubscribe();
+    expect(seen).toEqual(["kb-doc:a/b.md", ""]);
+  });
+
+  it("closing the TAB drops the record — there is no panel to return to", () => {
+    openInPanel("s1", DOC);
+    setPoppedOutArtifact("s1", DOC);
+    removeSessionPanel("s1");
+    expect(getPoppedOutArtifact()).toBeNull();
+  });
+
+  it("closing a DIFFERENT tab leaves it alone", () => {
+    openInPanel("s2", DOC);
+    setPoppedOutArtifact("s1", DOC);
+    removeSessionPanel("s2");
+    expect(getPoppedOutArtifact()).toEqual(DOC);
+  });
+
+  it("notifies even when the closed tab had no panel of its own", () => {
+    setPoppedOutArtifact("s1", DOC);
+    let notified = 0;
+    const unsubscribe = subscribeToPanelStore(() => (notified += 1));
+    removeSessionPanel("s1");
+    unsubscribe();
+    expect(getPoppedOutArtifact()).toBeNull();
+    expect(notified).toBe(1);
+  });
+
+  it("the action is DISABLED rather than silently dead with no handler", () => {
+    expect(popOutAvailable()).toBe(false);
+    popOutArtifact(DOC); // must not throw
+    const calls: Artifact[] = [];
+    registerPanelActions({
+      sendToThread: () => {},
+      popOutArtifact: (a) => calls.push(a),
+    });
+    expect(popOutAvailable()).toBe(true);
+    popOutArtifact(LIVE);
+    expect(calls).toEqual([LIVE]);
   });
 });

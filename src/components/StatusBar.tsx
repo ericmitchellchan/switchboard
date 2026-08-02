@@ -16,11 +16,17 @@ interface StatusBarProps {
    *  always does something, because forcing a composer onto a plain shell is a
    *  supported state, not a no-op. */
   onToggleComposer?: () => void;
+  /** Ctrl+Shift+O — the floating window (increment F). It has existed since v1
+   *  and was reachable ONLY by that undocumented chord; a standing gripe, and
+   *  now that the window can also host a popped-out ARTIFACT it needed a real
+   *  entry point. Passed whenever a session is focused, which is exactly when
+   *  the chord does something. */
+  onTogglePip?: () => void;
 }
 
 const DISPLAY_ORDER: AgentStatus[] = ["running", "waiting", "done", "error", "idle", "exited"];
 
-export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMenu, onTogglePanel, onToggleComposer }: StatusBarProps) {
+export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMenu, onTogglePanel, onToggleComposer, onTogglePip }: StatusBarProps) {
   const counts = new Map<AgentStatus, number>();
   for (const s of sessions) {
     counts.set(s.status, (counts.get(s.status) || 0) + 1);
@@ -91,6 +97,26 @@ export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMe
               }}
             >
               <span>Ctrl+Shift+P panel</span>
+            </button>
+            <span style={{ color: "#3F3F46" }}>{"│"}</span>
+          </>
+        )}
+        {onTogglePip && (
+          <>
+            <button
+              onClick={onTogglePip}
+              title="Open or close the floating always-on-top window — it mirrors the focused terminal, or hosts an artifact popped out of the panel"
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                fontFamily: "var(--font-mono)",
+                fontSize: 10,
+                color: "#52525B",
+                padding: 0,
+              }}
+            >
+              <span>Ctrl+Shift+O float</span>
             </button>
             <span style={{ color: "#3F3F46" }}>{"│"}</span>
           </>

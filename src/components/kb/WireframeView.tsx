@@ -94,6 +94,7 @@ import type { FileArtifact } from "../../types";
 import { mutatePins as mutateSharedPins, usePinsFile } from "../../lib/pinsStore";
 import { artifactIdentity, sendToThread, useSendToThreadAvailable } from "../../lib/panelStore";
 import { buildSendReference, refOptions } from "../../lib/agentContext";
+import { PinsRail } from "./PinsRail";
 
 // ── Instrument script (plain JS, appended to the mockup document) ────────────
 // Badge positions are computed in PAGE px from percent-of-scroll-size, then
@@ -237,18 +238,6 @@ const FRAME_BOX_STYLE: CSSProperties = {
   // itself paints its own background inside the frame, so this only affects
   // the margin around it.
   background: "transparent",
-};
-
-const RAIL_STYLE: CSSProperties = {
-  width: 260,
-  flexShrink: 0,
-  borderLeft: "1px solid var(--border)",
-  background: "var(--bg-secondary)",
-  overflowY: "auto",
-  padding: 10,
-  display: "flex",
-  flexDirection: "column",
-  gap: 8,
 };
 
 // The approved wireframe's note card (workstation-shell.html row 2):
@@ -543,10 +532,11 @@ export function WireframeView({
           />
         </div>
       </div>
-      <div style={RAIL_STYLE}>
-        <div style={{ fontSize: 10, color: "var(--text-muted)", letterSpacing: 0.5 }}>
-          PINS <span style={{ color: "var(--text-primary)" }}>{docPins.length}</span>
-        </div>
+      {/* Increment F, Decision 4: the rail COLLAPSES, and starts collapsed on
+          a doc with no pins — its worst case was being permanently 260px wide
+          with nothing in it. The chrome + the preference live in PinsRail (one
+          rail, shared with the live-preview surface); only the cards are ours. */}
+      <PinsRail identity={identity} count={docPins.length}>
         {docPins.length === 0 ? (
           <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6 }}>
             {pinsFile === null
@@ -638,7 +628,7 @@ export function WireframeView({
             </div>
           ))
         )}
-      </div>
+      </PinsRail>
     </div>
   );
 }

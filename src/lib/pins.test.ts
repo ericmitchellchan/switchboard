@@ -18,6 +18,11 @@ import {
   parseWireframeMessage,
   pinTargetFor,
   pinsForDoc,
+  LIVE_PINS_NAME,
+  createLivePin,
+  livePinTargetFor,
+  livePinViewport,
+  routeScopeOf,
   removePin,
   REPO_PINS_ROOT,
   serializePinsFile,
@@ -351,5 +356,121 @@ describe("parseWireframeMessage", () => {
       xPct: 1,
       yPct: 2,
     });
+  });
+});
+
+// ── Live preview pins (increment F, Decision 3) ──────────────────────────────
+// The same sidecar shape, the same pure ops, the same ONE writer — the only new
+// things are WHERE the file lives (`<project>/live-pins.json`), what `doc`
+// means (the route, not a filename) and the two live-only fields that ride in
+// the record's tolerant tail.
+
+describe("routeScopeOf", () => {
+  it("scopes by path, dropping the origin so a port change keeps the pins", () => {
+    expect(routeScopeOf("http://localhost:5173/cases")).toBe("/cases");
+    expect(routeScopeOf("http://localhost:5174/cases")).toBe("/cases");
+  });
+
+  it("keeps the query (two tabs of one route are two surfaces)", () => {
+    expect(routeScopeOf("http://localhost:5173/cases?tab=open")).toBe("/cases?tab=open");
+  });
+
+  it("normalizes the bare origin to /", () => {
+    expect(routeScopeOf("http://localhost:5173")).toBe("/");
+    expect(routeScopeOf("http://localhost:5173/")).toBe("/");
+  });
+
+  it("drops the hash — a fragment is a position, not a route", () => {
+    expect(routeScopeOf("http://localhost:5173/cases#row-4")).toBe("/cases");
+  });
+
+  it("degrades to the raw string for an unparseable url instead of merging into /", () => {
+    expect(routeScopeOf("not a url")).toBe("not a url");
+    expect(routeScopeOf("")).toBe("/");
+  });
+});
+
+describe("livePinTargetFor", () => {
+  it("files under <project>/live-pins.json, keyed by route", () => {
+    expect(
+      livePinTargetFor({ kind: "localhost", project: "lodestar", url: "http://localhost:5173/cases" })
+    ).toEqual({ sidecarPath: `lodestar/${LIVE_PINS_NAME}`, docKey: "/cases" });
+  });
+
+  it("two routes of one project share the file and split by doc key", () => {
+    const a = livePinTargetFor({ kind: "localhost", project: "orbit", url: "http://localhost:3000/" });
+    const b = livePinTargetFor({ kind: "localhost", project: "orbit", url: "http://localhost:3000/flow" });
+    expect(a.sidecarPath).toBe(b.sidecarPath);
+    expect(a.docKey).not.toBe(b.docKey);
+  });
+
+  it("a pathological project key cannot escape the KB root", () => {
+    expect(
+      livePinTargetFor({ kind: "localhost", project: "../../etc", url: "http://localhost:1/" })
+        .sidecarPath
+    ).toBe(`etc/${LIVE_PINS_NAME}`);
+    expect(
+      livePinTargetFor({ kind: "localhost", project: "..", url: "http://localhost:1/" }).sidecarPath
+    ).toBe(LIVE_PINS_NAME);
+  });
+});
+
+describe("createLivePin", () => {
+  const args = {
+    route: "/cases",
+    xPct: 42.5,
+    yPct: 61.25,
+    url: "http://localhost:5173/cases",
+    viewport: { w: 1204.4, h: 812.6 },
+  };
+
+  it("carries url + rounded viewport and files under the route", () => {
+    const pin = createLivePin(args, "pin-1", "2026-08-02T00:00:00.000Z");
+    expect(pin).toEqual({
+      id: "pin-1",
+      doc: "/cases",
+      xPct: 42.5,
+      yPct: 61.25,
+      note: "",
+      createdAt: "2026-08-02T00:00:00.000Z",
+      url: "http://localhost:5173/cases",
+      viewport: { w: 1204, h: 813 },
+    });
+  });
+
+  it("is never DOM-anchored", () => {
+    expect("anchor" in createLivePin(args)).toBe(false);
+  });
+
+  it("survives a serialize → parse round trip with its live fields intact", () => {
+    const pin = createLivePin(args, "pin-1", "2026-08-02T00:00:00.000Z");
+    const file = addPin(emptyPinsFile(), pin);
+    const back = parsePinsFile(serializePinsFile(file));
+    expect(back.pins).toHaveLength(1);
+    expect(back.pins[0].url).toBe("http://localhost:5173/cases");
+    expect(livePinViewport(back.pins[0])).toEqual({ w: 1204, h: 813 });
+    expect(pinsForDoc(back, "/cases")).toHaveLength(1);
+    expect(pinsForDoc(back, "/")).toHaveLength(0);
+  });
+
+  it("the ordinary pin ops apply unchanged", () => {
+    const pin = createLivePin(args, "pin-1");
+    let file = addPin(emptyPinsFile(), pin);
+    file = updatePinNote(file, "pin-1", "the empty state is wrong");
+    expect(pinsForDoc(file, "/cases")[0].note).toBe("the empty state is wrong");
+    expect(pinsForDoc(file, "/cases")[0].url).toBe("http://localhost:5173/cases");
+    file = removePin(file, "pin-1");
+    expect(file.pins).toHaveLength(0);
+  });
+});
+
+describe("livePinViewport", () => {
+  it("returns null for a wireframe pin", () => {
+    expect(livePinViewport(createPin({ doc: "a.html", xPct: 1, yPct: 2 }))).toBeNull();
+  });
+
+  it("returns null for a malformed hand-edited viewport", () => {
+    const pin = { ...createPin({ doc: "/", xPct: 1, yPct: 2 }), viewport: { w: "wide" } };
+    expect(livePinViewport(pin)).toBeNull();
   });
 });

@@ -14,7 +14,7 @@ src/
 │   ├── TabBar.tsx               → Tab bar with scroll, rename, close, group dividers + the right-end artifact-panel button
 │   ├── PaneContainer.tsx        → Recursive binary tree pane renderer
 │   ├── PaneDivider.tsx          → Drag-to-resize between panes
-│   ├── SessionHeader.tsx        → Per-session info bar (repo, cwd, restart)
+│   ├── SessionHeader.tsx        → Per-session info bar (repo, cwd, restart) + the dev-server PREVIEW OFFER chip
 │   ├── TaskSidebar.tsx          → Auto/manual task list (full/collapsed/hidden; terminal screen only)
 │   ├── SearchBar.tsx            → Ctrl+F terminal search
 │   ├── Composer.tsx             → THE COMPOSER (increment D): per-pane prose input at the bottom of a terminal pane — Enter sends, Shift+Enter newline, ↑/↓ send history, no paste handler (dictation)
@@ -28,12 +28,15 @@ src/
 │   ├── NewThreadDialog.tsx      → Repo picker for creating a thread
 │   ├── NewSessionDialog.tsx     → Repo picker / new session config (lazy-loaded)
 │   ├── ExplorerView.tsx         → Explorer screen body: breadcrumb + file viewer (tree lives in the side menu); repo files route through the SHARED ArtifactBody kind switch
-│   ├── ArtifactPanel.tsx        → Artifact panel host: right-side co-present surface inside the terminal screen (divider, tab strip + `+`, header chrome, docked/overlay); hosts DocView / FileViewer, renders no viewer of its own
-│   ├── ArtifactPicker.tsx       → The `+` picker: filterable KB docs + registry projects, repo files browsed one directory at a time (explorerList)
+│   ├── ArtifactPanel.tsx        → Artifact panel host: right-side co-present surface inside the terminal screen (divider, tab strip + `+`, header chrome, docked/overlay, `float` pop-out + the popped-out placeholder); hosts ArtifactSurface, renders no viewer of its own
+│   ├── ArtifactPicker.tsx       → The `+` picker: filterable KB docs + registry projects, repo files browsed one directory at a time (explorerList), and the MANUAL URL row (type a port or a URL) that opens a live preview
 │   ├── UpdateChip.tsx           → In-app updater chip (consent-based install flow)
 │   ├── ConfirmDialog.tsx        → Modal confirm (close/destructive actions); `enterConfirms={false}` unbinds Enter for thread delete
 │   ├── kb/                      → Knowledge Base screen views
+│   │   ├── ArtifactSurface.tsx    → THE artifact → host+loading-policy switch (kb-doc→DocView, repo-file→FileViewer, localhost→LocalhostView), shared by the panel AND the PiP window
 │   │   ├── ArtifactBody.tsx       → THE kind switch (docKind → renderer) shared by DocView and the Explorer's FileViewer; hosts differ only in the fallback
+│   │   ├── LocalhostView.tsx      → LIVE localhost preview (phase B): sandboxed cross-origin iframe + no-cors health poll + "server gone" card + the POSITIONAL pin overlay
+│   │   ├── PinsRail.tsx           → THE collapsible pins rail (260px <-> 26px edge), shared by WireframeView and LocalhostView; per-doc preference, collapsed by default when empty
 │   │   ├── DocView.tsx            → KB doc load policy (2500ms active-gated poll) + the KB's fallback for unrendered kinds
 │   │   ├── MarkdownDoc.tsx        → THE markdown path: one unified pipeline + typography + the link-activation policy (KB docs and repo READMEs alike)
 │   │   ├── WireframeView.tsx      → Sandboxed iframe wireframe rendering + pin/note markup (takes an Artifact + content + the host's `onReload`; no KB coupling)
@@ -60,12 +63,14 @@ src/
 │   ├── threadStore.ts           → Durable agent threads: records (explicit + promoted), revive decisions, shell-ready wait, history selection/filter/relative-time helpers, action bridge
 │   ├── composer.ts              → Composer wire format (`composeWrite`: single line vs bracketed paste), send-history + caret rules, and the per-session visibility/draft/history store. PURE helpers + module singleton
 │   ├── threadPromotion.ts       → Tab→thread promotion (increment C): what a discovery MEANS for the thread list (`planPromotion`) + the poll pass. PURE decision + injected IO; observe-only
-│   ├── panelStore.ts            → Artifact panel state (per-TAB `PanelState` = artifact strip + activeIndex, global width), strip ops (`appendOrActivate`/`closeArtifactIn`), layout/drag math, header breadcrumbs, the shared ICON NAMES (`FILE_ICON`/`folderIcon`/`describeArtifact().icon` — drawn by components/icons), open-in-panel decision (`decideOpen`/`fullWidthRoute`), toggle memory, `+`-picker request, active-tab + send-to-thread bridges
+│   ├── panelStore.ts            → Artifact panel state (per-TAB `PanelState` = artifact strip + activeIndex, global width), the POPPED-OUT record (which artifact the floating window holds), strip ops (`appendOrActivate`/`closeArtifactIn`), layout/drag math, header breadcrumbs, the shared ICON NAMES (`FILE_ICON`/`folderIcon`/`describeArtifact().icon` — drawn by components/icons), open-in-panel decision (`decideOpen`/`fullWidthRoute`), toggle memory, `+`-picker request, active-tab + send-to-thread bridges
 │   ├── agentContext.ts          → Agent context injection (T8): shell-safe sanitizer + the two seam builders (`buildSpawnContext`, `buildSendReference`) + KB-root cache. PURE — the effectful ends live in App/threadStore/panelStore
 │   ├── kb.ts                    → KB doc list/read data layer (poll while active)
-│   ├── pins.ts                  → Wireframe pin/note file model (pure ops over pins JSON) + `pinTargetFor` (KB sidecar vs the hidden `_repo-pins/` mirror for repo files)
+│   ├── pins.ts                  → Pin/note file model (pure ops over pins JSON) + `pinTargetFor` (KB sidecar vs the hidden `_repo-pins/` mirror) + `livePinTargetFor`/`createLivePin`/`routeScopeOf` for LIVE preview pins (`<project>/live-pins.json`, keyed by route)
 │   ├── componentPreview.ts      → LAZY chunk: TypeScript transpile + inlined React UMD → a self-contained preview document (never imported statically)
 │   ├── pinsStore.ts             → ONE shared `.pins.json` record per sidecar (refcounted mounts, one debounced writer, injected IO) — the panel and the KB screen can host the same wireframe at once
+│   ├── devServer.ts             → Dev-server URL detection (pure `detectDevServerUrl` over ANSI-stripped PTY text + `parseManualUrl`) and the per-session OFFER store
+│   ├── pinsRail.ts              → Pins-rail collapse rule (pure: a stored preference wins, else collapsed iff the doc has no pins) + the sessionStorage key
 │   ├── explorer.ts              → Explorer data layer (projects/listing/read via IPC, live-thread annotation, session-repo merge) + THE repo-file read both hosts share (`useRepoFile` / `mergeFileRead`)
 │   ├── sandbox.ts               → THE iframe posture: the frame Content-Security-Policy + `injectCsp` (planted into wireframe srcDoc AND the component-preview shell)
 │   ├── diagramZoom.ts           → Pure pan/zoom math for the diagram surface
@@ -80,7 +85,7 @@ src/
 │   ├── logger.ts                → Frontend structured logging
 │   ├── updater.ts               → Auto-update check
 │   └── export.ts                → Export session to file
-└── lib/*.test.ts              → 19 Vitest test suites (paneLayout, statusDetector, taskDetector, resizePolicy, terminalLifecycle, route, threadStore, threadPromotion, panelStore, agentContext, composer, kb, pins, pinsStore, componentPreview, explorer, diagramZoom, updaterState, sandbox)
+└── lib/*.test.ts              → 21 Vitest test suites (paneLayout, statusDetector, taskDetector, resizePolicy, terminalLifecycle, route, threadStore, threadPromotion, panelStore, agentContext, composer, kb, pins, pinsStore, componentPreview, explorer, diagramZoom, updaterState, sandbox, devServer, pinsRail)
 
 src-tauri/
 ├── src/
@@ -168,6 +173,13 @@ pnpm test:watch        # Vitest (watch mode)
 - **No paste handler on the composer, ever** — Wispr Flow dictation injects by PASTING. xterm's clipboard path needed explicit rules to avoid double-pasting because it INTERCEPTS; the composer's `<textarea>` does not, so the native paste (or App's OS-level `clipboard-paste` → `execCommand("insertText")` route for simulated keystrokes) inserts exactly once. Adding an `onPaste` would re-create the double-insert bug
 - **Workspace v4** — `panels: Record<sessionId, PanelState>` (`{artifacts, activeIndex}`) + `panelWidth` ride inside the same localStorage blob; the v3→v4 migration wraps each single `Artifact` into a one-tab strip. On restore, keys remap through the session idMap and unmapped ones are DROPPED (a panel binding without its tab is meaningless, unlike a thread, which is severed and stays revivable). Records stay LEAN via `sanitizeArtifact`/`sanitizePanelState` on every load path
 - **One artifact, one tab** — a panel holds MANY artifacts; re-opening one already in the strip ACTIVATES its tab rather than appending a duplicate (compared by `artifactIdentity`: kind + project + path). Same lesson as the shared pins store — two tabs naming one document would mean two records of everything downstream. A strip is never empty: closing the last tab removes the session's panel, and Ctrl+Shift+P hides/restores the WHOLE strip (the strip's own `×` is what closes one artifact)
+- **A live preview's iframe must NEVER get `allow-same-origin` — this was MEASURED, not reasoned** — Tauri injects `__TAURI_INTERNALS__` into EVERY frame, subframes included, so a framed `http://localhost:<port>` page can call `invoke`. A production-build probe framing a plain `python -m http.server` established the whole table: no sandbox -> IPC RESOLVED; `allow-scripts allow-same-origin` -> RESOLVED; `allow-scripts allow-same-origin allow-forms` -> RESOLVED; **`allow-scripts` alone -> REJECTED "Origin header is not a valid URL"**. RESOLVED is literal: the frame called `write_file` and a file appeared on disk, and `create_session` is process execution. `allow-same-origin` is the entire difference and the mechanism is the Origin header — without it the frame is an OPAQUE origin, sends `Origin: null`, and Tauri's IPC handler refuses. LocalhostView therefore ships `sandbox="allow-scripts allow-forms"`, and the cost is stated rather than hidden (no cookies / localStorage / IndexedDB / service worker in the frame, and its own API calls are cross-origin). The wireframe srcDoc and the component preview were already `allow-scripts` alone — that is now load-bearing, not a tidy default. `allow-top-navigation` stays withheld too (verified: `top.location` throws SecurityError)
+- **A dev server's health is checked with `mode: "no-cors"`, and that is not a detail** — a normal `fetch` to a dev server REJECTS even while it is up, because dev servers send no CORS headers, so "TypeError: Failed to fetch" carries no information. In no-cors mode a live server resolves an OPAQUE response and a dead port rejects: that is the up/down signal, and the only one available. TWO consecutive failures before the "server gone" card (a restarting server is briefly unreachable and a card that flashed on every reload would be worse than the void it replaces); recovery re-navigates the frame, because a connection-refused page does not reload itself. The card names the URL and the PROJECT and deliberately NOT a command — Switchboard reads server OUTPUT and never starts servers, so printing `pnpm dev` there would be a guess dressed up as instruction
+- **Detection OFFERS, it never hijacks** — a dev-server URL in PTY output records an offer in `devServer`'s per-session store and does NOTHING else: no panel opens, no screen switches, nothing is typed. The chip on the SessionHeader is the whole surface, dismissing is a first-class outcome, and either way the URL joins that session's `seen` set so the next HMR banner is silent. Detection hangs off the SAME registry-dispatched `onOutput` hook `noteSessionOutput` and `detectTasks` use — never a second listener chain — and is deliberately NOT gated on the mounted pane's callbacks, so a `pnpm dev` in a hidden tab is still noticed. ANSI is stripped FIRST because vite bolds the PORT mid-URL (`http://localhost:` ESC`[1m` `5173` ESC`[22m` `/`), and a 512-char tail is carried between chunks because a PTY splits a URL anywhere. The project a preview is filed under comes from the SESSION's cwd (`liveProjectFor`), falling back to the folder name, so a project the registry has never seen still previews
+- **A live pin is POSITIONAL, and the frame's cross-origin-ness is why** — `{xPct, yPct, viewport, url, note}` against the FRAME'S OWN BOX, never DOM-anchored (that needs a script injected into the dev server, rejected in the original phase-B design and rejected again). Two consequences, both deliberate: a pin marks a place ON SCREEN rather than in the document (scroll the app and the badge stays put — the recorded `viewport` is what keeps the note interpretable), and IN-APP navigation is invisible to us (`contentWindow.location` throws), so pins are scoped to the URL the ARTIFACT names and the rail SAYS which route that is instead of pretending to follow along. Storage is `<project>/live-pins.json` through the SAME shared `pinsStore` — still exactly ONE pins writer — with `doc` holding the route and the live-only fields riding in the tolerant parse's unknown-field tail
+- **The pins overlay is `pointer-events: none` except in pin mode** — the live app underneath stays fully interactive (click, scroll, type) because the layer is not there as far as the pointer is concerned; badges opt pointer events back on INDIVIDUALLY, so a badge is always clickable without the layer ever swallowing anything else
+- **The pins rail collapses, and its default comes from CONTENT** — no stored preference + zero pins -> collapsed (its worst case was being permanently 260px of nothing); + at least one pin -> expanded; a stored preference wins in BOTH directions. Per-DOCUMENT (artifact identity, like the zoom key — a repo file and a KB doc can share a path) and per-SESSION (sessionStorage, write-through at the moment of change, never an effect keyed on [identity, collapsed] — that clobbers the stored value on a doc switch, the recorded bug). Collapsed is a real 26px clickable edge, never nothing: a rail that vanished would take its own toggle with it
+- **The floating window hosts EITHER a terminal or an artifact — one window lifecycle, not a second window type** — `pip.html?session=` mirrors a shell (as always); `pip.html?artifact=<json>` hosts an artifact, and `pip:host` re-aims a window that is ALREADY open rather than closing and recreating one that is on screen. It renders the same `ArtifactSurface` the panel renders, so a popped-out wireframe keeps its pins and a popped-out preview keeps its overlay and health card. While an artifact is out there the panel tab shows a PLACEHOLDER, not a second live copy — two frames on one dev server, two health polls and two mounts of one pin sidecar is duplication, not co-presence — and closing the window (its `x`, Ctrl+Shift+O, or `back`) returns it. PiP finally has discoverable entry points too: the panel header's `float` action and the status bar's `Ctrl+Shift+O float`
 - **Lazy loading** — NewSessionDialog loaded via `React.lazy` + Suspense only when repos configured; mermaid is its own lazy chunk (DiagramView)
 - **`portable-pty = "=0.8.1"`** — pinned, v0.9 has Windows ConPTY bug
 - **CLAUDECODE env var** stripped from PTY sessions
@@ -225,13 +237,17 @@ are reconciled against it. Adding a chord means updating both.
 
 Chord notes:
 - **Ctrl+Shift+P moved PiP to Ctrl+Shift+O** (A2) — the two cannot share a chord.
-- **Ctrl+Shift+W / Ctrl+Shift+S / Ctrl+Shift+O / Ctrl+Shift+[ ] / Ctrl+Alt+Arrow /
+- **Ctrl+Shift+O is no longer keyboard-only** (increment F): the StatusBar carries a
+  `Ctrl+Shift+O float` button and the panel header a `float` action, because the
+  floating window can now host a popped-out ARTIFACT and not just a mirrored shell.
+- **Ctrl+Shift+W / Ctrl+Shift+S / Ctrl+Shift+[ ] / Ctrl+Alt+Arrow /
   Ctrl+- are keyboard-ONLY** — no button, hint or tooltip surfaces them anywhere in
   the UI. The StatusBar hint strip advertises Ctrl+T/W/[ ]/F/\\/1-9 as plain text plus
-  FOUR clickable buttons: Ctrl+Shift+B menu, Ctrl+Shift+P panel (rendered only while
+  FIVE clickable buttons: Ctrl+Shift+B menu, Ctrl+Shift+P panel (rendered only while
   the chord would do something), Ctrl+Shift+M composer (rendered whenever a session is
   focused — forcing a composer onto a plain shell is a supported state, so this toggle
-  is never a no-op), and Ctrl+B tasks.
+  is never a no-op), Ctrl+Shift+O float (whenever a session is focused), and
+  Ctrl+B tasks.
 - **The TAB BAR carries the two surface buttons**: the SWITCHBOARD wordmark (left end)
   toggles the side menu, and the panel button (right end) toggles the artifact panel —
   or, on a tab whose panel is EMPTY, opens the `+` picker instead, because a toggle

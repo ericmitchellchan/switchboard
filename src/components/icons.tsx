@@ -40,6 +40,7 @@ export type IconName =
   | "localhost"
   | "panel"
   | "chevron-right"
+  | "chevron-left"
   | "chevron-down"
   // Thread row menu (increment E). Same rules as everything above: one 16x16
   // box, ink centred on (8,8), currentColor, stroke-drawn.
@@ -68,6 +69,7 @@ const STROKE: Record<IconName, number> = {
   localhost: 1.3,
   panel: 1.4,
   "chevron-right": 2,
+  "chevron-left": 2,
   "chevron-down": 2,
   ellipsis: 0,
   open: 1.4,
@@ -122,6 +124,11 @@ const PATHS: Record<IconName, ReactNode> = {
     </>
   ),
   "chevron-right": <path d="m6.25 3.5 4.5 4.5-4.5 4.5" />,
+  // The mirror of chevron-right, drawn rather than CSS-rotated: a rotation
+  // would move the ink off the (8,8) centre these all share, which is the one
+  // rule this module exists to keep. Used by the pins rail's collapse toggle,
+  // where it means "open the rail that lives to your right".
+  "chevron-left": <path d="M9.75 3.5 5.25 8l4.5 4.5" />,
   "chevron-down": <path d="M3.5 6.25 8 10.75l4.5-4.5" />,
   // ⋯ — the row menu's trigger. Three FILLED dots (stroke 0): at 12px a
   // stroked circle of this radius is a grey smudge, and the trigger has to

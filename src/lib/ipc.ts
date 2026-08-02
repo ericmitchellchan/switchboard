@@ -228,8 +228,15 @@ export async function confirmAppClose(): Promise<void> {
   return invoke("confirm_app_close");
 }
 
-export async function openPipWindow(sessionId: string): Promise<void> {
-  return invoke("open_pip_window", { sessionId });
+/** Open the floating window. With `artifactJson` it boots hosting an ARTIFACT
+ *  (increment F, Decision 2); without, it mirrors `sessionId`'s terminal as it
+ *  always has. The JSON is URL-encoded here rather than in Rust so exactly one
+ *  side owns the encoding. */
+export async function openPipWindow(sessionId: string, artifactJson?: string): Promise<void> {
+  return invoke("open_pip_window", {
+    sessionId,
+    artifact: artifactJson ? encodeURIComponent(artifactJson) : null,
+  });
 }
 
 export async function closePipWindow(): Promise<void> {

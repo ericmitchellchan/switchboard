@@ -542,6 +542,15 @@ function subscribe(listener: () => void): () => void {
   };
 }
 
+/** The raw subscription, beyond the hooks. Exported for the same reason
+ *  pinsStore exports `subscribeToPins`: WHETHER a mutation notifies is part of
+ *  the contract (a silent one leaves every subscriber painting stale state),
+ *  and it is invisible from the accessors alone. Not used by app code — the
+ *  hooks are. */
+export function subscribeToPanelStore(listener: () => void): () => void {
+  return subscribe(listener);
+}
+
 export function getPanelsView(): PanelsView {
   if (!cachedView) {
     // No defensive copy: every mutator below REPLACES `panels` with a fresh
@@ -798,9 +807,17 @@ export function removeSessionPanel(sessionId: string): void {
   // A picker asking on behalf of a tab that no longer exists would open its
   // pick into a dead session id.
   if (pickerSessionId === sessionId) closeArtifactPicker();
+  // Same for a pop-out: the tab it would return to is gone. The WINDOW is
+  // App's to close (it owns the lifecycle); the record here just stops
+  // claiming an artifact belongs to a dead tab.
+  const hadPopOut = poppedOut?.sessionId === sessionId;
+  if (hadPopOut) poppedOut = null;
   const hadPanel = panels.has(sessionId);
   const hadMemory = lastPanelStates.has(sessionId);
-  if (!hadPanel && !hadMemory) return;
+  if (!hadPanel && !hadMemory) {
+    if (hadPopOut) bump();
+    return;
+  }
   if (hadPanel) {
     panels = new Map(panels);
     panels.delete(sessionId);
@@ -870,6 +887,11 @@ export type PanelActions = {
   /** TYPE text into the focused terminal. The implementation MUST NOT append
    *  a trailing \r — the Enter that sends it is the user's keystroke. */
   sendToThread: (text: string) => void;
+  /** POP OUT (increment F, Decision 2): hand this artifact to the floating PiP
+   *  window. App owns the window lifecycle; the store owns only the record of
+   *  WHICH artifact is out there, so the panel can say so instead of drawing a
+   *  second live copy of it. */
+  popOutArtifact: (artifact: Artifact) => void;
 };
 
 let panelActions: PanelActions | null = null;
@@ -896,6 +918,70 @@ export function sendToThreadAvailable(): boolean {
  *  snapshot — no re-render on divider drags. */
 export function useSendToThreadAvailable(): boolean {
   return useSyncExternalStore(subscribe, sendToThreadAvailable);
+}
+
+// ── Pop-out to the PiP window (increment F, Decision 2) ──────────────────────
+// The floating window (pip.tsx) can host an ARTIFACT, not only a mirrored
+// terminal — one window lifecycle instead of a second window type. There is
+// exactly ONE PiP window, so this is one module-level record, not a map.
+//
+// WHY THE PANEL NEEDS TO KNOW: an artifact that is out in the floating window
+// must not ALSO render in the panel. For a doc that would merely be wasteful;
+// for a LIVE localhost preview it would be two frames hitting the dev server
+// and two health polls, and for a wireframe two mounts of the same pin sidecar
+// (which the shared pinsStore survives, but which is still two of everything).
+// So the panel tab shows a "showing in the floating window" placeholder with a
+// bring-it-back action, and closing the window returns it. Nothing is lost
+// either way: the tab strip is untouched the whole time.
+
+let poppedOut: { sessionId: string; artifact: Artifact } | null = null;
+
+/** Record that an artifact is now hosted by the floating window. App calls
+ *  this AFTER the window actually opens — a failed open must not leave the
+ *  panel claiming the artifact is somewhere it is not. */
+export function setPoppedOutArtifact(sessionId: string, artifact: Artifact): void {
+  const clean = sanitizeArtifact(artifact);
+  if (!clean || sessionId.length === 0) return;
+  poppedOut = { sessionId, artifact: clean };
+  bump();
+}
+
+/** The floating window closed (or gave the artifact back) — the panel renders
+ *  it again. Idempotent. */
+export function clearPoppedOutArtifact(): void {
+  if (poppedOut === null) return;
+  poppedOut = null;
+  bump();
+}
+
+/** What the floating window is hosting, or null. */
+export function getPoppedOutArtifact(): Artifact | null {
+  return poppedOut?.artifact ?? null;
+}
+
+/** Identity of the popped-out artifact (`""` = nothing is out) — a primitive
+ *  snapshot, so subscribers re-render on the transition and not on drags. */
+export function poppedOutIdentity(): string {
+  return poppedOut ? artifactIdentity(poppedOut.artifact) : "";
+}
+
+export function usePoppedOutIdentity(): string {
+  return useSyncExternalStore(subscribe, poppedOutIdentity);
+}
+
+/** Send the panel's active artifact to the floating window. No-op when App has
+ *  registered no handler (callers gate on `usePopOutAvailable` so the action is
+ *  DISABLED rather than silently dead). */
+export function popOutArtifact(artifact: Artifact): void {
+  panelActions?.popOutArtifact(artifact);
+}
+
+export function popOutAvailable(): boolean {
+  return panelActions !== null;
+}
+
+export function usePopOutAvailable(): boolean {
+  return useSyncExternalStore(subscribe, popOutAvailable);
 }
 
 // ── `+` picker request (2026-08-02) ──────────────────────────────────────────
@@ -1064,6 +1150,7 @@ export function __resetPanelStoreForTests(): void {
   activeTabSessionId = null;
   panelActions = null;
   pickerSessionId = null;
+  poppedOut = null;
   panelWidth = DEFAULT_PANEL_WIDTH;
   cachedView = null;
   listeners.clear();

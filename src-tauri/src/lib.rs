@@ -479,19 +479,42 @@ fn confirm_app_close(app_handle: tauri::AppHandle) {
 
 const PIP_WINDOW_LABEL: &str = "pip";
 
+/// Open the floating window.
+///
+/// It hosts ONE of two things, decided here by which query param the URL
+/// carries (increment F, Decision 2 — one window lifecycle, not a second
+/// window type):
+///   · `?session=<id>`  — a mirrored terminal (the original Ctrl+Shift+O), or
+///   · `?artifact=<json>` — an artifact popped out of the panel.
+///
+/// `artifact` is the URL-ENCODED JSON of the Artifact record, encoded by the
+/// caller (`encodeURIComponent`) so it survives the query string. This command
+/// does not parse it: the shape belongs to the frontend's `sanitizeArtifact`,
+/// which the PiP page runs on it before rendering anything, exactly like every
+/// other load path.
 #[tauri::command]
 async fn open_pip_window(
     app_handle: tauri::AppHandle,
     session_id: String,
+    artifact: Option<String>,
 ) -> Result<(), String> {
     if app_handle.get_webview_window(PIP_WINDOW_LABEL).is_some() {
         log::debug!("PiP window already open, no-op");
         return Ok(());
     }
 
-    log::info!("Opening PiP window for session id={}", session_id);
+    log::info!(
+        "Opening PiP window for session id={} artifact={}",
+        session_id,
+        artifact.is_some()
+    );
 
-    let url = format!("pip.html?session={}", session_id);
+    let url = match artifact.as_deref() {
+        Some(encoded) if !encoded.is_empty() => {
+            format!("pip.html?session={}&artifact={}", session_id, encoded)
+        }
+        _ => format!("pip.html?session={}", session_id),
+    };
     tauri::WebviewWindowBuilder::new(
         &app_handle,
         PIP_WINDOW_LABEL,

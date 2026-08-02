@@ -24,22 +24,50 @@
 
 // Type-only (erased at build): this module stays pure and importable in a
 // plain node test, exactly like agentContext.ts, which takes the same type.
-import type { FileArtifact } from "../types";
+import type { Artifact, FileArtifact } from "../types";
 
 export interface Pin {
   id: string;
-  /** Filename (last path segment) of the doc this pin belongs to. */
+  /** WHICH annotated thing this pin belongs to, inside its sidecar.
+   *
+   *  For a wireframe it is the doc's FILENAME (last path segment) — one
+   *  sidecar serves every mockup in a folder. For a LIVE localhost preview
+   *  (increment F) it is the ROUTE (`routeScopeOf`, e.g. `/` or
+   *  `/cases?tab=open`) — one `live-pins.json` serves every route of a
+   *  project's dev server. Same field, same filter (`pinsForDoc`), so the
+   *  shared store and every pure op below are untouched by the new kind. */
   doc: string;
-  /** Position as percent of the mockup document's scroll size. */
+  /** Position as percent of the annotated surface: the mockup document's
+   *  scroll size for a wireframe, the FRAME's own box for a live preview
+   *  (which is all a cross-origin document lets us measure). */
   xPct: number;
   yPct: number;
-  /** Best-effort DOM anchor (id / class chain) captured at placement. */
+  /** Best-effort DOM anchor (id / class chain) captured at placement.
+   *  WIREFRAMES ONLY — a live pin is POSITIONAL and never DOM-anchored
+   *  (Decision 3: anchoring a live app needs a script injected into the dev
+   *  server, which stays rejected). */
   anchor?: string;
   note: string;
   /** ISO timestamp. */
   createdAt: string;
   /** Unknown fields from hand-edits survive the round-trip. */
   [extra: string]: unknown;
+}
+
+/** A LIVE pin's extra fields (increment F, Decision 3). They ride in the same
+ *  record as unknown-to-`sanitizePin` fields, which is exactly what the
+ *  tolerant parse's round-trip guarantee is for — no second schema, no second
+ *  writer, and a hand-edit still survives.
+ *
+ *  `viewport` is the frame size the percentages were taken against. It is
+ *  RECORDED, never used to reposition: a percentage is already
+ *  size-independent, and the viewport is what tells a reading agent (or Eric,
+ *  months later) whether the note was about the desktop or the narrow layout.
+ *  `url` is the full URL as loaded — `doc` holds only the route scope, so a
+ *  server that comes back on a different port keeps its pins. */
+export interface LivePinFields {
+  url: string;
+  viewport: { w: number; h: number };
 }
 
 export interface PinsFile {
@@ -142,6 +170,98 @@ export function pinTargetFor(artifact: FileArtifact): PinTarget {
     // that came from the explorer backend).
     docKey: segments.length > 0 ? segments[segments.length - 1] : docFileName(artifact.path),
   };
+}
+
+// ── Live preview pins (increment F, Decision 3) ──────────────────────────────
+// A localhost artifact has a URL, not a path, so it has no folder to put a
+// sidecar next to. It files into ONE per-project file in the KB:
+//
+//   project `lodestar`, url http://localhost:5173/cases
+//     → `lodestar/live-pins.json`, pin.doc = "/cases"
+//
+// Same principle as the repo mirror above — MARKUP LIVES IN THE KB, REPOS STAY
+// CLEAN — and the same shape as every other sidecar, so `pinsForDoc`,
+// `addPin`, `removePin`, `updatePinNote` and the ONE shared pinsStore writer
+// all apply unchanged. Deliberately NOT dot-prefixed and NOT under `_`: unlike
+// a wireframe's sidecar this file is a first-class artefact Eric (and an agent)
+// is meant to find, and `<project>/live-pins.json` is where the spec put it.
+// One consequence, accepted rather than worked around: `.json` IS a KB doc
+// extension (kb.rs DOC_EXTENSIONS) and this file is not dot-prefixed, so it
+// SHOWS UP in the KB tree as a document. That is the visible half of
+// "agent-readable"; hiding it would mean either a dot prefix (making it as
+// invisible as the wireframe sidecars this one is deliberately unlike) or a
+// second `_` tree, which the spec did not ask for.
+//
+// SCOPING, and its honest limit. `doc` is the ROUTE, so pins placed on `/cases`
+// do not appear on `/`. The route we can know is the one the ARTIFACT names:
+// the frame is a real cross-origin document, so navigation INSIDE the live app
+// is invisible to us (reading `contentWindow.location` throws — proven by the
+// phase-1 probe). Changing route is therefore an explicit act — open another
+// URL — and the rail says which route its pins belong to rather than pretending
+// to follow along.
+
+/** The per-project live-pin file name. */
+export const LIVE_PINS_NAME = "live-pins.json";
+
+/** The pin SCOPE for a live URL: path + query, normalized to at least `/`.
+ *  The origin is deliberately dropped — a dev server that comes back on 5174
+ *  after 5173 was taken is the same app, and its pins must survive that. */
+export function routeScopeOf(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const scope = `${parsed.pathname}${parsed.search}`;
+    return scope.length === 0 ? "/" : scope;
+  } catch {
+    // Not a parseable URL (hand-edited artifact, older blob) — scope by the
+    // raw string rather than silently merging it with `/`.
+    return url.length === 0 ? "/" : url;
+  }
+}
+
+/** Where a LIVE artifact's pins live, and the `doc` key they file under.
+ *  Total, like `pinTargetFor`: every localhost artifact has a place for pins. */
+export function livePinTargetFor(artifact: Extract<Artifact, { kind: "localhost" }>): PinTarget {
+  const segments = mirrorSegments(artifact.project);
+  const dir = segments.join("/");
+  return {
+    sidecarPath: dir.length > 0 ? `${dir}/${LIVE_PINS_NAME}` : LIVE_PINS_NAME,
+    docKey: routeScopeOf(artifact.url),
+  };
+}
+
+/** Build a live pin. Same `createPin` shape plus the two live-only fields;
+ *  `anchor` is structurally absent — a live pin is positional, always. */
+export function createLivePin(
+  args: {
+    route: string;
+    xPct: number;
+    yPct: number;
+    url: string;
+    viewport: { w: number; h: number };
+    note?: string;
+  },
+  id?: string,
+  createdAt?: string
+): Pin & LivePinFields {
+  const base = createPin(
+    { doc: args.route, xPct: args.xPct, yPct: args.yPct, note: args.note },
+    id,
+    createdAt
+  );
+  return {
+    ...base,
+    url: args.url,
+    viewport: { w: Math.round(args.viewport.w), h: Math.round(args.viewport.h) },
+  };
+}
+
+/** A pin's recorded viewport, when it has one (live pins do, wireframe pins
+ *  don't). Reads through the tolerant `[extra: string]: unknown` index, so a
+ *  hand-edited or older record degrades to null instead of throwing. */
+export function livePinViewport(pin: Pin): { w: number; h: number } | null {
+  const raw = pin.viewport;
+  if (!isRecord(raw)) return null;
+  return isFiniteNumber(raw.w) && isFiniteNumber(raw.h) ? { w: raw.w, h: raw.h } : null;
 }
 
 // ── Parse / serialize (tolerant) ─────────────────────────────────────────────

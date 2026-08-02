@@ -20,6 +20,7 @@ import {
   clearWaiting,
 } from "../lib/statusDetector";
 import { detectTasks, detectResolutions } from "../lib/taskDetector";
+import { noteDevServerOutput, registerSessionDir } from "../lib/devServer";
 import { log } from "../lib/logger";
 import { clearComposerState, useComposerVisible } from "../lib/composer";
 import { SearchBar } from "./SearchBar";
@@ -113,6 +114,12 @@ function wireSession(sessionId: string) {
       // are registry-owned and already happened.
       const decoder = sessionDecoders.get(sessionId);
       const text = decoder ? decoder.decode(bytes, { stream: true }) : new TextDecoder().decode(bytes);
+      // Dev-server URL detection (increment F) — the SAME registry-dispatched
+      // hook, deliberately NOT a second listener chain, and deliberately NOT
+      // behind `cbs`: a `pnpm dev` in a HIDDEN tab must still be noticed, and
+      // the offer lives in its own store rather than in a mounted component's
+      // callbacks. It only ever RECORDS an offer; nothing opens.
+      noteDevServerOutput(sessionId, text);
       const cbs = getCbs();
       if (cbs) {
         if (cbs.onAutoTask) {
@@ -170,6 +177,11 @@ export const TerminalPane = memo(function TerminalPane({
   // Update module-level callback refs on every render so hook closures always
   // invoke the latest callbacks from whichever component instance is active.
   sessionCallbacks.set(session.id, { onStatusChange, onExited, onAutoTask, onResolveTask });
+  // Publish the session's cwd for the live-preview project lookup (increment
+  // F): a detected URL knows nothing about projects, so the folder its pins are
+  // filed under comes from the shell it was announced in. Idempotent, and a
+  // plain map write — no render, no IPC.
+  registerSessionDir(session.id, session.working_dir);
   // Re-wire if needed (no-op when already wired). Runs in render (not just the
   // mount effect) so an in-place restart — which clears the wiring via
   // cleanupSessionListeners without remounting — re-registers hooks and

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, lazy, Suspense, Component, Fragment } from "react";
 import type { CSSProperties, ReactNode } from "react";
-import type { AgentStatus, RepoConfig, ScreenId, Session, Thread } from "./types";
+import type { AgentStatus, Artifact, RepoConfig, ScreenId, Session, Thread } from "./types";
 import { TabBar } from "./components/TabBar";
 import { SessionHeader } from "./components/SessionHeader";
 import { TerminalPane, cleanupSessionListeners } from "./components/TerminalPane";
@@ -20,7 +20,7 @@ import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
 import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot } from "./lib/ipc";
 import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty, isSessionDirty, serializeForPip, setTerminalScreenVisible } from "./lib/terminal";
-import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing } from "./lib/pipBridge";
+import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing, sendPipHost } from "./lib/pipBridge";
 import { bumpSessionGeneration, addSessionInputListener, getSessionGeneration } from "./lib/terminalRegistry";
 import {
   initThreadStore,
@@ -70,7 +70,11 @@ import {
   getPanelWidth,
   usePanelIdentity,
   usePanelToggleAvailable,
+  setPoppedOutArtifact,
+  clearPoppedOutArtifact,
+  usePoppedOutIdentity,
 } from "./lib/panelStore";
+import { clearDevServerSession } from "./lib/devServer";
 import {
   buildSpawnContext,
   getKbRootForContext,
@@ -488,6 +492,10 @@ export default function App() {
     // The tab's panel binding dies WITH the tab (per-tab state, nothing to
     // revive) — unlike the thread record, which survives severed.
     removeSessionPanel(id);
+    // Same for its dev-server detection state (increment F): the tail buffer,
+    // the already-offered URLs and the cwd all die with the tab. Session ids
+    // are never reused, so nothing would ever read them again.
+    clearDevServerSession(id);
     // Drop any un-fired chatStarted detector bookkeeping for the session
     // (closed before its first turn). The registry listener itself died with
     // disposeTerminal; calling the stale remover is a harmless no-op.
@@ -1223,6 +1231,10 @@ export default function App() {
       pipRouterCleanupRef.current?.();
       pipRouterCleanupRef.current = null;
       setPipSessionId(null);
+      // The window may have been hosting an ARTIFACT rather than a terminal
+      // (increment F) — closing it returns that artifact to the panel, exactly
+      // as the window's own × does.
+      clearPoppedOutArtifact();
       return;
     }
     const sessionId = effectiveActiveIdRef.current;
@@ -1348,12 +1360,71 @@ export default function App() {
       .catch((err) => log.error(`Failed to type reference into session=${sessionId}: ${err}`));
   }, []);
 
-  // Bridge it to the panel header + the wireframe pin rail (module singleton —
+  // POP OUT (increment F, Decision 2) — hand the panel's active artifact to
+  // the FLOATING window, which is the same window Ctrl+Shift+O mirrors a
+  // terminal into. One window lifecycle, two host modes:
+  //
+  //   · window already open (terminal mirror or another artifact) → RE-AIM it
+  //     over `pip:host`. Closing and recreating a window that is already on
+  //     screen would flash and would lose its position and size.
+  //   · window closed → open it straight into artifact mode via the URL.
+  //
+  // The store is only told AFTER the window actually has it: a failed open must
+  // not leave the panel showing "it's in the floating window" for a window that
+  // does not exist. The terminal router is torn down either way — the window is
+  // no longer mirroring a shell, and leaving the forwarder live would keep
+  // pushing PTY bytes at a page with no terminal to write them to.
+  const handlePopOutArtifact = useCallback(
+    async (artifact: Artifact) => {
+      const sessionId = activeIdRef.current;
+      const json = JSON.stringify(artifact);
+      const wasOpen = await isPipWindowOpen().catch(() => false);
+      try {
+        if (wasOpen) {
+          await sendPipHost(json);
+        } else {
+          // `sessionId` still rides along so the window can fall back to a
+          // terminal mirror if the artifact is ever taken away from it.
+          await openPipWindow(sessionId ?? "", json);
+        }
+      } catch (e) {
+        log.warn(`Failed to pop artifact out to the floating window: ${e}`);
+        return;
+      }
+      pipRouterCleanupRef.current?.();
+      pipRouterCleanupRef.current = null;
+      setPipSessionId(null);
+      if (sessionId) setPoppedOutArtifact(sessionId, artifact);
+    },
+    []
+  );
+
+  // Bridge them to the panel header + the wireframe pin rail (module singleton —
   // see panelStore.PanelActions).
   useEffect(() => {
-    registerPanelActions({ sendToThread: handleSendToThread });
+    registerPanelActions({
+      sendToThread: handleSendToThread,
+      popOutArtifact: (artifact) => void handlePopOutArtifact(artifact),
+    });
     return () => registerPanelActions(null);
-  }, [handleSendToThread]);
+  }, [handleSendToThread, handlePopOutArtifact]);
+
+  // "Bring it back" (the panel's `↙ back`, and the placeholder's button) —
+  // clearing the record is the panel's half; the WINDOW is App's, so it closes
+  // here. Subscribing to the identity is how App notices the store-side clear.
+  const poppedOutIdentity = usePoppedOutIdentity();
+  const hadPoppedOutRef = useRef(false);
+  useEffect(() => {
+    const has = poppedOutIdentity !== "";
+    const had = hadPoppedOutRef.current;
+    hadPoppedOutRef.current = has;
+    // Only the had→!has transition closes the window: the !had→has direction is
+    // the pop-out itself (which just opened it), and a same-to-same render must
+    // not touch a window the user is using.
+    if (had && !has) {
+      void closePipWindow().catch((e) => log.warn(`Failed to close floating window: ${e}`));
+    }
+  }, [poppedOutIdentity]);
 
   // Publish the active TAB to panelStore so the side-menu trees know which
   // session would host a panel (and which artifact to highlight) without a
@@ -1451,6 +1522,10 @@ export default function App() {
       pipRouterCleanupRef.current?.();
       pipRouterCleanupRef.current = null;
       setPipSessionId(null);
+      // CLOSING RETURNS IT TO THE PANEL (increment F, acceptance 4). The
+      // artifact was never moved, only hidden behind a placeholder, so this is
+      // the whole of "returns": the panel renders it again on the next frame.
+      clearPoppedOutArtifact();
     }).then((fn) => {
       if (cancelled) {
         fn();
@@ -2208,6 +2283,7 @@ export default function App() {
         onToggleSideMenu={toggleSideMenu}
         onTogglePanel={panelToggleAvailable ? handleTogglePanel : undefined}
         onToggleComposer={effectiveActiveSessionId ? handleToggleComposer : undefined}
+        onTogglePip={effectiveActiveSessionId ? handleTogglePip : undefined}
       />
 
       <ConfirmDialog

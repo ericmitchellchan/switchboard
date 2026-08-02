@@ -61,6 +61,59 @@ export function annotateProjects(
   }));
 }
 
+// ── Pure: which PROJECT a live preview belongs to (increment F) ──────────────
+// A localhost artifact carries a `project`, and that is not decoration: it is
+// the folder its pins are filed under (`<project>/live-pins.json`). The dev
+// server itself tells us nothing about a project, so the project comes from the
+// SESSION the URL was detected in — its working directory, matched against the
+// registry the same way annotateProjects matches a live thread's.
+//
+// ACCEPTANCE 6 lives in the fallback: "a project the registry has never seen
+// still previews". A cwd that matches nothing yields its own folder NAME, which
+// is a perfectly good bucket for pins and requires no setup anywhere. Detection
+// is therefore not registry-bound — the registry only makes the label nicer.
+
+/** The registry project whose repos contain `dir`, or null. Longest match
+ *  wins: a repo nested inside another project's checkout belongs to the
+ *  INNER one, which is the one you are actually working in. */
+export function projectKeyForDir(
+  projects: readonly ExplorerProject[],
+  dir: string
+): string | null {
+  if (!dir) return null;
+  let bestKey: string | null = null;
+  let bestLength = -1;
+  for (const project of projects) {
+    for (const repo of project.repos) {
+      if (!isPathInside(dir, repo)) continue;
+      if (repo.length > bestLength) {
+        bestLength = repo.length;
+        bestKey = project.key;
+      }
+    }
+  }
+  return bestKey;
+}
+
+/** THE project label for a live preview started in `dir`: the registry key
+ *  when there is one, the directory's own name when there is not, and a last
+ *  resort of `local` for a session with no usable cwd. Total — a preview
+ *  always has somewhere to file its pins. */
+export function liveProjectFor(projects: readonly ExplorerProject[], dir: string): string {
+  const key = projectKeyForDir(projects, dir);
+  if (key) return key;
+  // A drive root (`C:\`) basenames to the drive SPEC (`C:`), which is not a
+  // project name — and a colon is a segment the KB write guard rejects, so
+  // filing pins under it would silently land them at the KB root. `local` is
+  // the last resort for that and for a session with no cwd at all.
+  //
+  // (`basename` returns its INPUT when a path has no usable segment at all —
+  // `/` basenames to `/` — so separators are rejected here too.)
+  const name = basename(dir ?? "");
+  const usable = name.length > 0 && !name.endsWith(":") && !/[/\\]/.test(name);
+  return usable ? name : "local";
+}
+
 // ── Pure: session repo list (Increment B, acceptance 7) ──────────────────────
 // NewSessionDialog used to offer `config.repos` — the hand-maintained
 // config.json list — while the side menu already knew the registry's twelve

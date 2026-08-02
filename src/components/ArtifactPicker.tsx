@@ -25,10 +25,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
+import type { Artifact } from "../types";
 import { docKind, useKbDocList } from "../lib/kb";
-import { explorerList, explorerProjects } from "../lib/explorer";
+import { explorerList, explorerProjects, liveProjectFor } from "../lib/explorer";
 import type { ExplorerEntry, ExplorerProject } from "../lib/explorer";
-import { FILE_ICON, FOLDER_ICON, type OpenableArtifact } from "../lib/panelStore";
+import { FILE_ICON, FOLDER_ICON, getActiveTabSession } from "../lib/panelStore";
+import { parseManualUrl, sessionDirFor } from "../lib/devServer";
 import { ICON_SIZE, Icon, type IconName } from "./icons";
 
 /** Render cap. A KB with thousands of docs must not paint thousands of rows on
@@ -43,15 +45,22 @@ type Row =
   /** A KB doc — Enter opens it in the panel. */
   | { kind: "kb"; id: string; label: string; meta: string; path: string }
   /** A repo file — Enter opens it in the panel. */
-  | { kind: "file"; id: string; label: string; path: string };
+  | { kind: "file"; id: string; label: string; path: string }
+  /** THE MANUAL URL PATH (increment F). Appears at the top of the root list
+   *  the moment what you have typed parses as a URL or a bare port. It is the
+   *  fallback for a dev server whose banner the detector does not recognise —
+   *  detection is the common path, this is the guarantee. */
+  | { kind: "url"; id: string; label: string; url: string; project: string };
 
 export function ArtifactPicker({
   onPick,
   onClose,
 }: {
   /** Chosen artifact. The caller opens it in ITS panel — the picker never
-   *  routes or navigates, so `+` always means "add a tab here". */
-  onPick: (artifact: OpenableArtifact) => void;
+   *  routes or navigates, so `+` always means "add a tab here". Widened to the
+   *  full `Artifact` in increment F: a typed URL is a `localhost` artifact,
+   *  which has no full-width screen and is therefore not `OpenableArtifact`. */
+  onPick: (artifact: Artifact) => void;
   onClose: () => void;
 }) {
   const [project, setProject] = useState<string | null>(null);
@@ -113,7 +122,26 @@ export function ArtifactPicker({
     }
 
     const out: Row[] = [];
-    // Projects first — few rows, and they are the gateway to everything the
+    // A TYPED URL wins the top slot (increment F). It is offered only when the
+    // input actually parses, so it costs nothing while you are filtering docs,
+    // and it is first because typing a URL is unambiguous intent.
+    //
+    // The PROJECT it will be filed under comes from the ACTIVE TAB's cwd — a
+    // live preview's pins live in `<project>/live-pins.json`, so the artifact
+    // needs a bucket, and the tab you pressed `+` in is the honest source. A
+    // cwd the registry has never seen still yields one (acceptance 6).
+    const manualUrl = parseManualUrl(filter);
+    if (manualUrl) {
+      const project = liveProjectFor(projects ?? [], sessionDirFor(getActiveTabSession()));
+      out.push({
+        kind: "url",
+        id: `u:${manualUrl}`,
+        label: manualUrl,
+        url: manualUrl,
+        project,
+      });
+    }
+    // Projects next — few rows, and they are the gateway to everything the
     // flat KB list cannot reach.
     for (const p of projects ?? []) {
       if (!hit(p.key)) continue;
@@ -172,6 +200,9 @@ export function ArtifactPicker({
           return;
         case "kb":
           onPick({ kind: "kb-doc", path: row.path });
+          return;
+        case "url":
+          onPick({ kind: "localhost", project: row.project, url: row.url });
           return;
         case "file":
           if (project !== null) onPick({ kind: "repo-file", project, path: row.path });
@@ -289,7 +320,9 @@ export function ArtifactPicker({
             }}
             onKeyDown={onKeyDown}
             placeholder={
-              project === null ? "Filter KB docs and projects…" : `Filter in ${project}…`
+              project === null
+                ? "Filter KB docs and projects, or type a URL / port…"
+                : `Filter in ${project}…`
             }
             style={{
               width: "100%",
@@ -460,6 +493,10 @@ function iconFor(row: Row): IconName {
     case "project":
     case "dir":
       return FOLDER_ICON;
+    case "url":
+      // The same globe describeArtifact gives a localhost artifact in the
+      // panel header — a row and the tab it becomes read as the same thing.
+      return "localhost";
     case "kb":
     case "file":
       return FILE_ICON;
@@ -475,6 +512,10 @@ function metaFor(row: Row): string {
       return row.meta;
     case "dir":
       return "";
+    case "url":
+      // Which bucket its pins will land in — worth stating before you open it,
+      // because that is the one thing a typed URL does not say for itself.
+      return `live preview · ${row.project}`;
     case "kb":
       // Truncated from the LEFT: the deep end of a KB path
       // (…/artifact-panel) is what disambiguates two docs with the same file

@@ -9,6 +9,7 @@ import {
   beginFileRead,
   fileKey,
   isPathInside,
+  liveProjectFor,
   mergeFileRead,
   mergeSessionRepos,
 } from "./explorer";
@@ -249,5 +250,51 @@ describe("beginFileRead / mergeFileRead", () => {
 
   it("fileKey separates project from path — same path, different projects", () => {
     expect(fileKey("a", "x.html")).not.toBe(fileKey("b", "x.html"));
+  });
+});
+
+// LIVE-PREVIEW PROJECT RESOLUTION (increment F) — which folder a live
+// preview's pins are filed under, derived from the SESSION's cwd because the
+// dev server itself knows nothing about projects.
+
+describe("liveProjectFor / projectKeyForDir", () => {
+  const projects = [
+    project("lodestar", ["C:\\Users\\ericm\\projects\\lodestar"]),
+    project("kyde", [
+      "C:\\Users\\ericm\\projects\\kyde-labs\\react-native-app",
+      "C:\\Users\\ericm\\projects\\kyde-labs\\admin-panel",
+    ]),
+  ];
+
+  it("names the registry project a session's cwd sits in", () => {
+    expect(liveProjectFor(projects, "C:\\Users\\ericm\\projects\\lodestar")).toBe("lodestar");
+    expect(liveProjectFor(projects, "C:\\Users\\ericm\\projects\\lodestar\\src\\api")).toBe("lodestar");
+  });
+
+  it("matches any repo of a multi-repo project, and mixed separators", () => {
+    expect(liveProjectFor(projects, "C:/Users/ericm/projects/kyde-labs/admin-panel/app")).toBe(
+      "kyde"
+    );
+  });
+
+  it("is segment-boundary safe (lodestar-old is not lodestar)", () => {
+    expect(liveProjectFor(projects, "C:\\Users\\ericm\\projects\\lodestar-old")).toBe("lodestar-old");
+  });
+
+  it("ACCEPTANCE 6 - a project the registry has never seen still gets a bucket", () => {
+    expect(liveProjectFor(projects, "C:\\Users\\ericm\\code\\one-off-spike")).toBe("one-off-spike");
+    expect(liveProjectFor([], "C:/tmp/scratch")).toBe("scratch");
+  });
+
+  it("prefers the INNER repo when checkouts nest", () => {
+    const nested = [project("outer", ["C:/p"]), project("inner", ["C:/p/apps/web"])];
+    expect(liveProjectFor(nested, "C:/p/apps/web/src")).toBe("inner");
+    expect(liveProjectFor(nested, "C:/p/tools")).toBe("outer");
+  });
+
+  it("falls back to a usable label rather than a drive letter or nothing", () => {
+    expect(liveProjectFor(projects, "")).toBe("local");
+    expect(liveProjectFor(projects, "C:\\")).toBe("local");
+    expect(liveProjectFor(projects, "/")).toBe("local");
   });
 });
