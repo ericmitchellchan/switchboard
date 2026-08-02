@@ -37,18 +37,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { kbReadDoc, kbWriteDoc } from "../../lib/ipc";
 import {
   addPin,
   clampZoom,
   createPin,
   docFileName,
-  emptyPinsFile,
-  parsePinsFile,
   parseWireframeMessage,
   pinsForDoc,
   removePin,
-  serializePinsFile,
   sidecarPathFor,
   updatePinNote,
   zoomAfterWheel,
@@ -56,12 +52,9 @@ import {
   WIREFRAME_MSG_SOURCE,
 } from "../../lib/pins";
 import type { PinsFile } from "../../lib/pins";
+import { mutatePins as mutateSharedPins, usePinsFile } from "../../lib/pinsStore";
 import { sendToThread, useSendToThreadAvailable } from "../../lib/panelStore";
 import { buildSendReference, refOptions } from "../../lib/agentContext";
-import { log } from "../../lib/logger";
-
-/** Debounce for sidecar writes — mutations batch into one kb_write_doc. */
-const PINS_WRITE_DEBOUNCE_MS = 500;
 
 // ── Instrument script (plain JS, appended to the mockup document) ────────────
 // Badge positions are computed in PAGE px from percent-of-scroll-size, then
@@ -286,59 +279,20 @@ export function WireframeView({ path, content }: { path: string; content: string
   // ── Pins ──
   const docName = docFileName(path);
   const sidecarPath = sidecarPathFor(path);
-  const [pinsFile, setPinsFile] = useState<PinsFile | null>(null);
+  // The sidecar lives in a SHARED store keyed by its path, not in component
+  // state: this same wireframe can be mounted twice at once (artifact panel on
+  // the terminal screen + the keep-alive KB screen), and two private copies
+  // meant the later writer silently clobbered the other's pins. See
+  // pinsStore.ts — it owns loading, sharing and the ONE debounced write per
+  // sidecar; pins.ts still owns every rule about the file's contents.
+  const pinsFile = usePinsFile(sidecarPath);
   const [pinMode, setPinMode] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
 
-  // Read the sidecar once on doc open. A read error means "no sidecar yet"
-  // (kb_read_doc errors on missing files) → start from an empty v1 file.
-  useEffect(() => {
-    let cancelled = false;
-    kbReadDoc(sidecarPath)
-      .then((text) => {
-        if (!cancelled) setPinsFile(parsePinsFile(text));
-      })
-      .catch(() => {
-        if (!cancelled) setPinsFile(emptyPinsFile());
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [sidecarPath]);
-
-  // Debounced sidecar write. `dirtyRef` + a timer instead of an effect on the
-  // file state: the initial LOAD must not trigger a write-back.
-  const fileRef = useRef<PinsFile | null>(null);
-  fileRef.current = pinsFile;
-  const writeTimerRef = useRef<number | null>(null);
-  const flushPins = useCallback(() => {
-    if (writeTimerRef.current !== null) {
-      window.clearTimeout(writeTimerRef.current);
-      writeTimerRef.current = null;
-    }
-    const file = fileRef.current;
-    if (!file) return;
-    kbWriteDoc(sidecarPath, serializePinsFile(file)).catch((e) => {
-      log.error(`wireframe: pins write failed for ${sidecarPath}: ${String(e)}`);
-    });
-  }, [sidecarPath]);
-
   const mutatePins = useCallback(
-    (fn: (file: PinsFile) => PinsFile) => {
-      setPinsFile((prev) => (prev === null ? prev : fn(prev)));
-      if (writeTimerRef.current !== null) window.clearTimeout(writeTimerRef.current);
-      writeTimerRef.current = window.setTimeout(flushPins, PINS_WRITE_DEBOUNCE_MS);
-    },
-    [flushPins]
+    (fn: (file: PinsFile) => PinsFile) => mutateSharedPins(sidecarPath, fn),
+    [sidecarPath]
   );
-
-  // Pending debounced write on unmount (doc switch / screen close) → flush
-  // immediately; fire-and-forget is fine, the backend outlives the component.
-  useEffect(() => {
-    return () => {
-      if (writeTimerRef.current !== null) flushPins();
-    };
-  }, [flushPins]);
 
   const docPins = useMemo(
     () => (pinsFile ? pinsForDoc(pinsFile, docName) : []),

@@ -84,12 +84,25 @@ export type PanelLayout = {
   width: number;
 };
 
-/** Space the pane tree is left with for a given container width + layout.
- *  The inverse of panelLayoutFor's cap, exported so the invariant "the shell
- *  never drops below MIN_TERMINAL_WIDTH" is assertable directly. */
+/** LAYOUT width the pane tree occupies. In overlay mode the tree keeps its
+ *  full width — the panel floats ON TOP of it — so this is what the terminal
+ *  is sized/fitted to, NOT what the user can see. Use `shellVisibleWidthFor`
+ *  for the "is any shell still visible" question. */
 export function paneTreeWidthFor(containerWidth: number, layout: PanelLayout): number {
   if (layout.mode === "overlay") return Math.round(containerWidth); // panel floats; tree keeps its width
   return Math.round(containerWidth) - DIVIDER_WIDTH - layout.width;
+}
+
+/** Shell the user can actually SEE — the invariant the requirements state
+ *  ("below a sane minimum the panel OVERLAYS or collapses rather than
+ *  crushing the terminal"). Docked and overlay differ here and only here:
+ *  a docked panel takes space from the tree, an overlay COVERS it, so
+ *  `paneTreeWidthFor` alone cannot see an overlay that hides the shell
+ *  completely — which is exactly the regression this exists to make
+ *  assertable. */
+export function shellVisibleWidthFor(containerWidth: number, layout: PanelLayout): number {
+  if (layout.mode === "overlay") return Math.round(containerWidth) - layout.width;
+  return paneTreeWidthFor(containerWidth, layout);
 }
 
 /** Decide the panel's mode + painted width.
@@ -97,19 +110,31 @@ export function paneTreeWidthFor(containerWidth: number, layout: PanelLayout): n
  *  - Unmeasured container (0 / non-finite, e.g. the terminal screen sitting at
  *    display:none) → dock at the requested width; the ResizeObserver corrects
  *    it the moment the container is real.
- *  - Container narrower than OVERLAY_BREAKPOINT → OVERLAY, capped at the
- *    container width.
+ *  - Container narrower than OVERLAY_BREAKPOINT → OVERLAY, capped so a strip
+ *    of shell stays UNCOVERED. Overlaying is meant to stop the panel crushing
+ *    the terminal; a full-width overlay would hide it entirely, which is
+ *    worse than the crushing it replaces. `panelWidth` is global, persisted
+ *    and draggable to 960 on a wide monitor, so a snap-resize down to a 700px
+ *    workspace really does arrive here with `want` bigger than the box.
+ *    The panel's own readability floor still wins on a truly tiny container —
+ *    there, the peek shrinks rather than the panel becoming unusable.
  *  - Otherwise DOCK, capped so the pane tree keeps MIN_TERMINAL_WIDTH *after*
  *    the divider's own 4px. (At the breakpoint that cap is 556px, comfortably
  *    above MIN_PANEL_WIDTH, so a docked panel is never squeezed below its own
- *    floor.) */
+ *    floor.)
+ *
+ *  Both branches therefore hold the same promise wherever the container can
+ *  afford it — `shellVisibleWidthFor >= MIN_TERMINAL_WIDTH` — so crossing the
+ *  breakpoint changes the panel's MODE, never whether the shell is visible. */
 export function panelLayoutFor(containerWidth: number, requestedWidth: number): PanelLayout {
   const want = clampPanelWidth(requestedWidth);
   if (!Number.isFinite(containerWidth) || containerWidth <= 0) {
     return { mode: "docked", width: want };
   }
   const box = Math.round(containerWidth);
-  if (box < OVERLAY_BREAKPOINT) return { mode: "overlay", width: Math.min(want, box) };
+  if (box < OVERLAY_BREAKPOINT) {
+    return { mode: "overlay", width: Math.max(MIN_PANEL_WIDTH, Math.min(want, box - MIN_TERMINAL_WIDTH)) };
+  }
   return { mode: "docked", width: Math.min(want, box - MIN_TERMINAL_WIDTH - DIVIDER_WIDTH) };
 }
 

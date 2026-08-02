@@ -82,6 +82,34 @@ describe("sanitizeForTypedLine", () => {
     expect(sanitizeForTypedLine("   a    b  \t c   ", 200)).toBe("a b c");
   });
 
+  it("strips BIDI overrides, embeddings and isolates", () => {
+    // An RLO makes the RENDERED line differ from the bytes — fatal for a seam
+    // whose safety argument is "he reads it before pressing Enter".
+    expect(sanitizeForTypedLine("rm‮gpj.exe", 100)).toBe("rmgpj.exe");
+    for (const ch of ["‪", "‫", "‬", "‭", "‮"]) {
+      expect(sanitizeForTypedLine(`a${ch}b`, 100)).toBe("ab");
+    }
+    for (const ch of ["⁦", "⁧", "⁨", "⁩", "⁯"]) {
+      expect(sanitizeForTypedLine(`a${ch}b`, 100)).toBe("ab");
+    }
+  });
+
+  it("strips zero-width characters, directional marks and the BOM", () => {
+    for (const ch of ["​", "‌", "‍", "‎", "‏", "﻿"]) {
+      expect(sanitizeForTypedLine(`a${ch}b`, 100)).toBe("ab");
+    }
+    // Word joiner + the invisible math operators.
+    for (const ch of ["⁠", "⁡", "⁢", "⁣", "⁤"]) {
+      expect(sanitizeForTypedLine(`a${ch}b`, 100)).toBe("ab");
+    }
+  });
+
+  it("strips LONE surrogates (malformed UTF-16 the IPC layer would reject)", () => {
+    expect(sanitizeForTypedLine("a\uD800b", 100)).toBe("ab"); // lone high
+    expect(sanitizeForTypedLine("a\uDFFFb", 100)).toBe("ab"); // lone low
+    expect(sanitizeForTypedLine("a\uDC00\uD83D b", 100)).toBe("a b"); // reversed pair
+  });
+
   it("keeps unicode — accents, CJK, emoji", () => {
     expect(sanitizeForTypedLine("café 日本語 ✅", 200)).toBe("café 日本語 ✅");
   });
@@ -214,24 +242,43 @@ describe("buildSpawnContext", () => {
 describe("buildSendReference", () => {
   it("no pin → just the artifact", () => {
     expect(buildSendReference(DOC)).toBe(
-      "Look at kb switchboard/features/artifact-panel/requirements.md"
+      'Look at "kb switchboard/features/artifact-panel/requirements.md"'
     );
-    expect(buildSendReference(REPO_FILE)).toBe("Look at repo switchboard/src/App.tsx");
+    expect(buildSendReference(REPO_FILE)).toBe('Look at "repo switchboard/src/App.tsx"');
   });
 
   it("with a pin → number + quoted note", () => {
     expect(buildSendReference(DOC, { number: 2, note: "the CTA is below the fold" })).toBe(
-      'Look at kb switchboard/features/artifact-panel/requirements.md, pin 2: "the CTA is below the fold"'
+      'Look at "kb switchboard/features/artifact-panel/requirements.md", pin 2: "the CTA is below the fold"'
     );
   });
 
-  it("an empty note drops the quotes rather than typing an empty pair", () => {
+  it("an empty note drops the NOTE's quotes rather than typing an empty pair", () => {
     expect(buildSendReference(DOC, { number: 4, note: "" })).toBe(
-      "Look at kb switchboard/features/artifact-panel/requirements.md, pin 4"
+      'Look at "kb switchboard/features/artifact-panel/requirements.md", pin 4'
     );
     expect(buildSendReference(DOC, { number: 4, note: "   \n  " })).toBe(
-      "Look at kb switchboard/features/artifact-panel/requirements.md, pin 4"
+      'Look at "kb switchboard/features/artifact-panel/requirements.md", pin 4'
     );
+  });
+
+  it("the REF is quoted, so shell syntax in a filename is inert at a bare prompt", () => {
+    // `; | & ' < >` are legal in a filename and are NOT on the drop list (that
+    // list is calibrated for text inside a quoted argument). Unquoted, this
+    // line ran two commands if Enter was pressed at a shell prompt.
+    const line = buildSendReference({ kind: "kb-doc", path: "notes & calc; ls.md" });
+    expect(line).toBe('Look at "kb notes & calc; ls.md"');
+    // Everything after `Look at ` is inside OUR quotes, and there are exactly
+    // two of them — the path could not have closed the pair early.
+    expect((line.match(/"/g) ?? []).length).toBe(2);
+    expect(line.startsWith('Look at "')).toBe(true);
+    expect(line.endsWith('"')).toBe(true);
+  });
+
+  it("a hostile PATH cannot break out of the ref's quotes either", () => {
+    const line = buildSendReference({ kind: "kb-doc", path: NASTY });
+    expect((line.match(/"/g) ?? []).length).toBe(2);
+    assertShellSafe(line, true);
   });
 
   it("NEVER ends in a newline — a trailing \\n would send the message", () => {
@@ -245,9 +292,10 @@ describe("buildSendReference", () => {
 
   it("a hostile note cannot break out of OUR quotes", () => {
     const line = buildSendReference(DOC, { number: 7, note: NASTY }, { kbRoot: KB_ROOT });
-    // Exactly the opening and closing quote WE added, and nothing else: the
-    // note's own quotes are gone, so it cannot terminate ours early.
-    expect((line.match(/"/g) ?? []).length).toBe(2);
+    // Exactly the two pairs WE added — one around the ref, one around the
+    // note — and nothing else: their own quotes are gone, so neither can
+    // terminate ours early.
+    expect((line.match(/"/g) ?? []).length).toBe(4);
     expect(line.endsWith('"')).toBe(true);
     assertShellSafe(line, true);
     expect(line).toContain("pin 7: ");

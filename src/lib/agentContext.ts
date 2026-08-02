@@ -30,6 +30,17 @@
 //
 //   - control characters (incl. \r \n \t and ESC) → a single space. A newline
 //     in a typed line IS an Enter — this rule is the one that matters most.
+//   - INVISIBLE formatting characters dropped: bidi overrides/embeddings/
+//     isolates (U+202A-202E, U+2066-206F), zero-width space/joiners and the
+//     LRM/RLM marks (U+200B-200F), word joiner + invisible operators
+//     (U+2060-2065), BOM (U+FEFF), and LONE surrogates. These cannot break
+//     quoting — the metacharacters are already gone — but the send-to-thread
+//     seam's entire safety argument is "he READS the line before pressing
+//     Enter", and an RLO makes the rendered line differ from the bytes. A
+//     lone surrogate is worse than invisible: it is malformed UTF-16 that
+//     writeToSession's invoke rejects outright. (Dropping U+200D also splits
+//     ZWJ emoji sequences into their parts — an acceptable cost on a shell
+//     line, where legibility beats glyph fidelity.)
 //   - `"` dropped: it would close the quoted argument.
 //   - `\` dropped: escape/line-continuation in POSIX shells (path separators
 //     are normalized to `/` BEFORE this runs — see normalizePath).
@@ -38,8 +49,13 @@
 //   - `%` dropped: cmd.exe variable expansion `%VAR%`.
 //   - whitespace runs collapsed, ends trimmed, length capped.
 //
-// The framing quotes around a pin note are OURS and are added AFTER the note
-// has been stripped of every `"`, so a note can never break out of them.
+// The framing quotes around a pin note — and, in the send-to-thread seam,
+// around the artifact ref itself — are OURS and are added AFTER the string has
+// been stripped of every `"`, so neither can break out of them. That framing
+// is what makes the drop list sufficient: the list is calibrated for text
+// sitting INSIDE a double-quoted argument, and every interpolation this module
+// emits is placed inside one (see buildSendReference for why the ref needs its
+// own pair even though the spawn one-liner does not).
 
 import type { Artifact } from "../types";
 import { SIDECAR_NAME } from "./pins";
@@ -55,8 +71,9 @@ export const REF_MAX = 300;
 export const PIN_NOTE_MAX = 240;
 
 /** Upper bound on ANY string buildSendReference can return — derived from the
- *  component caps above (asserted in the tests, not enforced by a final
- *  truncation: truncating the assembled line could strip a closing quote). */
+ *  component caps above plus the two framing quote pairs (asserted in the
+ *  tests, not enforced by a final truncation: truncating the assembled line
+ *  could strip a closing quote). */
 export const SEND_REFERENCE_MAX = 600;
 
 /** Highest pin number a reference will print (keeps the bound above real). */
@@ -64,6 +81,11 @@ const MAX_PIN_NUMBER = 9999;
 
 const CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F]/g;
 const SHELL_METACHARS = /["\\$%`]/g;
+/** Invisible/direction-altering formatting characters (see the module header).
+ *  The `u` flag is load-bearing: in Unicode mode the string is matched as CODE
+ *  POINTS, so `\uD800-\uDFFF` hits only UNPAIRED surrogates — a well-formed
+ *  pair is one code point above the range and emoji survive untouched. */
+const INVISIBLE_CHARS = /[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\uD800-\uDFFF]/gu;
 
 /** The single sanitizer both seams use (see the module header for the rule
  *  list and why each character is on it). Idempotent: sanitizing an already
@@ -73,6 +95,7 @@ export function sanitizeForTypedLine(text: string, maxLength: number): string {
   if (typeof text !== "string") return "";
   const flattened = text
     .replace(CONTROL_CHARS, " ")
+    .replace(INVISIBLE_CHARS, "")
     .replace(SHELL_METACHARS, "")
     .replace(/\s+/g, " ")
     .trim();
@@ -170,16 +193,27 @@ export type PinReference = { number: number; note: string };
  *  Single line, NO trailing newline (that would be an Enter, i.e. sending on
  *  the user's behalf). The caller writes this verbatim and nothing else.
  *
- *    Look at kb <path>
- *    Look at kb <path>, pin 2: "the CTA is below the fold"
- *    Look at kb <path>, pin 2            (note still empty)
+ *    Look at "kb <path>"
+ *    Look at "kb <path>", pin 2: "the CTA is below the fold"
+ *    Look at "kb <path>", pin 2          (note still empty)
+ *
+ *  THE REF IS QUOTED, and the quotes are ours. Unlike buildSpawnContext —
+ *  whose one-liner rides INSIDE launchCommand's own double quotes — nothing
+ *  wraps this line, and the drop list alone does not cover a bare shell:
+ *  `; | & ' < >` are all legal in a filename and all shell syntax unquoted, so
+ *  `notes & calc.md` would type a line that runs two commands if Enter is
+ *  pressed at a prompt whose claude has exited (a case the module header
+ *  explicitly admits happens). Quoting fixes it without mangling the path,
+ *  which is what adding those characters to the drop list would do — and it
+ *  cannot be escaped, because artifactRef has already removed every `"`.
+ *  Same rule, same reason, as the framing quotes around the note below.
  */
 export function buildSendReference(
   artifact: Artifact,
   pin?: PinReference | null,
   opts: RefOptions = {}
 ): string {
-  const ref = artifactRef(artifact, opts);
+  const ref = `"${artifactRef(artifact, opts)}"`;
   if (!pin) return `Look at ${ref}`;
   const number = Number.isFinite(pin.number)
     ? Math.min(MAX_PIN_NUMBER, Math.max(1, Math.trunc(pin.number)))

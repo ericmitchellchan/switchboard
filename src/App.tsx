@@ -18,7 +18,7 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, onSessionOutput, kbReadDoc, kbRoot } from "./lib/ipc";
+import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot } from "./lib/ipc";
 import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty, isSessionDirty, serializeForPip, setTerminalScreenVisible } from "./lib/terminal";
 import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing } from "./lib/pipBridge";
 import { bumpSessionGeneration, addSessionInputListener, getSessionGeneration } from "./lib/terminalRegistry";
@@ -52,6 +52,7 @@ import {
   remapPanelSessions,
   removeSessionPanel,
   togglePanel,
+  panelToggleAvailableFor,
   publishActiveTabSession,
   registerPanelActions,
   artifactFor,
@@ -68,6 +69,7 @@ import {
   setKbRootForContext,
 } from "./lib/agentContext";
 import { docFileName, parsePinsFile, pinsForDoc, sidecarPathFor } from "./lib/pins";
+import { configurePinsIO, getPinsFile } from "./lib/pinsStore";
 import { ArtifactPanel, CRUMB_TONE } from "./components/ArtifactPanel";
 import { NewThreadDialog } from "./components/NewThreadDialog";
 import { DocView } from "./components/kb/DocView";
@@ -89,6 +91,12 @@ import { initTaskDetector, destroyTaskDetector } from "./lib/taskDetector";
 import { startUpdater, registerPreRelaunchFlush } from "./lib/updater";
 import { log, initLogger } from "./lib/logger";
 import "@xterm/xterm/css/xterm.css";
+
+// Pins sidecar IO, wired at MODULE scope — before any render, so the first
+// WireframeView to mount can never find the store unwired (an effect would be
+// too late). The store owns sharing + scheduling; these are the only two file
+// operations it performs.
+configurePinsIO({ read: kbReadDoc, write: kbWriteDoc });
 
 function shouldConfirmSessionClose(session: Session): boolean {
   if (session.status === "running" || session.status === "waiting") return true;
@@ -142,12 +150,22 @@ async function resolveSpawnContext(sessionId: string): Promise<string | null> {
   if (!artifact) return null;
   let pinCount = 0;
   if (artifact.kind === "kb-doc") {
-    try {
-      const text = await kbReadDoc(sidecarPathFor(artifact.path));
-      pinCount = pinsForDoc(parsePinsFile(text), docFileName(artifact.path)).length;
-    } catch {
-      // No sidecar next to this doc (kb_read_doc errors on missing files) —
-      // the artifact still gets announced, just without a pin clause.
+    const sidecarPath = sidecarPathFor(artifact.path);
+    // Prefer the SHARED record when a view has it loaded: it is the same
+    // record every mount edits and it is newer than disk during the write
+    // debounce, so a pin placed a moment ago is counted instead of missed.
+    // Only fall back to disk when nothing has the sidecar open.
+    const shared = getPinsFile(sidecarPath);
+    if (shared) {
+      pinCount = pinsForDoc(shared, docFileName(artifact.path)).length;
+    } else {
+      try {
+        const text = await kbReadDoc(sidecarPath);
+        pinCount = pinsForDoc(parsePinsFile(text), docFileName(artifact.path)).length;
+      } catch {
+        // No sidecar next to this doc (kb_read_doc errors on missing files) —
+        // the artifact still gets announced, just without a pin clause.
+      }
     }
   }
   return buildSpawnContext(artifact, pinCount, { kbRoot: getKbRootForContext() });
@@ -334,6 +352,16 @@ export default function App() {
     [addSession]
   );
 
+  // KNOWN, DELIBERATE divergence from acceptance criterion 3's first clause
+  // ("opening a new shell tab does NOT close or blank the panel"): panel state
+  // is per-TAB (Decision 1, resolved AFTER that criterion was written), so a
+  // brand-new shell has no panel and the panel visually disappears until you
+  // switch back — the binding is intact, it just isn't this tab's. Only the
+  // THREAD create path inherits (handleCreateThread → inheritPanel), because
+  // there the inheritance also makes the spawn-context sentence true. Do not
+  // "fix" this by making Ctrl+T inherit without deciding that a plain shell
+  // should carry the previous tab's artifact — that is a product call, not a
+  // bug.
   const handleNewTab = useCallback(async () => {
     if (config.repos.length > 0) {
       setNewSessionDialogOpen(true);
@@ -999,7 +1027,19 @@ export default function App() {
   // when the chord would actually do something, so it never advertises a
   // no-op.
   const handleTogglePanel = useCallback(() => {
-    togglePanel(activeIdRef.current);
+    const sessionId = activeIdRef.current;
+    // A genuinely dead chord stays dead — no panel and no memory means no
+    // screen change either (the StatusBar chip is hidden in that state, so
+    // this only guards the raw keystroke).
+    if (!panelToggleAvailableFor(sessionId)) return;
+    // Content first, screen second — exactly applyOpenDecision's order. The
+    // panel renders ONLY on the terminal screen while the chord and the chip
+    // are live on every screen, so without this reveal a press from KB /
+    // Explorer opens or closes a surface the user cannot see and reads as a
+    // no-op: the same "advertising a dead chord" lie the chip gate exists to
+    // prevent, just from the other direction.
+    togglePanel(sessionId);
+    if (getNavState().route.screen !== "terminal") navigate({ screen: "terminal" });
   }, []);
 
   // The KB root never changes while the app runs — fetch it once so T8's
@@ -1772,7 +1812,21 @@ export default function App() {
             ever shows the ACTIVE tab's artifact, so "tab active" is structural
             and the remaining condition is "terminal screen visible" — which
             pauses DocView's poll exactly like the keep-alive screens pause
-            theirs. */}
+            theirs.
+
+            SPLIT-MODE CONTRACT — three surfaces key off three DIFFERENT ids on
+            purpose, and each one is correct for what it means:
+              · TabBar highlight  → effectiveActiveSessionId (the FOCUSED PANE)
+                — the tab strip names the session you are typing in.
+              · this panel        → activeSessionId (the TAB) — Decision 1:
+                a split "just shares the width", so moving pane focus must not
+                swap or blank the panel, and persistence must not fork one
+                binding per pane.
+              · `→ thread` send   → effectiveActiveIdRef (the FOCUSED PANE) —
+                text has to land in the terminal his keystrokes reach.
+            In the unsplit case (almost always) all three are the same id. Do
+            NOT unify them for consistency: each divergence is load-bearing,
+            and aligning any one of them breaks the rule above it. */}
         <ScreenErrorBoundary
           resetKey={`panel:${activeSessionId ?? "none"}:${activePanelIdentity}`}
           fallbackStyle={{ flex: "none", width: getPanelWidth(), borderLeft: "1px solid var(--border-subtle)" }}

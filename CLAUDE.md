@@ -54,6 +54,7 @@ src/
 │   ├── agentContext.ts          → Agent context injection (T8): shell-safe sanitizer + the two seam builders (`buildSpawnContext`, `buildSendReference`) + KB-root cache. PURE — the effectful ends live in App/threadStore/panelStore
 │   ├── kb.ts                    → KB doc list/read data layer (poll while active)
 │   ├── pins.ts                  → Wireframe pin/note file model (pure ops over pins JSON)
+│   ├── pinsStore.ts             → ONE shared `.pins.json` record per sidecar (refcounted mounts, one debounced writer, injected IO) — the panel and the KB screen can host the same wireframe at once
 │   ├── explorer.ts              → Explorer data layer (projects/listing/read via IPC, live-thread annotation)
 │   ├── diagramZoom.ts           → Pure pan/zoom math for the diagram surface
 │   ├── diagramMeta.ts           → Diagram metadata parsing (.mmd frontmatter/title)
@@ -67,7 +68,7 @@ src/
 │   ├── logger.ts                → Frontend structured logging
 │   ├── updater.ts               → Auto-update check
 │   └── export.ts                → Export session to file
-└── lib/*.test.ts              → 14 Vitest test suites (paneLayout, statusDetector, taskDetector, resizePolicy, terminalLifecycle, route, threadStore, panelStore, agentContext, kb, pins, explorer, diagramZoom, updaterState)
+└── lib/*.test.ts              → 15 Vitest test suites (paneLayout, statusDetector, taskDetector, resizePolicy, terminalLifecycle, route, threadStore, panelStore, agentContext, kb, pins, pinsStore, explorer, diagramZoom, updaterState)
 
 src-tauri/
 ├── src/
@@ -135,6 +136,7 @@ pnpm test:watch        # Vitest (watch mode)
 - **Spawn generations** — every PTY event carries the spawn's generation; the expectation is bumped BEFORE each restart invoke so a dying old reader thread's output/exit events are dropped, never rendered
 - **Grow-only resize policy** — terminal cols never shrink on pane narrow (horizontal scroll instead); widen = snapshot-reflow; mid-stream grid changes deferred until output settles (`resizePolicy.ts`)
 - **Threads** — a thread binds a tab to a claude conversation via `chatSessionId` (minted by us) + `chatStarted` (UI hint); the revive `--resume` vs `--session-id` choice comes from disk GROUND TRUTH (`claude_session_exists`), never from the hint
+- **One shared record per `.pins.json`, never per mount** — the artifact panel and the keep-alive KB screen can host the SAME wireframe simultaneously (`display:none` is not unmount). Component-local pin state meant two copies and a silent last-writer-wins clobber, so all mounts go through `pinsStore` (refcounted subscribe, one debounced writer per sidecar, flush on last release). `pins.ts` stays pure and owns the file's contents; the store owns sharing and IO
 - **Artifact panel is per-TAB, never per-pane** — `panelStore` keys on the TAB's `activeSessionId`, not `effectiveActiveSessionId` (the focused pane). A split terminal + panel just shares the width: moving pane focus never swaps or blanks the panel, and persistence never forks one binding per pane
 - **Panel geometry is measured against the WORKSPACE container** — App nests `[pane tree | divider | ArtifactPanel]` in a container that EXCLUDES the TaskSidebar, so the panel's right edge is the container's right edge. Every width rule in `panelStore` (`panelLayoutFor`, `panelWidthFromDrag`, the MIN_TERMINAL_WIDTH floor, overlay's `right: 0`) assumes that nesting; re-parenting the panel next to the sidebar makes all of them wrong by exactly the sidebar's width (0/38/280px)
 - **Two honest agent-context seams, and no third** — (1) SPAWN-TIME: `--append-system-prompt "<one-liner>"` on the thread launch line, re-derived from the target tab's panel at EVERY spawn so stale context dies with the session; a fresh thread inherits the panel it was launched from so the sentence is true. (2) SEND-TO-THREAD: `→ thread` TYPES a reference into the terminal with NO trailing `\r` — the Enter is the user's. Anything that injects mid-conversation or presses Enter for the user is out of scope. Both strings go through `agentContext.sanitizeForTypedLine` (control chars, `" \ $ % \``) because they land on a shell line
@@ -197,9 +199,12 @@ Chord notes:
 - **Ctrl+Shift+P moved PiP to Ctrl+Shift+O** (A2) — the two cannot share a chord.
 - **Ctrl+Shift+W / Ctrl+Shift+S / Ctrl+Shift+O / Ctrl+Shift+[ ] / Ctrl+Alt+Arrow /
   Ctrl+- are keyboard-ONLY** — no button, hint or tooltip surfaces them anywhere in
-  the UI. The StatusBar hint strip advertises Ctrl+T/W/[ ]/F/\\/1-9 plus the two
-  clickable chips (Ctrl+Shift+B menu, Ctrl+Shift+P panel, the latter only while the
-  chord would do something).
+  the UI. The StatusBar hint strip advertises Ctrl+T/W/[ ]/F/\\/1-9 as plain text plus
+  THREE clickable buttons: Ctrl+Shift+B menu, Ctrl+Shift+P panel (rendered only while
+  the chord would do something), and Ctrl+B tasks.
+- **Ctrl+Shift+P reveals the terminal screen** when the route is elsewhere — the panel
+  renders only there, so toggling from KB/Explorer would otherwise be invisible.
+  Mirrors `applyOpenDecision`'s `revealTerminal`.
 - **Ctrl+click** on a side-menu tree row inverts the open decision (panel ⇄ full
   width) — mouse, not keyboard; the rule lives in `panelStore.decideOpen`.
 

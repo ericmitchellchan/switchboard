@@ -30,6 +30,7 @@ import {
   paneTreeWidthFor,
   artifactIdentity,
   panelIdentityFor,
+  shellVisibleWidthFor,
   MIN_TERMINAL_WIDTH,
   OVERLAY_BREAKPOINT,
   DIVIDER_WIDTH,
@@ -447,8 +448,35 @@ describe("panelLayoutFor (docked vs overlay)", () => {
     expect(layout.width).toBeGreaterThanOrEqual(MIN_PANEL_WIDTH);
   });
 
-  it("an overlay is never wider than the container it floats over", () => {
-    expect(panelLayoutFor(300, 420)).toEqual({ mode: "overlay", width: 300 });
+  it("an overlay NEVER covers the whole shell — it reserves the terminal floor", () => {
+    // The recorded regression: this used to cap at the container width, so a
+    // 960px stored width on an 879px workspace hid the terminal completely —
+    // inverting the "overlays RATHER THAN crushing" safeguard.
+    const layout = panelLayoutFor(OVERLAY_BREAKPOINT - 1, MAX_PANEL_WIDTH);
+    expect(layout).toEqual({
+      mode: "overlay",
+      width: OVERLAY_BREAKPOINT - 1 - MIN_TERMINAL_WIDTH,
+    });
+    expect(shellVisibleWidthFor(OVERLAY_BREAKPOINT - 1, layout)).toBe(MIN_TERMINAL_WIDTH);
+  });
+
+  it("crossing the breakpoint changes the MODE, not whether the shell is visible", () => {
+    const docked = panelLayoutFor(OVERLAY_BREAKPOINT, MAX_PANEL_WIDTH);
+    const overlaid = panelLayoutFor(OVERLAY_BREAKPOINT - 1, MAX_PANEL_WIDTH);
+    expect(docked.mode).toBe("docked");
+    expect(overlaid.mode).toBe("overlay");
+    // 880 → 320 visible, 879 → 320 visible. Pre-fix this step was 320 → 0.
+    expect(shellVisibleWidthFor(OVERLAY_BREAKPOINT, docked)).toBe(MIN_TERMINAL_WIDTH);
+    expect(shellVisibleWidthFor(OVERLAY_BREAKPOINT - 1, overlaid)).toBe(MIN_TERMINAL_WIDTH);
+  });
+
+  it("on a container too small for both, the PANEL keeps its floor and the peek shrinks", () => {
+    // 300px of workspace cannot hold 260 + 320. The panel stays readable and
+    // a strip of shell survives — never zero, which is the actual invariant.
+    const layout = panelLayoutFor(300, 420);
+    expect(layout).toEqual({ mode: "overlay", width: MIN_PANEL_WIDTH });
+    expect(shellVisibleWidthFor(300, layout)).toBe(40);
+    expect(shellVisibleWidthFor(300, layout)).toBeGreaterThan(0);
   });
 
   it("an unmeasured container (hidden screen / first paint) docks at the requested width", () => {
@@ -477,6 +505,15 @@ describe("terminal floor holds across row width x sidebar state", () => {
         // Overlay leaves the tree untouched; docked hands back exactly the
         // floor whenever the cap binds.
         if (layout.mode === "overlay") expect(paneTree).toBe(container);
+        // …and the assertion that actually catches an occluding overlay:
+        // paneTreeWidthFor reports LAYOUT space, which an overlay never takes,
+        // so on its own it cannot tell a floating panel from a covered shell.
+        // Every cell here can afford both floors, so every cell must keep a
+        // real, VISIBLE shell.
+        expect(container).toBeGreaterThanOrEqual(MIN_PANEL_WIDTH + MIN_TERMINAL_WIDTH);
+        expect(shellVisibleWidthFor(container, layout)).toBeGreaterThanOrEqual(
+          MIN_TERMINAL_WIDTH
+        );
       });
     }
   }
@@ -484,9 +521,12 @@ describe("terminal floor holds across row width x sidebar state", () => {
   it("the specific cell the reviewer computed: row 1100, sidebar full", () => {
     const container = workspaceWidth(1100, "full"); // 820
     const layout = panelLayoutFor(container, MAX_PANEL_WIDTH);
-    // 820 < 880 → the panel floats rather than leaving the shell 36px.
-    expect(layout).toEqual({ mode: "overlay", width: 820 });
+    // 820 < 880 → the panel floats rather than leaving the shell 36px…
+    expect(layout).toEqual({ mode: "overlay", width: 820 - MIN_TERMINAL_WIDTH });
+    // …the pane tree keeps its full layout width (nothing was taken from it)…
     expect(paneTreeWidthFor(container, layout)).toBe(820);
+    // …and 320px of it is genuinely on screen, not under the panel.
+    expect(shellVisibleWidthFor(container, layout)).toBe(MIN_TERMINAL_WIDTH);
   });
 
   it("row 1100, sidebar collapsed/hidden: docked, shell lands exactly on the floor", () => {
