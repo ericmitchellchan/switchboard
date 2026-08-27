@@ -4,7 +4,7 @@ import { Terminal } from "@xterm/xterm";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { open as openShellUrl } from "@tauri-apps/plugin-shell";
-import { closePipWindow, listSessions, onSessionExited, writeToSession, kbReadDoc, kbWriteDoc } from "./lib/ipc";
+import { closePipWindow, closeSurfaceWindow, listSessions, onSessionExited, writeToSession, kbReadDoc, kbWriteDoc } from "./lib/ipc";
 import { notifyPipClosing, notifyPipReady, notifyPipSwitchSession, onPipHost, onPipOutput, onPipSessions, type PipSessionInfo } from "./lib/pipBridge";
 import { STATUS_CONFIGS } from "./lib/statusConfig";
 import type { AgentStatus, Artifact } from "./types";
@@ -12,6 +12,8 @@ import { log, initLogger } from "./lib/logger";
 import { describeArtifact, sanitizeArtifact } from "./lib/panelStore";
 import { configurePinsIO } from "./lib/pinsStore";
 import { ArtifactSurface } from "./components/kb/ArtifactSurface";
+import { SurfaceHost } from "./surfaces/SurfaceHost";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Icon } from "./components/icons";
 import "@xterm/xterm/css/xterm.css";
 import "./styles/global.css";
@@ -31,11 +33,15 @@ initLogger().catch(() => {});
 // for the first mount, and an unwired store logs an error and stays inert
 // rather than presenting a real sidecar as empty.
 //
-// This does NOT make a second pins WRITER: pinsStore is per-WINDOW module
-// state, and the two windows never host the same artifact at the same time —
-// popping one out replaces the panel's copy with a placeholder, precisely so
-// there is one live record of it. Within each window the store is still the
-// only thing that writes.
+// pinsStore is per-WINDOW module state. For a POPPED-OUT artifact the two
+// windows never host the same one at the same time — popping out replaces
+// the panel's copy with a placeholder — so there is one live record. A
+// SURFACE WINDOW (Inc 5d) is different: the same page can be open in the
+// panel too, and both windows then hold `<project>/surface-pins.json` in
+// their own store. What keeps that honest is the store's write-side merge
+// (pins.mergeForeignPins) plus the 2.5s re-read while on screen: an edit in
+// one window lands in the other within a refresh, never overwritten. Within
+// each window the store is still the only thing that writes.
 configurePinsIO({ read: kbReadDoc, write: kbWriteDoc });
 
 const THEME = {
@@ -561,6 +567,85 @@ function PipShell({
   );
 }
 
+/** A SURFACE WINDOW (Inc 5d — SWIT-42): one project page in its own
+ *  always-on-top window, booted by `?surface=<artifact json>`. No session,
+ *  no tab strip, no return-to-panel: the page IS the window. The frame is the
+ *  PiP's drag bar shape with the page's title and one ×, and `closeHost` on
+ *  the page's nav closes this window (the HUD's own × uses it). */
+function SurfaceWindow({ artifact }: { artifact: Extract<Artifact, { kind: "surface" }> }) {
+  const { title } = describeArtifact(artifact);
+  const close = useCallback(() => {
+    // Through the origin-gated Rust command, like every other window op —
+    // no `core:window:allow-close` grant for the whole app.
+    closeSurfaceWindow(getCurrentWindow().label).catch((e) =>
+      log.warn(`[surface window] close failed: ${e}`)
+    );
+  }, []);
+  return (
+    <>
+      <div
+        style={{
+          position: "fixed",
+          top: 0,
+          left: 0,
+          right: 0,
+          height: TAB_STRIP_HEIGHT,
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          padding: "0 4px 0 10px",
+          backgroundColor: "rgba(255,255,255,0.04)",
+          borderBottom: "1px solid rgba(255,255,255,0.06)",
+          // @ts-expect-error — non-standard but supported by WebView2
+          WebkitAppRegion: "drag",
+          zIndex: 10,
+          fontFamily: "var(--font-mono)",
+          fontSize: 11,
+          color: "#A1A1AA",
+          overflow: "hidden",
+          whiteSpace: "nowrap",
+        }}
+        title={title}
+      >
+        <Icon name="surface" style={{ color: "#52525B" }} />
+        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{title}</span>
+        <button
+          type="button"
+          onClick={close}
+          title="Close this window"
+          aria-label="Close"
+          style={{
+            // @ts-expect-error — non-standard but supported by WebView2
+            WebkitAppRegion: "no-drag",
+            background: "transparent",
+            border: "none",
+            color: "#71717A",
+            fontFamily: "var(--font-mono)",
+            fontSize: 13,
+            padding: "0 6px",
+            cursor: "pointer",
+          }}
+        >
+          ×
+        </button>
+      </div>
+      <div
+        style={{
+          position: "fixed",
+          top: TAB_STRIP_HEIGHT,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          display: "flex",
+          background: "#0C0C0E",
+        }}
+      >
+        <SurfaceHost artifact={artifact} active onCloseHost={close} />
+      </div>
+    </>
+  );
+}
+
 /** Parse an artifact off the wire (URL query or `pip:host`) through the SAME
  *  lean gate every other load path uses. Bad JSON → null → terminal mode,
  *  never a half-built record. */
@@ -587,11 +672,21 @@ const initialArtifact = (() => {
   return raw ? safeParseArtifact(raw) : null;
 })();
 
+// `?surface=` boots a SURFACE WINDOW (Inc 5d): a page alone, no session at
+// all. Same lean gate; anything but a surface artifact is refused.
+const surfaceArtifact = (() => {
+  const raw = params.get("surface");
+  const parsed = raw ? safeParseArtifact(raw) : null;
+  return parsed && parsed.kind === "surface" ? parsed : null;
+})();
+
 const root = createRoot(document.getElementById("root") as HTMLElement);
 // A session id is required for the TERMINAL mirror and irrelevant to artifact
 // mode — an artifact pop-out from a tab-less workspace passes an empty one, and
 // erroring on that would turn a working pop-out into a red error card.
-if (!sessionId && !initialArtifact) {
+if (surfaceArtifact) {
+  root.render(<SurfaceWindow artifact={surfaceArtifact} />);
+} else if (!sessionId && !initialArtifact) {
   root.render(
     <div
       style={{

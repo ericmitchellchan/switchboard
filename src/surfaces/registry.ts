@@ -44,7 +44,20 @@ export type SurfacePage = {
    *  `<kind>:<id>` keys it may pin. Printed into the spawn context; the shell
    *  itself never interprets it. */
   pinHint?: string;
+  /** A page that also lives in ITS OWN always-on-top window (Inc 5d — the
+   *  trading HUD over NinjaTrader): its default size and title there. Absent
+   *  = the page opens in the panel / full width like any other; `openWindow`
+   *  on it falls back to a generic size. */
+  window?: { width: number; height: number; title?: string };
 };
+
+/** The Tauri window label for a page's own window: `surface-<project>-<page>`
+ *  with anything outside `[A-Za-z0-9_-]` folded to `-` (Rust re-validates).
+ *  Pure, so the window can be found again from the same two ids. */
+export function surfaceWindowLabel(project: string, page: string): string {
+  const fold = (s: string) => s.replace(/[^A-Za-z0-9_-]+/g, "-");
+  return `surface-${fold(project)}-${fold(page)}`;
+}
 
 export type SurfaceBackend = {
   /** Origin the page fetches — also what the host probes. */
@@ -120,6 +133,22 @@ export const SURFACES: Readonly<Record<string, ProjectSurfaces>> = {
           })),
       },
       { id: "knowledge", label: "Knowledge", load: () => import("../projects/lodestar/pages/Knowledge") },
+      // Stage-A cockpit (Inc 5c — SWIT-41). Sim-only: every write goes through
+      // the backend; the shell learns nothing about orders.
+      { id: "overview", label: "Overview", load: () => import("../projects/lodestar/pages/Overview") },
+      { id: "command", label: "Command", load: () => import("../projects/lodestar/pages/Command") },
+      { id: "kalshi", label: "Kalshi", load: () => import("../projects/lodestar/pages/KalshiCockpit") },
+      { id: "portfolio", label: "Portfolio", load: () => import("../projects/lodestar/pages/Portfolio") },
+      { id: "journal", label: "Journal", load: () => import("../projects/lodestar/pages/Journal") },
+      // The trading HUD (Inc 5d — SWIT-42): tilt guardrails over NinjaTrader.
+      // Opens in its own always-on-top window from the Trading page; also a
+      // plain page if you want it in the panel.
+      {
+        id: "hud",
+        label: "HUD",
+        load: () => import("../projects/lodestar/pages/Hud"),
+        window: { width: 380, height: 310, title: "lodestar · guardrails" },
+      },
     ],
   },
 };

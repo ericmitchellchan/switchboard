@@ -38,7 +38,8 @@
 
 import { Component, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ErrorInfo, ReactNode } from "react";
-import { componentFor, findSurface, surfaceBackend, surfaceLabel } from "./registry";
+import { componentFor, findSurface, surfaceBackend, surfaceLabel, surfaceWindowLabel } from "./registry";
+import { notify, openSurfaceWindow } from "../lib/ipc";
 import type { SurfaceArtifact, SurfaceBackend } from "./registry";
 import { SurfaceAnchorContext, composeAnchorProviders, domAnchorProvider } from "./anchors";
 import type { SurfaceAnchorProvider, SurfaceAnchorRegistry } from "./anchors";
@@ -85,9 +86,13 @@ const NOTE_STYLE: CSSProperties = {
 export function SurfaceHost({
   artifact,
   active,
+  onCloseHost,
 }: {
   artifact: SurfaceArtifact;
   active: boolean;
+  /** What the page's `closeHost()` does — a surface WINDOW passes its own
+   *  close; the panel passes nothing (its × is the panel's). */
+  onCloseHost?: () => void;
 }) {
   const page = findSurface(artifact.project, artifact.page);
   const backend = surfaceBackend(artifact.project);
@@ -112,8 +117,23 @@ export function SurfaceHost({
   // The page-facing API (5a): where a page's "go to page X" lands is the
   // shell's decision — the same open rule a tree click follows.
   const nav = useMemo<SurfaceNav>(
-    () => ({ openPage: (page) => openArtifact({ kind: "surface", project: artifact.project, page }) }),
-    [artifact.project]
+    () => ({
+      openPage: (page) => openArtifact({ kind: "surface", project: artifact.project, page }),
+      openWindow: (page) => {
+        const target = findSurface(artifact.project, page);
+        const win = target?.window;
+        const label = surfaceWindowLabel(artifact.project, page);
+        const json = JSON.stringify({ kind: "surface", project: artifact.project, page });
+        openSurfaceWindow(label, json, {
+          title: win?.title ?? `${artifact.project} · ${target?.label ?? page}`,
+          width: win?.width ?? 480,
+          height: win?.height ?? 320,
+        }).catch((e) => log.warn(`openWindow(${page}) failed: ${e}`));
+      },
+      closeHost: onCloseHost ?? (() => {}),
+      notify: (title, body) => void notify(title, body),
+    }),
+    [artifact.project, onCloseHost]
   );
   // The agent = the thread beside this surface (page-api §The agent). The
   // page's text goes through the same sanitizer a pin reference does — one
@@ -165,7 +185,10 @@ export function SurfaceHost({
         <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }}>
           {/* The surface toolbar: pin mode, and the one-line refusal when an
               armed click lands on nothing pinnable. Soft palette, 26px, the
-              same chrome LocalhostView puts above its frame. */}
+              same chrome LocalhostView puts above its frame. Hidden in a
+              page's OWN window (5d): a 380px HUD has nothing to pin and the
+              window frame already carries its title. */}
+          {!onCloseHost && (
           <div style={TOOLBAR_STYLE}>
             <span style={{ flex: 1, minWidth: 0, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {flash ?? (pinMode ? "pin mode — click a row, tile or bar" : "")}
@@ -182,6 +205,7 @@ export function SurfaceHost({
               {"\u{1F4CC}"} pin{pins.count > 0 ? ` ${pins.count}` : ""}
             </button>
           </div>
+          )}
           <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
             <div className="sb-surface" style={ROOT_STYLE}>
               {/* The content WRAPPER is the anchor root (DOM provider scope), the

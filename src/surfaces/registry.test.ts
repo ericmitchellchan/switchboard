@@ -9,6 +9,7 @@ import {
   findSurface,
   surfaceBackend,
   surfaceLabel,
+  surfaceWindowLabel,
   componentFor,
 } from "./registry";
 
@@ -17,8 +18,8 @@ describe("surface registry", () => {
     expect(Object.keys(SURFACES)).toContain("lodestar");
     const ids = surfacePages("lodestar").map((p) => p.id);
     expect(ids.slice(0, 3)).toEqual(["trading", "markets", "chart"]);
-    // 5b research surfaces
-    for (const id of ["playground", "answer-key", "s1-case", "s2-case", "k1-case", "path-case", "data-health", "library-cases", "library-threads", "knowledge"]) {
+    // 5b research + 5c cockpit + 5d HUD surfaces
+    for (const id of ["playground", "answer-key", "s1-case", "s2-case", "k1-case", "path-case", "data-health", "library-cases", "library-threads", "knowledge", "overview", "command", "kalshi", "portfolio", "journal", "hud"]) {
       expect(ids).toContain(id);
     }
     expect(new Set(ids).size).toBe(ids.length); // ids are unique — they are URLs
@@ -55,5 +56,18 @@ describe("surface registry", () => {
   it("the backend hint is prose, never a bare command the shell would run", () => {
     // The card prints it for a person to read; it must name the repo context.
     expect(surfaceBackend("lodestar")?.hint).toMatch(/lodestar repo/);
+  });
+});
+
+describe("surface windows (5d)", () => {
+  it("labels a page's own window from its two ids, folded to Tauri's label alphabet", () => {
+    expect(surfaceWindowLabel("lodestar", "hud")).toBe("surface-lodestar-hud");
+    expect(surfaceWindowLabel("my project", "a/b:c")).toBe("surface-my-project-a-b-c");
+  });
+
+  it("the HUD declares its own window size", () => {
+    const hud = findSurface("lodestar", "hud");
+    expect(hud?.window).toEqual({ width: 380, height: 310, title: "lodestar · guardrails" });
+    expect(findSurface("lodestar", "trading")?.window).toBeUndefined();
   });
 });

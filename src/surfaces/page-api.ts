@@ -51,9 +51,23 @@ export type SurfaceNav = {
    *  page id the registry does not know renders the host's "no such page"
    *  note rather than throwing. */
   openPage: (page: string) => void;
+  /** Open a page of this project in ITS OWN always-on-top window (Inc 5d —
+   *  the trading HUD). Re-opening focuses the existing window. */
+  openWindow: (page: string) => void;
+  /** Close the thing hosting this page: its own window when it has one; a
+   *  no-op in the panel (the panel's own × does that). The HUD's × uses it. */
+  closeHost: () => void;
+  /** A system notification (the shell's plugin — the web `Notification`
+   *  API is not reliably available inside the webview). */
+  notify: (title: string, body: string) => void;
 };
 
-const NOOP_NAV: SurfaceNav = { openPage: () => {} };
+const NOOP_NAV: SurfaceNav = {
+  openPage: () => {},
+  openWindow: () => {},
+  closeHost: () => {},
+  notify: () => {},
+};
 
 export const SurfaceNavContext = createContext<SurfaceNav>(NOOP_NAV);
 

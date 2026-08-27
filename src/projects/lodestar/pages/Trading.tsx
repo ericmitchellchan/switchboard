@@ -14,6 +14,7 @@ import { api, type ContextTables, type TradeRow } from "../api/client";
 import ExitSandbox from "../components/trading/ExitSandbox";
 import TradeDetail from "../components/trading/TradeDetail";
 import { ptTime } from "../lib/time";
+import { useSurfaceNav } from "../../../surfaces/page-api";
 
 const UP = "#4ea96a";
 const DN = "#e0645b";
@@ -62,6 +63,7 @@ function Tile({ label, value, color }: { label: string; value: string; color?: s
 
 export default function Trading() {
   const [tab, setTab] = useState<"audit" | "trades" | "exits">("audit");
+  const nav = useSurfaceNav();
   const [rows, setRows] = useState<TradeRow[]>([]);
   const [tables, setTables] = useState<ContextTables | null>(null);
   const [noData, setNoData] = useState(false);
@@ -184,9 +186,16 @@ export default function Trading() {
           <TabBtn id="trades" label="trades" />
           <TabBtn id="exits" label="exits" />
         </div>
-        {/* The HUD button is gone in the Switchboard copy: it opened an
-            Electron window via `window.lodestar`. The HUD returns as a second
-            Tauri window (Inc 5 / later), not as a dead control here. */}
+        {/* SWITCHBOARD: the HUD is the `hud` page in its own always-on-top
+            window (page-api openWindow, Inc 5d) — it stays over NinjaTrader. */}
+        <button
+          type="button"
+          onClick={() => nav.openWindow("hud")}
+          title="open the always-on-top guardrail HUD (runs over NinjaTrader while you trade)"
+          className="rounded-md border border-line px-2.5 py-0.5 font-mono text-[11px] text-dim hover:text-accent"
+        >
+          ⧉ HUD
+        </button>
         <span className="ml-auto font-mono text-[10px] text-dim2">the thread beside this view can slice, query and sim this data with you</span>
       </div>
 

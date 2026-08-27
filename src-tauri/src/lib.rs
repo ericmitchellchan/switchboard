@@ -603,6 +603,76 @@ fn is_pip_window_open(app_handle: tauri::AppHandle) -> bool {
     app_handle.get_webview_window(PIP_WINDOW_LABEL).is_some()
 }
 
+/// A SURFACE WINDOW (platform evolution, Inc 5d — SWIT-42): one project page
+/// in its own always-on-top window — Lodestar's trading HUD over NinjaTrader
+/// is the first. Generalised from the PiP: same `pip.html` entry, a
+/// `?surface=<encoded artifact json>` param instead of `?session=`, and a
+/// label PER PAGE (`surface-<project>-<page>`) so a HUD and a popped-out doc
+/// never fight over one window. Opening an already-open one FOCUSES it.
+///
+/// The label is validated here, not trusted from the frontend: Tauri labels
+/// are `[A-Za-z0-9-/:_]`, and a label is also a lookup key.
+#[tauri::command]
+async fn open_surface_window(
+    app_handle: tauri::AppHandle,
+    label: String,
+    artifact: String,
+    title: String,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    if label.is_empty()
+        || !label
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!("invalid surface window label {:?}", label));
+    }
+    if artifact.is_empty() {
+        return Err("surface window needs an artifact".into());
+    }
+    if let Some(existing) = app_handle.get_webview_window(&label) {
+        log::debug!("Surface window {} already open, focusing", label);
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+    let w = if width.is_finite() { width.clamp(200.0, 1600.0) } else { 380.0 };
+    let h = if height.is_finite() { height.clamp(120.0, 1200.0) } else { 260.0 };
+    log::info!("Opening surface window {} ({}x{})", label, w, h);
+    tauri::WebviewWindowBuilder::new(
+        &app_handle,
+        &label,
+        tauri::WebviewUrl::App(format!("pip.html?surface={}", artifact).into()),
+    )
+    .title(if title.is_empty() { "Switchboard — Surface".to_string() } else { title })
+    .inner_size(w, h)
+    .always_on_top(true)
+    .decorations(false)
+    .skip_taskbar(true)
+    .resizable(true)
+    .focused(true)
+    .build()
+    .map_err(|e| {
+        log::error!("Failed to open surface window {}: {}", label, e);
+        e.to_string()
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+fn close_surface_window(app_handle: tauri::AppHandle, label: String) -> Result<(), String> {
+    // Only a SURFACE window closes this way — never `main` (its close is the
+    // confirm flow) and never the PiP (its own command owns that lifecycle).
+    if !label.starts_with("surface-") {
+        return Err(format!("not a surface window: {:?}", label));
+    }
+    if let Some(window) = app_handle.get_webview_window(&label) {
+        log::info!("Closing surface window {}", label);
+        window.close().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app_state = Arc::new(AppState {
@@ -810,6 +880,8 @@ fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         write_file,
         confirm_app_close,
         open_pip_window,
+        open_surface_window,
+        close_surface_window,
         close_pip_window,
         is_pip_window_open,
     ];

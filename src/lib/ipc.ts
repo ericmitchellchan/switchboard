@@ -263,6 +263,28 @@ export async function openPipWindow(sessionId: string, artifactJson?: string): P
   });
 }
 
+/** A SURFACE WINDOW (Inc 5d): one project page in its own always-on-top
+ *  window. `artifactJson` is the artifact record; encoded here, decoded by
+ *  the window's URLSearchParams — one side owns each direction, like the
+ *  PiP. Re-opening focuses the existing window. */
+export async function openSurfaceWindow(
+  label: string,
+  artifactJson: string,
+  opts: { title: string; width: number; height: number }
+): Promise<void> {
+  return invoke("open_surface_window", {
+    label,
+    artifact: encodeURIComponent(artifactJson),
+    title: opts.title,
+    width: opts.width,
+    height: opts.height,
+  });
+}
+
+export async function closeSurfaceWindow(label: string): Promise<void> {
+  return invoke("close_surface_window", { label });
+}
+
 export async function closePipWindow(): Promise<void> {
   return invoke("close_pip_window");
 }
