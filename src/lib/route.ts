@@ -26,6 +26,7 @@ const VALID_SCREENS: ReadonlySet<ScreenId> = new Set<ScreenId>([
   "kb",
   "explorer",
   "threads",
+  "project",
 ]);
 
 /** Every query-param key the router owns. applyRouteToParams deletes ALL of
@@ -35,7 +36,7 @@ const VALID_SCREENS: ReadonlySet<ScreenId> = new Set<ScreenId>([
  *  Route union in src/types.ts — currently screen + kb's doc + explorer's
  *  project/path). A PARAM-LESS screen (terminal, threads) adds nothing: it is
  *  already covered by the shared `screen` key. */
-export const ROUTE_PARAM_KEYS = ["screen", "doc", "project", "path"] as const;
+export const ROUTE_PARAM_KEYS = ["screen", "doc", "project", "path", "page"] as const;
 
 /** Parse a route from query params. Pure: unknown screens and malformed or
  *  cross-screen params fall back to the terminal / undefined — never throws. */
@@ -62,6 +63,14 @@ export function parseRoute(params: URLSearchParams): Route {
         project: project ? project : undefined,
         path: project && path ? path : undefined,
       };
+    }
+    case "project": {
+      // Both params are identity — a half-specified project route is not a
+      // location, so it falls back to the terminal like an unknown screen.
+      const project = params.get("project");
+      const page = params.get("page");
+      if (!project || !page) return { screen: "terminal" };
+      return { screen: "project", project, page };
     }
   }
 }
@@ -90,6 +99,10 @@ export function routeToParams(route: Route): URLSearchParams {
         params.set("project", route.project);
         if (route.path) params.set("path", route.path);
       }
+      break;
+    case "project":
+      params.set("project", route.project);
+      params.set("page", route.page);
       break;
   }
   return params;
@@ -203,7 +216,19 @@ export function navigate(next: Route): void {
  *  there (the side menu uses this so switching away + back doesn't lose the
  *  doc/project you were on). */
 export function navigateToScreen(screen: ScreenId): void {
-  navigate(navState.lastByScreen[screen] ?? ({ screen } as Route));
+  const last = navState.lastByScreen[screen];
+  if (last) {
+    navigate(last);
+    return;
+  }
+  // "project" is the one screen whose params are IDENTITY (SWIT-30): with no
+  // prior visit there is no page to show, so the jump lands on the terminal
+  // rather than minting a route the type says cannot exist.
+  if (screen === "project") {
+    navigate({ screen: "terminal" });
+    return;
+  }
+  navigate({ screen } as Route);
 }
 
 /** Pop the previous route off the history stack. No-op on empty history.
@@ -250,6 +275,8 @@ export function backTargetLabel(): string | null {
         : target.project
           ? target.project
           : "the explorer";
+    case "project":
+      return `${target.project} / ${target.page}`;
   }
 }
 

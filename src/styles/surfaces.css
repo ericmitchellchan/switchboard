@@ -1,0 +1,80 @@
+/* Tailwind for PROJECT SURFACES (platform evolution, Inc 0 — SWIT-29).
+ *
+ * Utilities + theme ONLY. Preflight is deliberately NOT imported: the shell's
+ * hand-written CSS (global.css, every inline style) was never written against
+ * Tailwind's reset, and a `button { background: transparent }` or
+ * `h1 { font-size: inherit }` landing under it would silently re-tone chrome
+ * that was measured by hand. Surfaces copied from another app carry their
+ * own Tailwind classes; those classes are what this file exists to serve.
+ *
+ * Layer order matters: Tailwind's own layers sit BELOW the shell's unlayered
+ * rules, so an unlayered `:root { --font-mono: … }` in global.css beats the
+ * `--font-mono` Tailwind's theme would otherwise define. The theme block
+ * below pins the surface-facing names anyway, so the outcome does not depend
+ * on cascade trivia.
+ */
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@theme {
+  /* ONE typeface (kit rule, 2026-07-31): a surface adopts the shell's mono
+   * stack whether its markup asked for sans, mono or serif. */
+  --font-sans: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, monospace;
+  --font-mono: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, monospace;
+  --font-serif: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, monospace;
+
+  /* Lodestar's token names (apps/desktop/tailwind.config.ts) mapped onto the
+   * shell's zinc ramp where they are STRUCTURAL — so a surface reads as part
+   * of whichever host it sits in — and kept literal where they are FUNCTIONAL
+   * (up / down / liquidity / accent carry meaning, not decoration).
+   *
+   * `bg` is transparent on purpose: a surface paints its host's value (panel
+   * #1A1A1D, full-width #0C0C0E), the same rule every other viewer follows.
+   * `bg-bg` on an inner control (Lodestar's <select>) therefore shows the
+   * host through — which is the correct reading of "the canvas colour". */
+  --color-bg: transparent;
+  --color-surface: #0f0f11;   /* --bg-elevated */
+  --color-surface2: #151518;  /* --bg-active */
+  --color-line: #1e1e22;      /* --border */
+  --color-text: #e4e4e7;      /* --text-primary */
+  --color-dim: #a1a1aa;       /* --text-secondary (Lodestar's dim was a mid grey; the shell's secondary is the same role) */
+  --color-dim2: #71717a;      /* --text-muted */
+  --color-up: #4ea96a;
+  --color-dn: #e0645b;
+  --color-liq: #5aa6c9;
+  --color-accent: #7c8ce8;
+}
+
+/* The scope every surface mounts under (SurfaceHost). Copied code that reads
+ * `var(--…)` directly (Lodestar's theme.css names) resolves here; the names
+ * are the SAME mapping as the @theme block so class and var agree. */
+.sb-surface {
+  --bg: transparent;
+  --surface: #0f0f11;
+  --surface2: #151518;
+  --line: #1e1e22;
+  --text: #e4e4e7;
+  --dim: #a1a1aa;
+  --dim2: #71717a;
+  --up: #4ea96a;
+  --dn: #e0645b;
+  --liq: #5aa6c9;
+  --accent: #7c8ce8;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+/* Tailwind's `text-xl`/`text-lg` etc. ride on `--text-*` sizes and need no
+ * help. Form controls inherit the surface's type, which preflight would have
+ * done for us. */
+.sb-surface button,
+.sb-surface select,
+.sb-surface input {
+  font: inherit;
+  color: inherit;
+}
+.sb-surface select {
+  background: var(--surface);
+}

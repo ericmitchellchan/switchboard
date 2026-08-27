@@ -56,6 +56,7 @@ import { serverKey } from "./devServer";
 // in a plain node environment).
 import type { IconName } from "../components/icons";
 import { log } from "./logger";
+import { surfaceLabel } from "../surfaces/registry";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // REMOVAL AUDIT (2026-08-02)
@@ -374,6 +375,22 @@ export function describeArtifact(artifact: Artifact): ArtifactDescription {
         ],
         title: `${artifact.project} / ${artifact.url}`,
       };
+    case "surface": {
+      // `project › pages › Page` — the same shape the side-menu tree draws
+      // (wireframe shell-v0, screen 1). The page LABEL comes from the surface
+      // registry; an unregistered page prints its id so the strip still
+      // names something honest.
+      const label = surfaceLabel(artifact.project, artifact.page);
+      return {
+        icon: "surface",
+        crumbs: [
+          { text: artifact.project, tone: "lead" },
+          { text: "pages", tone: "dim" },
+          { text: label, tone: "bright" },
+        ],
+        title: `${artifact.project} / pages / ${label}`,
+      };
+    }
     case "session": {
       // A SESSION has no path — its name is the tab name Eric gave it, which
       // lives in App's session list, not here. `sessionLabelFor` is the
@@ -478,6 +495,13 @@ export function sanitizeArtifact(raw: unknown): Artifact | null {
       return isNonEmptyString(raw.project) && isNonEmptyString(raw.url)
         ? { kind: "localhost", project: raw.project, url: raw.url }
         : null;
+    case "surface":
+      // SWIT-30. Two ids and nothing else — whether the pair still names a
+      // registered page is the HOST's question at render time, not a load
+      // gate: a strip must not lose a tab because a project renamed a page.
+      return isNonEmptyString(raw.project) && isNonEmptyString(raw.page)
+        ? { kind: "surface", project: raw.project, page: raw.page }
+        : null;
     case "session":
       // Increment H. The id is the WHOLE record — everything else about the
       // session (name, cwd, status, scrollback) lives where sessions live, so
@@ -514,6 +538,8 @@ export function artifactIdentity(artifact: Artifact): string {
       // artifacts (which is what the positional-pin scoping requires).
       // The artifact keeps its own `url` — only the comparison folds.
       return `localhost:${artifact.project}:${serverKey(artifact.url)}`;
+    case "surface":
+      return `surface:${artifact.project}:${artifact.page}`;
     case "session":
       // The session id IS the identity. Two references to one session are one
       // artifact, which is what makes the dedupe rule enforce the one-live-view
@@ -549,6 +575,9 @@ export function artifactShortTitle(artifact: Artifact): string {
   // read through the same published label the header uses so the strip and the
   // header can never disagree about what a terminal is called.
   if (artifact.kind === "session") return sessionLabelFor(artifact.sessionId)?.name ?? "terminal";
+  // A surface's short title is its page LABEL (the same word the header's
+  // last crumb prints), not a path — it has none.
+  if (artifact.kind === "surface") return surfaceLabel(artifact.project, artifact.page);
   const raw = artifact.kind === "localhost" ? artifact.url : artifact.path;
   const segments = raw.split("/").filter((s) => s.length > 0);
   return segments[segments.length - 1] ?? raw;
@@ -1759,7 +1788,7 @@ export function useActiveTabArtifact(): Artifact | null {
 /** The artifact kinds a Phase A click can open. `localhost` is excluded by
  *  type: it has no full-width screen to navigate to (Phase B), so including it
  *  would make `fullWidthRoute` partial for no gain. */
-export type OpenableArtifact = Extract<Artifact, { kind: "kb-doc" | "repo-file" }>;
+export type OpenableArtifact = Extract<Artifact, { kind: "kb-doc" | "repo-file" | "surface" }>;
 
 /** Everything the decision depends on. Passed explicitly so the rule is
  *  testable without a route store, a window, or a session list. */
@@ -1793,6 +1822,8 @@ export function fullWidthRoute(target: OpenableArtifact): Route {
       return { screen: "kb", doc: target.path };
     case "repo-file":
       return { screen: "explorer", project: target.project, path: target.path };
+    case "surface":
+      return { screen: "project", project: target.project, page: target.page };
   }
 }
 

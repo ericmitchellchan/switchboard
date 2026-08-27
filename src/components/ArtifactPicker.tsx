@@ -46,6 +46,7 @@ import {
   mergeSessionRepos,
 } from "../lib/explorer";
 import type { ExplorerEntry, ExplorerProject } from "../lib/explorer";
+import { surfacePages } from "../surfaces/registry";
 import {
   FILE_ICON,
   FOLDER_ICON,
@@ -73,6 +74,10 @@ type Row =
   | { kind: "kb"; id: string; label: string; meta: string; path: string }
   /** A repo file — Enter opens it in the panel. */
   | { kind: "file"; id: string; label: string; path: string }
+  /** A project's LIVE PAGE (SWIT-30) — listed first inside a project, ahead
+   *  of its directories, because a page is what you open a project FOR; the
+   *  file tree is what you open to change it. Enter opens a surface. */
+  | { kind: "page"; id: string; label: string; project: string; page: string }
   /** THE MANUAL URL PATH (increment F). Appears at the top of the root list
    *  the moment what you have typed parses as a URL or a bare port. It is the
    *  fallback for a dev server whose banner the detector does not recognise —
@@ -218,6 +223,13 @@ export function ArtifactPicker({
 
     if (project !== null) {
       const out: Row[] = [];
+      // Pages first, at the project ROOT only (a page has no directory).
+      if (!dir) {
+        for (const p of surfacePages(project)) {
+          if (!hit(p.label) && !hit(p.id)) continue;
+          out.push({ kind: "page", id: `pg:${p.id}`, label: p.label, project, page: p.id });
+        }
+      }
       for (const entry of entries ?? []) {
         if (!hit(entry.name)) continue;
         const path = dir ? `${dir}/${entry.name}` : entry.name;
@@ -367,6 +379,9 @@ export function ArtifactPicker({
           return;
         case "file":
           if (project !== null) onPick({ kind: "repo-file", project, path: row.path });
+          return;
+        case "page":
+          onPick({ kind: "surface", project: row.project, page: row.page });
       }
     },
     [onPick, onNewTerminal, project]
@@ -694,6 +709,9 @@ function iconFor(row: Row): IconName {
     case "kb":
     case "file":
       return FILE_ICON;
+    case "page":
+      // The mark describeArtifact gives a surface in the panel header.
+      return "surface";
   }
 }
 
@@ -706,6 +724,8 @@ function metaFor(row: Row): string {
       return row.meta;
     case "dir":
       return "";
+    case "page":
+      return "live page";
     case "url":
       // Which bucket its pins will land in — worth stating before you open it,
       // because that is the one thing a typed URL does not say for itself.

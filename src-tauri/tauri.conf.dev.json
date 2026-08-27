@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicedoc/tauri/refs/tags/tauri-v2.1.1/crates/tauri-schema-generator/schemas/config.schema.json",
+  "productName": "Switchboard Dev",
+  "identifier": "com.switchboard.dev",
+  "app": {
+    "windows": [
+      {
+        "title": "Switchboard Dev",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 800,
+        "minHeight": 500,
+        "decorations": true,
+        "resizable": true,
+        "center": true
+      }
+    ]
+  }
+}

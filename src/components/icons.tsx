@@ -59,7 +59,11 @@ export type IconName =
   // artifact, so the tab strip and the panel header need a mark for it. Same
   // rules as everything above; deliberately NOT a reused `panel` or `file`
   // glyph, because a running process is neither.
-  | "terminal";
+  | "terminal"
+  // A LIVE APP SURFACE (SWIT-30) — a project's page rendered in-document. A
+  // dashed frame with a trace through it: "a view", drawn distinct from the
+  // solid `panel` frame and from `file` because a running page is neither.
+  | "surface";
 
 /** Default box for a content icon (folder / file / localhost / panel). Rows
  *  reserve exactly this much, so the icon column is identical at every depth
@@ -90,6 +94,7 @@ const STROKE: Record<IconName, number> = {
   edit: 1.4,
   save: 1.4,
   terminal: 1.4,
+  surface: 1.3,
 };
 
 // Every path below is centred on (8, 8) in the 16x16 box:
@@ -134,6 +139,15 @@ const PATHS: Record<IconName, ReactNode> = {
     <>
       <path d="M2 3.25h12v9.5H2z" />
       <path d="M9.25 4.15h3.85v7.7H9.25z" fill="currentColor" stroke="none" />
+    </>
+  ),
+  // Live app surface: a dashed frame (it is a VIEW, not a document) with a
+  // trace rising through it — the one chart-shaped hint, drawn small enough
+  // to stay a mark rather than a picture. Centred on (8,8), 12x10 box.
+  surface: (
+    <>
+      <path d="M2 3.5h12v9H2z" strokeDasharray="2.2 1.6" />
+      <path d="M4 10.25l2.6-2.9 2.1 1.6L12 5.75" />
     </>
   ),
   "chevron-right": <path d="m6.25 3.5 4.5 4.5-4.5 4.5" />,

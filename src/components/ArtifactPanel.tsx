@@ -595,7 +595,7 @@ export function ArtifactPanel({
   // `promote to tab` IS the full-width move, and it is a different thing: it
   // relocates the live view rather than opening a second look at content.)
   const openFull = () => {
-    if (artifact.kind !== "kb-doc" && artifact.kind !== "repo-file") return;
+    if (artifact.kind !== "kb-doc" && artifact.kind !== "repo-file" && artifact.kind !== "surface") return;
     navigate(fullWidthRoute(artifact));
   };
 

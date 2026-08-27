@@ -36,6 +36,7 @@ import { artifactIdentity } from "../../lib/panelStore";
 import { DocView } from "./DocView";
 import { FileViewer } from "../ExplorerView";
 import { LocalhostView } from "./LocalhostView";
+import { SurfaceHost } from "../../surfaces/SurfaceHost";
 
 export function ArtifactSurface({
   artifact,
@@ -66,6 +67,17 @@ export function ArtifactSurface({
               URL inherits the previous one's pin mode, open note editor, health
               verdict and rail-collapse state — all of which are per-document. */}
           <LocalhostView key={artifactIdentity(artifact)} artifact={artifact} active={active} />
+        </div>
+      );
+    case "surface":
+      return (
+        <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+          {/* Keyed by identity for the same reason localhost is: two surfaces
+              share an element type, and a page's own state (open drill-in,
+              filters) is per-page, not per-slot. SurfaceHost owns the error
+              boundary, the backend card and the token scope — this switch
+              stays a host+policy map, not a renderer. */}
+          <SurfaceHost key={artifactIdentity(artifact)} artifact={artifact} active={active} />
         </div>
       );
     case "session":

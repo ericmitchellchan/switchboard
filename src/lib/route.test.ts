@@ -395,3 +395,36 @@ describe("navigation history for the back control", () => {
     expect(backTargetLabel()).toBe("threads");
   });
 });
+
+// ── project screen (SWIT-30) ─────────────────────────────────────────────────
+describe("project route (a page full width)", () => {
+  beforeEach(() => __resetNavForTests());
+
+  it("round-trips project + page", () => {
+    const r: Route = { screen: "project", project: "lodestar", page: "trading" };
+    expect(roundTrip(r)).toEqual(r);
+    expect(routeToParams(r).toString()).toBe("screen=project&project=lodestar&page=trading");
+  });
+
+  it("both params are identity — a half-specified route falls back to the terminal", () => {
+    expect(parseRoute(new URLSearchParams("screen=project&project=lodestar"))).toEqual({ screen: "terminal" });
+    expect(parseRoute(new URLSearchParams("screen=project&page=trading"))).toEqual({ screen: "terminal" });
+    expect(parseRoute(new URLSearchParams("screen=project"))).toEqual({ screen: "terminal" });
+  });
+
+  it("`page` is a router-owned key: it is cleared when navigating to another screen", () => {
+    expect(ROUTE_PARAM_KEYS).toContain("page");
+    const stale = new URLSearchParams("screen=project&project=lodestar&page=trading&keep=1");
+    const next = applyRouteToParams(stale, { screen: "explorer", project: "lodestar" });
+    expect(next.get("page")).toBeNull();
+    expect(next.get("project")).toBe("lodestar");
+    expect(next.get("keep")).toBe("1");
+  });
+
+  it("lastByScreen restores the last page when jumping back to the project screen", () => {
+    navigate({ screen: "project", project: "lodestar", page: "trading" });
+    navigate({ screen: "terminal" });
+    navigateToScreen("project");
+    expect(getNavState().route).toEqual({ screen: "project", project: "lodestar", page: "trading" });
+  });
+});

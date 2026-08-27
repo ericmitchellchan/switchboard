@@ -167,9 +167,24 @@ async fn get_home_dir() -> Result<String, String> {
         .ok_or_else(|| "Cannot resolve home directory".to_string())
 }
 
+/// The per-IDENTITY local-data folder name (SWIT-29). `switchboard` for the
+/// installed app, `switchboard-dev` for a build launched with
+/// `tauri.conf.dev.json` (`com.switchboard.dev`), so a WIP build running
+/// BESIDE the daily driver never shares its scrollback mirror or its
+/// `threads.json` — two processes writing one threads file would be
+/// last-writer-wins on every periodic save. Set once in `setup` from the
+/// app's own config; before that (or if it were never set) the production
+/// name applies. `config.json` is deliberately NOT scoped: the repo list is
+/// the same list for both builds (see config.rs).
+static DATA_DIR_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn data_dir_name() -> &'static str {
+    DATA_DIR_NAME.get().map(String::as_str).unwrap_or("switchboard")
+}
+
 fn scrollback_dir() -> Result<std::path::PathBuf, String> {
     let base = dirs::data_local_dir().ok_or("Cannot resolve local data dir")?;
-    Ok(base.join("switchboard").join("scrollback"))
+    Ok(base.join(data_dir_name()).join("scrollback"))
 }
 
 /// The directory terminal scrollback is mirrored into, as an absolute path.
@@ -263,7 +278,7 @@ async fn clear_session_scrollback(session_id: String) -> Result<(), String> {
 // "no disk copy" and would silently fall back to localStorage).
 fn threads_path() -> Result<std::path::PathBuf, String> {
     let base = dirs::data_local_dir().ok_or("Cannot resolve local data dir")?;
-    Ok(base.join("switchboard").join("threads.json"))
+    Ok(base.join(data_dir_name()).join("threads.json"))
 }
 
 // Serializes concurrent save_threads invocations: every writer shares one tmp
@@ -630,6 +645,15 @@ pub fn run() {
         )
         .manage(app_state)
         .setup(move |app| {
+            // Identity-scoped local data (SWIT-29): a `.dev` identifier gets
+            // its own scrollback + threads folder. Set before any command can
+            // run, so no path is ever computed under the wrong name.
+            let identifier = app.config().identifier.clone();
+            let _ = DATA_DIR_NAME.set(
+                if identifier.ends_with(".dev") { "switchboard-dev" } else { "switchboard" }.to_string(),
+            );
+            log::info!("Local data folder: {} (identifier {})", data_dir_name(), identifier);
+
             // THE IPC ORIGIN ALLOWLIST — installed BEFORE anything can invoke.
             // Derived from the app's own config, never from a webview round
             // trip (see ipc_guard.rs for why per-invoke `Webview::url()` is not

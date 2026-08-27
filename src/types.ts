@@ -97,7 +97,7 @@ export interface SavedWorkspace {
 
 /** Every screen the workstation shell can show. "terminal" is the classic
  *  Switchboard workspace and the default route. */
-export type ScreenId = "terminal" | "kb" | "explorer" | "threads";
+export type ScreenId = "terminal" | "kb" | "explorer" | "threads" | "project";
 
 /** Discriminated route union keyed on `screen`. Param-carrying screens extend
  *  their variant inline (params are optional deep-link state, not identity —
@@ -113,7 +113,12 @@ export type Route =
   // filter box is screen-local UI state, not identity, so it joins the
   // keep-alive cache and the URL stays `?screen=threads` — deep-linkable and
   // reachable with the side menu hidden.
-  | { screen: "threads" };
+  | { screen: "threads" }
+  // A project PAGE full width (SWIT-30) — the "open full" of a surface
+  // artifact. Both params are IDENTITY (which page), hence required: a
+  // project screen with no page is not a location, and parseRoute falls back
+  // to the terminal when either is missing.
+  | { screen: "project"; project: string; page: string };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Threads (T5) — an agent session that survives app/machine restarts.
@@ -160,7 +165,16 @@ export type Artifact =
   // from the tab bar and from the pane tree (panelStore.isPanelOwnedSession,
   // applied by App). `promote to tab` MOVES it (park → release), it never
   // duplicates it.
-  | { kind: "session"; sessionId: string };
+  | { kind: "session"; sessionId: string }
+  // PLATFORM EVOLUTION (SWIT-30) — a LIVE APP SURFACE: a project's own React
+  // page, rendered in THIS document (never an iframe) and fed by that
+  // project's backend over HTTP/WS. `project` is a registry key and `page` a
+  // surface id from src/surfaces/registry.ts; the reference is nothing more,
+  // so a stale or unknown pair renders a note rather than breaking the strip.
+  // This is what the localhost kind could never be: same-document content,
+  // so pins hit real DOM, the agent sees real screen context, and one page
+  // can sit in the panel, full width, or popped out without a second origin.
+  | { kind: "surface"; project: string; page: string };
 
 /** The artifact kinds that name a FILE on disk — the ones with a readable
  *  `path` and therefore a renderable BODY (docKind switch, pins sidecar,

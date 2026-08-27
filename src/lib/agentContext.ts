@@ -210,6 +210,12 @@ export function artifactRef(artifact: Artifact, opts: RefOptions = {}): string {
       );
     case "localhost":
       return sanitizeForTypedLine(`localhost ${artifact.project} ${artifact.url}`, REF_MAX);
+    case "surface":
+      // A live page has no file to Read (yet — Inc 3 gives it pins and screen
+      // context). Naming it by project/page is still worth typing: the agent
+      // knows WHICH surface Eric is looking at, and the project's own MCP
+      // tools are how it reads the same data.
+      return sanitizeForTypedLine(`surface ${artifact.project}/${artifact.page}`, REF_MAX);
     case "session": {
       const path = sessionTranscriptPath(artifact.sessionId, opts);
       if (path.length === 0) return "";

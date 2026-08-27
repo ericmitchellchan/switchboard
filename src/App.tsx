@@ -107,6 +107,7 @@ import { DocView } from "./components/kb/DocView";
 import { ExplorerView } from "./components/ExplorerView";
 import { BackButton } from "./components/BackButton";
 import { ThreadsScreen } from "./components/ThreadsScreen";
+import { ProjectView } from "./components/ProjectView";
 import { enqueueFit } from "./lib/fitQueue";
 import { useRoute, navigate, readRouteFromUrl, getNavState } from "./lib/route";
 import {
@@ -2700,6 +2701,22 @@ export default function App() {
             </ScreenErrorBoundary>
           </div>
         )}
+        {/* A project PAGE full width (SWIT-30) — the "open full" of a surface
+            artifact. Keep-alive like the others; the surface inside is keyed
+            on (project, page) so switching pages remounts only the page. */}
+        {activatedScreens.has("project") && (
+          <div
+            style={{
+              display: route.screen === "project" ? "flex" : "none",
+              flex: 1,
+              minWidth: 0,
+            }}
+          >
+            <ScreenErrorBoundary resetKey="project">
+              <ProjectScreen menuHidden={!sideMenuVisible} />
+            </ScreenErrorBoundary>
+          </div>
+        )}
 
       </div>
 
@@ -2798,7 +2815,11 @@ function NewSessionDialogLazy({
  *  navigation) outside the activation cache — none exist today. ("threads"
  *  joined in increment C: the thread HISTORY is a param-less screen, while a
  *  thread itself is still a tab binding on the terminal screen.) */
-const KEEP_ALIVE_SCREENS = ["terminal", "kb", "explorer", "threads"] as const satisfies readonly ScreenId[];
+// "project" (SWIT-30) joins as a keep-alive screen even though its params ARE
+// identity: ProjectScreen keys the host on (project, page), so a different
+// page remounts the SURFACE while the screen shell stays put — the same
+// prop-stability trick ExplorerScreen plays with lastByScreen.
+const KEEP_ALIVE_SCREENS = ["terminal", "kb", "explorer", "threads", "project"] as const satisfies readonly ScreenId[];
 const KEEP_ALIVE_SET: ReadonlySet<ScreenId> = new Set(KEEP_ALIVE_SCREENS);
 
 function isKeepAliveScreen(screen: ScreenId): boolean {
@@ -2995,6 +3016,28 @@ function ExplorerScreen({ menuHidden }: { menuHidden: boolean }) {
     <ExplorerView
       project={effective?.project}
       path={effective?.path}
+      menuHidden={menuHidden}
+    />
+  );
+}
+
+/** The project screen (SWIT-30): route-driven while active, and while hidden
+ *  the last project route keeps the props STABLE so the mounted surface (its
+ *  filters, open drill-in, backend probe state) survives a trip to another
+ *  screen and back. Renders nothing until a project route has ever been
+ *  visited — the screen only mounts on its first visit, so that is the
+ *  common case. */
+function ProjectScreen({ menuHidden }: { menuHidden: boolean }) {
+  const route = useRoute();
+  const active = route.screen === "project";
+  const last = getNavState().lastByScreen.project;
+  const effective = active ? route : last?.screen === "project" ? last : undefined;
+  if (!effective) return null;
+  return (
+    <ProjectView
+      project={effective.project}
+      page={effective.page}
+      active={active}
       menuHidden={menuHidden}
     />
   );

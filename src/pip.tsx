@@ -15,6 +15,8 @@ import { ArtifactSurface } from "./components/kb/ArtifactSurface";
 import { Icon } from "./components/icons";
 import "@xterm/xterm/css/xterm.css";
 import "./styles/global.css";
+// A popped-out SURFACE renders here too, so its Tailwind classes must resolve.
+import "./styles/surfaces.css";
 
 const TAB_STRIP_HEIGHT = 28;
 

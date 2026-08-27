@@ -41,6 +41,7 @@ import {
 import { PulsingDot } from "./PulsingDot";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
 import { TreeMessage, TreeRow } from "./KbTreeSection";
+import { surfacePages } from "../surfaces/registry";
 
 // ── Module-level caches (survive menu unmount) ───────────────────────────────
 
@@ -53,6 +54,12 @@ const listingErrors = new Map<string, string>();
 function nodeKey(project: string, dir: string): string {
   return dir ? `${project}::${dir}` : project;
 }
+
+/** Pseudo-directory name for a project's `pages` node — a name no real
+ *  directory listing can produce, kept in its OWN expansion set so toggling
+ *  it never triggers a directory fetch. */
+const PAGES_NODE = "pages/";
+let pagesExpanded: ReadonlySet<string> = new Set<string>();
 
 export function ExplorerTreeSection({ route }: { route: Route }) {
   // Cache-first render; bump forces a re-render after background fetches
@@ -201,6 +208,68 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
     });
   };
 
+  /** The `pages` pseudo-folder (SWIT-30): a project's LIVE PAGES, listed
+   *  ahead of its directories — drawn only when the surface registry has
+   *  some for this project, so every other project's tree is unchanged.
+   *  Expansion state is menu-local like directories; rows open through the
+   *  same `openArtifact` decision a file does (panel beside a shell, full
+   *  width from a reading screen, Ctrl+click inverts). Active = the page the
+   *  project screen is showing. This is the seed of Inc 2's Projects
+   *  section, where `pages` becomes one of five children. */
+  const renderPages = (project: string) => {
+    const pages = surfacePages(project);
+    if (pages.length === 0) return null;
+    const key = nodeKey(project, PAGES_NODE);
+    const open = pagesExpanded.has(key);
+    // Same "what is ACTUALLY on screen" rule as file rows: on the terminal
+    // screen the panel's surface, otherwise the project route (live or last).
+    const lastProject = getNavState().lastByScreen.project;
+    const shown: { project: string; page: string } | undefined =
+      route.screen === "terminal"
+        ? panelArtifact?.kind === "surface"
+          ? { project: panelArtifact.project, page: panelArtifact.page }
+          : undefined
+        : route.screen === "project"
+          ? { project: route.project, page: route.page }
+          : lastProject?.screen === "project"
+            ? { project: lastProject.project, page: lastProject.page }
+            : undefined;
+    return (
+      <div>
+        <TreeRow
+          label="pages"
+          expanded={open}
+          icon={folderIcon(open)}
+          depth={1}
+          active={false}
+          onClick={() => {
+            const next = new Set(pagesExpanded);
+            if (open) next.delete(key);
+            else next.add(key);
+            pagesExpanded = next;
+            force();
+          }}
+        />
+        {open &&
+          pages.map((page) => (
+            <TreeRow
+              key={page.id}
+              label={page.label}
+              icon="surface"
+              depth={2}
+              active={shown?.project === project && shown?.page === page.id}
+              onClick={(e) =>
+                openArtifact(
+                  { kind: "surface", project, page: page.id },
+                  { modifier: e.ctrlKey || e.metaKey }
+                )
+              }
+            />
+          ))}
+      </div>
+    );
+  };
+
   return (
     <div>
       {projectsError !== null && (
@@ -232,6 +301,7 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
               hoverAction={<OpenTerminalHere project={p} />}
               onClick={() => toggle(p.key, "")}
             />
+            {isOpen && renderPages(p.key)}
             {isOpen && renderDir(p.key, "", 1)}
           </div>
         );

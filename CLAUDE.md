@@ -29,12 +29,13 @@ src/
 │   ├── NewSessionDialog.tsx     → Repo picker / new session config (lazy-loaded)
 │   ├── ExplorerView.tsx         → Explorer screen body: BACK control + breadcrumb + file viewer (tree lives in the side menu); repo files route through the SHARED ArtifactBody kind switch
 │   ├── BackButton.tsx           → THE back control on the full-width screens (route.navigateBack; renders only when there is somewhere to go)
+│   ├── ProjectView.tsx          → The PROJECT screen body (SWIT-30): BackButton + `project / pages / Page` breadcrumb over a full-width SurfaceHost — the "open full" of a surface artifact
 │   ├── ArtifactPanel.tsx        → Artifact panel host: right-side co-present surface inside the terminal screen (divider, tab strip + `+`, header chrome, docked/overlay, `float` pop-out + the popped-out placeholder, `promote to tab` + the guarded close for a PANEL TERMINAL); hosts ArtifactSurface, renders no viewer of its own and mounts no xterm of its own (App's `renderSession` is THE one live view)
 │   ├── ArtifactPicker.tsx       → The `+` picker: filterable KB docs + registry projects, repo files browsed one directory at a time (explorerList), the MANUAL URL row (type a port or a URL), THIS SESSION'S DETECTED dev-server URLs ranked best-first with their source — where a candidate that lost the offer chip stays reachable — plus `new terminal` (descends into the SAME merged registry repo list Ctrl+T offers, tab's own project pinned first) and RUNNING TERMINALS (panel shells alive with no view)
 │   ├── UpdateChip.tsx           → In-app updater chip (consent-based install flow)
 │   ├── ConfirmDialog.tsx        → Modal confirm (close/destructive actions); `enterConfirms={false}` unbinds Enter for thread delete and for the panel-terminal close guard, whose `extraActions` add the two non-destructive outcomes (keep running / promote to tab)
 │   ├── kb/                      → Knowledge Base screen views
-│   │   ├── ArtifactSurface.tsx    → THE artifact → host+loading-policy switch (kb-doc→DocView, repo-file→FileViewer, localhost→LocalhostView, session→a NOTE and never a terminal), shared by the panel AND the PiP window
+│   │   ├── ArtifactSurface.tsx    → THE artifact → host+loading-policy switch (kb-doc→DocView, repo-file→FileViewer, localhost→LocalhostView, surface→SurfaceHost, session→a NOTE and never a terminal), shared by the panel AND the PiP window
 │   │   ├── ArtifactBody.tsx       → THE kind switch (docKind → renderer) shared by DocView and the Explorer's FileViewer; hosts differ only in the fallback
 │   │   ├── LocalhostView.tsx      → LIVE localhost preview (phase B): cross-origin iframe (`allow-scripts allow-forms allow-same-origin` — read its header) + no-cors health poll + "server gone" card + the POSITIONAL pin overlay + the SIBLING-SERVER liveness dots (the shell's other announced servers, probed not framed)
 │   │   ├── PinsRail.tsx           → THE collapsible pins rail (260px <-> 26px edge), shared by WireframeView and LocalhostView; per-doc preference, collapsed by default when empty
@@ -89,7 +90,10 @@ src/
 │   ├── logger.ts                → Frontend structured logging
 │   ├── updater.ts               → Auto-update check
 │   └── export.ts                → Export session to file
-└── lib/*.test.ts              → 23 Vitest test suites (paneLayout, tabLabel, statusDetector, taskDetector, resizePolicy, terminalLifecycle, route, threadStore, threadPromotion, panelStore, agentContext, composer, kb, pins, pinsStore, componentPreview, explorer, editor, diagramZoom, updaterState, sandbox, devServer, pinsRail)
+├── lib/*.test.ts              → 25 Vitest test suites (paneLayout, tabLabel, statusDetector, taskDetector, resizePolicy, terminalLifecycle, route, threadStore, threadPromotion, panelStore, panelStore.surface, agentContext, composer, kb, pins, pinsStore, componentPreview, explorer, editor, diagramZoom, updaterState, sandbox, devServer, pinsRail) + surfaces/registry.test.ts
+├── surfaces/                  → PROJECT SURFACES (platform evolution, SWIT-28/30): `registry.ts` = which projects have live PAGES and how to lazy-load each (pure + a per-page `lazy()` memo); `SurfaceHost.tsx` = the one place a foreign page touches the shell — per-page crash boundary, the backend "not answering" card (health probe while active, two misses), and the `.sb-surface` token scope. Read the header comment before adding a page.
+├── projects/lodestar/         → Lodestar's UI, copied from `lodestar/apps/desktop/src` and pointed at its backend on :8799 (`api/client.ts` BASE_URL). Pages registered in surfaces/registry.ts. NOTHING in the shell imports from here except the registry's `import()` — a surface is a chunk, not a dependency.
+└── styles/surfaces.css        → Tailwind 4 for surfaces ONLY: utilities + theme layers, NO PREFLIGHT (the shell's hand-written CSS must never be reset under it); `@theme` maps Lodestar's token names onto the zinc ramp; `.sb-surface` defines the same names as CSS vars
 
 src-tauri/
 ├── src/
@@ -105,6 +109,7 @@ src-tauri/
 │       ├── mod.rs               → PtyManager: session registry + reader thread
 │       └── session.rs           → PtySession: portable-pty wrapper + Drop cleanup
 ├── tauri.conf.json              → Window, bundle, updater, identifier config
+├── tauri.conf.dev.json          → DEV IDENTITY overlay (`Switchboard Dev`, `com.switchboard.dev`) — `dev.ps1` passes it via `tauri dev --config` so the WIP build runs BESIDE the installed app; lib.rs scopes scrollback + threads.json to `switchboard-dev` for a `.dev` identifier (config.json stays shared)
 ├── capabilities/default.json    → Tauri ACL permissions
 └── build.rs                     → Windows manifest (UTF-8 codepage)
 
@@ -340,3 +345,14 @@ Chord notes:
 - Do not add features beyond what was asked.
 - If tests fail, fix them — do not bypass the Stop hook.
 - If you discover out-of-scope work, create a **Request** ticket — do NOT act on it.
+
+## Project surfaces (platform evolution — SWIT-28, 2026-08-26)
+
+The decision: **Switchboard is the shell; other apps' UIs come in as PROJECT SURFACES.** A `surface` artifact is `{project, page}` — a project's own React page rendered in THIS document (never an iframe), fed by that project's backend over HTTP/WS. First project: Lodestar (`src/projects/lodestar/`, backend on :8799). Specs: `personal-kb/switchboard/features/platform-evolution/`.
+
+- **A surface is a chunk, not a dependency.** The shell reaches a page only through `surfaces/registry.ts`'s `import()`. Nothing under `src/projects/**` is imported statically anywhere — that is what keeps the terminal registry out of a page's HMR update chain (a save in a page replaces that chunk's modules only; the PTYs live in Rust; the keep-alive root re-adopts xterm elements). Verified empirically as the Inc 1 gate — re-verify if a page ever grows a static import from the shell.
+- **The data plane never crosses Tauri IPC.** A surface fetches its backend directly (`127.0.0.1:8799`); the backend sends CORS headers for the webview's origins (`localhost:1620` in dev, `tauri.localhost` packaged). No Vite proxy, no IPC relay — which is also why the Tauri-vs-Electron question is second-order for this app.
+- **SurfaceHost owns the three guarantees a page cannot:** a per-page crash boundary (a throwing chart must not take the doc beside it), the backend card (probe `<url><health>` while ACTIVE, two consecutive misses → a card naming project + URL + a prose hint; Switchboard still never starts servers), and the `.sb-surface` token scope. The root paints TRANSPARENT and takes its host's value — the same rule as every other viewer.
+- **Tailwind is for surfaces only, and ships without preflight.** `styles/surfaces.css` imports the utilities + theme layers; the shell's chrome stays hand-written CSS and must never be re-toned by a reset. `@theme` maps a project's token names (`bg`/`surface`/`line`/`text`/`dim`…) onto the zinc ramp where structural and keeps them literal where functional (`up`/`dn`/`liq`/`accent`). One typeface: every `--font-*` is the JetBrains Mono stack.
+- **Copied code loses its window.** A page that listened on `window` (keys, resize) in its home app now sits beside a live xterm; scope such listeners to the surface (TradeDetail's arrow keys moved onto a focusable overlay for exactly this reason). `window.lodestar`-style shell bridges do not exist here — the HUD returns as a second Tauri window, not a dead button.
+- **Exhaustive switches are the registration list.** `Artifact.kind` (types.ts) and `ScreenId`/`Route` (`project` screen, identity-bearing params) are unions; adding a kind or screen is done when tsc stops complaining — panelStore's `sanitizeArtifact`/`artifactIdentity`/`describeArtifact`/`artifactShortTitle`/`fullWidthRoute`, agentContext's `artifactRef`, route.ts's parse/serialize/`backTargetLabel`, the picker's `Row` switches and App's `KEEP_ALIVE_SCREENS` are the sites.
