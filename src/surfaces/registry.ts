@@ -22,6 +22,11 @@
 
 import type { ComponentType, LazyExoticComponent } from "react";
 import { lazy } from "react";
+import type { Artifact } from "../types";
+
+/** The artifact kind this module serves — defined ONCE here so the host, the
+ *  pins layer and the anchors module import one name. */
+export type SurfaceArtifact = Extract<Artifact, { kind: "surface" }>;
 
 export type SurfacePage = {
   /** Stable id — the `page` half of a surface artifact and of the project
@@ -34,6 +39,10 @@ export type SurfacePage = {
    *  surface is a self-contained page, not a parameterised widget — params
    *  come later with pins (Inc 3), and will travel in the artifact. */
   load: () => Promise<{ default: ComponentType }>;
+  /** The page's ANCHOR vocabulary, in one line, for the agent (Inc 3d): what
+   *  `<kind>:<id>` keys it may pin. Printed into the spawn context; the shell
+   *  itself never interprets it. */
+  pinHint?: string;
 };
 
 export type SurfaceBackend = {
@@ -67,6 +76,19 @@ export const SURFACES: Readonly<Record<string, ProjectSurfaces>> = {
         id: "trading",
         label: "Trading",
         load: () => import("../projects/lodestar/pages/Trading"),
+        pinHint: "trade:<trade_id> a trade row, row:<dim>:<bucket> an audit row, tile:<label> a headline tile, bar:<iso ts> a candle",
+      },
+      {
+        id: "markets",
+        label: "Markets",
+        load: () => import("../projects/lodestar/pages/Markets"),
+        pinHint: "bar:<iso ts> a candle on the open market's chart",
+      },
+      {
+        id: "chart",
+        label: "Chart",
+        load: () => import("../projects/lodestar/pages/ChartPage"),
+        pinHint: "bar:<iso ts> a candle",
       },
     ],
   },

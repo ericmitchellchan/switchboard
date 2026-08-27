@@ -13,9 +13,9 @@ import {
 } from "./registry";
 
 describe("surface registry", () => {
-  it("lodestar registers Trading against the :8799 backend", () => {
+  it("lodestar registers its pages against the :8799 backend", () => {
     expect(Object.keys(SURFACES)).toContain("lodestar");
-    expect(surfacePages("lodestar").map((p) => p.id)).toEqual(["trading"]);
+    expect(surfacePages("lodestar").map((p) => p.id)).toEqual(["trading", "markets", "chart"]);
     expect(surfaceBackend("lodestar")).toMatchObject({
       url: "http://127.0.0.1:8799",
       health: "/health",

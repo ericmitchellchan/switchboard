@@ -11,62 +11,20 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { api, type Bar, type TradeRow } from "../../api/client";
 import { ptTime, ptWeekday } from "../../lib/time";
+import CandleChart from "../../../../surfaces/charts/CandleChart";
 
 const UP = "#4ea96a";
 const DN = "#e0645b";
-const AC = "#6ea8d8";
 
-const BAR_W = 8;
-const CH_H = 340;
-const PAD = { l: 6, r: 20, t: 28, b: 34 };
 
 function utcMs(ts: string): string | number {
   const s = ts.replace(" ", "T");
   return Date.parse(s.endsWith("Z") ? s : `${s}Z`);
 }
 
-function Candles({ bars, entryMs, exitMs }: { bars: Bar[]; entryMs: number; exitMs: number }) {
-  const finite = bars.filter((b) => Number.isFinite(b.high) && Number.isFinite(b.low));
-  if (finite.length < 2) return <div className="p-6 text-sm text-dim">not enough bars for this window</div>;
-  const W = PAD.l + bars.length * BAR_W + PAD.r;
-  const H = CH_H;
-  const lo = Math.min(...finite.map((b) => b.low));
-  const hi = Math.max(...finite.map((b) => b.high));
-  const bw = Math.max(2, BAR_W * 0.62);
-  const x = (i: number): number => PAD.l + i * BAR_W + BAR_W / 2;
-  const y = (v: number): number => (hi === lo ? H / 2 : PAD.t + (1 - (v - lo) / (hi - lo)) * (H - PAD.t - PAD.b));
-  const entryIdx = bars.findIndex((b) => Number(utcMs(b.ts)) >= entryMs);
-  let exitIdx = bars.findIndex((b) => Number(utcMs(b.ts)) >= exitMs);
-  if (exitIdx < 0) exitIdx = bars.length - 1;
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} width={W} height={H} className="block">
-      {entryIdx >= 0 ? (
-        <rect x={x(entryIdx)} y={PAD.t} width={Math.max(BAR_W, (exitIdx - entryIdx) * BAR_W)} height={H - PAD.t - PAD.b} fill={AC} opacity="0.08" />
-      ) : null}
-      {bars.map((b, i) =>
-        Number.isFinite(b.high) && Number.isFinite(b.close) ? (
-          // SWITCHBOARD: each candle is a pinnable anchor (`bar:<ts>`).
-          <g key={i} data-anchor={`bar:${b.ts}`} data-anchor-label={`bar ${ptTime(b.ts)}`}>
-            <line x1={x(i)} x2={x(i)} y1={y(b.high)} y2={y(b.low)} stroke={b.close >= b.open ? UP : DN} strokeWidth="1" />
-            <rect x={x(i) - bw / 2} y={y(Math.max(b.open, b.close))} width={bw} height={Math.max(1, Math.abs(y(b.open) - y(b.close)))} fill={b.close >= b.open ? UP : DN} />
-          </g>
-        ) : null,
-      )}
-      {entryIdx >= 0 ? (
-        <g>
-          <line x1={x(entryIdx)} x2={x(entryIdx)} y1={PAD.t} y2={H - PAD.b} stroke={AC} strokeWidth="1" />
-          <path d={`M ${x(entryIdx) - 4} ${H - PAD.b + 11} L ${x(entryIdx) + 4} ${H - PAD.b + 11} L ${x(entryIdx)} ${H - PAD.b + 3} Z`} fill={AC} />
-          <text x={x(entryIdx)} y={H - PAD.b + 24} textAnchor="middle" fill={AC} fontSize="9" fontFamily="monospace">ENTRY</text>
-        </g>
-      ) : null}
-      <g>
-        <line x1={x(exitIdx)} x2={x(exitIdx)} y1={PAD.t} y2={H - PAD.b} stroke="#9a9aa4" strokeWidth="0.9" strokeDasharray="3 2" />
-        <path d={`M ${x(exitIdx) - 4} ${PAD.t - 10} L ${x(exitIdx) + 4} ${PAD.t - 10} L ${x(exitIdx)} ${PAD.t - 2} Z`} fill="#9a9aa4" />
-        <text x={x(exitIdx)} y={PAD.t - 13} textAnchor="middle" fill="#9a9aa4" fontSize="9" fontFamily="monospace">EXIT</text>
-      </g>
-    </svg>
-  );
-}
+// SWITCHBOARD: the SVG candle renderer is gone — the shared lightweight-charts
+// CandleChart draws the window, with ENTRY/EXIT as markers (and publishes
+// `bar:<ts>` anchors, so a candle here is pinnable).
 
 export default function TradeDetail({
   trades,
@@ -82,7 +40,6 @@ export default function TradeDetail({
   const t = trades[index];
   const [bars, setBars] = useState<Bar[] | null>(null);
   const [err, setErr] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
 
   const entryMs = Number(utcMs(t.start_utc));
   const exitMs = Number(utcMs(t.end_utc));
@@ -106,15 +63,6 @@ export default function TradeDetail({
     };
   }, [t.trade_id, entryMs, exitMs]);
 
-  // centre the view on the hold window
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || !bars) return;
-    const eIdx = bars.findIndex((b) => Number(utcMs(b.ts)) >= entryMs);
-    let xIdx = bars.findIndex((b) => Number(utcMs(b.ts)) >= exitMs);
-    if (xIdx < 0) xIdx = bars.length - 1;
-    if (eIdx >= 0) el.scrollLeft = Math.max(0, PAD.l + ((eIdx + xIdx) / 2) * BAR_W - el.clientWidth / 2);
-  }, [bars, entryMs, exitMs]);
 
   // SWITCHBOARD COPY: the keys are handled ON the overlay, not on `window`.
   // In Lodestar this page owned the window; here the drill-in sits beside a
@@ -182,13 +130,22 @@ export default function TradeDetail({
           ))}
         </div>
 
-        <div ref={scrollRef} className="min-h-0 flex-1 overflow-x-auto overflow-y-hidden rounded border border-line bg-surface/40 p-2">
+        <div className="min-h-0 flex-1 overflow-y-auto rounded border border-line bg-surface/40 p-2">
           {err ? (
             <div className="p-6 text-sm text-dim">couldn't load bars for this window</div>
           ) : bars == null ? (
             <div className="h-72 animate-pulse rounded bg-surface2/60" />
           ) : (
-            <Candles bars={bars} entryMs={entryMs} exitMs={exitMs} />
+            <CandleChart
+              bars={bars}
+              height={340}
+              intraday
+              fitOnLoad
+              markers={[
+                { ts: new Date(entryMs).toISOString(), label: "ENTRY", tone: "accent", position: "below" },
+                { ts: new Date(exitMs).toISOString(), label: "EXIT", tone: "liq", position: "above" },
+              ]}
+            />
           )}
         </div>
         <div className="font-mono text-[9px] text-dim2">
