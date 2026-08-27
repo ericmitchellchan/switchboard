@@ -20,7 +20,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 // through.
 import { explorerRead, explorerProjects as explorerProjectsIpc } from "./ipc";
 import type { ExplorerProject } from "./ipc";
-import type { RepoConfig } from "../types";
+import type { AgentStatus, RepoConfig } from "../types";
 
 // ── Pure: live-thread annotation ─────────────────────────────────────────────
 
@@ -485,7 +485,36 @@ export type ExplorerActions = {
   /** Spawn a NEW terminal session whose cwd is `workingDir`, reveal it, and
    *  leave every existing session untouched. */
   openTerminalHere: (name: string, workingDir: string) => void;
+  /** Show an EXISTING session's tab (the Projects section's `terminals` rows,
+   *  SWIT-31). A plain tab switch — nothing is typed, nothing is spawned. */
+  showSession: (sessionId: string) => void;
 };
+
+/** One row of a project's `terminals` node: a live session whose cwd sits
+ *  inside one of the project's repos. */
+export type ProjectSession = { id: string; name: string; status: AgentStatus; workingDir: string };
+
+/** The sessions that BELONG to a project — cwd inside one of its repos, by
+ *  the same segment-safe containment `annotateProjects` uses for threads.
+ *  Pure: the caller hands in panelStore's published labels (id → name, status,
+ *  workingDir). Order is the map's order, i.e. App's session order — the tab
+ *  bar's order — so the tree and the bar agree. ANY-match, not longest-match
+ *  (`liveProjectFor`): a repo checked out inside another project's checkout
+ *  would list its sessions under both — the registry is flat today, so no
+ *  project nests in another. The caller filters panel-owned sessions first. */
+export function sessionsForProject(
+  labels: ReadonlyMap<string, { name: string; status: AgentStatus; workingDir: string }>,
+  project: ExplorerProject
+): ProjectSession[] {
+  const out: ProjectSession[] = [];
+  for (const [id, label] of labels) {
+    if (!label.workingDir) continue;
+    if (project.repos.some((repo) => isPathInside(label.workingDir, repo))) {
+      out.push({ id, name: label.name, status: label.status, workingDir: label.workingDir });
+    }
+  }
+  return out;
+}
 
 let explorerActions: ExplorerActions | null = null;
 

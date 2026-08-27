@@ -6,9 +6,10 @@
 // is reserved for status dots.
 //
 // Sections are TREES, not nav items (design correction, 2026-08-01): the
-// KNOWLEDGE BASE section IS the doc tree and the EXPLORER section IS the
-// registry-projects file tree — no intermediate "Browse docs"/"By repo"
-// rows, and the screens themselves render content only (breadcrumb +
+// KNOWLEDGE BASE section IS the doc tree and the PROJECTS section (SWIT-31,
+// formerly Explorer) IS the registry-projects tree — each project a folder of
+// pages / knowledge / repo / terminals — no intermediate "Browse docs"/"By
+// repo" rows, and the screens themselves render content only (breadcrumb +
 // viewer). "terminal" has no row: the session tab bar is its navigation.
 
 import { useCallback, useState } from "react";
@@ -88,9 +89,12 @@ export function SideMenu({ route }: { route: Route }) {
       <SectionLabel onClick={() => navigateToScreen("kb")}>Knowledge Base</SectionLabel>
       <KbTreeSection route={route} />
 
-      {/* Registry projects with inline IDE-style file browsing — clicking a
-          file navigates the explorer screen to it. Label jumps back likewise. */}
-      <SectionLabel onClick={() => navigateToScreen("explorer")}>Explorer</SectionLabel>
+      {/* PROJECTS (platform evolution, SWIT-31 — was "Explorer"): each registry
+          project is a folder whose children are what the project IS — its live
+          `pages`, its `knowledge` (the KB folder + the repo's knowledge/specs/
+          docs), its `repo` file tree, and its `terminals`. Clicking a file
+          navigates the explorer screen as before; the label jumps back likewise. */}
+      <SectionLabel onClick={() => navigateToScreen("explorer")}>Projects</SectionLabel>
       <ExplorerTreeSection route={route} />
     </div>
   );

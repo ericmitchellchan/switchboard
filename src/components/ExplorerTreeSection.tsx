@@ -1,10 +1,15 @@
-// EXPLORER section of the side menu — registry projects rendered INLINE with
-// IDE-style file browsing (replaces the former in-screen project rail +
-// listing column of ExplorerView, which is now viewer-only). Project rows
-// keep the old rail's look: name + dim status meta, archived dimmed further,
-// live-thread running dot (statusConfig color — the ONLY color here).
-// Expanding a project/dir lazily fetches its listing via explorerList
-// (dirs-first, server-side skip-list); clicking a FILE goes through
+// PROJECTS section of the side menu (SWIT-31 — was "Explorer"): registry
+// projects rendered INLINE, each a folder whose children are what the project
+// IS — `pages`, `knowledge`, repo shortcuts, `repo`, `terminals` (see the
+// PROJECT NODE block below). The `repo` child is the IDE-style file tree this
+// section used to draw at the top level (it replaced the former in-screen
+// project rail + listing column of ExplorerView, which is viewer-only).
+// Project rows keep the old rail's look: name + dim meta (open-tab count, else
+// registry status), archived dimmed further, live-thread running dot
+// (statusConfig color — the ONLY color here besides the terminals' dots).
+// Expanding a project fetches its ROOT listing (for the repo shortcuts) and
+// a dir its own, via explorerList (dirs-first, server-side skip-list);
+// clicking a FILE goes through
 // panelStore.openArtifact (A3) — the panel beside the running shell on the
 // terminal screen, the explorer screen full-width when that's what's showing,
 // Ctrl/⌘+click inverts. Directory/project rows only expand; they open nothing
@@ -40,8 +45,12 @@ import {
 } from "../lib/panelStore";
 import { PulsingDot } from "./PulsingDot";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
-import { TreeMessage, TreeRow } from "./KbTreeSection";
+import { KbTreeNode, TreeMessage, TreeRow } from "./KbTreeSection";
 import { surfacePages } from "../surfaces/registry";
+import { sessionsForProject } from "../lib/explorer";
+import { useSessionLabels, usePanelOwnedSessions, type SessionLabel } from "../lib/panelStore";
+import { ancestorFolders, buildKbTree, useKbDocList } from "../lib/kb";
+import type { KbNode } from "../lib/kb";
 
 // ── Module-level caches (survive menu unmount) ───────────────────────────────
 
@@ -55,11 +64,38 @@ function nodeKey(project: string, dir: string): string {
   return dir ? `${project}::${dir}` : project;
 }
 
-/** Pseudo-directory name for a project's `pages` node — a name no real
- *  directory listing can produce, kept in its OWN expansion set so toggling
- *  it never triggers a directory fetch. */
+// ── The PROJECT node's children (SWIT-31, wireframe shell-v0 screen 1) ──────
+// A project row expands into what the project IS, in this order:
+//   pages      its live app surfaces (surfaces/registry) — when it has any
+//   knowledge  its folder in the personal KB (`<kb>/<project>/`) — when it has docs
+//   knowledge / specs / docs   shortcuts INTO the repo tree for those dirs — when present
+//   repo       the whole file tree (what the Explorer section was)
+//   terminals  the live sessions whose cwd is inside one of its repos, + `new terminal here`
+// Each pseudo node has a name no real directory listing can produce (trailing
+// slash), and its expansion lives in ITS OWN set so toggling one never fetches
+// a directory; the shortcut nodes DO share the real dir's listing cache, so
+// `specs` under a project and `specs` under `repo` show the same entries.
 const PAGES_NODE = "pages/";
-let pagesExpanded: ReadonlySet<string> = new Set<string>();
+const KNOWLEDGE_NODE = "knowledge/";
+const REPO_NODE = "repo/";
+const TERMINALS_NODE = "terminals/";
+/** Repo directories that get a shortcut node beside `repo` when they exist. */
+const REPO_SHORTCUTS = ["knowledge", "specs", "docs"] as const;
+function shortcutNode(dir: string): string {
+  return `${dir}//`;
+}
+let pseudoExpanded: ReadonlySet<string> = new Set<string>();
+/** Expansion of KB folders under a project's `knowledge` node — separate from
+ *  the KB section's own set, so opening a folder here does not open it there. */
+let kbExpanded: ReadonlySet<string> = new Set<string>();
+
+/** Count docs under a KB folder node (for the `knowledge` row's meta). */
+function countDocs(node: KbNode): number {
+  if (node.type === "doc") return 1;
+  let n = 0;
+  for (const child of node.children) n += countDocs(child);
+  return n;
+}
 
 export function ExplorerTreeSection({ route }: { route: Route }) {
   // Cache-first render; bump forces a re-render after background fetches
@@ -115,6 +151,38 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
   //   · otherwise the last explorer route, so the file you were reading stays
   //     highlighted while you work elsewhere (same rule as the KB tree).
   const panelArtifact = useActiveTabArtifact();
+
+  // Projects section data (SWIT-31): the KB doc list (for each project's
+  // `knowledge` node) and the live session list (for `terminals`). Both are
+  // module-cached stores — cheap to subscribe to from here.
+  const { docs: kbDocs } = useKbDocList(true);
+  const kbTree = useMemo(() => buildKbTree(kbDocs ?? []), [kbDocs]);
+  const sessionLabels = useSessionLabels();
+  // PANEL-OWNED terminals (a `pnpm dev` living in a panel, or a parked one)
+  // are NOT tabs and must not be listed as such: a `terminals` row is a tab
+  // switch, and switching to a session that lives in a panel would swap a
+  // pane onto it — the second live view the one-session-one-view rule
+  // (increment H) exists to prevent. Filtered here, so the count on the
+  // project row is honest too ("open tabs", not "shells").
+  const panelOwned = usePanelOwnedSessions();
+  const tabLabels = useMemo(() => {
+    const out = new Map<string, SessionLabel>();
+    for (const [id, label] of sessionLabels) if (!panelOwned.has(id)) out.set(id, label);
+    return out;
+  }, [sessionLabels, panelOwned]);
+  // The KB doc ACTUALLY on screen — the same rule KbTreeSection applies, so a
+  // doc opened from either tree highlights in both.
+  const lastKb = getNavState().lastByScreen.kb;
+  const activeKbDoc =
+    route.screen === "terminal"
+      ? panelArtifact?.kind === "kb-doc"
+        ? panelArtifact.path
+        : undefined
+      : route.screen === "kb"
+        ? route.doc
+        : lastKb?.screen === "kb"
+          ? lastKb.doc
+          : undefined;
   const panelFile =
     route.screen === "terminal" && panelArtifact?.kind === "repo-file"
       ? { project: panelArtifact.project, path: panelArtifact.path }
@@ -208,19 +276,25 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
     });
   };
 
+  const togglePseudo = (key: string) => {
+    const next = new Set(pseudoExpanded);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    pseudoExpanded = next;
+    force();
+  };
+
   /** The `pages` pseudo-folder (SWIT-30): a project's LIVE PAGES, listed
-   *  ahead of its directories — drawn only when the surface registry has
-   *  some for this project, so every other project's tree is unchanged.
-   *  Expansion state is menu-local like directories; rows open through the
-   *  same `openArtifact` decision a file does (panel beside a shell, full
-   *  width from a reading screen, Ctrl+click inverts). Active = the page the
-   *  project screen is showing. This is the seed of Inc 2's Projects
-   *  section, where `pages` becomes one of five children. */
+   *  first — drawn only when the surface registry has some for this project,
+   *  so every other project's tree is unchanged. Expansion state is
+   *  menu-local like directories; rows open through the same `openArtifact`
+   *  decision a file does (panel beside a shell, full width from a reading
+   *  screen, Ctrl+click inverts). Active = the page ACTUALLY on screen. */
   const renderPages = (project: string) => {
     const pages = surfacePages(project);
     if (pages.length === 0) return null;
     const key = nodeKey(project, PAGES_NODE);
-    const open = pagesExpanded.has(key);
+    const open = pseudoExpanded.has(key);
     // Same "what is ACTUALLY on screen" rule as file rows: on the terminal
     // screen the panel's surface, otherwise the project route (live or last).
     const lastProject = getNavState().lastByScreen.project;
@@ -242,13 +316,7 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
           icon={folderIcon(open)}
           depth={1}
           active={false}
-          onClick={() => {
-            const next = new Set(pagesExpanded);
-            if (open) next.delete(key);
-            else next.add(key);
-            pagesExpanded = next;
-            force();
-          }}
+          onClick={() => togglePseudo(key)}
         />
         {open &&
           pages.map((page) => (
@@ -270,6 +338,162 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
     );
   };
 
+  /** `knowledge` — the project's folder in the personal KB, rendered with the
+   *  KB section's own node component and its own expansion set. Omitted when
+   *  the folder has no docs (a `.gitkeep` is not knowledge). */
+  const renderKnowledge = (project: string) => {
+    const folder = kbTree.find((n) => n.type === "folder" && n.name === project);
+    if (!folder || folder.type !== "folder") return null;
+    const count = countDocs(folder);
+    if (count === 0) return null;
+    const key = nodeKey(project, KNOWLEDGE_NODE);
+    const open = pseudoExpanded.has(key);
+    const toggleKb = (path: string) => {
+      const next = new Set(kbExpanded);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      kbExpanded = next;
+      force();
+    };
+    const selectKb = (path: string, modifier: boolean) => {
+      const needed = ancestorFolders(path);
+      if (!needed.every((p) => kbExpanded.has(p))) {
+        const next = new Set(kbExpanded);
+        for (const p of needed) next.add(p);
+        kbExpanded = next;
+      }
+      openArtifact({ kind: "kb-doc", path }, { modifier });
+    };
+    return (
+      <div>
+        <TreeRow
+          label="knowledge"
+          expanded={open}
+          icon={folderIcon(open)}
+          depth={1}
+          active={false}
+          meta={String(count)}
+          onClick={() => togglePseudo(key)}
+        />
+        {open &&
+          folder.children.map((child) => (
+            <KbTreeNode
+              key={child.path}
+              node={child}
+              depth={2}
+              expanded={kbExpanded}
+              activeDoc={activeKbDoc}
+              onSelect={selectKb}
+              onToggle={toggleKb}
+            />
+          ))}
+      </div>
+    );
+  };
+
+  /** `knowledge` / `specs` / `docs` — shortcuts INTO the repo tree for the
+   *  directories a project keeps its thinking in (Lodestar's `knowledge/` is
+   *  24 reports the in-app KB tools write). Drawn only when the root listing
+   *  has that directory, which the project row's expand already fetched. The
+   *  meta says `repo` so it never reads as the KB folder above it. */
+  const renderRepoShortcuts = (project: string) => {
+    const root = listingCache.get(nodeKey(project, ""));
+    if (!root) return null;
+    return REPO_SHORTCUTS.filter((d) => root.some((e) => e.is_dir && e.name === d)).map((d) => {
+      const key = nodeKey(project, shortcutNode(d));
+      const open = pseudoExpanded.has(key);
+      return (
+        <div key={key}>
+          <TreeRow
+            label={d}
+            expanded={open}
+            icon={folderIcon(open)}
+            depth={1}
+            active={false}
+            meta="repo"
+            onClick={() => {
+              if (!open) fetchListing(project, d); // stale-while-revalidate
+              togglePseudo(key);
+            }}
+          />
+          {open && renderDir(project, d, 2)}
+        </div>
+      );
+    });
+  };
+
+  /** `repo` — the whole file tree, one level down from where the Explorer
+   *  section used to draw it. Directory expansion inside is the SAME cache
+   *  the shortcuts use, so a dir open under `specs` is open under `repo/specs`. */
+  const renderRepo = (project: string) => {
+    const key = nodeKey(project, REPO_NODE);
+    const open = pseudoExpanded.has(key);
+    return (
+      <div>
+        <TreeRow
+          label="repo"
+          expanded={open}
+          icon={folderIcon(open)}
+          depth={1}
+          active={false}
+          onClick={() => {
+            if (!open) fetchListing(project, "");
+            togglePseudo(key);
+          }}
+        />
+        {open && renderDir(project, "", 2)}
+      </div>
+    );
+  };
+
+  /** `terminals` — the live sessions whose cwd is inside one of the project's
+   *  repos (explorer.sessionsForProject), each with its statusConfig dot, plus
+   *  `+ new terminal here` (the row form of the project row's hover `>_`).
+   *  Clicking a session is a tab switch through the explorer actions bridge —
+   *  nothing is typed into it. */
+  const renderTerminals = (p: ExplorerProject, owned: ReturnType<typeof sessionsForProject>) => {
+    const key = nodeKey(p.key, TERMINALS_NODE);
+    const open = pseudoExpanded.has(key);
+    const dir = p.repos[0];
+    return (
+      <div>
+        <TreeRow
+          label="terminals"
+          expanded={open}
+          icon={folderIcon(open)}
+          depth={1}
+          active={false}
+          meta={owned.length > 0 ? String(owned.length) : undefined}
+          onClick={() => togglePseudo(key)}
+        />
+        {open &&
+          owned.map((s) => {
+            const cfg = STATUS_CONFIGS[s.status];
+            return (
+              <TreeRow
+                key={s.id}
+                label={s.name}
+                depth={2}
+                active={false}
+                meta={cfg.label.toLowerCase()}
+                leading={<PulsingDot color={cfg.color} pulse={cfg.pulse} />}
+                onClick={() => getExplorerActions()?.showSession(s.id)}
+              />
+            );
+          })}
+        {open && dir !== undefined && (
+          <TreeRow
+            label="+ new terminal here"
+            depth={2}
+            active={false}
+            dim
+            onClick={() => getExplorerActions()?.openTerminalHere(p.key, dir)}
+          />
+        )}
+      </div>
+    );
+  };
+
   return (
     <div>
       {projectsError !== null && (
@@ -281,6 +505,7 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
       {annotated.map((p) => {
         const isOpen = expandedCache.has(nodeKey(p.key, ""));
         const archived = p.status === "archived";
+        const owned = sessionsForProject(tabLabels, p);
         return (
           <div key={p.key}>
             <TreeRow
@@ -289,7 +514,11 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
               icon={folderIcon(isOpen)}
               depth={0}
               active={activeRoute?.project === p.key}
-              meta={p.status}
+              // How many of the open tabs live here beats the registry status
+              // once there are any — the status still shows for a quiet or
+              // archived project. Plain text: the hover `>_` affordance sits
+              // right beside this meta, so a glyph here would read twice.
+              meta={owned.length > 0 ? `${owned.length} open` : p.status}
               dim={archived}
               leading={
                 p.live ? (
@@ -302,7 +531,10 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
               onClick={() => toggle(p.key, "")}
             />
             {isOpen && renderPages(p.key)}
-            {isOpen && renderDir(p.key, "", 1)}
+            {isOpen && renderKnowledge(p.key)}
+            {isOpen && renderRepoShortcuts(p.key)}
+            {isOpen && renderRepo(p.key)}
+            {isOpen && renderTerminals(p, owned)}
           </div>
         );
       })}

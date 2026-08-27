@@ -85,6 +85,13 @@ export interface SavedWorkspace {
   panels: Record<string, PanelState>;
   /** Global panel width (one width for all tabs — one less thing to restore). */
   panelWidth: number;
+  /** PANEL SIDE per tab (SWIT-33): the tabs whose panel sits on the LEFT of
+   *  the pane tree. Right is the default and is never recorded, so the record
+   *  lists only `"left"` values — an empty or absent record is "every panel on
+   *  the right", which is also what every pre-SWIT-33 blob means. Keys are
+   *  saved session ids, remapped through the restore idMap like `panels`.
+   *  Optional: the v5 SHAPE is unchanged. */
+  panelSides?: Record<string, "left">;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

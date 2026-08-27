@@ -58,6 +58,8 @@ import {
 } from "./lib/threadStore";
 import {
   initPanelStore,
+  initPanelSides,
+  usePanelSide,
   isLocalhostUrlOpen,
   remapPanelSessions,
   removeSessionPanel,
@@ -397,6 +399,9 @@ export default function App() {
 
   const activeIdRef = useRef(activeSessionId);
   activeIdRef.current = activeSessionId;
+  // Which side the ACTIVE TAB keeps its panel on (SWIT-33) — drives the
+  // pane-tree row's direction on the terminal screen.
+  const panelSide = usePanelSide(activeSessionId);
 
   const effectiveActiveIdRef = useRef<string | null>(null);
 
@@ -1167,9 +1172,19 @@ export default function App() {
           openTerminalBusyRef.current = false;
         });
       },
+      // A `terminals` row in the Projects section (SWIT-31) is a plain tab
+      // switch — the same intent as a tab click or a toast, through the same
+      // path (it also lands on the terminal screen). A PANEL-OWNED session is
+      // refused outright: the tree already filters them, and this is the
+      // structural backstop — switchToSession would leave the tab alone but
+      // still swap a pane onto the id, which is the second-live-view case.
+      showSession: (id) => {
+        if (isPanelOwnedSession(id)) return;
+        switchToSession(id);
+      },
     });
     return () => registerExplorerActions(null);
-  }, [handleCreateSession]);
+  }, [handleCreateSession, switchToSession]);
 
   // Publish session statuses + active session so thread rows can render live
   // status dots (statusConfig colors) and the active-row highlight.
@@ -1186,7 +1201,9 @@ export default function App() {
   // panelStore must not import threadStore to get it.
   useEffect(() => {
     const labels = new Map<string, SessionLabel>();
-    for (const s of sessions) labels.set(s.id, { name: s.name, status: s.status });
+    for (const s of sessions) {
+      labels.set(s.id, { name: s.name, status: s.status, workingDir: s.working_dir });
+    }
     publishSessionLabels(labels);
   }, [sessions]);
 
@@ -2125,6 +2142,7 @@ export default function App() {
       // path below calls remapPanelSessions, so bindings whose tab did not
       // come back are dropped rather than left pointing at nothing.
       initPanelStore(savedWorkspace?.panels ?? {}, savedWorkspace?.panelWidth);
+      initPanelSides(savedWorkspace?.panelSides);
 
       // Detection asks the panel store "is this already framed?" before it
       // offers. Wired AFTER initPanelStore so a restored preview counts on the
@@ -2514,6 +2532,10 @@ export default function App() {
             flex: 1,
             minWidth: 0,
             display: "flex",
+            // PANEL SIDE (SWIT-33): the panel renders AFTER the pane tree in
+            // this row; a left-side tab reverses the row, so `[divider][aside]`
+            // lands as aside | divider | panes with no re-ordering of children.
+            flexDirection: panelSide === "left" ? "row-reverse" : "row",
             overflow: "hidden",
             position: "relative",
           }}
@@ -2620,7 +2642,11 @@ export default function App() {
           fallbackStyle={{
             flex: "none",
             width: getPanelWidth(),
-            borderLeft: "1px solid var(--border-subtle)",
+            // The hairline sits on the edge that meets the pane tree — which
+            // side that is follows the tab's panel side (SWIT-33).
+            ...(panelSide === "left"
+              ? { borderRight: "1px solid var(--border-subtle)" }
+              : { borderLeft: "1px solid var(--border-subtle)" }),
             // Same surface as the live panel (increment B) — a crash card must
             // not read as a hole in the terminal side.
             background: "var(--bg-elevated)",

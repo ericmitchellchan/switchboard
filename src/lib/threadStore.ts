@@ -29,7 +29,7 @@
 
 import { useSyncExternalStore } from "react";
 import type { AgentStatus, SavedSession, SavedWorkspace, Thread } from "../types";
-import { parsePanels, parsePanelsV3, parsePanelWidth } from "./panelStore";
+import { parsePanels, parsePanelsV3, parsePanelWidth, parsePanelSides } from "./panelStore";
 import { sanitizeForTypedLine, SPAWN_CONTEXT_MAX } from "./agentContext";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -530,6 +530,8 @@ export function migrateSavedWorkspace(raw: unknown): SavedWorkspace | null {
           ? parsePanelsV3(ws.panels)
           : {},
     panelWidth: parsePanelWidth(ws.panelWidth),
+    // SWIT-33 — optional on every version; a blob without it is "all right".
+    panelSides: parsePanelSides(ws.panelSides),
   };
 }
 

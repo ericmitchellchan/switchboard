@@ -14,9 +14,10 @@ import {
   mergeSessionRepos,
   quickThreadTarget,
   sessionRepoOptions,
+  sessionsForProject,
 } from "./explorer";
 import type { ExplorerProject, OpenFile } from "./explorer";
-import type { RepoConfig } from "../types";
+import type { AgentStatus, RepoConfig } from "../types";
 
 function project(key: string, repos: string[], status = "active"): ExplorerProject {
   return { key, status, repos, note: null };
@@ -400,5 +401,40 @@ describe("liveProjectFor / projectKeyForDir", () => {
     expect(liveProjectFor(projects, "")).toBe("local");
     expect(liveProjectFor(projects, "C:\\")).toBe("local");
     expect(liveProjectFor(projects, "/")).toBe("local");
+  });
+});
+
+// ── Projects section: which sessions belong to a project (SWIT-31) ───────────
+describe("sessionsForProject", () => {
+  const lodestar = project("lodestar", ["C:/Users/e/projects/lodestar"]);
+  const labels = new Map<string, { name: string; status: AgentStatus; workingDir: string }>([
+    ["s1", { name: "sextant", status: "running", workingDir: "C:/Users/e/projects/lodestar" }],
+    ["s2", { name: "backend", status: "idle", workingDir: "C:\\Users\\e\\projects\\lodestar\\packages" }],
+    ["s3", { name: "gex", status: "waiting", workingDir: "C:/Users/e/projects/orbit" }],
+    ["s4", { name: "lodestar-ish", status: "idle", workingDir: "C:/Users/e/projects/lodestar-archive" }],
+    ["s5", { name: "no cwd yet", status: "idle", workingDir: "" }],
+  ]);
+
+  it("keeps sessions whose cwd is the repo or nested inside it, in map order", () => {
+    expect(sessionsForProject(labels, lodestar).map((s) => s.id)).toEqual(["s1", "s2"]);
+  });
+
+  it("is segment-safe and skips sessions with no registered cwd", () => {
+    const ids = sessionsForProject(labels, lodestar).map((s) => s.id);
+    expect(ids).not.toContain("s4");
+    expect(ids).not.toContain("s5");
+  });
+
+  it("carries name, status and cwd through for the row", () => {
+    expect(sessionsForProject(labels, lodestar)[0]).toEqual({
+      id: "s1",
+      name: "sextant",
+      status: "running",
+      workingDir: "C:/Users/e/projects/lodestar",
+    });
+  });
+
+  it("a project with no repos owns nothing", () => {
+    expect(sessionsForProject(labels, project("empty", []))).toEqual([]);
   });
 });

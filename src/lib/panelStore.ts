@@ -308,18 +308,27 @@ export function panelLayoutFor(containerWidth: number, requestedWidth: number): 
   return { mode: "docked", width: Math.min(want, box - MIN_TERMINAL_WIDTH - DIVIDER_WIDTH) };
 }
 
-/** Divider drag → new stored width. The panel is right-anchored to the
- *  workspace container, and the divider sits immediately left of it, so the
- *  width that puts the divider's left edge under the cursor is
- *  `containerRight - clientX - DIVIDER_WIDTH`. Capped by the same
+/** Divider drag → new stored width. On the RIGHT side the panel is anchored
+ *  to the workspace container's right edge with the divider immediately left
+ *  of it, so the width that puts the divider's left edge under the cursor is
+ *  `containerRight - clientX - DIVIDER_WIDTH`; on the LEFT side (SWIT-33) the
+ *  panel spans from the container's left edge to the divider, so it is
+ *  `clientX - containerLeft`. Capped by the same
  *  terminal-side floor panelLayoutFor enforces, then clamped into
  *  [MIN_PANEL_WIDTH, MAX_PANEL_WIDTH]. */
 export function panelWidthFromDrag(
   containerLeft: number,
   containerWidth: number,
-  clientX: number
+  clientX: number,
+  /** Which side the panel is on (SWIT-33): right = the panel spans from the
+   *  divider to the container's right edge; left = from the container's left
+   *  edge to the divider, so dragging RIGHT widens it. */
+  side: PanelSide = "right"
 ): number {
-  const raw = containerLeft + containerWidth - clientX - DIVIDER_WIDTH;
+  const raw =
+    side === "left"
+      ? clientX - containerLeft
+      : containerLeft + containerWidth - clientX - DIVIDER_WIDTH;
   if (!Number.isFinite(containerWidth) || containerWidth <= 0) return clampPanelWidth(raw);
   const cap = Math.max(
     MIN_PANEL_WIDTH,
@@ -796,6 +805,59 @@ let panelWidth = DEFAULT_PANEL_WIDTH;
  *  reads this map.) */
 let lastPanelStates = new Map<string, PanelState>();
 
+// ── Panel SIDE per tab (SWIT-33 — Ky's SplitView "Swap", in this panel) ──────
+// Right is the default and is not stored; the map holds only the tabs whose
+// panel sits on the LEFT of the pane tree. Per TAB, like the strip itself,
+// and persisted with the workspace (`panelSides`) so a flipped tab comes back
+// flipped. Not part of PanelState on purpose: every strip op builds a fresh
+// PanelState literal, and threading a `side` field through all of them would
+// be a dozen places to forget — while the side is one bit that outlives the
+// strip (a tab keeps its side across close + Ctrl+Shift+P reopen).
+export type PanelSide = "left" | "right";
+let panelSides = new Map<string, "left">();
+
+export function panelSideFor(sessionId: string | null): PanelSide {
+  return sessionId && panelSides.has(sessionId) ? "left" : "right";
+}
+
+export function usePanelSide(sessionId: string | null): PanelSide {
+  return useSyncExternalStore(subscribe, () => panelSideFor(sessionId));
+}
+
+export function setPanelSide(sessionId: string, side: PanelSide): void {
+  if (panelSideFor(sessionId) === side) return;
+  panelSides = new Map(panelSides);
+  if (side === "left") panelSides.set(sessionId, "left");
+  else panelSides.delete(sessionId);
+  bump();
+}
+
+export function togglePanelSide(sessionId: string): void {
+  setPanelSide(sessionId, panelSideFor(sessionId) === "left" ? "right" : "left");
+}
+
+/** Lean record for the workspace blob: only the left-side tabs. */
+export function getPanelSidesRecord(): Record<string, "left"> {
+  return Object.fromEntries(panelSides);
+}
+
+/** Tolerant parse of a saved `panelSides` record: keeps `"left"` entries with
+ *  non-empty keys, drops everything else — a stranger value is "right". */
+export function parsePanelSides(raw: unknown): Record<string, "left"> {
+  const out: Record<string, "left"> = {};
+  if (!isRecord(raw)) return out;
+  for (const [key, value] of Object.entries(raw)) {
+    if (key.length > 0 && value === "left") out[key] = "left";
+  }
+  return out;
+}
+
+/** Seed at boot (with initPanelStore); a re-seed replaces the whole map. */
+export function initPanelSides(initial: unknown): void {
+  panelSides = new Map(Object.entries(parsePanelSides(initial)));
+  bump();
+}
+
 /** The ACTIVE TAB's session id, published by App (§Active-tab bridge below). */
 let activeTabSessionId: string | null = null;
 
@@ -1213,8 +1275,16 @@ export function removeSessionPanel(sessionId: string): void {
   if (hadPopOut) poppedOut = null;
   const hadPanel = panels.has(sessionId);
   const hadMemory = lastPanelStates.has(sessionId);
+  // The tab's SIDE (SWIT-33) dies with it too — checked before the early
+  // return below, because a tab can have flipped its panel and then closed
+  // it, leaving a side with no strip and no memory.
+  const hadSide = panelSides.has(sessionId);
+  if (hadSide) {
+    panelSides = new Map(panelSides);
+    panelSides.delete(sessionId);
+  }
   if (!hadPanel && !hadMemory) {
-    if (hadPopOut) bump();
+    if (hadPopOut || hadSide) bump();
     return;
   }
   // PANEL TERMINALS OUTLIVE THEIR HOST TAB (increment H). This tab is being
@@ -1256,6 +1326,15 @@ export function setPanelWidth(w: number): void {
  *  on fresh starts to drop every binding). */
 export function remapPanelSessions(idMap: Map<string, string>): void {
   panels = new Map(Object.entries(remapPanels(Object.fromEntries(panels), idMap)));
+  // Sides follow the same map: an unmapped tab's side is dropped with it.
+  {
+    const next = new Map<string, "left">();
+    for (const id of panelSides.keys()) {
+      const mapped = idMap.get(id);
+      if (mapped) next.set(mapped, "left");
+    }
+    panelSides = next;
+  }
   // Parked ids follow the same map for completeness. In practice this set is
   // empty at restore time (it is never persisted), so this is a guard against a
   // future caller remapping mid-session, not a live path.
@@ -1690,17 +1769,27 @@ export function usePanelTerminalsAvailable(): boolean {
 // changes, so the panel re-renders on a real status flip and not on every
 // unrelated `sessions` array identity change.
 
-export type SessionLabel = { name: string; status: AgentStatus };
+/** `workingDir` joined in SWIT-31: the Projects section files a session
+ *  under the project whose repo contains its cwd (explorer.sessionsForProject).
+ *  It is the SPAWN cwd (SessionInfo.working_dir — always set: restore passes
+ *  the saved one, quick sessions use the home dir), not the live one: a `cd`
+ *  elsewhere is invisible to the shell, and only claude's cwd is discovered. */
+export type SessionLabel = { name: string; status: AgentStatus; workingDir: string };
 
-let sessionLabels = new Map<string, SessionLabel>();
+let sessionLabels: ReadonlyMap<string, SessionLabel> = new Map<string, SessionLabel>();
 
-/** App publishes the live session list (id → name + status). */
+/** App publishes the live session list (id → name + status + cwd). */
 export function publishSessionLabels(next: ReadonlyMap<string, SessionLabel>): void {
   if (next.size === sessionLabels.size) {
     let same = true;
     for (const [id, label] of next) {
       const prev = sessionLabels.get(id);
-      if (!prev || prev.name !== label.name || prev.status !== label.status) {
+      if (
+        !prev ||
+        prev.name !== label.name ||
+        prev.status !== label.status ||
+        prev.workingDir !== label.workingDir
+      ) {
         same = false;
         break;
       }
@@ -1709,6 +1798,14 @@ export function publishSessionLabels(next: ReadonlyMap<string, SessionLabel>): v
   }
   sessionLabels = new Map(next);
   bump();
+}
+
+/** The WHOLE published list, for the Projects section's `terminals` rows.
+ *  The snapshot is the map instance, replaced only on a real change, so a
+ *  subscriber re-renders exactly when a session appears, leaves, renames,
+ *  changes status or reports a cwd. */
+export function useSessionLabels(): ReadonlyMap<string, SessionLabel> {
+  return useSyncExternalStore(subscribe, () => sessionLabels);
 }
 
 /** Name + status for a session, or null when App knows no such session (a
@@ -1895,6 +1992,7 @@ export function __resetPanelStoreForTests(): void {
   lastPanelStates = new Map();
   parkedSessions = new Set();
   sessionLabels = new Map();
+  panelSides = new Map();
   activeTabSessionId = null;
   panelActions = null;
   pickerSessionId = null;

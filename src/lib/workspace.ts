@@ -8,7 +8,12 @@ import {
   migrateSavedWorkspace,
   applyWorkspaceStaleness,
 } from "./threadStore";
-import { getPanelsRecord, getPanelWidth, DEFAULT_PANEL_WIDTH } from "./panelStore";
+import {
+  getPanelsRecord,
+  getPanelWidth,
+  getPanelSidesRecord,
+  DEFAULT_PANEL_WIDTH,
+} from "./panelStore";
 
 const STORAGE_KEY = "switchboard:workspace";
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days — sessions only; threads never expire
@@ -54,6 +59,9 @@ export function buildSavedWorkspace(
     // because it IS a session, not because the panel persists anything extra.
     panels: getPanelsRecord(),
     panelWidth: getPanelWidth(),
+    // SWIT-33: which tabs keep their panel on the LEFT (right is the default
+    // and is never written). Absent on every older blob = all right.
+    panelSides: getPanelSidesRecord(),
   };
 }
 

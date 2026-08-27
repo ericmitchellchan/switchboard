@@ -113,7 +113,10 @@ export function KbTreeSection({ route }: { route: Route }) {
   );
 }
 
-function KbTreeNode({
+/** One KB node (folder or doc) as tree rows. Exported for the Projects
+ *  section (SWIT-31), which renders a project's KB folder under its own
+ *  project row with its own expansion set — same rows, same open path. */
+export function KbTreeNode({
   node,
   depth,
   expanded,

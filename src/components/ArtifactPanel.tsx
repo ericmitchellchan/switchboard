@@ -85,6 +85,8 @@ import {
   panelWidthFromDrag,
   promotePanelTerminal,
   setPanelWidth,
+  usePanelSide,
+  togglePanelSide,
   sendToThread,
   useSendToThreadAvailable,
   useSessionLabel,
@@ -96,6 +98,7 @@ import {
   DIVIDER_WIDTH,
   usePanelsView,
   type ArtifactCrumb,
+  type PanelSide,
 } from "../lib/panelStore";
 import { buildSendReference, refOptions } from "../lib/agentContext";
 import { useDirtyKeys } from "../lib/editor";
@@ -412,7 +415,7 @@ function SessionTabMark({ sessionId, active }: { sessionId: string; active: bool
  *  WebView2 window never arrives at all — an onMouseUp-only teardown would
  *  strand every pane at `pointer-events: none` with the cursor stuck at
  *  col-resize, permanently. */
-function PanelDivider() {
+function PanelDivider({ side }: { side: PanelSide }) {
   const [dragBox, setDragBox] = useState<{ left: number; width: number } | null>(null);
   const dragging = dragBox !== null;
   const dividerRef = useRef<HTMLDivElement>(null);
@@ -421,7 +424,7 @@ function PanelDivider() {
     if (!dragBox) return;
 
     const onMouseMove = (ev: MouseEvent) => {
-      setPanelWidth(panelWidthFromDrag(dragBox.left, dragBox.width, ev.clientX));
+      setPanelWidth(panelWidthFromDrag(dragBox.left, dragBox.width, ev.clientX, side));
     };
     const onMouseUp = () => setDragBox(null);
 
@@ -586,6 +589,13 @@ export function ArtifactPanel({
   const layout = panelLayoutFor(containerWidth, panelWidth);
   const overlay = layout.mode === "overlay";
   const { icon, crumbs, title } = describeArtifact(artifact);
+  // PANEL SIDE (SWIT-33) — per tab, from the store. The pane tree + panel row
+  // is App's flex container: `row-reverse` for a left panel, so this fragment
+  // (`[divider][aside]`) reads aside | divider | panes with no re-ordering
+  // here. What this component owns is the edge hairline, the overlay anchor
+  // and the drag direction, which all flip with the side.
+  const side = usePanelSide(sessionId);
+  const onLeft = side === "left";
 
   // Crossover to the full-width screen. Shares panelStore's `fullWidthRoute`
   // with the routing helper's navigate branch, so "open full" and a
@@ -647,7 +657,7 @@ export function ArtifactPanel({
     <>
       {/* Docked only: in overlay mode the panel floats above the pane tree, so
           there is no boundary to drag. */}
-      {!overlay && <PanelDivider />}
+      {!overlay && <PanelDivider side={side} />}
       <aside
         ref={asideRef}
         aria-label="Artifact panel"
@@ -663,16 +673,20 @@ export function ArtifactPanel({
           // tokens, which is the "slightly stronger border" this needs. The
           // global border-box means it costs 1px of `layout.width`, not an
           // extra pixel of layout.
-          borderLeft: "1px solid var(--border-subtle)",
+          ...(onLeft
+            ? { borderRight: "1px solid var(--border-subtle)" }
+            : { borderLeft: "1px solid var(--border-subtle)" }),
           width: layout.width,
           ...(overlay
             ? {
                 position: "absolute",
                 top: 0,
-                right: 0,
+                ...(onLeft ? { left: 0 } : { right: 0 }),
                 bottom: 0,
                 zIndex: 6,
-                boxShadow: "-10px 0 28px rgba(0, 0, 0, 0.55)",
+                boxShadow: onLeft
+                  ? "10px 0 28px rgba(0, 0, 0, 0.55)"
+                  : "-10px 0 28px rgba(0, 0, 0, 0.55)",
               }
             : { flex: "none", minWidth: 0 }),
         }}
@@ -708,6 +722,20 @@ export function ArtifactPanel({
               </span>
             ))}
           </span>
+          {/* SIDE SWAP (SWIT-33) — Ky's SplitView "Swap", here: flips THIS
+              TAB's panel to the other side of the pane tree. Per tab, kept
+              with the workspace. Shown for every artifact kind — the side is
+              the tab's, not the artifact's. */}
+          <button
+            type="button"
+            onClick={() => togglePanelSide(sessionId)}
+            title={onLeft ? "Move the panel to the right" : "Move the panel to the left"}
+            style={ACTION_STYLE}
+            onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-primary)")}
+            onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-dim)")}
+          >
+            ⇄ {onLeft ? "right" : "left"}
+          </button>
           {/* PROMOTE TO TAB (increment H, Decision 2) — the panel's escape
               hatch. It MOVES the session to the tab bar (park → commit →
               release, App side), so at no point are there two views of it;

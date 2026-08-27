@@ -2046,7 +2046,7 @@ describe("session artifacts (increment H)", () => {
     expect(describeArtifact(SESSION_A).icon).toBe(SESSION_ICON);
 
     publishSessionLabels(
-      new Map<string, SessionLabel>([["pty-a", { name: "lodestar dev", status: "running" }]])
+      new Map<string, SessionLabel>([["pty-a", { name: "lodestar dev", status: "running", workingDir: "" }]])
     );
     expect(sessionLabelFor("pty-a")?.status).toBe("running");
     expect(artifactShortTitle(SESSION_A)).toBe("lodestar dev");
@@ -2060,11 +2060,11 @@ describe("session artifacts (increment H)", () => {
   it("publishing an unchanged label set does NOT notify (no re-render per keystroke)", () => {
     let notified = 0;
     const unsubscribe = subscribeToPanelStore(() => (notified += 1));
-    publishSessionLabels(new Map([["pty-a", { name: "dev", status: "idle" }]]));
+    publishSessionLabels(new Map([["pty-a", { name: "dev", status: "idle", workingDir: "" }]]));
     expect(notified).toBe(1);
-    publishSessionLabels(new Map([["pty-a", { name: "dev", status: "idle" }]]));
+    publishSessionLabels(new Map([["pty-a", { name: "dev", status: "idle", workingDir: "" }]]));
     expect(notified).toBe(1); // same content, different Map object
-    publishSessionLabels(new Map([["pty-a", { name: "dev", status: "running" }]]));
+    publishSessionLabels(new Map([["pty-a", { name: "dev", status: "running", workingDir: "" }]]));
     expect(notified).toBe(2); // a real status flip
     unsubscribe();
   });
