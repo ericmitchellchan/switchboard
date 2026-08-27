@@ -45,7 +45,8 @@ function Candles({ bars, entryMs, exitMs }: { bars: Bar[]; entryMs: number; exit
       ) : null}
       {bars.map((b, i) =>
         Number.isFinite(b.high) && Number.isFinite(b.close) ? (
-          <g key={i}>
+          // SWITCHBOARD: each candle is a pinnable anchor (`bar:<ts>`).
+          <g key={i} data-anchor={`bar:${b.ts}`} data-anchor-label={`bar ${ptTime(b.ts)}`}>
             <line x1={x(i)} x2={x(i)} y1={y(b.high)} y2={y(b.low)} stroke={b.close >= b.open ? UP : DN} strokeWidth="1" />
             <rect x={x(i) - bw / 2} y={y(Math.max(b.open, b.close))} width={bw} height={Math.max(1, Math.abs(y(b.open) - y(b.close)))} fill={b.close >= b.open ? UP : DN} />
           </g>

@@ -52,7 +52,8 @@ function money(v: number): string {
 
 function Tile({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
-    <div className="rounded-lg border border-line bg-surface/40 px-4 py-2.5">
+    // SWITCHBOARD: `data-anchor` marks make the tile pinnable (surfaces/anchors.ts).
+    <div className="rounded-lg border border-line bg-surface/40 px-4 py-2.5" data-anchor={`tile:${label}`} data-anchor-label={`tile · ${label}`}>
       <div className="font-mono text-[10px] uppercase tracking-wider text-dim">{label}</div>
       <div className="mt-0.5 font-mono text-xl" style={{ color: color ?? "var(--tw-text)" }}>{value}</div>
     </div>
@@ -225,7 +226,7 @@ export default function Trading() {
               </thead>
               <tbody>
                 {tables[dim].map((b) => (
-                  <tr key={b.bucket} onClick={() => openScenario(b.bucket)} title="see this scenario's trades" className="cursor-pointer border-b border-line/40 hover:bg-surface2/30">
+                  <tr key={b.bucket} onClick={() => openScenario(b.bucket)} title="see this scenario's trades" className="cursor-pointer border-b border-line/40 hover:bg-surface2/30" data-anchor={`row:${dim}:${b.bucket}`} data-anchor-label={`${DIM_LABEL[dim] ?? dim} · ${b.bucket}`}>
                     <td className="py-1.5 pr-3 text-text">{b.bucket} <span className="text-dim2">→</span></td>
                     <td className="pr-3 text-right text-dim">{b.n}</td>
                     <td className="pr-3 text-right" style={{ color: b.net_usd >= 0 ? UP : DN }}>{money(b.net_usd)}</td>
@@ -302,7 +303,7 @@ export default function Trading() {
               </thead>
               <tbody>
                 {filtered.map((r, i) => (
-                  <tr key={r.trade_id} onClick={() => setDetailIdx(i)} className="cursor-pointer border-t border-line/40 hover:bg-surface2/40">
+                  <tr key={r.trade_id} onClick={() => setDetailIdx(i)} className="cursor-pointer border-t border-line/40 hover:bg-surface2/40" data-anchor={`trade:${r.trade_id}`} data-anchor-label={`${r.date} ${ptTime(r.start_utc)} · ${r.symbol} ${r.direction}`}>
                     <td className="py-1 pl-3 pr-3 text-dim">{r.date} · {ptTime(r.start_utc)} PT</td>
                     <td className="pr-3" style={{ color: r.pnl_usd >= 0 ? UP : DN }}>{money(r.pnl_usd)}</td>
                     <td className="pr-3 text-dim">{Math.round(r.hold_min)}m</td>

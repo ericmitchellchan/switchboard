@@ -33,11 +33,13 @@
 // `active` gates the probe exactly as it gates DocView's poll — a surface on
 // a hidden tab costs nothing.
 
-import { Component, Suspense, useEffect, useState } from "react";
+import { Component, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ErrorInfo, ReactNode } from "react";
 import type { Artifact } from "../types";
 import { componentFor, findSurface, surfaceBackend, surfaceLabel } from "./registry";
 import type { SurfaceBackend } from "./registry";
+import { SurfaceAnchorContext, composeAnchorProviders, domAnchorProvider } from "./anchors";
+import type { SurfaceAnchorProvider, SurfaceAnchorRegistry } from "./anchors";
 import { log } from "../lib/logger";
 
 export type SurfaceArtifact = Extract<Artifact, { kind: "surface" }>;
@@ -83,6 +85,7 @@ export function SurfaceHost({
   const page = findSurface(artifact.project, artifact.page);
   const backend = surfaceBackend(artifact.project);
   const health = useBackendHealth(backend, active);
+  const anchors = useSurfaceAnchors();
 
   if (!page) {
     return (
@@ -105,13 +108,39 @@ export function SurfaceHost({
   const title = `${artifact.project} / ${surfaceLabel(artifact.project, artifact.page)}`;
   return (
     <SurfaceErrorBoundary title={title}>
-      <div className="sb-surface" style={ROOT_STYLE}>
-        <Suspense fallback={<div style={NOTE_STYLE}>loading {title}…</div>}>
-          <Page />
-        </Suspense>
-      </div>
+      <SurfaceAnchorContext.Provider value={anchors.registry}>
+        <div ref={anchors.rootRef} className="sb-surface" style={ROOT_STYLE}>
+          <Suspense fallback={<div style={NOTE_STYLE}>loading {title}…</div>}>
+            <Page />
+          </Suspense>
+        </div>
+      </SurfaceAnchorContext.Provider>
     </SurfaceErrorBoundary>
   );
+}
+
+// ── Anchors (Inc 3a — SWIT-35) ───────────────────────────────────────────────
+
+/** The host's anchor plumbing: a root ref for the DOM provider, a registry a
+ *  page may publish a programmatic provider into, and the COMPOSED provider
+ *  (page first, DOM attributes as the fallback) that pins (3b) resolve
+ *  through. The registry object is stable for the host's lifetime so a page
+ *  effect that publishes on mount does not re-run per render. */
+function useSurfaceAnchors(): {
+  rootRef: React.RefObject<HTMLDivElement>;
+  registry: SurfaceAnchorRegistry;
+  provider: SurfaceAnchorProvider;
+} {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [published, setPublished] = useState<SurfaceAnchorProvider | null>(null);
+  const publish = useCallback((p: SurfaceAnchorProvider) => {
+    setPublished(p);
+    return () => setPublished((cur) => (cur === p ? null : cur));
+  }, []);
+  const registry = useMemo<SurfaceAnchorRegistry>(() => ({ publish }), [publish]);
+  const dom = useMemo(() => domAnchorProvider(() => rootRef.current), []);
+  const provider = useMemo(() => composeAnchorProviders(published, dom), [published, dom]);
+  return { rootRef, registry, provider };
 }
 
 // ── Backend probe ────────────────────────────────────────────────────────────
