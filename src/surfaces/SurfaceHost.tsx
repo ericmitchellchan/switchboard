@@ -35,14 +35,17 @@
 
 import { Component, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ErrorInfo, ReactNode } from "react";
-import type { Artifact } from "../types";
 import { componentFor, findSurface, surfaceBackend, surfaceLabel } from "./registry";
-import type { SurfaceBackend } from "./registry";
+import type { SurfaceArtifact, SurfaceBackend } from "./registry";
 import { SurfaceAnchorContext, composeAnchorProviders, domAnchorProvider } from "./anchors";
 import type { SurfaceAnchorProvider, SurfaceAnchorRegistry } from "./anchors";
+import { useSurfacePins } from "./SurfacePins";
+import { SurfaceActiveContext, SurfaceNavContext } from "./page-api";
+import type { SurfaceNav } from "./page-api";
+import { openArtifact } from "../lib/panelStore";
 import { log } from "../lib/logger";
 
-export type SurfaceArtifact = Extract<Artifact, { kind: "surface" }>;
+export type { SurfaceArtifact } from "./registry";
 
 /** Probe cadence while active, and the miss count that flips the card. */
 export const SURFACE_HEALTH_POLL_MS = 5000;
@@ -87,6 +90,28 @@ export function SurfaceHost({
   const health = useBackendHealth(backend, active);
   const anchors = useSurfaceAnchors();
 
+  // Pins (3b). Every hook runs before the early returns below (hook order);
+  // the rail and toolbar themselves render only on the main branch — an
+  // unknown page or a down backend shows its card and nothing else.
+  const [pinMode, setPinMode] = useState(false);
+  const [flash, setFlash] = useState<string | null>(null);
+  useEffect(() => {
+    if (flash === null) return;
+    const t = setTimeout(() => setFlash(null), 1600);
+    return () => clearTimeout(t);
+  }, [flash]);
+  const onPlaced = useCallback((outcome: "pinned" | "nothing-here") => {
+    setPinMode(false); // single-shot, like the wireframe and the live preview
+    if (outcome === "nothing-here") setFlash("nothing pinnable there — click a row, tile or bar");
+  }, []);
+  const pins = useSurfacePins(artifact, anchors.provider, anchors.rootEl, pinMode, onPlaced, active);
+  // The page-facing API (5a): where a page's "go to page X" lands is the
+  // shell's decision — the same open rule a tree click follows.
+  const nav = useMemo<SurfaceNav>(
+    () => ({ openPage: (page) => openArtifact({ kind: "surface", project: artifact.project, page }) }),
+    [artifact.project]
+  );
+
   if (!page) {
     return (
       <div style={NOTE_STYLE}>
@@ -109,29 +134,102 @@ export function SurfaceHost({
   return (
     <SurfaceErrorBoundary title={title}>
       <SurfaceAnchorContext.Provider value={anchors.registry}>
-        <div ref={anchors.rootRef} className="sb-surface" style={ROOT_STYLE}>
-          <Suspense fallback={<div style={NOTE_STYLE}>loading {title}…</div>}>
-            <Page />
-          </Suspense>
+        <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          {/* The surface toolbar: pin mode, and the one-line refusal when an
+              armed click lands on nothing pinnable. Soft palette, 26px, the
+              same chrome LocalhostView puts above its frame. */}
+          <div style={TOOLBAR_STYLE}>
+            <span style={{ flex: 1, minWidth: 0, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {flash ?? (pinMode ? "pin mode — click a row, tile or bar" : "")}
+            </span>
+            <button
+              type="button"
+              style={{
+                ...TOOL_BTN_STYLE,
+                ...(pinMode ? { color: "var(--text-primary)", borderColor: "var(--text-secondary)" } : {}),
+              }}
+              onClick={() => setPinMode((m) => !m)}
+              title={`Pin mode: click a pinnable thing on the page to drop a numbered pin. Pins follow the THING (its anchor), and are stored in the KB (${artifact.project}/surface-pins.json), never in the repo.`}
+            >
+              {"\u{1F4CC}"} pin{pins.count > 0 ? ` ${pins.count}` : ""}
+            </button>
+          </div>
+          <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+            <div className="sb-surface" style={ROOT_STYLE}>
+              {/* The content WRAPPER is the anchor root (DOM provider scope), the
+                  mark overlay's coordinate space, and the armed-click capture
+                  target. `position: relative` so marks scroll with the page. */}
+              <div
+                ref={anchors.setRootEl}
+                onClickCapture={pins.onCapture}
+                style={{
+                  position: "relative",
+                  minHeight: "100%",
+                  cursor: pinMode ? "crosshair" : undefined,
+                  background: pinMode ? "rgba(228, 228, 231, 0.04)" : "transparent",
+                }}
+              >
+                <SurfaceActiveContext.Provider value={active}>
+                  <SurfaceNavContext.Provider value={nav}>
+                    <Suspense fallback={<div style={NOTE_STYLE}>loading {title}…</div>}>
+                      <Page />
+                    </Suspense>
+                  </SurfaceNavContext.Provider>
+                </SurfaceActiveContext.Provider>
+                <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>{pins.marks}</div>
+              </div>
+            </div>
+            {pins.rail}
+          </div>
         </div>
       </SurfaceAnchorContext.Provider>
     </SurfaceErrorBoundary>
   );
 }
 
+const TOOLBAR_STYLE: CSSProperties = {
+  height: 26,
+  flex: "none",
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  padding: "0 8px 0 12px",
+  borderBottom: "1px solid var(--border)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 10.5,
+};
+
+const TOOL_BTN_STYLE: CSSProperties = {
+  background: "transparent",
+  border: "1px solid transparent",
+  borderRadius: 3,
+  color: "var(--text-dim)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 10.5,
+  lineHeight: "16px",
+  padding: "0 6px",
+  cursor: "pointer",
+};
+
 // ── Anchors (Inc 3a — SWIT-35) ───────────────────────────────────────────────
 
-/** The host's anchor plumbing: a root ref for the DOM provider, a registry a
- *  page may publish a programmatic provider into, and the COMPOSED provider
- *  (page first, DOM attributes as the fallback) that pins (3b) resolve
- *  through. The registry object is stable for the host's lifetime so a page
- *  effect that publishes on mount does not re-run per render. */
+/** The host's anchor plumbing: the content root ELEMENT (held as state via a
+ *  callback ref, so a remount after the backend card or a crash card hands
+ *  the pins layer a fresh element and its observers re-attach — an object
+ *  ref would keep observing the detached node), a registry a page may publish
+ *  a programmatic provider into, and the COMPOSED provider (page first, DOM
+ *  attributes as the fallback) that pins (3b) resolve through. The registry
+ *  object is stable for the host's lifetime so a page effect that publishes
+ *  on mount does not re-run per render. */
 function useSurfaceAnchors(): {
-  rootRef: React.RefObject<HTMLDivElement>;
+  rootEl: HTMLDivElement | null;
+  setRootEl: (el: HTMLDivElement | null) => void;
   registry: SurfaceAnchorRegistry;
   provider: SurfaceAnchorProvider;
 } {
-  const rootRef = useRef<HTMLDivElement>(null);
+  const [rootEl, setRootEl] = useState<HTMLDivElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  rootRef.current = rootEl;
   const [published, setPublished] = useState<SurfaceAnchorProvider | null>(null);
   const publish = useCallback((p: SurfaceAnchorProvider) => {
     setPublished(p);
@@ -140,7 +238,7 @@ function useSurfaceAnchors(): {
   const registry = useMemo<SurfaceAnchorRegistry>(() => ({ publish }), [publish]);
   const dom = useMemo(() => domAnchorProvider(() => rootRef.current), []);
   const provider = useMemo(() => composeAnchorProviders(published, dom), [published, dom]);
-  return { rootRef, registry, provider };
+  return { rootEl, setRootEl, registry, provider };
 }
 
 // ── Backend probe ────────────────────────────────────────────────────────────

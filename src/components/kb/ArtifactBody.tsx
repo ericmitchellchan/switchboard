@@ -32,6 +32,7 @@ export function ArtifactBody({
   content,
   fallback,
   onReload,
+  active = true,
 }: {
   /** WHICH document this is — identity for per-doc state, the pins sidecar,
    *  and the `→ thread` reference. */
@@ -47,6 +48,9 @@ export function ArtifactBody({
    *  save, and after take-theirs, so the rendered view catches up without
    *  waiting for a poll that a repo file does not even have). */
   onReload?: () => void;
+  /** The host is on screen — forwarded to the markdown surface's doc-pins
+   *  re-read (3d). Hosts without the notion (Explorer) leave it true. */
+  active?: boolean;
 }) {
   const key = artifactIdentity(artifact);
   switch (docKind(artifact.path)) {
@@ -55,7 +59,9 @@ export function ArtifactBody({
       // buffer, the dirty state and the conflict banner keyed by identity in
       // lib/editor. Keyed like the others — a repo file and a KB doc can share
       // a path, and a buffer must never follow you to a different document.
-      return <MarkdownSurface key={key} artifact={artifact} content={content} onReload={onReload} />;
+      return (
+        <MarkdownSurface key={key} artifact={artifact} content={content} onReload={onReload} active={active} />
+      );
     case "wireframe":
       // Live sandboxed rendering for .html/.htm.
       return <WireframeView key={key} artifact={artifact} content={content} onReload={onReload} />;

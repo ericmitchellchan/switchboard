@@ -24,7 +24,7 @@
 // ALL the buffer/conflict/draft RULES live in lib/editor.ts, pure and tested.
 // This file draws them.
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { FileArtifact } from "../../types";
 import {
@@ -42,6 +42,11 @@ import {
 } from "../../lib/editor";
 import { Icon } from "../icons";
 import { MarkdownDoc } from "./MarkdownDoc";
+import { pinTargetFor } from "../../lib/pins";
+import { artifactIdentity } from "../../lib/panelStore";
+import { domAnchorProvider } from "../../surfaces/anchors";
+import { useAnchoredPins } from "../../surfaces/SurfacePins";
+import type { AnchoredPinTarget } from "../../surfaces/SurfacePins";
 
 const BAR_STYLE: CSSProperties = {
   height: 24,
@@ -100,10 +105,14 @@ export function MarkdownSurface({
   artifact,
   content,
   onReload,
+  active = true,
 }: {
   artifact: FileArtifact;
   /** The document's CURRENT DISK text — the host owns loading policy. */
   content: string;
+  /** The host is on screen — gates the doc-pins disk re-read (3d). Defaults
+   *  to true for hosts that have no notion of it (the Explorer's viewer). */
+  active?: boolean;
   /** Force the host's read NOW. Used after a successful save so the rendered
    *  view reflects what just landed without waiting for the poll (and so a repo
    *  file, whose host never polls, refreshes at all). */
@@ -123,6 +132,48 @@ export function MarkdownSurface({
   const dirty = isDirty(state);
   const editing = !!state?.editing;
   const conflict = state?.conflict ?? null;
+
+  // DOC PINS (Inc 3c — SWIT-37): anchored to headings / table rows, which
+  // MarkdownDoc stamps as `data-anchor` after each paint. Same marks, rail
+  // and single-shot pin mode as a surface (surfaces/SurfacePins); the sidecar
+  // is THIS document's existing one (`pinTargetFor` — next to a KB doc, the
+  // hidden mirror for a repo file), so wireframe pins and doc pins in one
+  // folder share a file, filed by document name. View mode only: the editor
+  // has no anchors to pin, and a pin dropped on stale text would lie.
+  const [pinMode, setPinMode] = useState(false);
+  const [pinFlash, setPinFlash] = useState<string | null>(null);
+  useEffect(() => {
+    if (pinFlash === null) return;
+    const t = setTimeout(() => setPinFlash(null), 1600);
+    return () => clearTimeout(t);
+  }, [pinFlash]);
+  useEffect(() => {
+    if (editing) setPinMode(false);
+  }, [editing]);
+  // The doc wrapper as STATE from a callback ref (not an object ref), so a
+  // remount — view ⇄ edit toggles — hands the pins layer a fresh element and
+  // its observers re-attach.
+  const [docEl, setDocEl] = useState<HTMLDivElement | null>(null);
+  const docElRef = useRef<HTMLDivElement | null>(null);
+  docElRef.current = docEl;
+  const pinTarget = useMemo<AnchoredPinTarget>(() => {
+    const { sidecarPath, docKey } = pinTargetFor(artifact);
+    return {
+      artifact,
+      sidecarPath,
+      docKey,
+      identity: artifactIdentity(artifact),
+      scopeNote: `doc ${docKey}`,
+      emptyHint:
+        "no pins yet — toggle \u{1F4CC} pin, then click a heading or a table row. A doc pin follows the heading or row, not the spot on screen.",
+    };
+  }, [artifact]);
+  const anchorProvider = useMemo(() => domAnchorProvider(() => docElRef.current), []);
+  const onPlaced = useCallback((outcome: "pinned" | "nothing-here") => {
+    setPinMode(false);
+    if (outcome === "nothing-here") setPinFlash("nothing pinnable there — click a heading or a table row");
+  }, []);
+  const pins = useAnchoredPins(pinTarget, anchorProvider, docEl, pinMode, onPlaced, active);
 
   const save = useCallback(() => {
     void saveBuffer(key, artifact).then(() => {
@@ -228,6 +279,21 @@ export function MarkdownSurface({
             save
           </button>
         )}
+        {!editing && (
+          <button
+            type="button"
+            onClick={() => setPinMode((m) => !m)}
+            aria-pressed={pinMode}
+            title={`Pin mode: click a heading or a table row to drop a numbered pin — notes are stored in the KB (${pinTarget.sidecarPath}), never in the document.`}
+            style={{ ...ACTION_STYLE, color: pinMode ? "var(--text-primary)" : "var(--text-dim)" }}
+            onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-primary)")}
+            onMouseLeave={(e) =>
+              (e.currentTarget.style.color = pinMode ? "var(--text-primary)" : "var(--text-dim)")
+            }
+          >
+            {"\u{1F4CC}"} pin{pins.count > 0 ? ` ${pins.count}` : ""}
+          </button>
+        )}
         <button
           type="button"
           onClick={() => (editing ? endEdit(key) : beginEdit(key, content))}
@@ -280,7 +346,7 @@ export function MarkdownSurface({
         </div>
       )}
 
-      <div style={{ flex: 1, minHeight: 0, display: "flex", overflowY: editing ? "hidden" : "auto" }}>
+      <div style={{ flex: 1, minHeight: 0, display: "flex", overflowY: "hidden" }}>
         {editing && state ? (
           <textarea
             ref={textareaRef}
@@ -310,11 +376,35 @@ export function MarkdownSurface({
             }}
           />
         ) : (
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <MarkdownDoc content={content} />
-          </div>
+          <>
+            {/* The doc scrolls on its own so the pins rail beside it stays put.
+                The inner wrapper is the anchor root, the marks' coordinate
+                space and the armed-click capture target (same contract as
+                SurfaceHost's content wrapper). */}
+            <div style={{ flex: 1, minWidth: 0, overflowY: "auto" }}>
+              <div
+                ref={setDocEl}
+                onClickCapture={pins.onCapture}
+                style={{
+                  position: "relative",
+                  minHeight: "100%",
+                  cursor: pinMode ? "crosshair" : undefined,
+                  background: pinMode ? "rgba(228, 228, 231, 0.04)" : "transparent",
+                }}
+              >
+                <MarkdownDoc content={content} />
+                <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>{pins.marks}</div>
+              </div>
+            </div>
+            {pins.rail}
+          </>
         )}
       </div>
+      {pinFlash && (
+        <div style={{ ...BAR_STYLE, height: "auto", padding: "4px 12px", color: "var(--text-dim)" }}>
+          {pinFlash}
+        </div>
+      )}
     </div>
   );
 }

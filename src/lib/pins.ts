@@ -200,6 +200,129 @@ export function pinTargetFor(artifact: FileArtifact): PinTarget {
 // URL — and the rail says which route its pins belong to rather than pretending
 // to follow along.
 
+// ── Surface pins (platform evolution, Inc 3b — SWIT-36) ─────────────────────
+// A pin on a LIVE APP SURFACE (a project's own page rendered in-document).
+// Unlike a wireframe pin (a point on a picture) or a live-preview pin (a
+// point on a route), a surface pin is ANCHORED: `anchor` holds the page's own
+// key for the thing (`trade:<id>`, `row:<dim>:<bucket>`, `bar:<ts>` — see
+// surfaces/anchors.ts), and the page locates it again after every re-layout.
+// `xPct`/`yPct` are RECORDED at placement (the anchor's centre as a percentage
+// of the surface) for a reader with no page to ask — never used to reposition.
+// One `surface-pins.json` per project, `doc` = the page id, so every page of
+// a project files into one sidecar the way every route of a dev server does.
+
+/** The per-project surface-pin file name. */
+export const SURFACE_PINS_NAME = "surface-pins.json";
+
+/** Where a SURFACE artifact's pins live and the `doc` key they file under.
+ *  Total, like the other targets: every surface has a place for pins. */
+export function surfacePinTargetFor(artifact: Extract<Artifact, { kind: "surface" }>): PinTarget {
+  const segments = mirrorSegments(artifact.project);
+  const dir = segments.join("/");
+  return {
+    sidecarPath: dir.length > 0 ? `${dir}/${SURFACE_PINS_NAME}` : SURFACE_PINS_NAME,
+    docKey: artifact.page,
+  };
+}
+
+/** A surface pin's extra fields. `anchorLabel` is what the page called the
+ *  thing when the pin was placed — printed in the rail even after the page
+ *  can no longer locate the key (a trade filtered out). `origin` says who
+ *  dropped it: "user" from the UI, "thread" when an agent wrote the file
+ *  (3d) — absent means user, so older/hand-edited records read as the
+ *  common case. */
+export interface SurfacePinFields {
+  anchor: string;
+  anchorLabel: string;
+  origin?: "user" | "thread";
+}
+
+/** Build a surface pin: `createPin` shape + the anchor key in the KNOWN
+ *  optional `anchor` field + the label as an extra field. */
+export function createSurfacePin(
+  args: {
+    page: string;
+    anchor: string;
+    anchorLabel: string;
+    xPct: number;
+    yPct: number;
+    note?: string;
+    origin?: "user" | "thread";
+  },
+  id?: string,
+  createdAt?: string
+): Pin & SurfacePinFields {
+  const base = createPin(
+    { doc: args.page, xPct: args.xPct, yPct: args.yPct, anchor: args.anchor, note: args.note },
+    id,
+    createdAt
+  );
+  return {
+    ...base,
+    anchor: args.anchor,
+    anchorLabel: args.anchorLabel,
+    ...(args.origin === "thread" ? { origin: "thread" as const } : {}),
+  };
+}
+
+/** The anchor key of a pin, or null for a pin that has none (a positional
+ *  pin that somehow landed in a surface file). Reads the KNOWN `anchor`
+ *  field, which sanitizePin already guarantees is a string when present. */
+export function surfacePinAnchor(pin: Pin): string | null {
+  return typeof pin.anchor === "string" && pin.anchor.length > 0 ? pin.anchor : null;
+}
+
+/** What the rail prints for a pin: the recorded label, else the anchor key,
+ *  else nothing. Tolerant of hand-edits, like every other extra-field read. */
+export function surfacePinLabel(pin: Pin): string {
+  const raw = pin.anchorLabel;
+  if (typeof raw === "string" && raw.trim().length > 0) return raw.trim();
+  return surfacePinAnchor(pin) ?? "";
+}
+
+/** Who dropped it — "thread" only when the record says so. */
+export function surfacePinOrigin(pin: Pin): "user" | "thread" {
+  return pin.origin === "thread" ? "thread" : "user";
+}
+
+/** THE WRITE-SIDE MERGE (Inc 3d — SWIT-38, review finding): a local flush
+ *  must not overwrite a pin that someone ELSE (the agent, a hand-edit, a git
+ *  pull) put on disk since we last read it. Given the local record, what is on
+ *  disk NOW, and the ids we last SAW on disk:
+ *    · a disk pin we never saw and do not hold locally is a FOREIGN ADD → kept
+ *      (appended after ours, so display numbers of existing pins hold);
+ *    · a pin we saw on disk and no longer hold is a LOCAL DELETE → dropped;
+ *    · everything else is ours, as we hold it (a local edit wins over a
+ *      concurrent foreign edit of the same pin — last-writer-wins on ONE pin
+ *      is the honest floor; on the whole file it was the bug).
+ *  Pure; the store calls it inside its flush with a fresh read. Returns the
+ *  local file itself when nothing foreign exists, so an unchanged case costs
+ *  no serialization. */
+export function mergeForeignPins(local: PinsFile, disk: PinsFile, seenOnDisk: ReadonlySet<string>): PinsFile {
+  const localIds = new Set(local.pins.map((p) => p.id));
+  const foreign = disk.pins.filter((p) => !seenOnDisk.has(p.id) && !localIds.has(p.id));
+  if (foreign.length === 0) return local;
+  return { ...local, pins: [...local.pins, ...foreign] };
+}
+
+/** A note's CROSS-REFERENCES (Inc 3d): `#3` in a note means "pin 3 of this
+ *  same rail" (display numbers, 1-based). Split so the rail can render each
+ *  reference as a jump. Pure; `#0`, `#` alone and `#x` stay text. */
+export type NoteSegment = { text: string } | { ref: number };
+
+export function splitPinRefs(note: string): NoteSegment[] {
+  const out: NoteSegment[] = [];
+  const re = /#([1-9]\d{0,3})(?!\d)/g;
+  let last = 0;
+  for (let m = re.exec(note); m !== null; m = re.exec(note)) {
+    if (m.index > last) out.push({ text: note.slice(last, m.index) });
+    out.push({ ref: Number(m[1]) });
+    last = m.index + m[0].length;
+  }
+  if (last < note.length) out.push({ text: note.slice(last) });
+  return out;
+}
+
 /** The per-project live-pin file name. */
 export const LIVE_PINS_NAME = "live-pins.json";
 

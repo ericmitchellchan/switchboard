@@ -489,3 +489,41 @@ describe("launchCommand + spawn context", () => {
     expect(line.split("\n")).toHaveLength(1);
   });
 });
+
+// ─── Anchored pins + surfaces (Inc 3d — SWIT-38) ─────────────────────────────
+
+describe("anchored pin references + surface spawn context (3d)", () => {
+  const SURFACE: Artifact = { kind: "surface", project: "lodestar", page: "trading" };
+
+  it("an anchored pin says WHAT it is on: (anchor — label) before the note", () => {
+    expect(
+      buildSendReference(DOC, { number: 2, note: "is this the same 30m?", anchor: "table:1:row:2", label: "table 1 · 30m" })
+    ).toBe(
+      'Look at "kb switchboard/features/artifact-panel/requirements.md", pin 2 (table:1:row:2 — table 1 · 30m): "is this the same 30m?"'
+    );
+  });
+
+  it("a label equal to the key is not repeated; an empty note keeps the anchor clause", () => {
+    expect(buildSendReference(SURFACE, { number: 1, note: "", anchor: "trade:t1", label: "trade:t1" })).toBe(
+      'Look at "surface lodestar/trading", pin 1 (trade:t1)'
+    );
+  });
+
+  it("a hostile anchor/label cannot break the line", () => {
+    const line = buildSendReference(SURFACE, { number: 3, note: "n", anchor: `row:${NASTY}`, label: NASTY });
+    expect(line.split("\n")).toHaveLength(1);
+    expect((line.match(/"/g) ?? []).length).toBe(4); // ref pair + note pair only
+    expect(Array.from(line).length).toBeLessThanOrEqual(SEND_REFERENCE_MAX);
+  });
+
+  it("a surface spawn context names its pins file by path and says how to add a pin", () => {
+    const line = buildSpawnContext(SURFACE, 2, { kbRoot: KB_ROOT });
+    expect(line).toContain('panel shows surface lodestar/trading');
+    expect(line).toContain(`2 pins in ${KB_ROOT}/lodestar/surface-pins.json`);
+    expect(line).toContain("origin: thread");
+    expect(line).toContain("doc: trading");
+    expect(line?.split("\n")).toHaveLength(1);
+    // Zero pins still names the file — the agent needs it to ADD one.
+    expect(buildSpawnContext(SURFACE, 0, { kbRoot: KB_ROOT })).toContain(`pins file ${KB_ROOT}/lodestar/surface-pins.json`);
+  });
+});

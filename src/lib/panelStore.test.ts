@@ -1801,6 +1801,8 @@ describe("panel tabs x shared pins store (one record per sidecar)", () => {
     releaseA();
     expect(writes).toHaveLength(0); // still mounted elsewhere — nothing owed yet
     releaseB();
+    // A flush is read-then-merge-then-write (Inc 3d) — let the hops land.
+    for (let i = 0; i < 4; i++) await Promise.resolve();
     expect(writes).toHaveLength(1);
     expect(writes[0][0]).toBe(sidecarA);
     expect(JSON.parse(writes[0][1]).pins.map((p: Pin) => p.id)).toEqual(["p1", "p2"]);

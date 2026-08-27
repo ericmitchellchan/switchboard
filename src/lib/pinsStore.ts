@@ -32,7 +32,7 @@
 // unit-testable under Node without a Tauri bridge.
 
 import { useCallback, useSyncExternalStore } from "react";
-import { emptyPinsFile, parsePinsFile, serializePinsFile } from "./pins";
+import { emptyPinsFile, mergeForeignPins, parsePinsFile, serializePinsFile } from "./pins";
 import type { PinsFile } from "./pins";
 import { log } from "./logger";
 
@@ -96,6 +96,12 @@ type Entry = {
   /** Monotonic count of writes ISSUED — lets a late-settling older write
    *  avoid clearing a newer write's gate. */
   writesIssued: number;
+  /** The pin ids we last SAW on disk (set by every load/refresh, and by every
+   *  write we complete). What lets a flush tell a FOREIGN add (agent, hand
+   *  edit) from a LOCAL delete — pins.mergeForeignPins. */
+  diskIds: ReadonlySet<string>;
+  /** A refresh read in flight — a second tick while one is out is skipped. */
+  refreshing: boolean;
   listeners: Set<() => void>;
 };
 
@@ -113,6 +119,8 @@ function entryFor(sidecarPath: string): Entry {
       pending: false,
       inFlight: null,
       writesIssued: 0,
+      diskIds: new Set(),
+      refreshing: false,
       listeners: new Set(),
     };
     entries.set(sidecarPath, entry);
@@ -154,8 +162,40 @@ function ensureLoaded(sidecarPath: string, entry: Entry): void {
 
 function applyLoad(entry: Entry, file: PinsFile, at: number): void {
   if (entry.mutations !== at) return; // local edits are newer; keep them
+  entry.diskIds = new Set(file.pins.map((p) => p.id));
+  // A re-read (refreshPins) that finds the SAME content must not re-render
+  // every mount — compare by serialized form, which is what the disk holds.
+  if (entry.file !== null && serializePinsFile(entry.file) === serializePinsFile(file)) return;
   entry.file = file;
   notify(entry);
+}
+
+/** RE-READ an already-loaded sidecar from disk (Inc 3d — SWIT-38): the agent
+ *  adds a pin by writing the file, and a mounted rail polls this so the pin
+ *  appears without a remount. Every protection the first load has applies:
+ *  skipped while a write is owed or in flight (the disk is about to change
+ *  under us — reading it now could only be stale), discarded if a local edit
+ *  lands before the read resolves (`mutations` guard), and a no-op when the
+ *  content is unchanged. Never creates an entry: nothing mounted means
+ *  nothing to refresh. */
+export function refreshPins(sidecarPath: string): void {
+  const entry = entries.get(sidecarPath);
+  const reader = io;
+  if (!entry || !reader || entry.file === null || entry.mounts === 0) return;
+  if (entry.pending || entry.inFlight !== null || entry.refreshing) return;
+  entry.refreshing = true;
+  const at = entry.mutations;
+  void reader.read(sidecarPath).then(
+    (text) => {
+      entry.refreshing = false;
+      applyLoad(entry, parsePinsFile(text), at);
+    },
+    () => {
+      // A missing sidecar now means nothing changed that we can act on — an
+      // earlier load already settled the in-memory record.
+      entry.refreshing = false;
+    }
+  );
 }
 
 // ── Subscribe / refcount ─────────────────────────────────────────────────────
@@ -256,8 +296,33 @@ function flushEntry(sidecarPath: string, entry: Entry): void {
     return;
   }
   const issued = (entry.writesIssued += 1);
+  // READ-THEN-MERGE-THEN-WRITE (Inc 3d — SWIT-38). The file may have changed
+  // under us since the last load — an agent appending a pin is the designed
+  // case — and writing our record over it verbatim would be last-writer-wins
+  // on the whole file, which is what this store exists to kill. So a flush
+  // first reads what is on disk NOW, keeps the pins that are foreign to us
+  // (pins.mergeForeignPins), and writes the union. A read failure (no file
+  // yet) merges against nothing. The whole sequence is the in-flight gate, so
+  // no load can be served between the read and the write.
+  const local = entry.file;
   entry.inFlight = writer
-    .write(sidecarPath, serializePinsFile(entry.file))
+    .read(sidecarPath)
+    .then(
+      (text) => parsePinsFile(text),
+      () => emptyPinsFile()
+    )
+    .then((disk) => {
+      const merged = mergeForeignPins(local, disk, entry.diskIds);
+      if (merged !== local && entry.file === local) {
+        // Foreign pins joined: show them, without counting as a local edit
+        // (no mutation bump — a refresh landing later must still be honoured).
+        entry.file = merged;
+        notify(entry);
+      }
+      const out = entry.file ?? merged;
+      entry.diskIds = new Set(out.pins.map((p) => p.id));
+      return writer.write(sidecarPath, serializePinsFile(out));
+    })
     .catch((e: unknown) => {
       log.error(`pinsStore: pins write failed for ${sidecarPath}: ${String(e)}`);
     })

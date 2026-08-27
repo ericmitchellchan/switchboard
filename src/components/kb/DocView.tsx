@@ -58,6 +58,7 @@ export function DocView({ path, active }: { path: string; active: boolean }) {
         <ArtifactBody
           artifact={artifact}
           content={content}
+          active={active}
           fallback={<PlaceholderBody kind={kind} path={path} />}
           // The reload affordance is the HOST's read, forced: the KB's poll
           // covers a doc you are watching, but not one you just saved from

@@ -58,7 +58,7 @@
 // own pair even though the spawn one-liner does not).
 
 import type { Artifact } from "../types";
-import { SIDECAR_NAME } from "./pins";
+import { SIDECAR_NAME, SURFACE_PINS_NAME } from "./pins";
 
 /** Cap for the spawn one-liner. Generous — it rides in a system prompt — but
  *  finite: a runaway path must not produce an unbounded typed line. */
@@ -74,7 +74,7 @@ export const PIN_NOTE_MAX = 240;
  *  component caps above plus the two framing quote pairs (asserted in the
  *  tests, not enforced by a final truncation: truncating the assembled line
  *  could strip a closing quote). */
-export const SEND_REFERENCE_MAX = 600;
+export const SEND_REFERENCE_MAX = 800; // + PIN_ANCHOR_MAX and its parentheses (Inc 3d)
 
 /** Highest pin number a reference will print (keeps the bound above real). */
 const MAX_PIN_NUMBER = 9999;
@@ -141,6 +141,9 @@ export type RefOptions = {
    *  Passed in rather than looked up so this module stays pure: the names live
    *  in App's session list, published through panelStore.sessionLabelFor. */
   sessionName?: string | null;
+  /** A surface page's anchor vocabulary (registry `pinHint`), for the spawn
+   *  context's pin advice. Passed in so this module stays project-agnostic. */
+  anchorHint?: string | null;
 };
 
 /** Where a session's transcript is mirrored, or `""` when the root is unknown.
@@ -261,14 +264,47 @@ export function buildSpawnContext(
     );
   }
   const pins = Number.isFinite(pinCount) ? Math.max(0, Math.trunc(pinCount)) : 0;
+  // A SURFACE (Inc 3d — SWIT-38) names its pins file by path — it is not
+  // "alongside" anything — and says how the agent may add one: the file is
+  // plain JSON the app re-reads while the surface is open, so a pin the agent
+  // appends shows up in the rail marked "from thread". `origin` is what marks
+  // it; `anchor` is the page's own key (the same keys the rail sends back in
+  // a pin reference), so the agent pins the THING, never a coordinate.
+  if (artifact.kind === "surface") {
+    const root = normalizePath(opts.kbRoot ?? "");
+    const file = joinPath(root, `${normalizePath(artifact.project)}/${SURFACE_PINS_NAME}`);
+    const count = pins > 0 ? `${pins} pin${pins === 1 ? "" : "s"} in ${file}` : `pins file ${file}`;
+    // The anchor vocabulary is the PAGE's (registry `pinHint`), never spelled
+    // out here — this module is generic to every project.
+    const anchors = (opts.anchorHint ?? "").trim();
+    const vocab = anchors.length > 0 ? `anchor kinds on this page: ${anchors}` : "anchor: the page's own <kind>:<id> key, as in the pins it already holds";
+    return sanitizeForTypedLine(
+      `Workstation context: panel shows ${ref} (${count}; ${vocab}; to add a pin, append to its pins array ` +
+        `{id, doc: ${artifact.page}, anchor, anchorLabel, note, origin: thread, xPct: 0, yPct: 0, createdAt} — ` +
+        `create the file as {version: 1, pins: []} if absent; the app re-reads it while the page is open).`,
+      SPAWN_CONTEXT_MAX
+    );
+  }
+  // The doc one-liner is UNCHANGED by 3c (it is an acceptance criterion): a
+  // doc pin's `anchor` field (h:<slug> / table:<n>:row:<m>) is self-describing
+  // in the sidecar the clause already points the agent at.
   const clause =
     pins > 0 ? ` (${pins} pin${pins === 1 ? "" : "s"} in ${SIDECAR_NAME} alongside)` : "";
   return sanitizeForTypedLine(`Workstation context: panel shows ${ref}${clause}.`, SPAWN_CONTEXT_MAX);
 }
 
 /** A pin as the send-to-thread reference names it: its DISPLAY number (1-based
- *  position in the doc's pin list — what the badge shows) plus its note. */
-export type PinReference = { number: number; note: string };
+ *  position in the doc's pin list — what the badge shows) plus its note.
+ *
+ *  ANCHORED pins (Inc 3d — SWIT-38) also carry the page's key for the thing
+ *  and its label, so the line says WHAT the pin is on, not just which number:
+ *  `pin 2 (trade:t1 — NQ long 10:02): "note"`. The agent can then find the
+ *  same thing through the project's own tools (a trade id, a table row) —
+ *  a number alone only means something to a person looking at the rail. */
+export type PinReference = { number: number; note: string; anchor?: string; label?: string };
+
+/** Cap for the `(anchor — label)` clause of an anchored pin reference. */
+export const PIN_ANCHOR_MAX = 160;
 
 /** SEAM 2 — the exact text a `→ thread` click TYPES into the terminal.
  *
@@ -316,9 +352,20 @@ export function buildSendReference(
     ? Math.min(MAX_PIN_NUMBER, Math.max(1, Math.trunc(pin.number)))
     : 1;
   const note = sanitizeForTypedLine(pin.note ?? "", PIN_NOTE_MAX);
+  // The anchor clause rides UNQUOTED inside parentheses — it is sanitized like
+  // the note (no quotes, no metacharacters survive), and parentheses are inert
+  // in a typed line that is not being evaluated. `—` separates key from label.
+  const anchor = sanitizeForTypedLine(pin.anchor ?? "", PIN_ANCHOR_MAX);
+  const label = sanitizeForTypedLine(pin.label ?? "", PIN_ANCHOR_MAX);
+  const where =
+    anchor.length > 0
+      ? label.length > 0 && label !== anchor
+        ? ` (${sanitizeForTypedLine(`${anchor} — ${label}`, PIN_ANCHOR_MAX)})`
+        : ` (${anchor})`
+      : "";
   return note.length > 0
-    ? `Look at ${ref}, pin ${number}: "${note}"`
-    : `Look at ${ref}, pin ${number}`;
+    ? `Look at ${ref}, pin ${number}${where}: "${note}"`
+    : `Look at ${ref}, pin ${number}${where}`;
 }
 
 // ── KB root cache ────────────────────────────────────────────────────────────

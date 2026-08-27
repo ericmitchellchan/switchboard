@@ -101,7 +101,7 @@ import {
 } from "./lib/agentContext";
 import { runPromotionPass, promotionPassReason, PROMOTION_POLL_MS } from "./lib/threadPromotion";
 import { explorerProjects, registerExplorerActions } from "./lib/explorer";
-import { parsePinsFile, pinsForDoc, pinTargetFor } from "./lib/pins";
+import { parsePinsFile, pinsForDoc, pinTargetFor, surfacePinTargetFor } from "./lib/pins";
 import { configurePinsIO, getPinsFile } from "./lib/pinsStore";
 import { ArtifactPanel, CRUMB_TONE } from "./components/ArtifactPanel";
 import { NewThreadDialog } from "./components/NewThreadDialog";
@@ -110,6 +110,7 @@ import { ExplorerView } from "./components/ExplorerView";
 import { BackButton } from "./components/BackButton";
 import { ThreadsScreen } from "./components/ThreadsScreen";
 import { ProjectView } from "./components/ProjectView";
+import { findSurface } from "./surfaces/registry";
 import { enqueueFit } from "./lib/fitQueue";
 import { useRoute, navigate, readRouteFromUrl, getNavState } from "./lib/route";
 import {
@@ -204,8 +205,11 @@ async function resolveSpawnContext(sessionId: string): Promise<string | null> {
       sessionName: artifactShortTitle(artifact),
     });
   }
-  if (artifact.kind === "kb-doc" || artifact.kind === "repo-file") {
-    const { sidecarPath, docKey } = pinTargetFor(artifact);
+  if (artifact.kind === "kb-doc" || artifact.kind === "repo-file" || artifact.kind === "surface") {
+    // A SURFACE files its pins per project (Inc 3d); the two file kinds keep
+    // their sidecar / mirror. Same shared-record-first lookup for all three.
+    const { sidecarPath, docKey } =
+      artifact.kind === "surface" ? surfacePinTargetFor(artifact) : pinTargetFor(artifact);
     // Prefer the SHARED record when a view has it loaded: it is the same
     // record every mount edits and it is newer than disk during the write
     // debounce, so a pin placed a moment ago is counted instead of missed.
@@ -223,7 +227,12 @@ async function resolveSpawnContext(sessionId: string): Promise<string | null> {
       }
     }
   }
-  return buildSpawnContext(artifact, pinCount, refOptions());
+  return buildSpawnContext(artifact, pinCount, {
+    ...refOptions(),
+    // A surface's anchor vocabulary is the PAGE's (registry pinHint).
+    anchorHint:
+      artifact.kind === "surface" ? (findSurface(artifact.project, artifact.page)?.pinHint ?? null) : null,
+  });
 }
 
 type ConfirmState = {

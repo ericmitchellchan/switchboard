@@ -18,6 +18,7 @@ import {
   hasPendingWrite,
   hasInFlightWrite,
   usePinsFile,
+  refreshPins,
   PINS_WRITE_DEBOUNCE_MS,
   __resetPinsStoreForTests,
   type PinsIO,
@@ -73,6 +74,11 @@ function settle(): Promise<void> {
   return Promise.resolve().then(() => undefined);
 }
 
+/** A flush is read-then-merge-then-write (Inc 3d): let all three hops land. */
+async function flushed(): Promise<void> {
+  for (let i = 0; i < 4; i++) await settle();
+}
+
 let rec: Recorder;
 
 beforeEach(() => {
@@ -123,7 +129,9 @@ describe("two mounts of the same sidecar", () => {
     expect(screenSeen[2]).toEqual(["p1", "p2", "p3", "p4", "p5"]);
 
     vi.advanceTimersByTime(PINS_WRITE_DEBOUNCE_MS);
+    await flushed();
     expect(rec.writes).toHaveLength(1);
+    await flushed();
     expect(idsIn(JSON.parse(rec.writes[0].text) as PinsFile)).toEqual([
       "p1",
       "p2",
@@ -145,6 +153,7 @@ describe("two mounts of the same sidecar", () => {
 
     expect(idsIn(getPinsFile(SIDECAR))).toEqual(["p1", "p3", "p4"]);
     vi.advanceTimersByTime(PINS_WRITE_DEBOUNCE_MS);
+    await flushed();
     expect(idsIn(JSON.parse(rec.writes[0].text) as PinsFile)).toEqual(["p1", "p3", "p4"]);
     a();
     b();
@@ -204,9 +213,12 @@ describe("debounced write (ONE writer per sidecar)", () => {
       mutatePins(SIDECAR, (f) => addPin(f, pin(id)));
       vi.advanceTimersByTime(PINS_WRITE_DEBOUNCE_MS - 50); // keeps resetting
     }
+    await flushed();
     expect(rec.writes).toHaveLength(0);
     vi.advanceTimersByTime(PINS_WRITE_DEBOUNCE_MS);
+    await flushed();
     expect(rec.writes).toHaveLength(1);
+    await flushed();
     expect(idsIn(JSON.parse(rec.writes[0].text) as PinsFile)).toHaveLength(6);
     a();
   });
@@ -218,9 +230,11 @@ describe("debounced write (ONE writer per sidecar)", () => {
     mutatePins(SIDECAR, (f) => addPin(f, pin("p4")));
     mutatePins(SIDECAR, (f) => addPin(f, pin("p5")));
     vi.advanceTimersByTime(PINS_WRITE_DEBOUNCE_MS);
+    await flushed();
     expect(rec.writes).toHaveLength(1);
     a();
     b();
+    await flushed();
     expect(rec.writes).toHaveLength(1); // releases owe nothing
   });
 
@@ -231,6 +245,7 @@ describe("debounced write (ONE writer per sidecar)", () => {
     mutatePins(SIDECAR, (f) => updatePinNote(f, "p1", "")); // already empty
     expect(hasPendingWrite(SIDECAR)).toBe(false);
     vi.advanceTimersByTime(PINS_WRITE_DEBOUNCE_MS * 2);
+    await flushed();
     expect(rec.writes).toHaveLength(0);
     a();
   });
@@ -240,8 +255,11 @@ describe("debounced write (ONE writer per sidecar)", () => {
     await settle();
     mutatePins(SIDECAR, (f) => addPin(f, pin("p4")));
     vi.advanceTimersByTime(PINS_WRITE_DEBOUNCE_MS);
+    await flushed();
     expect(rec.writes[0].path).toBe(SIDECAR);
+    await flushed();
     expect(rec.writes[0].text.endsWith("\n")).toBe(true);
+    await flushed();
     expect(rec.writes[0].text).toBe(serializePinsFile(getPinsFile(SIDECAR) as PinsFile));
     a();
   });
@@ -255,15 +273,18 @@ describe("unmount with a pending write", () => {
     mutatePins(SIDECAR, (f) => addPin(f, pin("p4")));
 
     a(); // one mount left — the timer keeps running, nothing written yet
+    await flushed();
     expect(rec.writes).toHaveLength(0);
     expect(hasPendingWrite(SIDECAR)).toBe(true);
 
     b(); // last one out → flush now
+    await flushed();
     expect(rec.writes).toHaveLength(1);
     expect(hasPendingWrite(SIDECAR)).toBe(false);
 
     // The cancelled timer must not fire a SECOND write.
     vi.advanceTimersByTime(PINS_WRITE_DEBOUNCE_MS * 2);
+    await flushed();
     expect(rec.writes).toHaveLength(1);
   });
 
@@ -272,6 +293,7 @@ describe("unmount with a pending write", () => {
     await settle();
     a();
     vi.advanceTimersByTime(PINS_WRITE_DEBOUNCE_MS * 2);
+    await flushed();
     expect(rec.writes).toHaveLength(0);
   });
 
@@ -280,8 +302,10 @@ describe("unmount with a pending write", () => {
     await settle();
     mutatePins(SIDECAR, (f) => addPin(f, pin("p4")));
     vi.advanceTimersByTime(PINS_WRITE_DEBOUNCE_MS);
+    await flushed();
     expect(rec.writes).toHaveLength(1);
     a();
+    await flushed();
     expect(rec.writes).toHaveLength(1);
   });
 
@@ -291,12 +315,14 @@ describe("unmount with a pending write", () => {
     mutatePins(SIDECAR, (f) => addPin(f, pin("p4")));
     flushPins(SIDECAR);
     flushPins(SIDECAR);
+    await flushed();
     expect(rec.writes).toHaveLength(1);
     a();
   });
 
-  it("flushing an unknown sidecar is harmless", () => {
+  it("flushing an unknown sidecar is harmless", async () => {
     expect(() => flushPins("never/seen/.pins.json")).not.toThrow();
+    await flushed();
     expect(rec.writes).toHaveLength(0);
   });
 });
@@ -454,14 +480,16 @@ describe("a tab switch that flushes and immediately re-reads", () => {
     // THE assertion: p4 is still there. Without the gate the read lands here
     // with stale disk contents and silently drops it.
     expect(idsIn(getPinsFile(SIDECAR))).toEqual(["p1", "p2", "p3", "p4"]);
-    expect(race.order).toEqual(["read", "write-issued"]); // no second read yet
+    // The second `read` is the FLUSH's own merge read (Inc 3d: read-then-
+    // merge-then-write); B's RELOAD read is still gated behind the write.
+    expect(race.order).toEqual(["read", "read", "write-issued"]);
 
     // Now let the write land; the gated read follows and agrees with it.
     race.land();
     await settle();
     await settle();
     await settle();
-    expect(race.order).toEqual(["read", "write-issued", "write-landed", "read"]);
+    expect(race.order).toEqual(["read", "read", "write-issued", "write-landed", "read"]);
     expect(idsIn(getPinsFile(SIDECAR))).toEqual(["p1", "p2", "p3", "p4"]);
     // …and the pin is on disk, not just in memory.
     expect(idsIn(JSON.parse(race.disk()))).toEqual(["p1", "p2", "p3", "p4"]);
@@ -502,5 +530,89 @@ describe("a tab switch that flushes and immediately re-reads", () => {
     // The read resolved against [p1,p2] and was DISCARDED — p3 is newer.
     expect(idsIn(getPinsFile(SIDECAR))).toEqual(["p1", "p2", "p3"]);
     b();
+  });
+});
+
+// ─── refreshPins (Inc 3d — the agent wrote the file) ─────────────────────────
+
+describe("refreshPins", () => {
+  it("re-reads a loaded, idle sidecar and applies what changed on disk", async () => {
+    const changes: string[] = [];
+    const off = subscribeToPins(SIDECAR, () => changes.push("notified"));
+    await settle();
+    expect(idsIn(getPinsFile(SIDECAR))).toEqual(["p1", "p2", "p3"]);
+    // The agent appends a pin by writing the file behind our back.
+    rec.io.write(SIDECAR, fileWith("p1", "p2", "p3", "agent"));
+    rec.reads.length = 0;
+    refreshPins(SIDECAR);
+    await settle();
+    expect(rec.reads).toEqual([SIDECAR]);
+    expect(idsIn(getPinsFile(SIDECAR))).toEqual(["p1", "p2", "p3", "agent"]);
+    expect(changes).toContain("notified");
+    off();
+  });
+
+  it("is a no-op on unchanged content — no notify, no re-render storm", async () => {
+    let notified = 0;
+    const off = subscribeToPins(SIDECAR, () => (notified += 1));
+    await settle();
+    const before = notified;
+    refreshPins(SIDECAR);
+    await settle();
+    expect(notified).toBe(before);
+    off();
+  });
+
+  it("skips while a local write is owed, and never clobbers a local edit", async () => {
+    const off = subscribeToPins(SIDECAR, () => {});
+    await settle();
+    mutatePins(SIDECAR, (f) => addPin(f, pin("mine")));
+    rec.reads.length = 0;
+    refreshPins(SIDECAR); // write pending → no read issued
+    await settle();
+    expect(rec.reads).toEqual([]);
+    expect(idsIn(getPinsFile(SIDECAR))).toEqual(["p1", "p2", "p3", "mine"]);
+    off();
+  });
+
+  it("does nothing for a sidecar nothing has mounted", async () => {
+    refreshPins("nobody/.pins.json");
+    await settle();
+    expect(rec.reads).toEqual([]);
+  });
+});
+
+// ─── flush merges what changed on disk (Inc 3d review) ───────────────────────
+
+describe("flush keeps foreign pins", () => {
+  it("a pin the agent added on disk survives the next local flush", async () => {
+    const off = subscribeToPins(SIDECAR, () => {});
+    await settle();
+    // Agent appends a pin behind our back (no refresh has run yet)…
+    rec.io.write(SIDECAR, fileWith("p1", "p2", "p3", "agent"));
+    // …then Eric adds one locally and the debounce flushes.
+    mutatePins(SIDECAR, (f) => addPin(f, pin("mine")));
+    vi.advanceTimersByTime(PINS_WRITE_DEBOUNCE_MS + 1);
+    await settle();
+    await settle();
+    await settle();
+    const last = rec.writes[rec.writes.length - 1];
+    expect(idsIn(JSON.parse(last.text))).toEqual(["p1", "p2", "p3", "mine", "agent"]);
+    // and the in-memory record shows the agent's pin too
+    expect(idsIn(getPinsFile(SIDECAR))).toEqual(["p1", "p2", "p3", "mine", "agent"]);
+    off();
+  });
+
+  it("a local delete is not resurrected by the merge", async () => {
+    const off = subscribeToPins(SIDECAR, () => {});
+    await settle();
+    mutatePins(SIDECAR, (f) => removePin(f, "p2"));
+    vi.advanceTimersByTime(PINS_WRITE_DEBOUNCE_MS + 1);
+    await settle();
+    await settle();
+    await settle();
+    const last = rec.writes[rec.writes.length - 1];
+    expect(idsIn(JSON.parse(last.text))).toEqual(["p1", "p3"]);
+    off();
   });
 });

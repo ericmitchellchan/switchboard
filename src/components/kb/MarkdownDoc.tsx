@@ -39,6 +39,7 @@ import remarkParse from "remark-parse";
 import remarkGfm from "remark-gfm";
 import remarkRehype from "remark-rehype";
 import rehypeSlug from "rehype-slug";
+import { planHeading, planTableRow, stampAttributes } from "../../lib/docAnchors";
 import rehypeAutolinkHeadings from "rehype-autolink-headings";
 import rehypeStringify from "rehype-stringify";
 import { log } from "../../lib/logger";
@@ -129,6 +130,18 @@ export function MarkdownDoc({ content }: { content: string }) {
 function MarkdownBody({ content }: { content: string }) {
   const [html, setHtml] = useState("");
   const renderSeq = useRef(0);
+  const bodyRef = useRef<HTMLDivElement>(null);
+
+  // DOC ANCHORS (Inc 3c — SWIT-37): after each paint, stamp `data-anchor`
+  // on every heading (by its rehype-slug id) and every table body row (by
+  // position), so a doc pin can name the THING it is on and the generic DOM
+  // anchor provider can find it again after a re-render. Reads the DOM this
+  // component just injected; the plan itself is pure (lib/docAnchors).
+  useEffect(() => {
+    const root = bodyRef.current;
+    if (!root) return;
+    decorateDocAnchors(root);
+  }, [html]);
 
   // Async render; the sequence counter drops out-of-order completions (fast
   // typing on disk + slow render must not paint stale HTML over fresh).
@@ -172,10 +185,27 @@ function MarkdownBody({ content }: { content: string }) {
   // see the module header's SAFETY block.
   return (
     <div
+      ref={bodyRef}
       className="kb-doc"
       onClick={handleLinkActivation}
       onAuxClick={handleLinkActivation}
       dangerouslySetInnerHTML={{ __html: html }}
     />
   );
+}
+
+/** Stamp anchors onto a rendered doc's headings and table rows. Idempotent —
+ *  re-running over an already-stamped tree rewrites the same values. */
+function decorateDocAnchors(root: HTMLElement): void {
+  root.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6").forEach((h) => {
+    const stamp = planHeading(h.id || null, h.textContent ?? "");
+    if (stamp) for (const [name, value] of stampAttributes(stamp)) h.setAttribute(name, value);
+  });
+  root.querySelectorAll<HTMLTableElement>("table").forEach((table, ti) => {
+    table.querySelectorAll<HTMLTableRowElement>("tbody tr").forEach((row, ri) => {
+      const first = row.querySelector("td, th");
+      const stamp = planTableRow(ti + 1, ri + 1, first?.textContent ?? "");
+      if (stamp) for (const [name, value] of stampAttributes(stamp)) row.setAttribute(name, value);
+    });
+  });
 }
