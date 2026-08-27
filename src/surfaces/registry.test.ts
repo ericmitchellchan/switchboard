@@ -15,7 +15,13 @@ import {
 describe("surface registry", () => {
   it("lodestar registers its pages against the :8799 backend", () => {
     expect(Object.keys(SURFACES)).toContain("lodestar");
-    expect(surfacePages("lodestar").map((p) => p.id)).toEqual(["trading", "markets", "chart"]);
+    const ids = surfacePages("lodestar").map((p) => p.id);
+    expect(ids.slice(0, 3)).toEqual(["trading", "markets", "chart"]);
+    // 5b research surfaces
+    for (const id of ["playground", "answer-key", "s1-case", "s2-case", "k1-case", "path-case", "data-health", "library-cases", "library-threads", "knowledge"]) {
+      expect(ids).toContain(id);
+    }
+    expect(new Set(ids).size).toBe(ids.length); // ids are unique — they are URLs
     expect(surfaceBackend("lodestar")).toMatchObject({
       url: "http://127.0.0.1:8799",
       health: "/health",

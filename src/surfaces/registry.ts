@@ -9,9 +9,10 @@
 // chunk's modules only, which is what keeps the terminal registry out of the
 // update chain (architecture.md §HMR-while-busy).
 //
-// PURE + a memo: no React imports beyond the ComponentType TYPE, no store, so
-// the tree, the picker, describeArtifact and the host all ask the same
-// questions of the same table. `componentFor` memoizes the `lazy()` wrapper
+// PURE + a memo: no store, no DOM — React appears only as `lazy` (the memo
+// below) and `createElement` (binding a prop at load time for a page that
+// takes one), so the tree, the picker, describeArtifact and the host all ask
+// the same questions of the same table. `componentFor` memoizes the `lazy()` wrapper
 // per page — a fresh `lazy()` on every render would remount the page each
 // time (React compares element types by identity), so the wrapper is created
 // once and cached here rather than in any component.
@@ -21,7 +22,7 @@
 // routes all read this table.
 
 import type { ComponentType, LazyExoticComponent } from "react";
-import { lazy } from "react";
+import { createElement, lazy } from "react";
 import type { Artifact } from "../types";
 
 /** The artifact kind this module serves — defined ONCE here so the host, the
@@ -90,6 +91,35 @@ export const SURFACES: Readonly<Record<string, ProjectSurfaces>> = {
         load: () => import("../projects/lodestar/pages/ChartPage"),
         pinHint: "bar:<iso ts> a candle",
       },
+      // Research surfaces (Inc 5b — SWIT-40). Their pin vocabularies grow as
+      // the pages mark elements; headings/rows inside their markdown are
+      // covered by the shared doc anchors already.
+      { id: "playground", label: "Playground", load: () => import("../projects/lodestar/pages/Playground") },
+      { id: "answer-key", label: "Answer Key", load: () => import("../projects/lodestar/pages/AnswerKey") },
+      { id: "s1-case", label: "S1 Case", load: () => import("../projects/lodestar/pages/S1Case") },
+      { id: "s2-case", label: "S2 Case", load: () => import("../projects/lodestar/pages/S2Case") },
+      { id: "k1-case", label: "K1 Case", load: () => import("../projects/lodestar/pages/K1Case") },
+      { id: "path-case", label: "Path Case", load: () => import("../projects/lodestar/pages/PathCase") },
+      { id: "data-health", label: "Data Health", load: () => import("../projects/lodestar/pages/DataHealth") },
+      // Library takes a `kind` prop in Lodestar (two routes); here it is two
+      // pages, each binding the prop at load time.
+      {
+        id: "library-cases",
+        label: "Library · cases",
+        load: () =>
+          import("../projects/lodestar/pages/Library").then((m) => ({
+            default: () => createElement(m.default, { kind: "cases" }),
+          })),
+      },
+      {
+        id: "library-threads",
+        label: "Library · threads",
+        load: () =>
+          import("../projects/lodestar/pages/Library").then((m) => ({
+            default: () => createElement(m.default, { kind: "threads" }),
+          })),
+      },
+      { id: "knowledge", label: "Knowledge", load: () => import("../projects/lodestar/pages/Knowledge") },
     ],
   },
 };

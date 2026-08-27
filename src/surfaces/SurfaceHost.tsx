@@ -2,8 +2,11 @@
 // artifact: a project's own React page, in THIS document, fed by that
 // project's backend.
 //
-// It is the one place a foreign page touches the shell, so it owns the three
-// things the shell must guarantee about it and the page cannot:
+// It is the one place a foreign page touches the shell, so it owns what the
+// shell must guarantee about it and the page cannot — three render-time
+// guarantees below, plus (5a/5b) the page-facing contexts: `active`, `nav`,
+// the focusable root that scopes a page's shortcuts, and the agent seam
+// (type a line into the thread beside the page):
 //
 //   1. CRASH ISOLATION. A class boundary around the page. A throwing surface
 //      shows a crash card naming itself and offering a retry; the terminal
@@ -40,9 +43,10 @@ import type { SurfaceArtifact, SurfaceBackend } from "./registry";
 import { SurfaceAnchorContext, composeAnchorProviders, domAnchorProvider } from "./anchors";
 import type { SurfaceAnchorProvider, SurfaceAnchorRegistry } from "./anchors";
 import { useSurfacePins } from "./SurfacePins";
-import { SurfaceActiveContext, SurfaceNavContext } from "./page-api";
-import type { SurfaceNav } from "./page-api";
-import { openArtifact } from "../lib/panelStore";
+import { SurfaceActiveContext, SurfaceAgentContext, SurfaceNavContext, SurfaceRootContext } from "./page-api";
+import type { SurfaceAgent, SurfaceNav } from "./page-api";
+import { openArtifact, sendToThread, useSendToThreadAvailable } from "../lib/panelStore";
+import { sanitizeForTypedLine, SEND_REFERENCE_MAX } from "../lib/agentContext";
 import { log } from "../lib/logger";
 
 export type { SurfaceArtifact } from "./registry";
@@ -111,6 +115,30 @@ export function SurfaceHost({
     () => ({ openPage: (page) => openArtifact({ kind: "surface", project: artifact.project, page }) }),
     [artifact.project]
   );
+  // The agent = the thread beside this surface (page-api §The agent). The
+  // page's text goes through the same sanitizer a pin reference does — one
+  // typed line, no Enter — so a page can never send on the user's behalf.
+  const canSend = useSendToThreadAvailable();
+  const agent = useMemo<SurfaceAgent>(
+    () => ({
+      available: canSend,
+      send: (text) => {
+        if (!canSend) return { sent: false, truncated: false };
+        // Backslashes are on the sanitizer's drop list (a POSIX escape), and a
+        // page's most common backslash is a Windows PATH — turn it into the
+        // forward slashes the agent's Read tool takes, as artifactRef does.
+        const forwardSlashed = text.replace(/\\/g, "/");
+        const line = sanitizeForTypedLine(forwardSlashed, SEND_REFERENCE_MAX);
+        if (line.length === 0) return { sent: false, truncated: false };
+        sendToThread(line);
+        // The sanitizer collapses whitespace before it caps, so measure what
+        // it would have kept: a cap hit ends the line in `…`.
+        const truncated = Array.from(forwardSlashed.trim()).length > SEND_REFERENCE_MAX && line.endsWith("…");
+        return { sent: true, truncated };
+      },
+    }),
+    [canSend]
+  );
 
   if (!page) {
     return (
@@ -162,20 +190,51 @@ export function SurfaceHost({
               <div
                 ref={anchors.setRootEl}
                 onClickCapture={pins.onCapture}
+                // FOCUSABLE root (page-api useSurfaceKeydown): a click inside
+                // the page parks focus here unless a control already has it,
+                // so the page's own shortcuts work and the terminal's never
+                // leak in. `outline: none` — the focus is functional, not a
+                // visible ring around the whole page.
+                tabIndex={-1}
+                onMouseDownCapture={() => {
+                  const el = anchors.rootEl;
+                  const focused = document.activeElement;
+                  if (el && (focused === null || focused === document.body || !el.contains(focused))) {
+                    el.focus({ preventScroll: true });
+                  }
+                }}
+                // A click that UNMOUNTS the control it focused (a judge button
+                // that swaps to a correction row) leaves focus on <body> by
+                // the browser's fixup, and the page's shortcuts would go
+                // silent. After the click settles, focus comes back to the
+                // root unless something inside the page took it.
+                onClick={() => {
+                  const el = anchors.rootEl;
+                  if (!el) return;
+                  queueMicrotask(() => {
+                    const focused = document.activeElement;
+                    if (focused === null || focused === document.body) el.focus({ preventScroll: true });
+                  });
+                }}
                 style={{
                   position: "relative",
                   minHeight: "100%",
+                  outline: "none",
                   cursor: pinMode ? "crosshair" : undefined,
                   background: pinMode ? "rgba(228, 228, 231, 0.04)" : "transparent",
                 }}
               >
+                <SurfaceRootContext.Provider value={anchors.rootEl}>
                 <SurfaceActiveContext.Provider value={active}>
                   <SurfaceNavContext.Provider value={nav}>
-                    <Suspense fallback={<div style={NOTE_STYLE}>loading {title}…</div>}>
-                      <Page />
-                    </Suspense>
+                    <SurfaceAgentContext.Provider value={agent}>
+                      <Suspense fallback={<div style={NOTE_STYLE}>loading {title}…</div>}>
+                        <Page />
+                      </Suspense>
+                    </SurfaceAgentContext.Provider>
                   </SurfaceNavContext.Provider>
                 </SurfaceActiveContext.Provider>
+                </SurfaceRootContext.Provider>
                 <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>{pins.marks}</div>
               </div>
             </div>

@@ -15,8 +15,12 @@
 //                                shell decides panel vs full width.
 //   useSurfaceAnchorRegistry  — publish a programmatic anchor provider
 //                                (canvas charts); see anchors.ts.
+//   useSurfaceKeydown()       — page shortcuts, scoped to the page (the host
+//                                root is focusable); replaces window listeners.
+//   useSurfaceAgent()         — type a line into the thread beside the page;
+//                                replaces an in-page agent bridge.
 
-import { createContext, useContext } from "react";
+import { createContext, useContext, useEffect, useRef } from "react";
 
 export { SurfaceAnchorContext, useSurfaceAnchorRegistry } from "./anchors";
 export type { SurfaceAnchor, SurfaceAnchorProvider, SurfaceAnchorRegistry } from "./anchors";
@@ -55,4 +59,64 @@ export const SurfaceNavContext = createContext<SurfaceNav>(NOOP_NAV);
 
 export function useSurfaceNav(): SurfaceNav {
   return useContext(SurfaceNavContext);
+}
+
+// ── Keyboard ─────────────────────────────────────────────────────────────────
+// A page that listened on `window` in its home app (Escape to close a
+// drill-in, ← → to step, a/d/u to judge) now sits beside a live terminal, and
+// a window listener would fire from keys typed into the shell. The host's
+// content root is FOCUSABLE and takes focus when the page is clicked (unless
+// an input already has it), so a keydown reaches the root only from inside
+// the page — this hook listens there and nowhere else.
+
+export const SurfaceRootContext = createContext<HTMLElement | null>(null);
+
+/** Keys typed into a text field are the field's, never a page shortcut. */
+function isEditable(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
+}
+
+export function useSurfaceKeydown(handler: (e: KeyboardEvent) => void): void {
+  const root = useContext(SurfaceRootContext);
+  const handlerRef = useRef(handler);
+  handlerRef.current = handler;
+  useEffect(() => {
+    if (!root) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (isEditable(e.target)) return;
+      handlerRef.current(e);
+    };
+    root.addEventListener("keydown", onKey);
+    return () => root.removeEventListener("keydown", onKey);
+  }, [root]);
+}
+
+// ── The agent ────────────────────────────────────────────────────────────────
+// In Lodestar's Electron shell a page could spawn `claude -p` and stream the
+// reply into itself (`window.lodestar.askAgent`). Here THE AGENT IS THE THREAD
+// BESIDE THE PAGE — a live claude in a terminal — and a page talks to it the
+// one way everything else does: it TYPES a line into that terminal and the
+// user presses Enter (the send-to-thread seam, CLAUDE.md). No streamed reply
+// comes back to the page; the conversation happens where the user can see it.
+
+export type SurfaceAgent = {
+  /** A thread is there to type into. */
+  available: boolean;
+  /** Type `text` (ONE line — sanitized by the shell like a pin reference:
+   *  newlines flattened, shell metacharacters and quotes dropped, backslash
+   *  paths turned into forward slashes, capped) into the thread beside this
+   *  surface. `sent` is false when no thread is available; `truncated` says
+   *  the cap bit, so a page can tell the user rather than let a paragraph
+   *  lose its tail silently. */
+  send: (text: string) => { sent: boolean; truncated: boolean };
+};
+
+const NOOP_AGENT: SurfaceAgent = { available: false, send: () => ({ sent: false, truncated: false }) };
+
+export const SurfaceAgentContext = createContext<SurfaceAgent>(NOOP_AGENT);
+
+export function useSurfaceAgent(): SurfaceAgent {
+  return useContext(SurfaceAgentContext);
 }
