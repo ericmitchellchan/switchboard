@@ -416,6 +416,67 @@ export function selectMenuThreads(
   return sorted.slice(0, Math.max(limit, liveCount));
 }
 
+/** A tab-bar-less session as the menu sees it (SWIT-46): published by App
+ *  from its session state (name/status live there, not on any thread
+ *  record). Panel-owned sessions are filtered out BEFORE publishing — the
+ *  menu must never offer a second live view. */
+export type MenuSession = {
+  id: string;
+  name: string;
+  workingDir: string;
+  status: AgentStatus;
+};
+
+/** One project group of the side-menu Threads band (SWIT-46). */
+export type MenuThreadGroup = {
+  /** The repo folder name (threadRepoName) — what the group header prints. */
+  project: string;
+  threads: Thread[];
+  /** Live threads in this group — the header's `N ●`. */
+  liveCount: number;
+};
+
+/** Group the rail's selection by project, preserving selectMenuThreads'
+ *  order (live first, then recency) — so groups appear in the order of their
+ *  best-ranked thread and live-first holds WITHIN each group by construction.
+ *  Selection rules (archived hidden, live never truncated) are unchanged:
+ *  this is a fold over selectMenuThreads' output, never a second selection. */
+export function groupMenuThreads(
+  threads: readonly Thread[],
+  live: ReadonlySet<string>,
+  limit: number = MENU_THREAD_LIMIT
+): MenuThreadGroup[] {
+  const shown = selectMenuThreads(threads, live, limit);
+  const groups: MenuThreadGroup[] = [];
+  const byName = new Map<string, MenuThreadGroup>();
+  for (const t of shown) {
+    const project = threadRepoName(t.workingDir);
+    let group = byName.get(project);
+    if (!group) {
+      group = { project, threads: [], liveCount: 0 };
+      byName.set(project, group);
+      groups.push(group);
+    }
+    group.threads.push(t);
+    if (live.has(t.id)) group.liveCount += 1;
+  }
+  return groups;
+}
+
+/** The `shells` group: published sessions no thread record claims (the
+ *  promote-on-claude rule defines the set — a plain Ctrl+T shell has no
+ *  record until a claude conversation is actually running in it). Derived
+ *  from the SAME view as the thread groups, so a promotion moves a row
+ *  between groups in one render. */
+export function selectShellSessions(
+  threads: readonly Thread[],
+  sessions: readonly MenuSession[]
+): MenuSession[] {
+  const bound = new Set<string>();
+  for (const t of threads) if (t.sessionId) bound.add(t.sessionId);
+  return sessions.filter((s) => !bound.has(s.id));
+}
+
 /** Free-text filter for the See-all screen: case-insensitive substring over
  *  TITLE + repo name. A blank/whitespace query matches everything. */
 export function filterThreads(threads: readonly Thread[], query: string): Thread[] {
@@ -579,6 +640,13 @@ export type ThreadsView = {
   booting: ReadonlySet<string>;
   sessionStatuses: Readonly<Record<string, AgentStatus>>;
   activeSessionId: string | null;
+  /** Tab-bar-less sessions (SWIT-46) — App publishes its TAB sessions here so
+   *  the menu's `shells` group can be derived (selectShellSessions) in the
+   *  same view as the thread groups. Transient, like sessionStatuses. */
+  menuSessions: readonly MenuSession[];
+  /** Unread cross-thread posts per thread id — the `↓ N` chip. RENDER-SIDE
+   *  ONLY until SWIT-52 publishes real counts; empty means no chip. */
+  unreadPosts: Readonly<Record<string, number>>;
 };
 
 let threads: Thread[] = [];
@@ -586,6 +654,8 @@ const launched = new Set<string>();
 const booting = new Set<string>();
 let sessionStatuses: Record<string, AgentStatus> = {};
 let activeSessionId: string | null = null;
+let menuSessions: readonly MenuSession[] = [];
+let unreadPosts: Record<string, number> = {};
 
 const listeners = new Set<() => void>();
 let cachedView: ThreadsView | null = null;
@@ -616,6 +686,8 @@ export function getThreadsView(): ThreadsView {
       booting: new Set(booting),
       sessionStatuses,
       activeSessionId,
+      menuSessions,
+      unreadPosts,
     };
   }
   return cachedView;
@@ -890,6 +962,32 @@ export function publishSessionStatuses(
   bump();
 }
 
+/** App publishes its TAB sessions (panel-owned already filtered) so the menu
+ *  can derive the `shells` group (SWIT-46). Same skip-if-unchanged shape as
+ *  publishSessionStatuses — the effect fires on every session render tick. */
+export function publishMenuSessions(sessions: readonly MenuSession[]): void {
+  const prev = menuSessions;
+  const same =
+    prev.length === sessions.length &&
+    sessions.every((s, i) => {
+      const p = prev[i];
+      return (
+        p.id === s.id && p.name === s.name && p.workingDir === s.workingDir && p.status === s.status
+      );
+    });
+  if (same) return;
+  menuSessions = sessions;
+  bump();
+}
+
+/** Unread cross-thread posts per thread (`↓ N` chip). Nothing calls this
+ *  until SWIT-52 delivers posts; until then the record stays empty and no
+ *  chip renders. */
+export function publishThreadUnread(counts: Record<string, number>): void {
+  unreadPosts = counts;
+  bump();
+}
+
 // ── Actions bridge ───────────────────────────────────────────────────────────
 // App owns session creation/revival; ThreadsSection renders deep inside
 // SideMenu. Rather than threading callbacks through SideMenu's props, App
@@ -933,6 +1031,8 @@ export function __resetThreadStoreForTests(): void {
   reviveInFlight.clear();
   sessionStatuses = {};
   activeSessionId = null;
+  menuSessions = [];
+  unreadPosts = {};
   cachedView = null;
   threadActions = null;
   listeners.clear();

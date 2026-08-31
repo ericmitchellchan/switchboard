@@ -45,6 +45,9 @@ import {
   sameWorkingDir,
   sortThreadsForHistory,
   selectMenuThreads,
+  groupMenuThreads,
+  selectShellSessions,
+  type MenuSession,
   filterThreads,
   relativeActivity,
   MENU_THREAD_LIMIT,
@@ -852,6 +855,81 @@ describe("selectMenuThreads", () => {
   it("returns everything when there is less than a limit's worth", () => {
     const list = [ht("a", 1), ht("b", 2)];
     expect(selectMenuThreads(list, new Set())).toHaveLength(2);
+  });
+});
+
+// ── SWIT-46: the grouped rail + the shells group ─────────────────────────────
+
+describe("groupMenuThreads", () => {
+  it("groups by repo name, in the order of each group's best-ranked thread", () => {
+    const list = [
+      ht("lode1", 300, { workingDir: "C:\\repos\\lodestar" }),
+      ht("swit1", 400, { workingDir: "C:\\repos\\switchboard" }),
+      ht("lode2", 200, { workingDir: "C:\\repos\\lodestar" }),
+    ];
+    const out = groupMenuThreads(list, new Set());
+    expect(out.map((g) => g.project)).toEqual(["switchboard", "lodestar"]);
+    expect(out[1].threads.map((t) => t.id)).toEqual(["lode1", "lode2"]);
+  });
+
+  it("live threads pull their group to the front and count in liveCount", () => {
+    const list = [
+      ht("a", 300, { workingDir: "C:\\repos\\switchboard" }),
+      ht("b", 100, { workingDir: "C:\\repos\\lodestar" }),
+      ht("c", 200, { workingDir: "C:\\repos\\lodestar" }),
+    ];
+    const out = groupMenuThreads(list, new Set(["b"]));
+    // b is live → lodestar's best-ranked thread is first overall.
+    expect(out.map((g) => g.project)).toEqual(["lodestar", "switchboard"]);
+    expect(out[0].threads.map((t) => t.id)).toEqual(["b", "c"]);
+    expect(out[0].liveCount).toBe(1);
+    expect(out[1].liveCount).toBe(0);
+  });
+
+  it("is a fold over selectMenuThreads — same threads, same order, just grouped", () => {
+    const list = Array.from({ length: 20 }, (_, i) =>
+      ht(`t${i}`, i, { workingDir: i % 2 === 0 ? "C:\\repos\\a" : "C:\\repos\\b" })
+    );
+    const live = new Set(["t0"]);
+    const flat = groupMenuThreads(list, live).flatMap((g) => g.threads.map((t) => t.id));
+    const selected = selectMenuThreads(list, live).map((t) => t.id);
+    expect([...flat].sort()).toEqual([...selected].sort());
+  });
+
+  it("hides archived threads exactly as the flat rail does", () => {
+    const list = [
+      ht("a", 300, { workingDir: "C:\\repos\\a" }),
+      ht("b", 200, { workingDir: "C:\\repos\\a", archivedAt: 250 }),
+    ];
+    const out = groupMenuThreads(list, new Set());
+    expect(out).toHaveLength(1);
+    expect(out[0].threads.map((t) => t.id)).toEqual(["a"]);
+  });
+});
+
+describe("selectShellSessions", () => {
+  const shell = (id: string): MenuSession => ({
+    id,
+    name: id,
+    workingDir: "C:\\Users\\me",
+    status: "idle",
+  });
+
+  it("returns sessions no thread record claims", () => {
+    const threads = [ht("t1", 1, { sessionId: "s1" })];
+    const out = selectShellSessions(threads, [shell("s1"), shell("s2")]);
+    expect(out.map((s) => s.id)).toEqual(["s2"]);
+  });
+
+  it("a promotion (thread gains the session id) empties the shells group", () => {
+    const sessions = [shell("s1")];
+    expect(selectShellSessions([ht("t1", 1)], sessions)).toHaveLength(1);
+    expect(selectShellSessions([ht("t1", 1, { sessionId: "s1" })], sessions)).toHaveLength(0);
+  });
+
+  it("an ARCHIVED thread still claims its session — archive is a state, not a loss", () => {
+    const threads = [ht("t1", 1, { sessionId: "s1", archivedAt: 5 })];
+    expect(selectShellSessions(threads, [shell("s1")])).toHaveLength(0);
   });
 });
 

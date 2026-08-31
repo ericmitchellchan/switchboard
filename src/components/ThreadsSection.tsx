@@ -18,10 +18,13 @@ import {
   getThreadActions,
   activeThreads,
   selectMenuThreads,
-  threadRepoName,
+  groupMenuThreads,
+  selectShellSessions,
 } from "../lib/threadStore";
+import type { MenuSession } from "../lib/threadStore";
 import { navigate } from "../lib/route";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
+import { getExplorerActions } from "../lib/explorer";
 import { ThreadRowMenu, ThreadTitleEditor, threadMenuItems } from "./ThreadRowMenu";
 
 /** Dead rows use the EXITED status colour — read from statusConfig, the
@@ -69,36 +72,122 @@ const CHIP_STYLE: CSSProperties = {
 export function ThreadsSection() {
   const view = useThreadsView();
 
-  // Threads are the long history; this rail is 218px wide and has a Knowledge
-  // Base and an Explorer under it. Show the most recent handful — but never
-  // truncate a LIVE thread out of the list (you must always be able to reach
-  // the conversation you are having), which is selectMenuThreads' whole job.
+  // Threads are the long history; this rail is 218px wide. Show the most
+  // recent handful — but never truncate a LIVE thread out of the list (you
+  // must always be able to reach the conversation you are having), which is
+  // selectMenuThreads' whole job — GROUPED BY PROJECT (SWIT-46): groups in
+  // the order of their best-ranked thread, live-first holding within each
+  // group by construction (groupMenuThreads folds the same selection).
   //
   // ARCHIVED threads are not on this rail at all (increment E). The count on
   // the `See all (N)` row is the ACTIVE count for the same reason — the row
   // opens the history screen's Active tab, and a total that included put-away
   // threads would promise rows that tab does not show. selectMenuThreads drops
-  // them itself, so `shown` and this count cannot disagree.
+  // them itself, so the groups and this count cannot disagree.
   const active = activeThreads(view.threads);
   const shown = selectMenuThreads(view.threads, view.launched);
+  const groups = groupMenuThreads(view.threads, view.launched);
   const hidden = active.length - shown.length;
+
+  // The `shells` group: tab sessions no thread record claims (a plain Ctrl+T
+  // shell — the promote-on-claude rule). Derived from the same view, so a
+  // promotion moves the row between groups in one render.
+  const shells = selectShellSessions(view.threads, view.menuSessions);
 
   return (
     <>
-      {shown.map((t) => (
-        <ThreadRow
-          key={t.id}
-          thread={t}
-          live={view.launched.has(t.id)}
-          booting={view.booting.has(t.id)}
-          status={t.sessionId ? view.sessionStatuses[t.sessionId] : undefined}
-          active={t.sessionId !== null && t.sessionId === view.activeSessionId}
-        />
+      {groups.map((g) => (
+        <div key={g.project}>
+          <GroupHeader project={g.project} meta={g.liveCount > 0 ? `${g.liveCount} ●` : undefined} />
+          {g.threads.map((t) => (
+            <ThreadRow
+              key={t.id}
+              thread={t}
+              live={view.launched.has(t.id)}
+              booting={view.booting.has(t.id)}
+              status={t.sessionId ? view.sessionStatuses[t.sessionId] : undefined}
+              active={t.sessionId !== null && t.sessionId === view.activeSessionId}
+              unread={view.unreadPosts[t.id] ?? 0}
+            />
+          ))}
+        </div>
       ))}
+      {shells.length > 0 && (
+        <div>
+          <GroupHeader project="shells" meta={String(shells.length)} />
+          {shells.map((s) => (
+            <ShellRow key={s.id} session={s} active={s.id === view.activeSessionId} />
+          ))}
+        </div>
+      )}
       {hidden > 0 && <SeeAllRow total={active.length} />}
       <NewThreadRow />
     </>
   );
+}
+
+/** A project group's header line — dim, smaller than a row, carrying the
+ *  live count (`2 ●`) or the shell count. Not clickable: the rows are. */
+function GroupHeader({ project, meta }: { project: string; meta?: string }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        padding: "6px 12px 1px",
+        color: "var(--text-muted)",
+        fontFamily: "var(--font-mono)",
+        fontSize: 10.5,
+        whiteSpace: "nowrap",
+      }}
+    >
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{project}</span>
+      {meta && (
+        <span style={{ marginLeft: "auto", fontSize: 9, color: "var(--text-faint)" }}>{meta}</span>
+      )}
+    </div>
+  );
+}
+
+/** A plain shell's row — no thread record, so no menu, no revive, no rename;
+ *  clicking shows its tab (the same plain switch the Projects tree's
+ *  `terminals` rows make, through the same bridge). */
+function ShellRow({ session, active }: { session: MenuSession; active: boolean }) {
+  const [hover, setHover] = useState(false);
+  const cfg = STATUS_CONFIGS[session.status] ?? STATUS_CONFIGS.idle;
+  return (
+    <button
+      type="button"
+      onClick={() => getExplorerActions()?.showSession(session.id)}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title={session.workingDir}
+      style={{
+        ...ROW_STYLE,
+        paddingLeft: 22,
+        background: active ? "var(--bg-active)" : "none",
+        boxShadow: active ? "inset 2px 0 0 var(--text-primary)" : "none",
+        color: active || hover ? "var(--text-primary)" : "var(--text-secondary)",
+      }}
+    >
+      <span
+        style={{ width: 8, height: 8, borderRadius: "50%", flex: "none", backgroundColor: cfg.color }}
+      />
+      <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {session.name}
+      </span>
+      <span style={{ flex: "none", fontSize: 9.5, color: "var(--text-dim)" }}>
+        {shortDir(session.workingDir)}
+      </span>
+    </button>
+  );
+}
+
+/** The cwd's tail, one segment — `~/projects` prints worse than `projects`
+ *  helps at 218px, so one honest folder name. */
+function shortDir(dir: string): string {
+  const parts = dir.split(/[/\\]/).filter(Boolean);
+  return parts[parts.length - 1] ?? dir;
 }
 
 function ThreadRow({
@@ -107,6 +196,7 @@ function ThreadRow({
   booting,
   status,
   active,
+  unread,
 }: {
   thread: Thread;
   /** claude launched for this thread in THIS app run (create or revive). */
@@ -114,6 +204,8 @@ function ThreadRow({
   booting: boolean;
   status: AgentStatus | undefined;
   active: boolean;
+  /** Unread cross-thread posts (`↓ N`). Always 0 until SWIT-52 publishes. */
+  unread: number;
 }) {
   const [hover, setHover] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -151,7 +243,7 @@ function ThreadRow({
   // placement, not "open this thread".
   if (editing) {
     return (
-      <div style={{ ...ROW_STYLE, cursor: "default", background: "var(--bg-active)" }}>
+      <div style={{ ...ROW_STYLE, paddingLeft: 22, cursor: "default", background: "var(--bg-active)" }}>
         {dot}
         <ThreadTitleEditor thread={thread} onDone={() => setEditing(false)} />
         <span style={MENU_SLOT_STYLE} />
@@ -176,6 +268,7 @@ function ThreadRow({
       title={thread.workingDir}
       style={{
         ...ROW_STYLE,
+        paddingLeft: 22,
         background: active ? "var(--bg-active)" : "none",
         boxShadow: active ? "inset 2px 0 0 var(--text-primary)" : "none",
         color: active || hover ? "var(--text-primary)" : "var(--text-secondary)",
@@ -206,6 +299,15 @@ function ThreadRow({
           />
         </span>
       </span>
+      {/* Chips, wireframe order: `↓ N` (unread posts — data lands in
+          SWIT-52), then `?` (agent waiting on you) / booting / revive. The
+          repo name moved UP to the group header, so a live row with nothing
+          to say shows no right-side text at all. */}
+      {unread > 0 && (
+        <span style={{ ...CHIP_STYLE, color: "var(--text-primary)", borderColor: "var(--text-secondary)" }}>
+          {unread} ↓
+        </span>
+      )}
       {booting ? (
         <span style={CHIP_STYLE}>⟳ booting…</span>
       ) : dead ? (
@@ -218,11 +320,19 @@ function ThreadRow({
         >
           ⟳ revive
         </span>
-      ) : (
-        <span style={{ flex: "none", fontSize: 9.5, color: "var(--text-dim)" }}>
-          {threadRepoName(thread.workingDir)}
+      ) : live && status === "waiting" ? (
+        <span
+          style={{
+            ...CHIP_STYLE,
+            background: STATUS_CONFIGS.waiting.color,
+            color: "#0C0C0E",
+            borderColor: "transparent",
+            fontWeight: 600,
+          }}
+        >
+          ?
         </span>
-      )}
+      ) : null}
     </button>
   );
 }

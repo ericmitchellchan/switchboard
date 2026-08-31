@@ -58,6 +58,7 @@ import {
   endRevive,
   selectMenuThreads,
   getThreadsView,
+  publishMenuSessions,
 } from "./lib/threadStore";
 import {
   initPanelStore,
@@ -1155,7 +1156,19 @@ export default function App() {
     const statuses: Record<string, AgentStatus> = {};
     for (const s of sessions) statuses[s.id] = s.status;
     publishSessionStatuses(statuses, effectiveActiveSessionId);
-  }, [sessions, effectiveActiveSessionId]);
+    // TAB sessions only (panel-owned already filtered out of tabSessions) —
+    // the menu's `shells` group derives from these minus thread-bound ones
+    // (threadStore.selectShellSessions), so a promotion moves the row without
+    // a second publication. Skip-if-unchanged lives in the store.
+    publishMenuSessions(
+      tabSessions.map((s) => ({
+        id: s.id,
+        name: s.name,
+        workingDir: s.working_dir,
+        status: s.status,
+      }))
+    );
+  }, [sessions, tabSessions, effectiveActiveSessionId]);
 
   // The same publication, one layer over, for the PANEL (increment H): a
   // `session` artifact carries an id and nothing else, so the tab strip, the

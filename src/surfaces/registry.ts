@@ -49,6 +49,11 @@ export type SurfacePage = {
    *  = the page opens in the panel / full width like any other; `openWindow`
    *  on it falls back to a generic size. */
   window?: { width: number; height: number; title?: string };
+  /** Which side-menu band lists the page (SWIT-46): "research" pages appear
+   *  under the Research ▸ destination, grouped by project. Untagged pages are
+   *  reachable through the Projects tree / their own destinations (Trading's
+   *  cockpit tabs) and draw no Research row. */
+  section?: "research";
 };
 
 /** The Tauri window label for a page's own window: `surface-<project>-<page>`
@@ -107,18 +112,19 @@ export const SURFACES: Readonly<Record<string, ProjectSurfaces>> = {
       // Research surfaces (Inc 5b — SWIT-40). Their pin vocabularies grow as
       // the pages mark elements; headings/rows inside their markdown are
       // covered by the shared doc anchors already.
-      { id: "playground", label: "Playground", load: () => import("../projects/lodestar/pages/Playground") },
-      { id: "answer-key", label: "Answer Key", load: () => import("../projects/lodestar/pages/AnswerKey") },
-      { id: "s1-case", label: "S1 Case", load: () => import("../projects/lodestar/pages/S1Case") },
-      { id: "s2-case", label: "S2 Case", load: () => import("../projects/lodestar/pages/S2Case") },
-      { id: "k1-case", label: "K1 Case", load: () => import("../projects/lodestar/pages/K1Case") },
-      { id: "path-case", label: "Path Case", load: () => import("../projects/lodestar/pages/PathCase") },
-      { id: "data-health", label: "Data Health", load: () => import("../projects/lodestar/pages/DataHealth") },
+      { id: "playground", label: "Playground", section: "research", load: () => import("../projects/lodestar/pages/Playground") },
+      { id: "answer-key", label: "Answer Key", section: "research", load: () => import("../projects/lodestar/pages/AnswerKey") },
+      { id: "s1-case", label: "S1 Case", section: "research", load: () => import("../projects/lodestar/pages/S1Case") },
+      { id: "s2-case", label: "S2 Case", section: "research", load: () => import("../projects/lodestar/pages/S2Case") },
+      { id: "k1-case", label: "K1 Case", section: "research", load: () => import("../projects/lodestar/pages/K1Case") },
+      { id: "path-case", label: "Path Case", section: "research", load: () => import("../projects/lodestar/pages/PathCase") },
+      { id: "data-health", label: "Data Health", section: "research", load: () => import("../projects/lodestar/pages/DataHealth") },
       // Library takes a `kind` prop in Lodestar (two routes); here it is two
       // pages, each binding the prop at load time.
       {
         id: "library-cases",
         label: "Library · cases",
+        section: "research",
         load: () =>
           import("../projects/lodestar/pages/Library").then((m) => ({
             default: () => createElement(m.default, { kind: "cases" }),
@@ -127,12 +133,13 @@ export const SURFACES: Readonly<Record<string, ProjectSurfaces>> = {
       {
         id: "library-threads",
         label: "Library · threads",
+        section: "research",
         load: () =>
           import("../projects/lodestar/pages/Library").then((m) => ({
             default: () => createElement(m.default, { kind: "threads" }),
           })),
       },
-      { id: "knowledge", label: "Knowledge", load: () => import("../projects/lodestar/pages/Knowledge") },
+      { id: "knowledge", label: "Knowledge", section: "research", load: () => import("../projects/lodestar/pages/Knowledge") },
       // Stage-A cockpit (Inc 5c — SWIT-41). Sim-only: every write goes through
       // the backend; the shell learns nothing about orders.
       { id: "overview", label: "Overview", load: () => import("../projects/lodestar/pages/Overview") },
@@ -169,6 +176,18 @@ export function findSurface(project: string, page: string): SurfacePage | null {
 /** A project's backend descriptor, if it declares one. */
 export function surfaceBackend(project: string): SurfaceBackend | null {
   return SURFACES[project]?.backend ?? null;
+}
+
+/** A project's RESEARCH pages (SWIT-46) — what its Research ▸ group lists. */
+export function researchPages(project: string): SurfacePage[] {
+  return surfacePages(project).filter((p) => p.section === "research");
+}
+
+/** Projects with at least one research page, in registry order. The Research
+ *  band renders one group per entry and NOTHING for an empty result — a repo
+ *  without research never draws an empty group (decided Q5). */
+export function projectsWithResearch(): string[] {
+  return Object.keys(SURFACES).filter((project) => researchPages(project).length > 0);
 }
 
 /** What to PRINT for a page: its label when registered, its id otherwise —
