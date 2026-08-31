@@ -22,12 +22,18 @@ import type { Route, ScreenId } from "../types";
 export const HISTORY_CAP = 50;
 
 const VALID_SCREENS: ReadonlySet<ScreenId> = new Set<ScreenId>([
+  "home",
   "terminal",
   "kb",
   "explorer",
   "threads",
   "project",
 ]);
+
+/** The default route (SWIT-45): a bare URL — a fresh window — lands on Home,
+ *  the roll-up. An in-flight session's URL still carries `?screen=…` via
+ *  replaceState, so an F5 reload returns to wherever you were. */
+export const DEFAULT_ROUTE: Route = { screen: "home" };
 
 /** Every query-param key the router owns. applyRouteToParams deletes ALL of
  *  these before applying a route, so stale values from a prior route can never
@@ -39,12 +45,14 @@ const VALID_SCREENS: ReadonlySet<ScreenId> = new Set<ScreenId>([
 export const ROUTE_PARAM_KEYS = ["screen", "doc", "project", "path", "page"] as const;
 
 /** Parse a route from query params. Pure: unknown screens and malformed or
- *  cross-screen params fall back to the terminal / undefined — never throws. */
+ *  cross-screen params fall back to Home / undefined — never throws. */
 export function parseRoute(params: URLSearchParams): Route {
-  const raw = params.get("screen") ?? "terminal";
-  if (!VALID_SCREENS.has(raw as ScreenId)) return { screen: "terminal" };
+  const raw = params.get("screen") ?? DEFAULT_ROUTE.screen;
+  if (!VALID_SCREENS.has(raw as ScreenId)) return DEFAULT_ROUTE;
   const screen = raw as ScreenId;
   switch (screen) {
+    case "home":
+      return { screen: "home" };
     case "terminal":
       return { screen: "terminal" };
     case "threads":
@@ -66,19 +74,19 @@ export function parseRoute(params: URLSearchParams): Route {
     }
     case "project": {
       // Both params are identity — a half-specified project route is not a
-      // location, so it falls back to the terminal like an unknown screen.
+      // location, so it falls back to the default like an unknown screen.
       const project = params.get("project");
       const page = params.get("page");
-      if (!project || !page) return { screen: "terminal" };
+      if (!project || !page) return DEFAULT_ROUTE;
       return { screen: "project", project, page };
     }
   }
 }
 
 /** Read the current route from the window URL. Thin wrapper over parseRoute;
- *  in non-browser contexts (tests) it returns the default terminal route. */
+ *  in non-browser contexts (tests) it returns the default route. */
 export function readRouteFromUrl(): Route {
-  if (typeof window === "undefined") return { screen: "terminal" };
+  if (typeof window === "undefined") return DEFAULT_ROUTE;
   return parseRoute(new URLSearchParams(window.location.search));
 }
 
@@ -88,6 +96,7 @@ export function routeToParams(route: Route): URLSearchParams {
   const params = new URLSearchParams();
   params.set("screen", route.screen);
   switch (route.screen) {
+    case "home":
     case "terminal":
     case "threads":
       break;
@@ -222,10 +231,10 @@ export function navigateToScreen(screen: ScreenId): void {
     return;
   }
   // "project" is the one screen whose params are IDENTITY (SWIT-30): with no
-  // prior visit there is no page to show, so the jump lands on the terminal
-  // rather than minting a route the type says cannot exist.
+  // prior visit there is no page to show, so the jump lands on the default
+  // route rather than minting a route the type says cannot exist.
   if (screen === "project") {
-    navigate({ screen: "terminal" });
+    navigate(DEFAULT_ROUTE);
     return;
   }
   navigate({ screen } as Route);
@@ -263,6 +272,8 @@ export function backTargetLabel(): string | null {
   if (s.history.length === 0) return null;
   const target = s.history[s.history.length - 1];
   switch (target.screen) {
+    case "home":
+      return "home";
     case "terminal":
       return "the terminal";
     case "threads":

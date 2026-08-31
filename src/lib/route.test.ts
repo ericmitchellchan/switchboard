@@ -127,13 +127,20 @@ describe("parseRoute / routeToParams round-trips", () => {
 });
 
 describe("parseRoute fallbacks", () => {
-  it("defaults to terminal when no screen param is present", () => {
-    expect(parseRoute(new URLSearchParams(""))).toEqual({ screen: "terminal" });
+  // SWIT-45: Home is the default route — a bare URL (a fresh window) lands on
+  // the roll-up; a reload keeps its ?screen=… and returns to where you were.
+  it("defaults to home when no screen param is present", () => {
+    expect(parseRoute(new URLSearchParams(""))).toEqual({ screen: "home" });
   });
 
-  it("falls back to terminal on an unknown screen", () => {
-    expect(parseRoute(new URLSearchParams("screen=lab"))).toEqual({ screen: "terminal" });
-    expect(parseRoute(new URLSearchParams("screen="))).toEqual({ screen: "terminal" });
+  it("parses and round-trips the home route", () => {
+    expect(parseRoute(new URLSearchParams("screen=home"))).toEqual({ screen: "home" });
+    expect([...routeToParams({ screen: "home" }).entries()]).toEqual([["screen", "home"]]);
+  });
+
+  it("falls back to home on an unknown screen", () => {
+    expect(parseRoute(new URLSearchParams("screen=lab"))).toEqual({ screen: "home" });
+    expect(parseRoute(new URLSearchParams("screen="))).toEqual({ screen: "home" });
   });
 
   it("ignores params that belong to a different screen", () => {
@@ -198,8 +205,8 @@ describe("applyRouteToParams (router-owned key clearing)", () => {
 });
 
 describe("readRouteFromUrl / writeRouteToUrl", () => {
-  it("readRouteFromUrl returns the terminal default without a window", () => {
-    expect(readRouteFromUrl()).toEqual({ screen: "terminal" });
+  it("readRouteFromUrl returns the home default without a window", () => {
+    expect(readRouteFromUrl()).toEqual({ screen: "home" });
   });
 
   it("writeRouteToUrl is a no-op without a window", () => {
@@ -406,10 +413,10 @@ describe("project route (a page full width)", () => {
     expect(routeToParams(r).toString()).toBe("screen=project&project=lodestar&page=trading");
   });
 
-  it("both params are identity — a half-specified route falls back to the terminal", () => {
-    expect(parseRoute(new URLSearchParams("screen=project&project=lodestar"))).toEqual({ screen: "terminal" });
-    expect(parseRoute(new URLSearchParams("screen=project&page=trading"))).toEqual({ screen: "terminal" });
-    expect(parseRoute(new URLSearchParams("screen=project"))).toEqual({ screen: "terminal" });
+  it("both params are identity — a half-specified route falls back to the default", () => {
+    expect(parseRoute(new URLSearchParams("screen=project&project=lodestar"))).toEqual({ screen: "home" });
+    expect(parseRoute(new URLSearchParams("screen=project&page=trading"))).toEqual({ screen: "home" });
+    expect(parseRoute(new URLSearchParams("screen=project"))).toEqual({ screen: "home" });
   });
 
   it("`page` is a router-owned key: it is cleared when navigating to another screen", () => {

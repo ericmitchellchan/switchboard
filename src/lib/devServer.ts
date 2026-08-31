@@ -726,6 +726,37 @@ export function useSiblingServers(url: string): readonly DevServerHit[] {
   return useSyncExternalStore(subscribe, () => siblingServersFor(url));
 }
 
+// ── ALL KNOWN SERVERS — Home's Listening block (SWIT-45) ─────────────────────
+// Every server ANY session has announced, deduped by serverKey, best-ranked
+// first. Same memoization discipline as the sibling cache: rebuilt only when
+// the store version moves, so the array is a legal snapshot. Announcements
+// only — whether each one is ANSWERING is the caller's probe (Home's), with
+// the standing no-cors wording: this store never claims liveness.
+
+let allKnownCache: readonly DevServerHit[] = NO_HITS;
+let allKnownCacheVersion = -1;
+
+export function allKnownServers(): readonly DevServerHit[] {
+  if (allKnownCacheVersion === version) return allKnownCache;
+  allKnownCacheVersion = version;
+  const seenKeys = new Set<string>();
+  const collected: DevServerHit[] = [];
+  for (const state of sessions.values()) {
+    for (const hit of state.known) {
+      const key = serverKey(hit.url);
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      collected.push(hit);
+    }
+  }
+  allKnownCache = collected.length === 0 ? NO_HITS : rankHits(collected);
+  return allKnownCache;
+}
+
+export function useAllKnownServers(): readonly DevServerHit[] {
+  return useSyncExternalStore(subscribe, allKnownServers);
+}
+
 /** React hook for the offer chip. A STRING snapshot, so subscribers re-render
  *  only when the offer itself changes. */
 export function useDevServerOffer(sessionId: string | null): string | null {
@@ -771,4 +802,6 @@ export function __resetDevServerForTests(): void {
   version += 1;
   siblingCache = new Map();
   siblingCacheVersion = -1;
+  allKnownCache = NO_HITS;
+  allKnownCacheVersion = -1;
 }

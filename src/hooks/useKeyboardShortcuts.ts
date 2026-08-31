@@ -7,16 +7,16 @@ export interface ShortcutActions {
   onCloseTab: () => void;
   onPrevTab: () => void;
   onNextTab: () => void;
+  /** Ctrl+1–9 — jump to the Nth THREAD in side-menu order (SWIT-45). The tab
+   *  strip is retired, so index-jumping is thread-row-jumping now. */
   onSwitchToIndex: (index: number) => void;
   onToggleSidebar: () => void;
   onSearch?: () => void;
-  onSplitHorizontal?: () => void;
-  onSplitVertical?: () => void;
+  /** Ctrl+Shift+W — close the focused PANE without killing its session.
+   *  Splits can no longer be CREATED (SWIT-45 retired the split chords), but
+   *  a restored workspace may still hold one, so unwinding stays possible. */
   onClosePane?: () => void;
-  onMoveFocus?: (direction: "up" | "down" | "left" | "right") => void;
   onExport?: () => void;
-  onMoveTabLeft?: () => void;
-  onMoveTabRight?: () => void;
   /** Ctrl+Shift+O — toggle the floating PiP window. Moved off Ctrl+Shift+P in
    *  A2, which the artifact panel toggle claimed (architecture.md §Panel
    *  host); the two can't share a chord. */
@@ -47,7 +47,9 @@ function isOurShortcut(e: KeyboardEvent): boolean {
   if (!e.ctrlKey) return false;
   const key = e.key.toLowerCase();
 
-  // Ctrl+key
+  // Ctrl+key. The split chords (Ctrl+\ / Ctrl+-) and Ctrl+Alt+Arrow are
+  // RETIRED (SWIT-45): one terminal per thread — open another thread instead
+  // of splitting. Not intercepting them hands the keys back to the shell.
   if (
     key === "t" ||
     key === "w" ||
@@ -55,32 +57,23 @@ function isOurShortcut(e: KeyboardEvent): boolean {
     key === "]" ||
     key === "b" ||
     key === "f" ||
-    key === "\\" ||
-    key === "-" ||
     (key >= "1" && key <= "9")
   ) {
     return true;
   }
 
-  // Ctrl+Shift+W (close pane), Ctrl+Shift+S (export), Ctrl+Shift+[/] (move tab),
+  // Ctrl+Shift+W (close pane), Ctrl+Shift+S (export),
   // Ctrl+Shift+P (toggle artifact panel), Ctrl+Shift+O (toggle floating window),
-  // Ctrl+Shift+M (toggle composer).
-  // Shift+[ produces { and Shift+] produces } on most keyboards
+  // Ctrl+Shift+M (toggle composer). The tab-move chords (Ctrl+Shift+[/]) went
+  // with the tab strip.
   if (
     e.shiftKey &&
     (key === "w" ||
       key === "s" ||
       key === "p" ||
       key === "o" ||
-      key === "m" ||
-      key === "{" ||
-      key === "}")
+      key === "m")
   ) {
-    return true;
-  }
-
-  // Ctrl+Alt+Arrow (move focus between panes)
-  if (e.altKey && (key === "arrowup" || key === "arrowdown" || key === "arrowleft" || key === "arrowright")) {
     return true;
   }
 
@@ -160,29 +153,6 @@ export function useKeyboardShortcuts(
       const key = e.key.toLowerCase();
       const a = actionsRef.current;
 
-      // Ctrl+Alt+Arrow — move focus between panes
-      if (e.altKey) {
-        switch (key) {
-          case "arrowup":
-            e.preventDefault();
-            a.onMoveFocus?.("up");
-            return;
-          case "arrowdown":
-            e.preventDefault();
-            a.onMoveFocus?.("down");
-            return;
-          case "arrowleft":
-            e.preventDefault();
-            a.onMoveFocus?.("left");
-            return;
-          case "arrowright":
-            e.preventDefault();
-            a.onMoveFocus?.("right");
-            return;
-        }
-        return;
-      }
-
       // Ctrl+Shift shortcuts
       if (e.shiftKey) {
         if (key === "b") {
@@ -215,18 +185,6 @@ export function useKeyboardShortcuts(
           a.onToggleComposer?.();
           return;
         }
-        // Ctrl+Shift+[ / Ctrl+Shift+] — move tab left/right
-        // On most keyboards, Shift+[ = { and Shift+] = }
-        if (key === "{" || key === "[") {
-          e.preventDefault();
-          a.onMoveTabLeft?.();
-          return;
-        }
-        if (key === "}" || key === "]") {
-          e.preventDefault();
-          a.onMoveTabRight?.();
-          return;
-        }
       }
 
       switch (key) {
@@ -253,14 +211,6 @@ export function useKeyboardShortcuts(
         case "f":
           e.preventDefault();
           a.onSearch?.();
-          break;
-        case "\\":
-          e.preventDefault();
-          a.onSplitHorizontal?.();
-          break;
-        case "-":
-          e.preventDefault();
-          a.onSplitVertical?.();
           break;
         default:
           if (key >= "1" && key <= "9") {

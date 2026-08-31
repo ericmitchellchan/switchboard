@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense, Comp
 import { flushSync } from "react-dom";
 import type { CSSProperties, ReactNode } from "react";
 import type { AgentStatus, Artifact, RepoConfig, ScreenId, Session, Thread } from "./types";
-import { TabBar } from "./components/TabBar";
+import { TopBar } from "./components/TabBar";
+import { Home } from "./components/Home";
 import { SessionHeader, DevServerOffer } from "./components/SessionHeader";
 import { TerminalPane, cleanupSessionListeners } from "./components/TerminalPane";
 import { StatusBar } from "./components/StatusBar";
@@ -55,11 +56,14 @@ import {
   waitForShellReady,
   tryBeginRevive,
   endRevive,
+  selectMenuThreads,
+  getThreadsView,
 } from "./lib/threadStore";
 import {
   initPanelStore,
   initPanelSides,
   usePanelSide,
+  togglePanelSide,
   isLocalhostUrlOpen,
   remapPanelSessions,
   removeSessionPanel,
@@ -122,7 +126,7 @@ import {
   startPeriodicSave,
   stopPeriodicSave,
 } from "./lib/workspace";
-import { remapSessionIds, getMaxPaneIdNumber, setPaneIdCounter, closePane, getVisibleSessionIds, findPaneBySessionId } from "./lib/paneLayout";
+import { remapSessionIds, getMaxPaneIdNumber, setPaneIdCounter, closePane, getVisibleSessionIds } from "./lib/paneLayout";
 import type { PaneNode } from "./lib/paneLayout";
 import { toggleComposer } from "./lib/composer";
 import { initTaskDetector, destroyTaskDetector } from "./lib/taskDetector";
@@ -281,9 +285,7 @@ export default function App() {
     renameSession: renameSessionLocal,
     updateSessionStatus,
     switchToSession: switchToSessionDirect,
-    switchByIndex,
     switchRelative,
-    reorderSession,
     bulkSetSessions,
     // A panel terminal is a real session that is deliberately NOT in the tab
     // bar (increment H), so every "which tab now?" decision inside the hook —
@@ -630,49 +632,8 @@ export default function App() {
     performClose();
   }, [paneLayout, destroySession, closeConfirm]);
 
-  // Close a specific session by ID (from tab X button)
-  const handleCloseSpecificTab = useCallback(async (sessionId: string) => {
-    const session = sessionsRef.current.find((s) => s.id === sessionId);
-    if (!session) return;
-
-    let paneToClose: string | null = null;
-    let sessionStillVisible = false;
-    if (paneLayout.root) {
-      const pane = findPaneBySessionId(paneLayout.root, sessionId);
-      if (pane) {
-        paneToClose = pane.id;
-        const newRoot = closePane(paneLayout.root, pane.id);
-        sessionStillVisible = newRoot ? getVisibleSessionIds(newRoot).includes(sessionId) : false;
-      }
-    }
-
-    const performClose = () => {
-      log.info(`Close specific tab id=${sessionId} sessions=${sessionsRef.current.length}`);
-      if (paneToClose) {
-        paneLayout.close(paneToClose);
-        if (sessionStillVisible) {
-          log.debug(`Session id=${sessionId} still visible in another pane, keeping alive`);
-          return;
-        }
-      }
-      void destroySession(sessionId);
-    };
-
-    if (!sessionStillVisible && shouldConfirmSessionClose(session)) {
-      setConfirmState({
-        open: true,
-        title: "Close session?",
-        message: sessionConfirmMessage(session),
-        onConfirm: () => {
-          closeConfirm();
-          performClose();
-        },
-      });
-      return;
-    }
-
-    performClose();
-  }, [paneLayout, destroySession, closeConfirm]);
+  // (The per-tab × close went with the tab strip — Ctrl+W closes the active
+  // session, and a thread row's ⋯ menu covers the rest.)
 
   const handleClosePane = useCallback(() => {
     // Close pane but keep session alive
@@ -680,29 +641,9 @@ export default function App() {
     paneLayout.close(paneLayout.focusedPaneId);
   }, [paneLayout]);
 
-  const handleSplitHorizontal = useCallback(async () => {
-    if (!paneLayout.root) return;
-    sessionCounterRef.current++;
-    const name = `Shell ${sessionCounterRef.current}`;
-    try {
-      const info = await doCreateSession(name, "", homeDirRef.current);
-      paneLayout.split("horizontal", info.id);
-    } catch (err) {
-      log.error(`Failed to create session for split: ${err}`);
-    }
-  }, [doCreateSession, paneLayout]);
-
-  const handleSplitVertical = useCallback(async () => {
-    if (!paneLayout.root) return;
-    sessionCounterRef.current++;
-    const name = `Shell ${sessionCounterRef.current}`;
-    try {
-      const info = await doCreateSession(name, "", homeDirRef.current);
-      paneLayout.split("vertical", info.id);
-    } catch (err) {
-      log.error(`Failed to create session for split: ${err}`);
-    }
-  }, [doCreateSession, paneLayout]);
+  // (The split-creation handlers retired with the split chords — SWIT-45. A
+  // restored workspace can still HOLD a split; PaneContainer renders it and
+  // Ctrl+Shift+W unwinds it, but nothing creates a new one.)
 
   const handleSessionExited = useCallback(
     (sessionId: string) => {
@@ -1005,6 +946,19 @@ export default function App() {
     [switchToSession, handleReviveThread]
   );
 
+  // Ctrl+1–9 (SWIT-45): jump to the Nth THREAD in side-menu order — the same
+  // selection + ordering the rail renders (selectMenuThreads: live first,
+  // archived hidden), so the chord and the menu can never disagree about what
+  // "thread 3" is. A dead thread revives, exactly like clicking its row.
+  const handleJumpToThread = useCallback(
+    (index: number) => {
+      const rows = selectMenuThreads(getThreads(), getThreadsView().launched, 9);
+      const thread = rows[index];
+      if (thread) handleOpenThread(thread.id);
+    },
+    [handleOpenThread]
+  );
+
   const handleDeleteThread = useCallback((threadId: string) => {
     log.info(`Delete thread id=${threadId}`);
     deleteThread(threadId);
@@ -1257,44 +1211,8 @@ export default function App() {
     [updateSessionStatus, addToast, dismissBySessionId]
   );
 
-  // Tab ORDER is expressed in the tab bar's own coordinates, and those are
-  // `tabSessions`' — a panel terminal sits in `sessions` but not in the strip
-  // (increment H), so a raw index from the drag would land one slot off, and a
-  // ±1 move could "swap" with a session nobody can see (a keystroke that does
-  // nothing). Both paths therefore resolve the NEIGHBOUR in the visible list
-  // and reorder to ITS position in the full array.
-  const tabSessionsRef = useRef(tabSessions);
-  tabSessionsRef.current = tabSessions;
-
-  const handleReorderTab = useCallback(
-    (sessionId: string, newIndex: number) => {
-      const visible = tabSessionsRef.current;
-      const all = sessionsRef.current;
-      if (visible.length === all.length) {
-        reorderSession(sessionId, newIndex);
-        return;
-      }
-      const target = visible[Math.max(0, Math.min(newIndex, visible.length - 1))];
-      if (!target) return;
-      const at = all.findIndex((s) => s.id === target.id);
-      if (at >= 0) reorderSession(sessionId, at);
-    },
-    [reorderSession]
-  );
-
-  const handleMoveTab = useCallback(
-    (delta: -1 | 1) => {
-      const id = effectiveActiveIdRef.current;
-      if (!id) return;
-      const visible = tabSessionsRef.current;
-      const from = visible.findIndex((s) => s.id === id);
-      const to = from + delta;
-      if (from < 0 || to < 0 || to >= visible.length) return;
-      const at = sessionsRef.current.findIndex((s) => s.id === visible[to].id);
-      if (at >= 0) reorderSession(id, at);
-    },
-    [reorderSession]
-  );
+  // (Tab reorder/move retired with the tab strip — SWIT-45. Session ORDER
+  // still exists in state for Ctrl+[ ] cycling, it just has no drag surface.)
 
   // ONE NAME, TWO SURFACES (2026-08-02). A tab and the thread bound to it are
   // the same conversation seen from the tab bar and from the side menu, and
@@ -1898,16 +1816,11 @@ export default function App() {
       onCloseTab: handleCloseTab,
       onPrevTab: () => switchRelative(-1),
       onNextTab: () => switchRelative(1),
-      onSwitchToIndex: switchByIndex,
+      onSwitchToIndex: handleJumpToThread,
       onToggleSidebar: cycleSidebar,
       onSearch: toggleSearch,
-      onSplitHorizontal: handleSplitHorizontal,
-      onSplitVertical: handleSplitVertical,
       onClosePane: handleClosePane,
-      onMoveFocus: paneLayout.moveFocus,
       onExport: handleExport,
-      onMoveTabLeft: () => handleMoveTab(-1),
-      onMoveTabRight: () => handleMoveTab(1),
       onTogglePip: handleTogglePip,
       onToggleSideMenu: toggleSideMenu,
       onTogglePanel: handleTogglePanel,
@@ -2466,18 +2379,22 @@ export default function App() {
         overflow: "hidden",
       }}
     >
-      <TabBar
-        // TAB sessions only (increment H): a panel terminal has a home already
-        // and putting it here too would be the second surface the tab bar was
-        // meant to stop filling with dev servers.
-        sessions={tabSessions}
-        activeId={effectiveActiveSessionId}
-        onSelect={switchToSession}
-        onClose={handleCloseSpecificTab}
-        onRename={handleRenameTab}
-        onReorder={handleReorderTab}
+      <TopBar
+        route={route}
+        // The FOCUSED pane's session — the breadcrumb names what you are
+        // typing in, exactly as the tab highlight used to.
+        activeSession={sessions.find((s) => s.id === effectiveActiveSessionId) ?? null}
+        isThread={
+          effectiveActiveSessionId ? findThreadBySessionId(effectiveActiveSessionId) !== undefined : false
+        }
         waitingCount={waitingCount}
         onToggleSideMenu={toggleSideMenu}
+        onRename={handleRenameTab}
+        // ⇄ acts on the TAB's panel (per-TAB state, SWIT-33), rendered only
+        // while that panel is open.
+        onTogglePanelSide={activeSessionId ? () => togglePanelSide(activeSessionId) : undefined}
+        panelSide={panelSide}
+        onFloat={effectiveActiveSessionId ? handleTogglePip : undefined}
         // Per-TAB, like everything else about the panel: activeSessionId, not
         // the focused pane. `""` from panelIdentityFor means "no panel open".
         onPanelButton={activeSessionId ? handlePanelButton : undefined}
@@ -2691,6 +2608,19 @@ export default function App() {
         </div>
 
         {/* Keep-alive screens — mounted on first visit only. */}
+        {activatedScreens.has("home") && (
+          <div
+            style={{
+              display: route.screen === "home" ? "flex" : "none",
+              flex: 1,
+              minWidth: 0,
+            }}
+          >
+            <ScreenErrorBoundary resetKey="home">
+              <Home active={route.screen === "home"} />
+            </ScreenErrorBoundary>
+          </div>
+        )}
         {activatedScreens.has("kb") && (
           <div
             style={{
@@ -2854,7 +2784,7 @@ function NewSessionDialogLazy({
 // identity: ProjectScreen keys the host on (project, page), so a different
 // page remounts the SURFACE while the screen shell stays put — the same
 // prop-stability trick ExplorerScreen plays with lastByScreen.
-const KEEP_ALIVE_SCREENS = ["terminal", "kb", "explorer", "threads", "project"] as const satisfies readonly ScreenId[];
+const KEEP_ALIVE_SCREENS = ["home", "terminal", "kb", "explorer", "threads", "project"] as const satisfies readonly ScreenId[];
 const KEEP_ALIVE_SET: ReadonlySet<ScreenId> = new Set(KEEP_ALIVE_SCREENS);
 
 function isKeepAliveScreen(screen: ScreenId): boolean {

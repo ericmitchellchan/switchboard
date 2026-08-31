@@ -1,29 +1,41 @@
-import { useRef, useState, useEffect } from "react";
-import type { Session } from "../types";
+// The TOP BAR (SWIT-45). The tab strip is RETIRED — a thread IS the screen
+// now, and switching between them is the side menu's job (plus Ctrl+[ ] /
+// Ctrl+1–9). The 44px bar keeps its height and becomes three things:
+// wordmark (side-menu toggle) · breadcrumb (where you are) · right actions
+// (panel side ⇄, float, panel toggle). The file keeps its name so the git
+// history of the bar stays in one place.
+import { useEffect, useRef, useState } from "react";
+import type { Route, Session } from "../types";
 import { PulsingDot } from "./PulsingDot";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
-import { tabGroupLabel, tabRepoSuffix } from "../lib/tabLabel";
+import { tabRepoSuffix } from "../lib/tabLabel";
 import { Icon } from "./icons";
 
-interface TabBarProps {
-  sessions: Session[];
-  activeId: string | null;
-  onSelect: (id: string) => void;
-  onClose: (id: string) => void;
-  onRename: (id: string, newName: string) => void;
-  onReorder?: (sessionId: string, newIndex: number) => void;
+interface TopBarProps {
+  route: Route;
+  /** The focused pane's session — what the breadcrumb names on the terminal
+   *  screen. Null when no session exists. */
+  activeSession: Session | null;
+  /** Whether that session is bound to a thread record — `Thread /` vs
+   *  `Shell /`. A plain Ctrl+T shell is not a thread (promote-on-claude). */
+  isThread: boolean;
   waitingCount: number;
   /** Clicking the SWITCHBOARD wordmark toggles the left side menu — same
    *  action as Ctrl+Shift+B. */
   onToggleSideMenu?: () => void;
-  /** RIGHT-END counterpart of the wordmark: the artifact panel's own button.
-   *  Omitted (button hidden) when there is no tab to host a panel — the same
-   *  never-advertise-a-dead-affordance rule the StatusBar chip follows.
-   *
-   *  It does NOT always toggle: with an empty panel the handler opens the `+`
-   *  picker instead, because a toggle with nothing to show is the dead
-   *  affordance. The two booleans below are what the button PAINTS and SAYS;
-   *  the branch itself lives in App (it needs the store). */
+  /** Double-click rename on the breadcrumb name — the tab strip's inline
+   *  rename, relocated. Goes through the same one-name path (App's
+   *  handleRenameTab), so a bound thread's row renames with it. */
+  onRename?: (id: string, newName: string) => void;
+  /** `⇄` — flip the active tab's panel side (SWIT-33). Rendered only while
+   *  the panel is OPEN: flipping an invisible panel is a dead affordance. */
+  onTogglePanelSide?: () => void;
+  panelSide?: "left" | "right";
+  /** `float` — the floating window (Ctrl+Shift+O), same handler as the
+   *  status-bar chip. Rendered whenever a session is focused. */
+  onFloat?: () => void;
+  /** RIGHT-END panel button, unchanged from the tab-bar era: toggles the
+   *  panel, or opens the `+` picker on a tab whose panel is empty. */
   onPanelButton?: () => void;
   /** The active tab's panel is open right now → active treatment. */
   panelOpen?: boolean;
@@ -32,93 +44,23 @@ interface TabBarProps {
   panelToggleAvailable?: boolean;
 }
 
-export function TabBar({
-  sessions,
-  activeId,
-  onSelect,
-  onClose,
-  onRename,
-  onReorder,
+const DIM: React.CSSProperties = { color: "#52525B" };
+const BRIGHT: React.CSSProperties = { color: "#E4E4E7" };
+
+export function TopBar({
+  route,
+  activeSession,
+  isThread,
   waitingCount,
   onToggleSideMenu,
+  onRename,
+  onTogglePanelSide,
+  panelSide = "right",
+  onFloat,
   onPanelButton,
   panelOpen = false,
   panelToggleAvailable = false,
-}: TabBarProps) {
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [canScrollLeft, setCanScrollLeft] = useState(false);
-  const [canScrollRight, setCanScrollRight] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editValue, setEditValue] = useState("");
-  const [hoveredId, setHoveredId] = useState<string | null>(null);
-  const [draggedId, setDraggedId] = useState<string | null>(null);
-  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  const checkScroll = () => {
-    const el = scrollRef.current;
-    if (!el) return;
-    setCanScrollLeft(el.scrollLeft > 2);
-    setCanScrollRight(el.scrollLeft < el.scrollWidth - el.clientWidth - 2);
-  };
-
-  useEffect(() => {
-    checkScroll();
-    const el = scrollRef.current;
-    if (el) {
-      el.addEventListener("scroll", checkScroll);
-      const ro = new ResizeObserver(checkScroll);
-      ro.observe(el);
-      return () => {
-        el.removeEventListener("scroll", checkScroll);
-        ro.disconnect();
-      };
-    }
-  }, []);
-
-  // Auto-scroll active tab into view
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || !activeId) return;
-    const activeTab = el.querySelector(
-      `[data-session-id="${activeId}"]`
-    ) as HTMLElement | null;
-    if (activeTab) {
-      activeTab.scrollIntoView({
-        behavior: "smooth",
-        block: "nearest",
-        inline: "nearest",
-      });
-    }
-  }, [activeId]);
-
-  // Focus input when editing starts
-  useEffect(() => {
-    if (editingId && inputRef.current) {
-      inputRef.current.focus();
-      inputRef.current.select();
-    }
-  }, [editingId]);
-
-  const scroll = (dir: number) => {
-    const el = scrollRef.current;
-    if (el) el.scrollBy({ left: dir * 160, behavior: "smooth" });
-  };
-
-  const commitRename = () => {
-    if (editingId && editValue.trim()) {
-      onRename(editingId, editValue.trim());
-    }
-    setEditingId(null);
-  };
-
-  const cancelRename = () => {
-    setEditingId(null);
-  };
-
-  // Group sessions by group/repo for dividers
-  let lastGroup = "";
-
+}: TopBarProps) {
   return (
     <div
       style={{
@@ -131,7 +73,7 @@ export function TabBar({
         overflow: "hidden",
       }}
     >
-      {/* App title */}
+      {/* Wordmark = side-menu toggle (same as Ctrl+Shift+B). */}
       <div
         style={{
           display: "flex",
@@ -142,8 +84,6 @@ export function TabBar({
           flexShrink: 0,
         }}
       >
-        {/* Wordmark = side-menu toggle (same as Ctrl+Shift+B). Unstyled
-            button — no visual redesign, just cursor + click. */}
         <button
           type="button"
           onClick={onToggleSideMenu}
@@ -179,287 +119,212 @@ export function TabBar({
         )}
       </div>
 
-      {/* Scrollable tab area */}
+      {/* Breadcrumb — where you are. */}
       <div
         style={{
           display: "flex",
+          alignItems: "center",
+          gap: 8,
+          padding: "0 14px",
           flex: 1,
+          minWidth: 0,
           overflow: "hidden",
-          alignItems: "stretch",
-          position: "relative",
+          whiteSpace: "nowrap",
+          fontFamily: "var(--font-mono)",
+          fontSize: 12,
         }}
       >
-        {canScrollLeft && (
-          <button
-            onClick={() => scroll(-1)}
-            style={{
-              position: "absolute",
-              left: 0,
-              top: 0,
-              bottom: 0,
-              width: 28,
-              background: "linear-gradient(90deg, #0A0A0B 60%, transparent)",
-              border: "none",
-              cursor: "pointer",
-              zIndex: 2,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontFamily: "var(--font-mono)",
-              fontSize: 13,
-              color: "#71717A",
-            }}
-          >
-            {"\u2039"}
-          </button>
-        )}
-
-        <div
-          ref={scrollRef}
-          className="tabs-scroll"
-          style={{
-            display: "flex",
-            flex: 1,
-            overflowX: "auto",
-            overflowY: "hidden",
-            alignItems: "stretch",
-            scrollbarWidth: "none",
-          }}
-        >
-          {sessions.map((session, idx) => {
-            const isActive = session.id === activeId;
-            const cfg = STATUS_CONFIGS[session.status] || STATUS_CONFIGS.running;
-            const groupKey = session.group || session.repo || "";
-            const showDivider = groupKey !== lastGroup && idx > 0 && groupKey !== "";
-            lastGroup = groupKey;
-            // De-duplication (tabLabel.ts): a tab must not print the same word
-            // three times. Both are null when the tab's own NAME already leads
-            // with it — the divider rule still renders, only its text goes.
-            const groupLabel = showDivider ? tabGroupLabel(groupKey, session.name) : null;
-            const repoSuffix = tabRepoSuffix(session.name, session.repo);
-
-            const isHovered = hoveredId === session.id;
-            const showClose = isActive || isHovered;
-
-            return (
-              <div
-                key={session.id}
-                data-session-id={session.id}
-                draggable={!!onReorder}
-                onDragStart={(e) => {
-                  setDraggedId(session.id);
-                  e.dataTransfer.effectAllowed = "move";
-                }}
-                onDragEnd={() => {
-                  setDraggedId(null);
-                  setDragOverIdx(null);
-                }}
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  setDragOverIdx(idx);
-                }}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  if (draggedId && onReorder) {
-                    onReorder(draggedId, idx);
-                  }
-                  setDraggedId(null);
-                  setDragOverIdx(null);
-                }}
-                onMouseEnter={() => setHoveredId(session.id)}
-                onMouseLeave={() => setHoveredId(null)}
-                style={{
-                  display: "flex",
-                  alignItems: "stretch",
-                  flexShrink: 0,
-                  opacity: draggedId === session.id ? 0.4 : 1,
-                  borderLeft: dragOverIdx === idx && draggedId && draggedId !== session.id
-                    ? "2px solid var(--text-primary)"
-                    : "none",
-                  transition: "opacity 0.15s",
-                }}
-              >
-                {showDivider && (
-                  <div style={{ display: "flex", alignItems: "center", paddingLeft: 4, gap: 4 }}>
-                    <div style={{ width: 1, backgroundColor: "#27272A", margin: "8px 0" }} />
-                    {groupLabel && (
-                      <span
-                        style={{
-                          fontFamily: "var(--font-mono)",
-                          fontSize: 8.5,
-                          fontWeight: 600,
-                          color: "#52525B",
-                          letterSpacing: "0.04em",
-                          padding: "0 4px",
-                        }}
-                      >
-                        {groupLabel}
-                      </span>
-                    )}
-                  </div>
-                )}
-                <button
-                  onClick={() => onSelect(session.id)}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                    padding: "0 6px 0 14px",
-                    border: "none",
-                    borderTop: isActive
-                      ? `2px solid ${cfg.color}`
-                      : "2px solid transparent",
-                    borderBottom: "none",
-                    borderLeft: session.repoColor
-                      ? `3px solid ${session.repoColor}`
-                      : "none",
-                    backgroundColor: isActive ? "#151518" : "transparent",
-                    cursor: "pointer",
-                    fontFamily: "var(--font-mono)",
-                    fontSize: 11.5,
-                    color: isActive ? "#E4E4E7" : "#71717A",
-                    transition: "background-color 0.15s ease, color 0.15s ease",
-                    flexShrink: 0,
-                    whiteSpace: "nowrap",
-                    position: "relative",
-                  }}
-                >
-                  <PulsingDot
-                    color={cfg.color}
-                    pulse={cfg.pulse}
-                    size={6}
-                  />
-                  {editingId === session.id ? (
-                    <input
-                      ref={inputRef}
-                      value={editValue}
-                      onChange={(e) => setEditValue(e.target.value)}
-                      onBlur={commitRename}
-                      onKeyDown={(e) => {
-                        e.stopPropagation();
-                        if (e.key === "Enter") commitRename();
-                        if (e.key === "Escape") cancelRename();
-                      }}
-                      onClick={(e) => e.stopPropagation()}
-                      style={{
-                        fontFamily: "var(--font-mono)",
-                        fontSize: 11.5,
-                        fontWeight: isActive ? 600 : 400,
-                        color: "#E4E4E7",
-                        backgroundColor: "#27272A",
-                        border: "1px solid #3F3F46",
-                        borderRadius: 3,
-                        padding: "1px 4px",
-                        outline: "none",
-                        width: Math.max(60, editValue.length * 7.5),
-                      }}
-                    />
-                  ) : (
-                    <span
-                      style={{ fontWeight: isActive ? 600 : 400 }}
-                      onDoubleClick={(e) => {
-                        e.stopPropagation();
-                        setEditingId(session.id);
-                        setEditValue(session.name);
-                      }}
-                    >
-                      {session.name}
-                    </span>
-                  )}
-                  {repoSuffix && (
-                    <span
-                      style={{
-                        fontSize: 9,
-                        color: "#52525B",
-                        opacity: isActive ? 0.8 : 0.5,
-                      }}
-                    >
-                      {repoSuffix}
-                    </span>
-                  )}
-                  <span
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onClose(session.id);
-                    }}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      width: 18,
-                      height: 18,
-                      borderRadius: 4,
-                      fontSize: 14,
-                      lineHeight: 1,
-                      color: showClose ? "#71717A" : "transparent",
-                      cursor: "pointer",
-                      transition: "color 0.1s, background-color 0.1s",
-                      backgroundColor: "transparent",
-                      marginLeft: 2,
-                      flexShrink: 0,
-                    }}
-                    onMouseEnter={(e) => {
-                      (e.currentTarget as HTMLElement).style.color = "#E4E4E7";
-                      (e.currentTarget as HTMLElement).style.backgroundColor = "#3F3F46";
-                    }}
-                    onMouseLeave={(e) => {
-                      (e.currentTarget as HTMLElement).style.color = showClose ? "#71717A" : "transparent";
-                      (e.currentTarget as HTMLElement).style.backgroundColor = "transparent";
-                    }}
-                  >
-                    {"\u00D7"}
-                  </span>
-                </button>
-              </div>
-            );
-          })}
-        </div>
-
-        {canScrollRight && (
-          <button
-            onClick={() => scroll(1)}
-            style={{
-              position: "absolute",
-              right: 0,
-              top: 0,
-              bottom: 0,
-              width: 28,
-              background: "linear-gradient(270deg, #0A0A0B 60%, transparent)",
-              border: "none",
-              cursor: "pointer",
-              zIndex: 2,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontFamily: "var(--font-mono)",
-              fontSize: 13,
-              color: "#71717A",
-            }}
-          >
-            {"\u203A"}
-          </button>
-        )}
+        <Breadcrumb route={route} activeSession={activeSession} isThread={isThread} onRename={onRename} />
       </div>
 
-      {onPanelButton && (
-        <PanelButton
-          onClick={onPanelButton}
-          open={panelOpen}
-          toggles={panelToggleAvailable}
-        />
-      )}
+      {/* Right actions: ⇄ side · float · panel. */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 4,
+          padding: "0 6px",
+          borderLeft: "1px solid #1E1E22",
+          flexShrink: 0,
+        }}
+      >
+        {panelOpen && onTogglePanelSide && (
+          <TextAction
+            label={`⇄ ${panelSide === "left" ? "right" : "left"}`}
+            title={`Move the artifact panel to the ${panelSide === "left" ? "right" : "left"} side of this tab`}
+            onClick={onTogglePanelSide}
+          />
+        )}
+        {onFloat && (
+          <TextAction
+            label="float"
+            title="Open or close the floating always-on-top window (Ctrl+Shift+O)"
+            onClick={onFloat}
+          />
+        )}
+        {onPanelButton && (
+          <PanelButton onClick={onPanelButton} open={panelOpen} toggles={panelToggleAvailable} />
+        )}
+      </div>
     </div>
   );
 }
 
-/** The artifact panel's button — right end of the tab bar, mirroring the
- *  wordmark's side-menu toggle at the left end. Same glyph the trees used to
- *  spend on folders (a frame with its right portion filled), which is where
- *  Eric said it belonged.
- *
- *  Active treatment is the kit's soft palette and nothing else: `--bg-active`
- *  behind `--text-primary`. No new hue — status dots stay the only colour in
- *  this bar. */
+/** Where you are, as one line. The terminal screen names the focused session
+ *  (`Thread / <name> · <repo>`, the suffix under tabLabel's de-duplication
+ *  rule); every other screen names itself — the full-width screens carry
+ *  their own detailed breadcrumb headers already, so this stays coarse. */
+function Breadcrumb({
+  route,
+  activeSession,
+  isThread,
+  onRename,
+}: {
+  route: Route;
+  activeSession: Session | null;
+  isThread: boolean;
+  onRename?: (id: string, newName: string) => void;
+}) {
+  switch (route.screen) {
+    case "home":
+      return <span style={BRIGHT}>Home</span>;
+    case "kb":
+      return <span style={BRIGHT}>Knowledge base</span>;
+    case "explorer":
+      return <span style={BRIGHT}>Explorer</span>;
+    case "threads":
+      return <span style={BRIGHT}>Threads</span>;
+    case "project":
+      return (
+        <>
+          <span style={DIM}>{route.project} /</span>
+          <span style={BRIGHT}>{route.page}</span>
+        </>
+      );
+    case "terminal": {
+      if (!activeSession) return <span style={DIM}>No session</span>;
+      const cfg = STATUS_CONFIGS[activeSession.status] || STATUS_CONFIGS.running;
+      const suffix = tabRepoSuffix(activeSession.name, activeSession.repo);
+      return (
+        <>
+          <span style={DIM}>{isThread ? "Thread /" : "Shell /"}</span>
+          <PulsingDot color={cfg.color} pulse={cfg.pulse} size={7} />
+          <SessionName session={activeSession} onRename={onRename} />
+          {suffix && <span style={{ ...DIM, fontSize: 10.5 }}>{suffix}</span>}
+        </>
+      );
+    }
+  }
+}
+
+/** The session's name, double-click to rename in place — the tab strip's
+ *  inline editor, relocated onto the breadcrumb. */
+function SessionName({
+  session,
+  onRename,
+}: {
+  session: Session;
+  onRename?: (id: string, newName: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(session.name);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [editing]);
+
+  const commit = () => {
+    if (value.trim() && value.trim() !== session.name) {
+      onRename?.(session.id, value.trim());
+    }
+    setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === "Enter") commit();
+          if (e.key === "Escape") setEditing(false);
+        }}
+        style={{
+          fontFamily: "var(--font-mono)",
+          fontSize: 12,
+          color: "#E4E4E7",
+          backgroundColor: "#27272A",
+          border: "1px solid #3F3F46",
+          borderRadius: 3,
+          padding: "1px 4px",
+          outline: "none",
+          width: Math.max(80, value.length * 7.5),
+        }}
+      />
+    );
+  }
+  return (
+    <span
+      style={{ ...BRIGHT, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}
+      title={onRename ? "Double-click to rename" : undefined}
+      onDoubleClick={() => {
+        if (!onRename) return;
+        setValue(session.name);
+        setEditing(true);
+      }}
+    >
+      {session.name}
+    </span>
+  );
+}
+
+/** Small text action in the bar's right end — same soft treatment as the
+ *  status bar's chips; no new hue. */
+function TextAction({
+  label,
+  title,
+  onClick,
+}: {
+  label: string;
+  title: string;
+  onClick: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title={title}
+      style={{
+        background: hover ? "var(--bg-elevated)" : "transparent",
+        border: "none",
+        borderRadius: 4,
+        padding: "4px 8px",
+        fontFamily: "var(--font-mono)",
+        fontSize: 10.5,
+        color: hover ? "var(--text-primary)" : "#71717A",
+        cursor: "pointer",
+        transition: "background-color 0.15s ease, color 0.15s ease",
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+/** The artifact panel's button — right end of the bar, mirroring the
+ *  wordmark's side-menu toggle at the left end. Unchanged from the tab-bar
+ *  era: it toggles the panel, or opens the `+` picker when the panel is
+ *  empty (a toggle with nothing to show would be a dead affordance). */
 function PanelButton({
   onClick,
   open,
@@ -476,44 +341,34 @@ function PanelButton({
       ? "Show the artifact panel (Ctrl+Shift+P)"
       : "Open an artifact in the panel — Ctrl+Shift+P toggles it once something is open";
   return (
-    <div
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title={title}
+      aria-label={title}
+      aria-pressed={open}
       style={{
         display: "flex",
         alignItems: "center",
-        padding: "0 10px",
-        borderLeft: "1px solid #1E1E22",
-        flexShrink: 0,
+        justifyContent: "center",
+        width: 24,
+        height: 24,
+        padding: 0,
+        borderRadius: 4,
+        border: "none",
+        background: open
+          ? "var(--bg-active)"
+          : hover
+            ? "var(--bg-elevated)"
+            : "transparent",
+        color: open || hover ? "var(--text-primary)" : "#71717A",
+        cursor: "pointer",
+        transition: "background-color 0.15s ease, color 0.15s ease",
       }}
     >
-      <button
-        type="button"
-        onClick={onClick}
-        onMouseEnter={() => setHover(true)}
-        onMouseLeave={() => setHover(false)}
-        title={title}
-        aria-label={title}
-        aria-pressed={open}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          width: 24,
-          height: 24,
-          padding: 0,
-          borderRadius: 4,
-          border: "none",
-          background: open
-            ? "var(--bg-active)"
-            : hover
-              ? "var(--bg-elevated)"
-              : "transparent",
-          color: open || hover ? "var(--text-primary)" : "#71717A",
-          cursor: "pointer",
-          transition: "background-color 0.15s ease, color 0.15s ease",
-        }}
-      >
-        <Icon name="panel" size={14} />
-      </button>
-    </div>
+      <Icon name="panel" size={14} />
+    </button>
   );
 }

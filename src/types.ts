@@ -102,9 +102,10 @@ export interface SavedWorkspace {
 // disturb the existing types above.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Every screen the workstation shell can show. "terminal" is the classic
- *  Switchboard workspace and the default route. */
-export type ScreenId = "terminal" | "kb" | "explorer" | "threads" | "project";
+/** Every screen the workstation shell can show. "home" is the default route
+ *  (SWIT-45 — the roll-up screen); "terminal" is the classic Switchboard
+ *  workspace, where threads live. */
+export type ScreenId = "home" | "terminal" | "kb" | "explorer" | "threads" | "project";
 
 /** Discriminated route union keyed on `screen`. Param-carrying screens extend
  *  their variant inline (params are optional deep-link state, not identity —
@@ -113,6 +114,9 @@ export type ScreenId = "terminal" | "kb" | "explorer" | "threads" | "project";
  *  tree's directory-expansion state is menu-local, never routed); it is
  *  meaningless without `project` and parseRoute drops it when orphaned. */
 export type Route =
+  // Home (SWIT-45) — the roll-up: what needs you across threads, what is
+  // live, what is listening. Param-less and the DEFAULT route.
+  | { screen: "home" }
   | { screen: "terminal" }
   | { screen: "kb"; doc?: string }
   | { screen: "explorer"; project?: string; path?: string }

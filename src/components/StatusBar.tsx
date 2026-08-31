@@ -149,9 +149,7 @@ export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMe
         <span style={{ color: "#3F3F46" }}>{"\u2502"}</span>
         <span>Ctrl+F find</span>
         <span style={{ color: "#3F3F46" }}>{"\u2502"}</span>
-        <span>Ctrl+\ split</span>
-        <span style={{ color: "#3F3F46" }}>{"\u2502"}</span>
-        <span>Ctrl+1-9 jump</span>
+        <span>Ctrl+1-9 thread</span>
         {onToggleSidebar && (
           <>
             <span style={{ color: "#3F3F46" }}>{"\u2502"}</span>

@@ -255,10 +255,9 @@ are reconciled against it. Adding a chord means updating both.
 |--------|----------|
 | New tab | Ctrl+T |
 | Close tab + session | Ctrl+W |
-| Close pane only | Ctrl+Shift+W |
-| Prev/next tab | Ctrl+[ / Ctrl+] |
-| Move tab left/right | Ctrl+Shift+[ / Ctrl+Shift+] |
-| Jump to tab | Ctrl+1–9 |
+| Close pane only (unwind a restored split) | Ctrl+Shift+W |
+| Prev/next session | Ctrl+[ / Ctrl+] |
+| Jump to the Nth thread (side-menu order) | Ctrl+1–9 |
 | Cycle task sidebar (full/collapsed/hidden) | Ctrl+B |
 | Toggle side menu (navigator) | Ctrl+Shift+B |
 | Toggle artifact panel (active tab) | Ctrl+Shift+P |
@@ -267,9 +266,6 @@ are reconciled against it. Adding a chord means updating both.
 | Save the open markdown edit buffer | Ctrl+S (inside the editor) |
 | Export session scrollback | Ctrl+Shift+S |
 | Terminal search | Ctrl+F |
-| Split horizontal | Ctrl+\\ |
-| Split vertical | Ctrl+- |
-| Move pane focus | Ctrl+Alt+Arrow |
 | Reload app window | F5 or Ctrl+Shift+R |
 | Copy selection / SIGINT | Ctrl+C |
 | Paste into terminal | Ctrl+V |
@@ -280,19 +276,25 @@ Chord notes:
 - **Ctrl+Shift+O is no longer keyboard-only** (increment F): the StatusBar carries a
   `Ctrl+Shift+O float` button and the panel header a `float` action, because the
   floating window can now host a popped-out ARTIFACT and not just a mirrored shell.
-- **Ctrl+Shift+W / Ctrl+Shift+S / Ctrl+Shift+[ ] / Ctrl+Alt+Arrow /
-  Ctrl+- are keyboard-ONLY** — no button, hint or tooltip surfaces them anywhere in
-  the UI. The StatusBar hint strip advertises Ctrl+T/W/[ ]/F/\\/1-9 as plain text plus
-  FIVE clickable buttons: Ctrl+Shift+B menu, Ctrl+Shift+P panel (rendered only while
-  the chord would do something), Ctrl+Shift+M composer (rendered whenever a session is
-  focused — forcing a composer onto a plain shell is a supported state, so this toggle
-  is never a no-op), Ctrl+Shift+O float (whenever a session is focused), and
-  Ctrl+B tasks.
-- **The TAB BAR carries the two surface buttons**: the SWITCHBOARD wordmark (left end)
-  toggles the side menu, and the panel button (right end) toggles the artifact panel —
-  or, on a tab whose panel is EMPTY, opens the `+` picker instead, because a toggle
-  with nothing to show would be a dead affordance. That empty state is the only place
-  the button diverges from Ctrl+Shift+P.
+- **The split chords are RETIRED (SWIT-45)** — Ctrl+\\, Ctrl+- and Ctrl+Alt+Arrow no
+  longer exist (one terminal per thread; open another thread instead of splitting), and
+  the tab-move chords (Ctrl+Shift+[ ]) went with the tab strip. Ctrl+Shift+W stays: a
+  RESTORED workspace can still hold a split, and unwinding it must stay possible.
+- **Ctrl+Shift+W / Ctrl+Shift+S are keyboard-ONLY** — no button, hint or tooltip
+  surfaces them anywhere in the UI. The StatusBar hint strip advertises
+  Ctrl+T/W/[ ]/F/1-9 as plain text plus FIVE clickable buttons: Ctrl+Shift+B menu,
+  Ctrl+Shift+P panel (rendered only while the chord would do something), Ctrl+Shift+M
+  composer (rendered whenever a session is focused — forcing a composer onto a plain
+  shell is a supported state, so this toggle is never a no-op), Ctrl+Shift+O float
+  (whenever a session is focused), and Ctrl+B tasks.
+- **The TOP BAR (SWIT-45 — TabBar.tsx, tab strip retired)** is wordmark · breadcrumb ·
+  right actions: the SWITCHBOARD wordmark (left end) toggles the side menu; the
+  breadcrumb names the screen or the focused session (`Thread / <name> · <repo>`,
+  double-click renames); the right end carries `⇄ left/right` (panel side, only while
+  the panel is open), `float`, and the panel button — which toggles the artifact panel,
+  or on a tab whose panel is EMPTY opens the `+` picker instead, because a toggle with
+  nothing to show would be a dead affordance. That empty state is the only place the
+  button diverges from Ctrl+Shift+P.
 - **Ctrl+Shift+P reveals the terminal screen** when the route is elsewhere — the panel
   renders only there, so toggling from KB/Explorer would otherwise be invisible.
   Mirrors `applyOpenDecision`'s `revealTerminal`.

@@ -118,3 +118,30 @@ that stop being true.
   16x16 path is easy to get subtly wrong and nothing in the type system catches a
   folder that reads as a box. "It's in the Geometric Shapes block" and "the path looks
   right in my head" are the same non-evidence.
+- 2026-08-30 — ONE COACHING PLATFORM, not Lodestar-inside-Switchboard (Eric, on the
+  5c/5d build): the TAB BAR RETIRES — a thread IS the screen (Ky's model); the 44px bar
+  keeps its height and becomes wordmark · breadcrumb · right actions. The side menu is
+  THREE BANDS: destinations on top (Home / Trading / Research ▸ / Knowledge base ▸),
+  THREADS GROUPED BY PROJECT in the middle (live pinned first per group, a `shells`
+  group for un-promoted Ctrl+T shells), Explorer COLLAPSED at the bottom (the SWIT-31
+  Projects tree, folded). ONE terminal per thread — splits retire; open another thread.
+  Home = placeholder (live threads, thread→thread updates, listening servers, a
+  reserved status-reports box). Trading is FULL-WIDTH (ambient thread beside it = v2).
+  Research pages + KB docs open BESIDE the active thread (left/right pane). Thread→thread
+  updates/requests are in (grafted from Ky), delivered through the existing typed-line
+  seam. "Lodestar" stops being a nav word — repo/backend name and thread suffix only.
+  Mock: features/platform-evolution/wireframes/shell-v1-coaching.html.
+- 2026-08-31 — THE PAGE, THREE TABS, AND VIEWS (Eric, adopting Ky's session spine
+  write-up): every thread's panel opens on a ✦ PAGE tab that cannot close — theme ·
+  needs you · to do · what happened · evidence · questions, in that order, written by
+  the agent through fixed operations, never as a document. ONLY THREE THINGS OPEN A
+  TAB: a question from the agent (`?` tab, closes on answer), a clicked link (ONE
+  preview tab per thread, italic, replaced by the next plain click; Ctrl+click /
+  double-click keeps), and a VIEW the agent was asked for. A VIEW is a declaration the
+  shell renders with the SAME chart components as Trading/Research (candles · table ·
+  dist switch in its toolbar; source + built-at + `spec ▸`; `keep` / `re-run`), never
+  agent-written code; every row/bar is an anchor so pins land on it. Home is the ROLL-UP
+  of every page's needs-you (+ live now · between threads · listening · kept views) and
+  grows no sections of its own. Row chips: `?` = agent waiting on you, `↓ N` = unread
+  cross-thread posts, a 6px white dot = changed since you last looked. Mock:
+  features/coaching-platform/wireframes/shell-v2.html; spec: requirements.md beside it.
