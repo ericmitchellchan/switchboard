@@ -86,6 +86,18 @@ export async function scrollbackRoot(): Promise<string> {
   return invoke("scrollback_root");
 }
 
+/** Absolute path of the per-thread data root (SWIT-48) — what lets a thread's
+ *  ✦ page be NAMED to an agent as a file it can Read. */
+export async function threadsRoot(): Promise<string> {
+  return invoke("threads_root");
+}
+
+/** Read one of a thread's page files (page.json / answers.json / inbox.json).
+ *  A missing file resolves to "" — "no page yet" is the ordinary state. */
+export async function readThreadFile(threadId: string, name: string): Promise<string> {
+  return invoke("read_thread_file", { threadId, name });
+}
+
 /** Write the AGENT-FACING plain-text transcript for a session (see
  *  lib.rs's TRANSCRIPT_SUFFIX for why it is a second file). */
 export async function saveTranscript(sessionId: string, data: string): Promise<void> {

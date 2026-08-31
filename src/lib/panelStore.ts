@@ -419,6 +419,26 @@ export function describeArtifact(artifact: Artifact): ArtifactDescription {
         title: `terminal / ${name}`,
       };
     }
+    case "page":
+      // The ✦ page (SWIT-48). The thread's TITLE is what the breadcrumb bar
+      // above already prints — the header stays generic and short.
+      return {
+        icon: FILE_ICON,
+        crumbs: [
+          { text: "thread", tone: "dim" },
+          { text: "✦ page", tone: "bright" },
+        ],
+        title: "the thread's page",
+      };
+    case "view":
+      return {
+        icon: FILE_ICON,
+        crumbs: [
+          { text: "view", tone: "dim" },
+          { text: artifact.viewId, tone: "bright" },
+        ],
+        title: `view / ${artifact.viewId}`,
+      };
   }
 }
 
@@ -519,6 +539,16 @@ export function sanitizeArtifact(raw: unknown): Artifact | null {
       // session (name, cwd, status, scrollback) lives where sessions live, so
       // there is nothing here to go stale.
       return isNonEmptyString(raw.sessionId) ? { kind: "session", sessionId: raw.sessionId } : null;
+    case "page":
+      // SWIT-48 — the ✦ page. The thread id is the whole record; the content
+      // is the per-thread files (pageStore), read at render time.
+      return isNonEmptyString(raw.threadId) ? { kind: "page", threadId: raw.threadId } : null;
+    case "view":
+      // SWIT-48 stub (rendered in SWIT-50) — two ids, tolerated on load so a
+      // strip never loses a tab to a version skew.
+      return isNonEmptyString(raw.threadId) && isNonEmptyString(raw.viewId)
+        ? { kind: "view", threadId: raw.threadId, viewId: raw.viewId }
+        : null;
     default:
       return null;
   }
@@ -557,6 +587,10 @@ export function artifactIdentity(artifact: Artifact): string {
       // artifact, which is what makes the dedupe rule enforce the one-live-view
       // invariant rather than merely coexist with it.
       return `session:${artifact.sessionId}`;
+    case "page":
+      return `page:${artifact.threadId}`;
+    case "view":
+      return `view:${artifact.threadId}:${artifact.viewId}`;
   }
 }
 
@@ -587,6 +621,9 @@ export function artifactShortTitle(artifact: Artifact): string {
   // read through the same published label the header uses so the strip and the
   // header can never disagree about what a terminal is called.
   if (artifact.kind === "session") return sessionLabelFor(artifact.sessionId)?.name ?? "terminal";
+  // The ✦ page and views print their marks, not a path (they have none).
+  if (artifact.kind === "page") return "✦ page";
+  if (artifact.kind === "view") return artifact.viewId;
   // A surface's short title is its page LABEL (the same word the header's
   // last crumb prints), not a path — it has none.
   if (artifact.kind === "surface") return surfaceLabel(artifact.project, artifact.page);
@@ -922,6 +959,44 @@ export function notePanelThreadBinding(sessionId: string): void {
     changed = true;
   }
   if (changed) bump();
+}
+
+/** THE ✦ PAGE TAB (SWIT-48): every THREAD's strip leads with its page —
+ *  present even when the panel holds nothing else (R2), prepended at index 0,
+ *  unclosable (closeArtifactAt refuses the kind). Idempotent and cheap, so
+ *  App calls it from the bind sites and from the active-tab effect; a HIDDEN
+ *  strip gains the page in its MEMORY rather than being resurrected —
+ *  Ctrl+Shift+P stays an honest toggle. A plain shell gets nothing: a shell
+ *  has no page (R2 edge case). */
+export function ensurePageTab(sessionId: string): void {
+  const threadId = threadKeyResolver?.(sessionId) ?? null;
+  if (!threadId) return;
+  const key = `t:${threadId}`;
+  const page: Artifact = { kind: "page", threadId };
+  const live = panels.get(key) ?? null;
+  const hidden = live === null ? lastPanelStates.get(key) ?? null : null;
+  const state = live ?? hidden;
+  if (state && indexOfArtifact(state.artifacts, page) >= 0) return;
+  if (!state) {
+    panels = new Map(panels);
+    panels.set(key, { artifacts: [page], activeIndex: 0 });
+    bump();
+    return;
+  }
+  // Prepend WITHOUT stealing focus: whatever was active stays active, one
+  // index over. The page leads the strip; it does not interrupt.
+  const next: PanelState = {
+    artifacts: [page, ...state.artifacts],
+    activeIndex: state.activeIndex + 1,
+  };
+  if (live !== null) {
+    panels = new Map(panels);
+    panels.set(key, next);
+  } else {
+    lastPanelStates = new Map(lastPanelStates);
+    lastPanelStates.set(key, next);
+  }
+  bump();
 }
 
 let panels = new Map<string, PanelState>();
@@ -1288,7 +1363,9 @@ export function openInPanel(
       parkedSessions.delete(clean.sessionId);
     }
   }
-  const wantsPreview = opts.preview === true && clean.kind !== "session";
+  // Neither a session nor the ✦ page is ever a preview: a live shell is not a
+  // glance, and the page is the strip's permanent first-class tab (SWIT-48).
+  const wantsPreview = opts.preview === true && clean.kind !== "session" && clean.kind !== "page";
   const live = panels.get(key) ?? null;
   const revived = live === null ? lastPanelStates.get(key) ?? null : null;
   const current = live ?? revived;
@@ -1444,6 +1521,13 @@ export function closeArtifactAt(
   const key = ownerKeyFor(sessionId);
   const state = panels.get(key);
   if (!state) return;
+  // THE ✦ PAGE CANNOT CLOSE (SWIT-48, R2): it is the thread's one living
+  // page, present as long as the thread is. The strip's × is hidden for it;
+  // this is the store-side backstop so no path can route around the rule.
+  if (state.artifacts[index]?.kind === "page") {
+    log.warn(`panel-close refused reason=page-tab tab=${key}`);
+    return;
+  }
   const next = closeArtifactIn(state, index);
   if (next === state) return; // out of range — nothing happened
   const closed = state.artifacts[index];
@@ -1493,6 +1577,10 @@ export function inheritPanel(artifact: Artifact | null, newSessionId: string): b
   // would MOVE Eric's dev server into a thread he just created. A new thread
   // launched beside a panel terminal simply starts with an empty panel.
   if (artifact.kind === "session") return false;
+  // A PAGE or VIEW is THREAD-SCOPED (SWIT-48): inheriting one would put the
+  // OLD thread's page into the new thread's strip — the wrong document with a
+  // confident face. The new thread gets its own ✦ page from ensurePageTab.
+  if (artifact.kind === "page" || artifact.kind === "view") return false;
   openInPanel(newSessionId, artifact);
   const now = artifactFor(newSessionId);
   return now !== null && sameArtifact(now, artifact);

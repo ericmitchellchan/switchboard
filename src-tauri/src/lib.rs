@@ -270,6 +270,67 @@ async fn clear_session_scrollback(session_id: String) -> Result<(), String> {
     Ok(())
 }
 
+// ── Per-thread data dirs (SWIT-48, the coaching-platform page) ───────────────
+// `%LOCALAPPDATA%/switchboard/threads/<threadId>/` holds the thread's page
+// files: page.json (written by the MCP server, SWIT-49), answers.json +
+// inbox.json (written by the app, SWIT-51/52). ONE WRITER PER FILE is the
+// design; the shell only READS here, and the guard posture mirrors kb.rs:
+// the thread id is validated component-wise (uuid alphabet only — no
+// separators, so no traversal is expressible) and the file name comes from a
+// closed allowlist, never from the caller's imagination.
+
+fn threads_data_dir() -> Result<std::path::PathBuf, String> {
+    let base = dirs::data_local_dir().ok_or("Cannot resolve local data dir")?;
+    Ok(base.join(data_dir_name()).join("threads"))
+}
+
+/// The files a thread dir may hold in this increment. SWIT-50 extends this
+/// with the views/ listing through its own guarded command.
+const THREAD_FILES: [&str; 3] = ["page.json", "answers.json", "inbox.json"];
+
+/// Thread ids are frontend-minted uuids (threadStore.mintUuid). Anything
+/// outside the uuid alphabet is refused outright — there is no path form to
+/// sanitize because none can be expressed.
+fn valid_thread_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// The threads data root, as an absolute path — read once at boot by the
+/// frontend (agentContext) so a PAGE can be NAMED to an agent: the page is a
+/// JSON file claude can `Read`. Created eagerly for the same reason the
+/// scrollback root is: the reference must point somewhere that exists.
+#[tauri::command]
+async fn threads_root() -> Result<String, String> {
+    let dir = threads_data_dir()?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+/// Read one of a thread's page files. A MISSING file is an empty string, not
+/// an error — "no page yet" is the ordinary state of every thread until its
+/// agent first writes (SWIT-49), and the 2.5s poll must not log a failure per
+/// tick for it.
+#[tauri::command]
+async fn read_thread_file(thread_id: String, name: String) -> Result<String, String> {
+    if !valid_thread_id(&thread_id) {
+        return Err("invalid thread id".into());
+    }
+    if !THREAD_FILES.contains(&name.as_str()) {
+        return Err("invalid thread file name".into());
+    }
+    let path = threads_data_dir()?.join(&thread_id).join(&name);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => Ok(content),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => {
+            log::error!("Failed to read thread file {}/{}: {}", thread_id, name, e);
+            Err(e.to_string())
+        }
+    }
+}
+
 // Thread records disk mirror (T5). Same storage pattern as scrollback: a JSON
 // blob under the app's local data dir. The frontend owns the payload shape
 // (threadStore.serializeThreadsForDisk); this is a dumb byte store. Written
@@ -859,6 +920,8 @@ fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         list_sessions,
         get_config,
         scrollback_root,
+        threads_root,
+        read_thread_file,
         save_transcript,
         save_scrollback,
         load_scrollback,

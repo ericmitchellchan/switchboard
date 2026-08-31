@@ -144,6 +144,10 @@ export type RefOptions = {
   /** A surface page's anchor vocabulary (registry `pinHint`), for the spawn
    *  context's pin advice. Passed in so this module stays project-agnostic. */
   anchorHint?: string | null;
+  /** ABSOLUTE path of the per-thread data root (ipc.threadsRoot, SWIT-48).
+   *  Without it a `page` artifact has no ref — same degrade rule as the
+   *  scrollback root. */
+  threadsRoot?: string | null;
 };
 
 /** Where a session's transcript is mirrored, or `""` when the root is unknown.
@@ -224,6 +228,21 @@ export function artifactRef(artifact: Artifact, opts: RefOptions = {}): string {
       if (path.length === 0) return "";
       return sanitizeForTypedLine(`terminal ${path}`, REF_MAX);
     }
+    case "page": {
+      // The ✦ page IS a file (SWIT-48): the agent can Read its own page —
+      // the same honesty rule as the transcript. No known root → no ref,
+      // never a path that does not exist.
+      const root = normalizePath(opts.threadsRoot ?? "");
+      if (root.length === 0) return "";
+      return sanitizeForTypedLine(
+        `page ${joinPath(root, `${artifact.threadId}/page.json`)}`,
+        REF_MAX
+      );
+    }
+    case "view":
+      // SWIT-50 gives a view its spec file; until then both seams stay
+      // silent about one — degraded, never wrong.
+      return "";
   }
 }
 
@@ -400,9 +419,17 @@ export function getScrollbackRootForContext(): string | null {
   return scrollbackRootCache;
 }
 
+/** Same shape for the per-thread data root (SWIT-48): fetched once at boot;
+ *  unset = a page has no ref, exactly the pre-page behaviour. */
+let threadsRootCache: string | null = null;
+
+export function setThreadsRootForContext(root: string | null): void {
+  threadsRootCache = root && root.length > 0 ? root : null;
+}
+
 /** Convenience for call sites: `buildSendReference(a, p, refOptions())`.
  *  `sessionName` is NOT here — it is per-artifact and the caller holds it
  *  (panelStore.artifactShortTitle). */
 export function refOptions(): RefOptions {
-  return { kbRoot: kbRootCache, scrollbackRoot: scrollbackRootCache };
+  return { kbRoot: kbRootCache, scrollbackRoot: scrollbackRootCache, threadsRoot: threadsRootCache };
 }

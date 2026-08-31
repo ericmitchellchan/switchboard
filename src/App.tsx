@@ -20,7 +20,7 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, saveTranscript } from "./lib/ipc";
+import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, saveTranscript } from "./lib/ipc";
 import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty, isSessionDirty, serializeForPip, plainTextTerminal, setTerminalScreenVisible } from "./lib/terminal";
 import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing, sendPipHost } from "./lib/pipBridge";
 import { bumpSessionGeneration, addSessionInputListener, getSessionGeneration } from "./lib/terminalRegistry";
@@ -67,6 +67,7 @@ import {
   togglePanelSide,
   setPanelThreadResolver,
   notePanelThreadBinding,
+  ensurePageTab,
   isLocalhostUrlOpen,
   remapPanelSessions,
   removeSessionPanel,
@@ -105,6 +106,7 @@ import {
   refOptions,
   setKbRootForContext,
   setScrollbackRootForContext,
+  setThreadsRootForContext,
 } from "./lib/agentContext";
 import { runPromotionPass, promotionPassReason, PROMOTION_POLL_MS } from "./lib/threadPromotion";
 import { explorerProjects, registerExplorerActions } from "./lib/explorer";
@@ -838,6 +840,8 @@ export default function App() {
         bindThreadSession(thread.id, info.id);
         // SWIT-47: the fresh session now resolves to the thread's panel key.
         notePanelThreadBinding(info.id);
+        // SWIT-48: every thread's strip leads with its ✦ page.
+        ensurePageTab(info.id);
         // Before the launch below: resolveSpawnContext reads THIS tab's panel.
         if (inheritPanel(inherited, info.id)) {
           log.info(`Thread inherits panel id=${thread.id} session=${info.id}`);
@@ -932,6 +936,7 @@ export default function App() {
           // SWIT-47: the fresh session resolves to the thread's panel key —
           // this is the seam that makes a revived thread's strip reappear.
           notePanelThreadBinding(info.id);
+          ensurePageTab(info.id);
           sessionId = info.id;
         }
         markThreadLaunched(threadId);
@@ -1115,6 +1120,8 @@ export default function App() {
           // SWIT-47: a shell promoted on `claude` carries its strip into the
           // thread — the transient panel key moves to the thread key.
           notePanelThreadBinding(sessionId);
+          // SWIT-48: the promoted thread's strip leads with its ✦ page.
+          ensurePageTab(sessionId);
         },
         // Decision 1: a restarted claude does not overwrite the old record's
         // uuid — the old thread is released (still revivable) and the pass
@@ -1191,7 +1198,11 @@ export default function App() {
         status: s.status,
       }))
     );
-  }, [sessions, tabSessions, effectiveActiveSessionId]);
+    // SWIT-48 backstop for bindings the three explicit sites cannot see (a
+    // RESTORED bound tab, a revive into the bound tab): the active thread's
+    // strip leads with its page. Idempotent, so re-running costs nothing.
+    if (activeSessionId) ensurePageTab(activeSessionId);
+  }, [sessions, tabSessions, activeSessionId, effectiveActiveSessionId]);
 
   // The same publication, one layer over, for the PANEL (increment H): a
   // `session` artifact carries an id and nothing else, so the tab strip, the
@@ -1461,6 +1472,11 @@ export default function App() {
       .catch((err) =>
         log.warn(`scrollback_root unavailable — panel terminals stay unreferenceable: ${err}`)
       );
+    // And the per-thread data root (SWIT-48): what lets a thread's page be
+    // NAMED to an agent as a file. Unset = a page has no ref — degraded.
+    threadsRoot()
+      .then(setThreadsRootForContext)
+      .catch((err) => log.warn(`threads_root unavailable — pages stay unreferenceable: ${err}`));
   }, []);
 
   // T8 seam 2 — send-to-thread. TYPES the reference into the terminal and

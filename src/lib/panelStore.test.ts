@@ -56,6 +56,7 @@ import {
   previewBackAvailableFor,
   goPreviewBack,
   pinPreview,
+  ensurePageTab,
   DEFAULT_PANEL_WIDTH,
   MIN_PANEL_WIDTH,
   MAX_PANEL_WIDTH,
@@ -514,6 +515,75 @@ describe("remapPanelSessions (store, SWIT-47 — thread-keyed)", () => {
     notePanelThreadBinding("shell-1");
     expect(panelStateFor("shell-1")).toEqual(strip([KB_DOC, SESSION_A], 1));
     expect(isPanelOwnedSession("pty-a")).toBe(true);
+  });
+});
+
+// ─── SWIT-48: the ✦ page tab ─────────────────────────────────────────────────
+
+describe("ensurePageTab (the ✦ page)", () => {
+  const PAGE_9: Artifact = { kind: "page", threadId: "th-9" };
+
+  it("a thread with no panel gets one holding just its page", () => {
+    setPanelThreadResolver((s) => (s === "sess-1" ? "th-9" : null));
+    ensurePageTab("sess-1");
+    expect(panelStateFor("sess-1")).toEqual(one(PAGE_9));
+  });
+
+  it("a plain shell gets nothing — a shell has no page", () => {
+    ensurePageTab("sess-1"); // no resolver → no thread
+    expect(panelStateFor("sess-1")).toBeNull();
+  });
+
+  it("prepends to an existing strip WITHOUT stealing focus, idempotently", () => {
+    setPanelThreadResolver((s) => (s === "sess-1" ? "th-9" : null));
+    openInPanel("sess-1", KB_DOC);
+    openInPanel("sess-1", REPO_FILE); // active
+    ensurePageTab("sess-1");
+    expect(panelStateFor("sess-1")).toEqual(strip([PAGE_9, KB_DOC, REPO_FILE], 2));
+    ensurePageTab("sess-1"); // idempotent
+    expect(panelStateFor("sess-1")).toEqual(strip([PAGE_9, KB_DOC, REPO_FILE], 2));
+  });
+
+  it("a HIDDEN strip gains the page in its memory — the toggle stays honest", () => {
+    setPanelThreadResolver((s) => (s === "sess-1" ? "th-9" : null));
+    openInPanel("sess-1", KB_DOC);
+    togglePanel("sess-1"); // hide
+    ensurePageTab("sess-1");
+    expect(panelStateFor("sess-1")).toBeNull(); // NOT resurrected
+    togglePanel("sess-1"); // bring it back
+    expect(panelStateFor("sess-1")).toEqual(strip([PAGE_9, KB_DOC], 1));
+  });
+
+  it("the page tab cannot close — store-side backstop", () => {
+    setPanelThreadResolver((s) => (s === "sess-1" ? "th-9" : null));
+    ensurePageTab("sess-1");
+    openInPanel("sess-1", KB_DOC);
+    closeArtifactAt("sess-1", 0); // the page — refused
+    expect(panelStateFor("sess-1")).toEqual(strip([PAGE_9, KB_DOC], 1));
+    closeArtifactAt("sess-1", 1); // the doc — closes normally
+    expect(panelStateFor("sess-1")).toEqual(one(PAGE_9));
+  });
+
+  it("a page is never the preview, and never inherited into a new thread", () => {
+    setPanelThreadResolver((s) => (s === "sess-1" ? "th-9" : null));
+    openInPanel("sess-1", PAGE_9, { preview: true });
+    expect(previewIdentityFor("sess-1")).toBe("");
+    expect(inheritPanel(PAGE_9, "sess-2")).toBe(false);
+    expect(panelStateFor("sess-2")).toBeNull();
+  });
+
+  it("the page persists with the thread's strip (workspace v6) and survives sanitize", () => {
+    setPanelThreadResolver((s) => (s === "sess-1" ? "th-9" : null));
+    ensurePageTab("sess-1");
+    expect(getPanelsRecord()).toEqual({ "th-9": one(PAGE_9) });
+    expect(sanitizeArtifact({ kind: "page", threadId: "th-9" })).toEqual(PAGE_9);
+    expect(sanitizeArtifact({ kind: "page" })).toBeNull();
+    expect(sanitizeArtifact({ kind: "view", threadId: "t", viewId: "v" })).toEqual({
+      kind: "view",
+      threadId: "t",
+      viewId: "v",
+    });
+    expect(sanitizeArtifact({ kind: "view", threadId: "t" })).toBeNull();
   });
 });
 

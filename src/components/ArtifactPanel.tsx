@@ -356,8 +356,11 @@ function TabStrip({
                   lineHeight: 1,
                   color: "var(--text-dim)",
                   // Reserved space, not conditional rendering: a tab must not
-                  // resize under the cursor as you sweep the strip.
-                  visibility: isActive || isHovered ? "visible" : "hidden",
+                  // resize under the cursor as you sweep the strip. The ✦
+                  // PAGE never shows a × (SWIT-48 — the store refuses the
+                  // close; the affordance must not promise one).
+                  visibility:
+                    artifact.kind !== "page" && (isActive || isHovered) ? "visible" : "hidden",
                 }}
                 onMouseEnter={(e) => {
                   e.currentTarget.style.background = "var(--border-subtle)";
@@ -856,7 +859,7 @@ export function ArtifactPanel({
           >
             {isPoppedOut ? "↙ back" : "↗ float"}
           </button>
-          {artifact.kind !== "localhost" && (
+          {artifact.kind !== "localhost" && artifact.kind !== "page" && artifact.kind !== "view" && (
             // OPEN FULL is an ICON now (increment G, Decision 5) — the `open`
             // mark from the shared module, which already means "go to it" in
             // the thread row menu. The words were the widest thing in a 36px
@@ -875,6 +878,10 @@ export function ArtifactPanel({
           )}
           </>
           )}
+          {/* The ✦ page has no × anywhere (SWIT-48): it cannot close, and a
+              button that silently refuses is a dead affordance. Ctrl+Shift+P
+              still hides the whole panel. */}
+          {artifact.kind !== "page" && (
           <button
             type="button"
             // The header `×` acts on the ACTIVE tab, and for a session that
@@ -896,6 +903,7 @@ export function ArtifactPanel({
           >
             ×
           </button>
+          )}
         </header>
 
         {/* Body by kind — the SAME components the screens render, through the

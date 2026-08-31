@@ -36,6 +36,7 @@ import { artifactIdentity } from "../../lib/panelStore";
 import { DocView } from "./DocView";
 import { FileViewer } from "../ExplorerView";
 import { LocalhostView } from "./LocalhostView";
+import { PageView } from "./PageView";
 import { SurfaceHost } from "../../surfaces/SurfaceHost";
 
 export function ArtifactSurface({
@@ -78,6 +79,37 @@ export function ArtifactSurface({
               boundary, the backend card and the token scope — this switch
               stays a host+policy map, not a renderer. */}
           <SurfaceHost key={artifactIdentity(artifact)} artifact={artifact} active={active} />
+        </div>
+      );
+    case "page":
+      return (
+        <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+          {/* Keyed by identity like localhost/surface: two threads' pages
+              share an element type, and the seen-stamp + fold state are
+              per-thread. Loading policy is pageStore's (2.5s active-gated). */}
+          <PageView key={artifactIdentity(artifact)} threadId={artifact.threadId} active={active} />
+        </div>
+      );
+    case "view":
+      // SWIT-48 stub — the renderer is SWIT-50. The tab exists so nothing is
+      // lost; the body says what it will become rather than drawing nothing.
+      return (
+        <div
+          style={{
+            flex: 1,
+            minHeight: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 24,
+            textAlign: "center",
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            color: "var(--text-dim)",
+          }}
+        >
+          A rendered view lands here — table, candles, distribution — once the
+          view renderer ships.
         </div>
       );
     case "session":

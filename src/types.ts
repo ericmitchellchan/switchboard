@@ -187,7 +187,17 @@ export type Artifact =
   // This is what the localhost kind could never be: same-document content,
   // so pins hit real DOM, the agent sees real screen context, and one page
   // can sit in the panel, full width, or popped out without a second origin.
-  | { kind: "surface"; project: string; page: string };
+  | { kind: "surface"; project: string; page: string }
+  // THE ✦ PAGE (SWIT-48) — a thread's one living page: theme · needs you ·
+  // to do · what happened · evidence · questions, written by the agent
+  // through fixed operations (the MCP server, SWIT-49) and merge-rendered by
+  // the shell from per-thread files (pageStore). The reference is the thread
+  // id and nothing else — the content lives on disk, one writer per file.
+  | { kind: "page"; threadId: string }
+  // A VIEW (SWIT-50) — a rendered dataset the agent declared (table, candles,
+  // distribution), drawn by the shell's own chart components. STUB in SWIT-48:
+  // the kind exists so strips can hold one, the renderer lands in SWIT-50.
+  | { kind: "view"; threadId: string; viewId: string };
 
 /** The artifact kinds that name a FILE on disk — the ones with a readable
  *  `path` and therefore a renderable BODY (docKind switch, pins sidecar,
