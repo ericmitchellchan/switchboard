@@ -50,6 +50,12 @@ import {
   getPanelsRecord,
   getPanelsView,
   remapPanelSessions,
+  setPanelThreadResolver,
+  notePanelThreadBinding,
+  previewIdentityFor,
+  previewBackAvailableFor,
+  goPreviewBack,
+  pinPreview,
   DEFAULT_PANEL_WIDTH,
   MIN_PANEL_WIDTH,
   MAX_PANEL_WIDTH,
@@ -317,7 +323,7 @@ describe("migrateSavedWorkspace (panels)", () => {
   it("v1 → v5: sessions/layout/counter preserved, panels default {} + default width", () => {
     const raw = mkWorkspaceV1();
     const ws = migrateSavedWorkspace(raw)!;
-    expect(ws.version).toBe(5);
+    expect(ws.version).toBe(6);
     expect(ws.sessions).toEqual(raw.sessions);
     expect(ws.paneLayout).toEqual(raw.paneLayout);
     expect(ws.activeSessionId).toBe("s1");
@@ -332,7 +338,7 @@ describe("migrateSavedWorkspace (panels)", () => {
     const t = mkThread({ sessionId: "s1" });
     const raw = mkWorkspaceV1({ version: 2, threads: [t] });
     const ws = migrateSavedWorkspace(raw)!;
-    expect(ws.version).toBe(5);
+    expect(ws.version).toBe(6);
     expect(ws.sessions).toEqual(raw.sessions);
     expect(ws.threads).toEqual([t]);
     expect(ws.panels).toEqual({});
@@ -344,25 +350,28 @@ describe("migrateSavedWorkspace (panels)", () => {
     expect(ws.panels).toEqual({});
   });
 
-  it("v3 → v5 is ADDITIVE and LOSSLESS: each artifact becomes a one-tab strip", () => {
+  it("v3 → v6: each artifact becomes a one-tab strip keyed by its THREAD; shell panels drop", () => {
+    const t = mkThread({ sessionId: "s1" });
     const raw = mkWorkspaceV1({
       version: 3,
-      threads: [mkThread({ sessionId: "s1" })],
+      threads: [t],
       panels: { "s1": { ...KB_DOC, junk: 1 }, "s2": { kind: "broken" }, "s3": REPO_FILE },
       panelWidth: 500,
     });
     const ws = migrateSavedWorkspace(raw)!;
-    expect(ws.version).toBe(5);
+    expect(ws.version).toBe(6);
     expect(ws.sessions).toEqual(raw.sessions); // v3's other halves untouched
     expect(ws.threads).toHaveLength(1);
-    expect(ws.panels).toEqual({ "s1": one(KB_DOC), "s3": one(REPO_FILE) });
+    // s1 follows its thread; s3 has no thread record → transient, dropped.
+    expect(ws.panels).toEqual({ [t.id]: one(KB_DOC) });
     expect(ws.panelWidth).toBe(500);
   });
 
-  it("v4/v5 round-trip: strips tolerant-parsed, width clamped", () => {
+  it("v4/v5 round-trip: strips tolerant-parsed, re-keyed by thread, width clamped", () => {
+    const t1 = mkThread({ sessionId: "s1" });
     const raw = mkWorkspaceV1({
       version: 4,
-      threads: [],
+      threads: [t1],
       panels: {
         "s1": { artifacts: [{ ...KB_DOC, junk: 1 }, REPO_FILE], activeIndex: 1 },
         "s2": { artifacts: [{ kind: "broken" }], activeIndex: 0 },
@@ -371,8 +380,8 @@ describe("migrateSavedWorkspace (panels)", () => {
       panelWidth: 5000,
     });
     const ws = migrateSavedWorkspace(raw)!;
-    expect(ws.version).toBe(5);
-    expect(ws.panels).toEqual({ "s1": strip([KB_DOC, REPO_FILE], 1), "s3": one(REPO_FILE) });
+    expect(ws.version).toBe(6);
+    expect(ws.panels).toEqual({ [t1.id]: strip([KB_DOC, REPO_FILE], 1) });
     expect(ws.panelWidth).toBe(MAX_PANEL_WIDTH);
   });
 
@@ -386,7 +395,7 @@ describe("migrateSavedWorkspace (panels)", () => {
   });
 
   it("unknown versions are still rejected outright", () => {
-    expect(migrateSavedWorkspace(mkWorkspaceV1({ version: 6 }))).toBeNull();
+    expect(migrateSavedWorkspace(mkWorkspaceV1({ version: 7 }))).toBeNull();
     expect(migrateSavedWorkspace(mkWorkspaceV1({ version: "4" }))).toBeNull();
   });
 });
@@ -403,7 +412,7 @@ describe("applyWorkspaceStaleness (panels)", () => {
     expect(applyWorkspaceStaleness(ws, ws.savedAt + WEEK, WEEK)).toBe(ws);
   });
 
-  it("expired sessions take their PANELS with them — threads survive", () => {
+  it("expired sessions leave — threads survive WITH their panels (v6, SWIT-47)", () => {
     const t = mkThread({ sessionId: "s1" });
     const ws = migrateSavedWorkspace(
       mkWorkspaceV1({ version: 4, threads: [t], panels: { "s1": one(KB_DOC) }, panelWidth: 500 })
@@ -411,7 +420,9 @@ describe("applyWorkspaceStaleness (panels)", () => {
     const stale = applyWorkspaceStaleness(ws, ws.savedAt + WEEK + 1, WEEK);
     expect(stale.sessions).toEqual([]);
     expect(stale.paneLayout).toBeNull();
-    expect(stale.panels).toEqual({}); // binding to an expired session is meaningless
+    // v6 keys panels by THREAD id, and threads never expire — the strip is
+    // kept and comes back when the thread revives.
+    expect(stale.panels).toEqual({ [t.id]: one(KB_DOC) });
     expect(stale.threads).toEqual([t]); // durable by definition
     expect(stale.panelWidth).toBe(500); // width is global, not session-bound
   });
@@ -445,22 +456,43 @@ describe("remapPanels", () => {
   });
 });
 
-describe("remapPanelSessions (store)", () => {
-  it("rewrites live keys and drops the unmapped ones", () => {
-    initPanelStore({ "old-1": strip([KB_DOC, REPO_FILE], 1), "old-2": one(REPO_FILE) });
-    remapPanelSessions(new Map([["old-1", "new-1"]]));
-    expect(artifactFor("new-1")).toEqual(REPO_FILE); // the ACTIVE tab came back active
-    expect(panelStateFor("new-1")).toEqual(strip([KB_DOC, REPO_FILE], 1));
-    expect(artifactFor("old-1")).toBeNull();
-    expect(artifactFor("old-2")).toBeNull();
-    expect(getPanelsRecord()).toEqual({ "new-1": strip([KB_DOC, REPO_FILE], 1) });
+describe("remapPanelSessions (store, SWIT-47 — thread-keyed)", () => {
+  it("keeps a strip whose thread survived; drops one whose thread is gone", () => {
+    // initPanelStore keys are THREAD ids now (workspace v6).
+    initPanelStore({ "th-1": strip([KB_DOC, REPO_FILE], 1), "th-2": one(REPO_FILE) });
+    remapPanelSessions(new Map(), new Set(["th-1"]));
+    // A session bound to th-1 resolves to the kept strip…
+    setPanelThreadResolver((s) => (s === "sess-1" ? "th-1" : null));
+    expect(artifactFor("sess-1")).toEqual(REPO_FILE); // the ACTIVE tab came back active
+    expect(panelStateFor("sess-1")).toEqual(strip([KB_DOC, REPO_FILE], 1));
+    expect(getPanelsRecord()).toEqual({ "th-1": strip([KB_DOC, REPO_FILE], 1) });
+    // …and th-2's strip is gone with its thread.
+    setPanelThreadResolver((s) => (s === "sess-2" ? "th-2" : null));
+    expect(artifactFor("sess-2")).toBeNull();
   });
 
-  it("empty map clears every binding but keeps the global width", () => {
-    initPanelStore({ "old-1": one(KB_DOC) }, 500);
-    remapPanelSessions(new Map());
+  it("no surviving threads clears every binding but keeps the global width", () => {
+    initPanelStore({ "th-1": one(KB_DOC) }, 500);
+    remapPanelSessions(new Map(), new Set());
     expect(getPanelsRecord()).toEqual({});
     expect(getPanelWidth()).toBe(500);
+  });
+
+  it("a shell's panel never reaches the workspace blob", () => {
+    // No resolver → a plain shell key. Its strip is live in the store…
+    openInPanel("shell-1", KB_DOC);
+    expect(artifactFor("shell-1")).toEqual(KB_DOC);
+    // …but transient: the persisted record holds thread panels only.
+    expect(getPanelsRecord()).toEqual({});
+  });
+
+  it("notePanelThreadBinding moves a shell's strip under its new thread key", () => {
+    openInPanel("shell-1", KB_DOC);
+    // Promotion: the session gains a thread record.
+    setPanelThreadResolver((s) => (s === "shell-1" ? "th-9" : null));
+    notePanelThreadBinding("shell-1");
+    expect(panelStateFor("shell-1")).toEqual(one(KB_DOC));
+    expect(getPanelsRecord()).toEqual({ "th-9": one(KB_DOC) });
   });
 });
 
@@ -468,6 +500,7 @@ describe("remapPanelSessions (store)", () => {
 
 describe("panel store", () => {
   it("open → artifactFor; opening ANOTHER appends a tab and activates it", () => {
+    setPanelThreadResolver((id) => id); // thread-bound, so the record persists
     openInPanel("sess-1", KB_DOC);
     expect(artifactFor("sess-1")).toEqual(KB_DOC);
     openInPanel("sess-1", REPO_FILE);
@@ -487,6 +520,7 @@ describe("panel store", () => {
   });
 
   it("open sanitizes at the gate and rejects junk / empty session ids", () => {
+    setPanelThreadResolver((id) => id);
     openInPanel("sess-1", { ...KB_DOC, junk: true } as unknown as Artifact);
     expect(artifactFor("sess-1")).toEqual(KB_DOC);
     openInPanel("sess-2", { kind: "nope" } as unknown as Artifact);
@@ -506,13 +540,18 @@ describe("panel store", () => {
     expect(getPanelsView()).toBe(view);
   });
 
-  it("tab close: removeSessionPanel drops the whole strip with the session", () => {
+  it("tab close: a SHELL's strip dies with its session; a THREAD's survives (SWIT-47)", () => {
+    // Shell (no thread record): dropped outright, as before.
     openInPanel("sess-1", KB_DOC);
     openInPanel("sess-1", REPO_FILE);
-    openInPanel("sess-2", REPO_FILE);
     removeSessionPanel("sess-1");
     expect(artifactFor("sess-1")).toBeNull();
-    expect(getPanelsRecord()).toEqual({ "sess-2": one(REPO_FILE) });
+    // Thread: the strip stays filed under the thread key for the revive.
+    setPanelThreadResolver((id) => (id === "sess-2" ? "th-2" : null));
+    openInPanel("sess-2", REPO_FILE);
+    removeSessionPanel("sess-2");
+    expect(panelStateFor("sess-2")).toEqual(one(REPO_FILE));
+    expect(getPanelsRecord()).toEqual({ "th-2": one(REPO_FILE) });
   });
 
   it("width is GLOBAL and clamped at both bounds; a no-op set does not churn", () => {
@@ -548,26 +587,28 @@ describe("panel store", () => {
     openInPanel("sess-1", KB_DOC);
     const v1 = getPanelsView();
     expect(getPanelsView()).toBe(v1);
-    expect(v1.panels.get("sess-1")).toEqual(one(KB_DOC));
+    expect(v1.panels.get("s:sess-1")).toEqual(one(KB_DOC)); // shell owner key (SWIT-47)
     openInPanel("sess-2", REPO_FILE);
     const v2 = getPanelsView();
     expect(v2).not.toBe(v1);
-    expect(v1.panels.has("sess-2")).toBe(false); // old snapshot not mutated in place
+    expect(v1.panels.has("s:sess-2")).toBe(false); // old snapshot not mutated in place
     expect(v2.panels.size).toBe(2);
   });
 
   it("boot round-trip: store → workspace record → migrate → store (criterion 3)", () => {
+    setPanelThreadResolver((id) => id); // thread-bound tabs; shells never persist
     openInPanel("sess-1", KB_DOC);
     openInPanel("sess-1", REPO_FILE);
     openInPanel("sess-2", REPO_FILE);
     setPanelWidth(500);
     const blob = mkWorkspaceV1({
-      version: 4,
+      version: 6,
       threads: [],
       panels: getPanelsRecord(),
       panelWidth: getPanelWidth(),
     });
     __resetPanelStoreForTests();
+    setPanelThreadResolver((id) => id);
     const ws = migrateSavedWorkspace(JSON.parse(JSON.stringify(blob)))!;
     initPanelStore(ws.panels, ws.panelWidth);
     // WHICH artifacts and WHICH one is active both survive the restart.
@@ -578,10 +619,15 @@ describe("panel store", () => {
   });
 
   it("a v3 blob restores as one-tab strips, and the panel keeps working (upgrade path)", () => {
+    const t = {
+      id: "th-1", title: "t", workingDir: "C:/repo", chatSessionId: "c-1",
+      chatStarted: false, sessionId: "sess-1", createdAt: 1, lastActivityAt: 1,
+    };
     const ws = migrateSavedWorkspace(
-      mkWorkspaceV1({ version: 3, panels: { "sess-1": KB_DOC }, panelWidth: 480 })
+      mkWorkspaceV1({ version: 3, threads: [t], panels: { "sess-1": KB_DOC }, panelWidth: 480 })
     )!;
     initPanelStore(ws.panels, ws.panelWidth);
+    setPanelThreadResolver((id) => (id === "sess-1" ? "th-1" : null));
     expect(artifactFor("sess-1")).toEqual(KB_DOC);
     openInPanel("sess-1", REPO_FILE);
     expect(panelStateFor("sess-1")).toEqual(strip([KB_DOC, REPO_FILE], 1));
@@ -810,6 +856,7 @@ describe("multi-open, switching and × (acceptance 1 + 4)", () => {
   });
 
   it("the whole strip persists per session (acceptance 3's source)", () => {
+    setPanelThreadResolver((id) => id); // thread-bound; a shell's strip is transient
     openInPanel("s1", KB_DOC);
     openInPanel("s1", REPO_FILE);
     activateArtifact("s1", 0);
@@ -1354,21 +1401,50 @@ describe("openArtifact / applyOpenDecision (effects)", () => {
     expect(getNavState().route).toEqual({ screen: "kb", doc: OPEN_DOC.path });
   });
 
-  it("opening a second artifact ADDS a tab and shows it (increment B)", () => {
+  it("a tree click opens the PREVIEW tab; the next plain click REPLACES it (SWIT-47, R3)", () => {
     publishActiveTabSession("s1");
     openArtifact(OPEN_DOC);
+    expect(previewIdentityFor("s1")).toBe(artifactIdentity(OPEN_DOC));
     openArtifact(OPEN_FILE);
     expect(artifactFor("s1")).toEqual(OPEN_FILE);
+    expect(panelStateFor("s1")).toEqual(one(OPEN_FILE)); // replaced in place, not appended
+    expect(previewIdentityFor("s1")).toBe(artifactIdentity(OPEN_FILE));
+    // ...and back steps to what the preview replaced.
+    expect(previewBackAvailableFor("s1")).toBe(true);
+    goPreviewBack("s1");
+    expect(artifactFor("s1")).toEqual(OPEN_DOC);
+    expect(previewBackAvailableFor("s1")).toBe(false);
+  });
+
+  it("pinning the preview keeps it; the next click opens a NEW preview beside it", () => {
+    publishActiveTabSession("s1");
+    openArtifact(OPEN_DOC);
+    pinPreview("s1");
+    expect(previewIdentityFor("s1")).toBe("");
+    openArtifact(OPEN_FILE);
     expect(panelStateFor("s1")).toEqual(strip([OPEN_DOC, OPEN_FILE], 1));
+    expect(previewIdentityFor("s1")).toBe(artifactIdentity(OPEN_FILE));
   });
 
   it("a tree click on an ALREADY-OPEN doc activates its tab (acceptance 4, real path)", () => {
     publishActiveTabSession("s1");
     openArtifact(OPEN_DOC);
+    pinPreview("s1");
     openArtifact(OPEN_FILE);
     const decision = openArtifact({ ...OPEN_DOC });
     expect(decision.action).toBe("panel");
+    // Activated, never duplicated - and the preview mark is untouched.
     expect(panelStateFor("s1")).toEqual(strip([OPEN_DOC, OPEN_FILE], 0));
+    expect(previewIdentityFor("s1")).toBe(artifactIdentity(OPEN_FILE));
+  });
+
+  it("closing the preview tab clears its mark and back stack", () => {
+    publishActiveTabSession("s1");
+    openArtifact(OPEN_DOC);
+    openArtifact(OPEN_FILE); // preview lineage: DOC replaced by FILE
+    closeArtifactAt("s1", 0);
+    expect(previewIdentityFor("s1")).toBe("");
+    expect(previewBackAvailableFor("s1")).toBe(false);
   });
 
   it("each tab keeps its own artifact (criterion 3)", () => {
@@ -1394,7 +1470,8 @@ describe("openArtifact / applyOpenDecision (effects)", () => {
     expect(getNavState().route).toEqual({ screen: "terminal" });
   });
 
-  it("opened artifacts land in the persisted record (criterion 5's source)", () => {
+  it("opened artifacts land in the persisted record when thread-bound (criterion 5's source)", () => {
+    setPanelThreadResolver((id) => id);
     publishActiveTabSession("s1");
     openArtifact(OPEN_DOC);
     expect(getPanelsRecord()).toEqual({ s1: one(OPEN_DOC) });
@@ -1704,6 +1781,7 @@ describe("inheritPanel (a new thread inherits the panel it was launched from)", 
   });
 
   it("an empty target session id is a no-op (create failed before an id existed)", () => {
+    setPanelThreadResolver((id) => id);
     openInPanel("s1", KB_DOC);
     expect(inheritPanel(KB_DOC, "")).toBe(false);
     expect(getPanelsRecord()).toEqual({ s1: one(KB_DOC) });
@@ -1727,6 +1805,7 @@ describe("inheritPanel (a new thread inherits the panel it was launched from)", 
   });
 
   it("the inherited binding persists with the workspace like any other (criterion 5)", () => {
+    setPanelThreadResolver((id) => id);
     openInPanel("s1", KB_DOC);
     inheritPanel(artifactFor("s1"), "s2");
     expect(getPanelsRecord()).toEqual({ s1: one(KB_DOC), s2: one(KB_DOC) });
@@ -2205,15 +2284,11 @@ describe("remapPanels with session artifacts (increment H)", () => {
     expect(remapPanels(panels, new Map([["old-tab", "new-tab"]]))).toEqual({});
   });
 
-  it("through the store: the live panel follows the restored ids", () => {
+  it("through the store: a thread's panel terminal follows the restored session id", () => {
     __resetPanelStoreForTests();
-    initPanelStore({ "old-tab": one(SESSION_A) });
-    remapPanelSessions(
-      new Map([
-        ["old-tab", "new-tab"],
-        ["pty-a", "pty-a-new"],
-      ])
-    );
+    initPanelStore({ "th-1": one(SESSION_A) });
+    remapPanelSessions(new Map([["pty-a", "pty-a-new"]]), new Set(["th-1"]));
+    setPanelThreadResolver((s) => (s === "new-tab" ? "th-1" : null));
     expect(panelStateFor("new-tab")).toEqual(one({ kind: "session", sessionId: "pty-a-new" }));
     expect(isPanelOwnedSession("pty-a-new")).toBe(true);
     expect(isPanelOwnedSession("pty-a")).toBe(false);
@@ -2222,21 +2297,66 @@ describe("remapPanels with session artifacts (increment H)", () => {
 
 // ─── Workspace v5 carries a panel terminal ───────────────────────────────────
 
-describe("migrateSavedWorkspace v5 (panel terminals)", () => {
-  it("keeps a session artifact through the migration", () => {
+describe("migrateSavedWorkspace v5→v6 (SWIT-47 — panels re-key by thread)", () => {
+  const THREAD_S1 = {
+    id: "th-1",
+    title: "thread",
+    workingDir: "C:/repo",
+    chatSessionId: "c-1",
+    chatStarted: true,
+    sessionId: "s1",
+    createdAt: 1,
+    lastActivityAt: 1,
+  };
+
+  it("a thread's panel survives the version bump, keyed by its thread id", () => {
     const raw = mkWorkspaceV1({
       version: 5,
+      threads: [THREAD_S1],
       panels: { "s1": strip([KB_DOC, SESSION_A], 1) },
       panelWidth: 500,
     });
     const ws = migrateSavedWorkspace(raw)!;
-    expect(ws.version).toBe(5);
-    expect(ws.panels).toEqual({ "s1": strip([KB_DOC, SESSION_A], 1) });
+    expect(ws.version).toBe(6);
+    expect(ws.panels).toEqual({ "th-1": strip([KB_DOC, SESSION_A], 1) });
   });
 
-  it("a v4 blob is a valid v5 one — nothing to transform, nothing lost", () => {
-    const v4 = mkWorkspaceV1({ version: 4, panels: { "s1": strip([KB_DOC, REPO_FILE], 1) } });
-    const v5 = mkWorkspaceV1({ version: 5, panels: { "s1": strip([KB_DOC, REPO_FILE], 1) } });
+  it("a SHELL's panel (no thread claims the session) is dropped as transient", () => {
+    const raw = mkWorkspaceV1({ version: 5, panels: { "s1": one(KB_DOC) } });
+    expect(migrateSavedWorkspace(raw)!.panels).toEqual({});
+  });
+
+  it("panelSides re-key through the same thread records", () => {
+    const raw = mkWorkspaceV1({
+      version: 5,
+      threads: [THREAD_S1],
+      panelSides: { s1: "left", s2: "left" },
+    });
+    expect(migrateSavedWorkspace(raw)!.panelSides).toEqual({ "th-1": "left" });
+  });
+
+  it("a v6 blob passes through unchanged", () => {
+    const raw = mkWorkspaceV1({
+      version: 6,
+      panels: { "th-1": one(KB_DOC) },
+      panelSides: { "th-1": "left" },
+    });
+    const ws = migrateSavedWorkspace(raw)!;
+    expect(ws.panels).toEqual({ "th-1": one(KB_DOC) });
+    expect(ws.panelSides).toEqual({ "th-1": "left" });
+  });
+
+  it("v4 and v5 blobs with the same content migrate identically", () => {
+    const v4 = mkWorkspaceV1({
+      version: 4,
+      threads: [THREAD_S1],
+      panels: { "s1": strip([KB_DOC, REPO_FILE], 1) },
+    });
+    const v5 = mkWorkspaceV1({
+      version: 5,
+      threads: [THREAD_S1],
+      panels: { "s1": strip([KB_DOC, REPO_FILE], 1) },
+    });
     expect(migrateSavedWorkspace(v4)!.panels).toEqual(migrateSavedWorkspace(v5)!.panels);
   });
 });
@@ -2265,7 +2385,7 @@ describe("panel removal audit", () => {
     closeArtifactAt("s1", 0);
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain("reason=user-close");
-    expect(lines[0]).toContain("tab=s1");
+    expect(lines[0]).toContain("tab=s:s1"); // shell owner key (SWIT-47)
     expect(lines[0]).toContain(`artifact=kb-doc:${KB_DOC.path}`);
   });
 

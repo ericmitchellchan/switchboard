@@ -567,39 +567,70 @@ export function mergeThreads(
  *
  *  The width is clamped from whatever is present at every version (it has
  *  existed since v3 and is not session-bound). Anything else is rejected. */
+/** Re-key a ≤v5 record (keyed by SAVED session id) onto thread ids via the
+ *  blob's own thread records (SWIT-47): an entry whose session a thread
+ *  claims follows that thread; the rest were SHELL panels, transient by the
+ *  new rule, and are dropped. Pure; shared by the panels and panelSides
+ *  migrations. */
+function rekeyBySavedThreads<V>(
+  record: Record<string, V>,
+  threads: readonly Thread[]
+): Record<string, V> {
+  const threadBySession = new Map<string, string>();
+  for (const t of threads) if (t.sessionId) threadBySession.set(t.sessionId, t.id);
+  const out: Record<string, V> = {};
+  for (const [sessionId, value] of Object.entries(record)) {
+    const threadId = threadBySession.get(sessionId);
+    if (threadId) out[threadId] = value;
+  }
+  return out;
+}
+
 export function migrateSavedWorkspace(raw: unknown): SavedWorkspace | null {
   if (!raw || typeof raw !== "object") return null;
   const ws = raw as Record<string, unknown>;
   const version = ws.version;
-  if (version !== 1 && version !== 2 && version !== 3 && version !== 4 && version !== 5) {
+  if (
+    version !== 1 &&
+    version !== 2 &&
+    version !== 3 &&
+    version !== 4 &&
+    version !== 5 &&
+    version !== 6
+  ) {
     return null;
   }
   if (!Array.isArray(ws.sessions)) return null;
+  const threads = version === 1 ? [] : sanitizeThreads(ws.threads);
+  // v6 (SWIT-47): panels + panelSides are keyed by THREAD id. A ≤v5 blob keys
+  // them by saved session id — re-keyed here through the blob's own thread
+  // records, so a thread's panel survives the version bump and a shell's is
+  // dropped (transient by the new rule).
+  const rawPanels =
+    version >= 4 ? parsePanels(ws.panels) : version === 3 ? parsePanelsV3(ws.panels) : {};
+  const panels = version === 6 ? rawPanels : rekeyBySavedThreads(rawPanels, threads);
+  const rawSides = parsePanelSides(ws.panelSides);
+  const panelSides = version === 6 ? rawSides : rekeyBySavedThreads(rawSides, threads);
   return {
-    version: 5,
+    version: 6,
     sessions: ws.sessions as SavedSession[],
     activeSessionId: typeof ws.activeSessionId === "string" ? ws.activeSessionId : null,
     paneLayout: ws.paneLayout ?? null,
     focusedPaneId: typeof ws.focusedPaneId === "string" ? ws.focusedPaneId : null,
     sessionCounter: typeof ws.sessionCounter === "number" ? ws.sessionCounter : 0,
     savedAt: typeof ws.savedAt === "number" ? ws.savedAt : 0,
-    threads: version === 1 ? [] : sanitizeThreads(ws.threads),
-    panels:
-      version >= 4
-        ? parsePanels(ws.panels)
-        : version === 3
-          ? parsePanelsV3(ws.panels)
-          : {},
+    threads,
+    panels,
     panelWidth: parsePanelWidth(ws.panelWidth),
-    // SWIT-33 — optional on every version; a blob without it is "all right".
-    panelSides: parsePanelSides(ws.panelSides),
+    panelSides,
   };
 }
 
 /** 7-day staleness applies to SESSIONS only: a stale workspace loses its
- *  sessions/layout, but threads are durable by definition and survive.
- *  Panels expire WITH their sessions (a panel binding to an expired session
- *  is meaningless — unlike a thread, there is nothing left to revive); the
+ *  sessions/layout, but threads are durable by definition and survive — and
+ *  since v6 keys panels by THREAD id, a thread's panel survives WITH it
+ *  (SWIT-47: "a strip whose thread exists is kept"). The session artifacts
+ *  inside those strips are dropped at restore (their sessions are gone); the
  *  global panelWidth is not session-bound and survives. */
 export function applyWorkspaceStaleness(
   ws: SavedWorkspace,
@@ -613,7 +644,6 @@ export function applyWorkspaceStaleness(
     activeSessionId: null,
     paneLayout: null,
     focusedPaneId: null,
-    panels: {},
   };
 }
 

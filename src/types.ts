@@ -59,7 +59,7 @@ export interface SavedSession {
 }
 
 export interface SavedWorkspace {
-  version: 5; // v5 (panel terminals): a panel strip may hold a `session` artifact. v1–v4 payloads are migrated on load.
+  version: 6; // v6 (SWIT-47): panels + panelSides keyed by THREAD id (shells transient). v1–v5 payloads are migrated on load.
   sessions: SavedSession[];
   activeSessionId: string | null;
   paneLayout: unknown; // PaneNode serialized
@@ -69,19 +69,21 @@ export interface SavedWorkspace {
   /** Durable thread records (T5). Sessions expire after 7 days of staleness;
    *  threads NEVER expire with them — a thread is durable by definition. */
   threads: Thread[];
-  /** Per-tab artifact panel content, keyed by SAVED session id; keys are
-   *  remapped through the restore idMap exactly like thread bindings. Unlike
-   *  threads, panels expire WITH their sessions — a panel binding to an
-   *  expired session is meaningless (see applyWorkspaceStaleness).
+  /** Artifact panel content, keyed by THREAD id (v6, SWIT-47) — thread ids
+   *  are durable, so keys need no restore remap at all; a strip is kept
+   *  whenever its thread survived, and it survives staleness WITH the thread.
+   *  A shell's panel is transient and is never written here.
    *
    *  v4: the value is a whole TAB STRIP (PanelState), not a single Artifact.
    *  A v3 blob's `Artifact` migrates to `{artifacts:[a], activeIndex:0}`.
    *
-   *  v5: a strip entry may be a `session` artifact (increment H). The SHAPE is
-   *  unchanged — a v4 blob is a valid v5 blob, it simply never held one — but
-   *  the session ids inside those entries are remapped through the SAME
-   *  restore idMap the keys are (panelStore.remapPanels), and an entry whose
-   *  session did not come back is dropped like an unmapped key. */
+   *  v5: a strip entry may be a `session` artifact (increment H). The session
+   *  ids INSIDE those entries still go through the restore idMap
+   *  (panelStore.remapPanelSessions); an entry whose session did not come
+   *  back is dropped.
+   *
+   *  v6: keys move saved-session-id → thread id; a ≤v5 blob re-keys through
+   *  its own thread records on load and shell entries are dropped. */
   panels: Record<string, PanelState>;
   /** Global panel width (one width for all tabs — one less thing to restore). */
   panelWidth: number;

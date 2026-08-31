@@ -65,6 +65,8 @@ import {
   initPanelSides,
   usePanelSide,
   togglePanelSide,
+  setPanelThreadResolver,
+  notePanelThreadBinding,
   isLocalhostUrlOpen,
   remapPanelSessions,
   removeSessionPanel,
@@ -140,6 +142,12 @@ import "@xterm/xterm/css/xterm.css";
 // too late). The store owns sharing + scheduling; these are the only two file
 // operations it performs.
 configurePinsIO({ read: kbReadDoc, write: kbWriteDoc });
+
+// SWIT-47: the panel is per-THREAD. panelStore resolves a session to its
+// thread through this injected lookup (it must not import threadStore); a
+// session with no thread record keys a transient shell panel. Module scope
+// for the same reason as the pins IO above.
+setPanelThreadResolver((sessionId) => findThreadBySessionId(sessionId)?.id ?? null);
 
 function shouldConfirmSessionClose(session: Session): boolean {
   if (session.status === "running" || session.status === "waiting") return true;
@@ -827,6 +835,8 @@ export default function App() {
           paneLayout.focusOrSwapSession(info.id);
         }
         bindThreadSession(thread.id, info.id);
+        // SWIT-47: the fresh session now resolves to the thread's panel key.
+        notePanelThreadBinding(info.id);
         // Before the launch below: resolveSpawnContext reads THIS tab's panel.
         if (inheritPanel(inherited, info.id)) {
           log.info(`Thread inherits panel id=${thread.id} session=${info.id}`);
@@ -918,6 +928,9 @@ export default function App() {
             paneLayout.focusOrSwapSession(info.id);
           }
           bindThreadSession(threadId, info.id);
+          // SWIT-47: the fresh session resolves to the thread's panel key —
+          // this is the seam that makes a revived thread's strip reappear.
+          notePanelThreadBinding(info.id);
           sessionId = info.id;
         }
         markThreadLaunched(threadId);
@@ -1092,7 +1105,12 @@ export default function App() {
         discover: discoverClaudeSessions,
         chatStartedOnDisk: claudeSessionExists,
         createThread: (args) => promoteThreadRecord(args).id, // startedAt → createdAt
-        bindThread: bindThreadSession,
+        bindThread: (threadId, sessionId) => {
+          bindThreadSession(threadId, sessionId);
+          // SWIT-47: a shell promoted on `claude` carries its strip into the
+          // thread — the transient panel key moves to the thread key.
+          notePanelThreadBinding(sessionId);
+        },
         // Decision 1: a restarted claude does not overwrite the old record's
         // uuid — the old thread is released (still revivable) and the pass
         // creates a new one through the SAME createThread above.
@@ -2115,7 +2133,7 @@ export default function App() {
           // binding is severed (no session survived to point at) and every
           // panel binding is dropped for the same reason.
           remapThreadSessionsInStore(new Map());
-          remapPanelSessions(new Map());
+          remapPanelSessions(new Map(), new Set(getThreads().map((t) => t.id)));
           sessionCounterRef.current++;
           const name = `Shell ${sessionCounterRef.current}`;
           try {
@@ -2135,7 +2153,7 @@ export default function App() {
         // made those decisions depend on it: a restored PANEL TERMINAL must not
         // be handed to the pane tree or made the active tab, and
         // `isPanelOwnedSession` can only answer that once the remap has landed.
-        remapPanelSessions(idMap);
+        remapPanelSessions(idMap, new Set(getThreads().map((t) => t.id)));
         /** Restored sessions the TAB BAR can hold (i.e. not panel terminals). */
         const restoredTabSessions = newSessions.filter((s) => !isPanelOwnedSession(s.id));
 
@@ -2179,7 +2197,7 @@ export default function App() {
         // Fresh start — no sessions restored, so no thread or panel binding
         // can hold.
         remapThreadSessionsInStore(new Map());
-        remapPanelSessions(new Map());
+        remapPanelSessions(new Map(), new Set(getThreads().map((t) => t.id)));
         // A threads-only workspace (sessions expired by staleness, threads
         // durable) still lands here: keep its session counter so fresh
         // "Shell N" names don't restart from 1.

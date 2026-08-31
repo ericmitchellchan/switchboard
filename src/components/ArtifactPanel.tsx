@@ -69,6 +69,10 @@ import { navigate } from "../lib/route";
 import {
   activateArtifact,
   artifactIdentity,
+  usePreviewIdentity,
+  pinPreview,
+  usePreviewBackAvailable,
+  goPreviewBack,
   closeArtifactPicker,
   openArtifactPicker,
   useArtifactPickerOpen,
@@ -200,6 +204,8 @@ function TabStrip({
   // snapshot, so the strip re-renders when the dirty SET changes and never on
   // a keystroke inside one buffer.
   const dirtyKeys = useDirtyKeys();
+  // WHICH tab is the preview (SWIT-47) — "" when every tab is pinned.
+  const previewIdentity = usePreviewIdentity(sessionId);
 
   // Follow the active tab when it changes or the strip grows past the edge —
   // an opened artifact whose tab is off-screen reads as "nothing happened".
@@ -241,6 +247,9 @@ function TabStrip({
           const isHovered = hovered === i;
           const { title } = describeArtifact(artifact);
           const identity = artifactIdentity(artifact);
+          // The PREVIEW tab (SWIT-47) renders italic — the next plain open
+          // replaces it; double-click pins it (the VS Code gesture).
+          const isPreview = identity === previewIdentity;
           // `\n`-delimited on both ends so `kb-doc:a.md` cannot match inside
           // `kb-doc:a.md.bak`.
           const isDirtyTab = `\n${dirtyKeys}\n`.includes(`\n${identity}\n`);
@@ -252,8 +261,17 @@ function TabStrip({
               key={identity}
               role="tab"
               aria-selected={isActive}
-              title={isDirtyTab ? `${title} — unsaved changes` : title}
+              title={
+                isDirtyTab
+                  ? `${title} — unsaved changes`
+                  : isPreview
+                    ? `${title} — preview (the next open replaces it; double-click keeps it)`
+                    : title
+              }
               onClick={() => activateArtifact(sessionId, i)}
+              onDoubleClick={() => {
+                if (isPreview) pinPreview(sessionId);
+              }}
               onMouseEnter={() => setHovered(i)}
               onMouseLeave={() => setHovered((prev) => (prev === i ? null : prev))}
               // Middle-click closes, as everywhere else tabs exist.
@@ -287,6 +305,7 @@ function TabStrip({
                 fontFamily: "var(--font-mono)",
                 fontSize: 10.5,
                 fontWeight: isActive ? 600 : 400,
+                fontStyle: isPreview ? "italic" : "normal",
                 cursor: "pointer",
                 whiteSpace: "nowrap",
                 transition: "background-color 0.15s ease, color 0.15s ease",
@@ -533,6 +552,10 @@ export function ArtifactPanel({
   // T8 seam 2 gate — no terminal to type into means the `→ thread` action is
   // DISABLED, never a silent no-op. Hook order: before the early return below.
   const canSend = useSendToThreadAvailable();
+  // Preview slot (SWIT-47): back is offered only while the ACTIVE tab is the
+  // preview and it has replaced something. Hooks before the early return.
+  const previewBackAvail = usePreviewBackAvailable(sessionId);
+  const headPreviewIdentity = usePreviewIdentity(sessionId);
   // Pop-out (increment F, Decision 2). `canPopOut` is App's handler being
   // registered; `poppedIdentity` is WHICH artifact the floating window is
   // holding, so this tab can show a placeholder instead of a second live copy.
@@ -722,6 +745,23 @@ export function ArtifactPanel({
               </span>
             ))}
           </span>
+          {/* PREVIEW BACK (SWIT-47) — the preview tab replaced something; step
+              back to it. Rendered only while the active tab IS the preview and
+              there is somewhere to go, so it is never a dead affordance. */}
+          {artifact !== null &&
+            headPreviewIdentity === artifactIdentity(artifact) &&
+            previewBackAvail && (
+              <button
+                type="button"
+                onClick={() => sessionId && goPreviewBack(sessionId)}
+                title="Back to the artifact this preview replaced"
+                style={ACTION_STYLE}
+                onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-primary)")}
+                onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-dim)")}
+              >
+                ←
+              </button>
+            )}
           {/* SIDE SWAP (SWIT-33) — Ky's SplitView "Swap", here: flips THIS
               TAB's panel to the other side of the pane tree. Per tab, kept
               with the workspace. Shown for every artifact kind — the side is

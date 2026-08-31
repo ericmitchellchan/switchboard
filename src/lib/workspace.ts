@@ -42,7 +42,7 @@ export function buildSavedWorkspace(
   });
 
   return {
-    version: 5,
+    version: 6,
     sessions: savedSessions,
     activeSessionId,
     paneLayout: paneLayout as unknown,
@@ -52,11 +52,11 @@ export function buildSavedWorkspace(
     // Threads ride in the same blob (records are lean by invariant — see
     // threadStore.sanitizeThread) AND mirror to disk via saveThreadsToDisk.
     threads: getThreads(),
-    // Artifact panel state (v4): per-tab TAB STRIPS keyed by session id (lean
+    // Artifact panel state (v6, SWIT-47): TAB STRIPS keyed by THREAD id (lean
     // by invariant — see panelStore.sanitizePanelState) + the global width.
-    // v5 (increment H): a strip may hold a `session` artifact, whose session
-    // rides in `sessions` above like any other — a panel terminal restores
-    // because it IS a session, not because the panel persists anything extra.
+    // Shell panels are transient and are not written. A strip may hold a
+    // `session` artifact (v5, increment H), whose session rides in `sessions`
+    // above like any other.
     panels: getPanelsRecord(),
     panelWidth: getPanelWidth(),
     // SWIT-33: which tabs keep their panel on the LEFT (right is the default

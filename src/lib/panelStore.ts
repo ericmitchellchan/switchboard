@@ -113,7 +113,10 @@ export type PanelRemovalReason =
   /** `releasePanelSession` — the panel stops owning the session entirely. */
   | "session-released"
   /** `promote to tab` — the SAME park+release pair, but a MOVE, not a loss. */
-  | "promote-move";
+  | "promote-move"
+  /** A plain open REPLACED the preview tab in place (SWIT-47, R3 rule 2).
+   *  The replaced artifact went onto the strip's preview back stack. */
+  | "preview-replace";
 
 export interface PanelRemoval {
   reason: PanelRemovalReason;
@@ -788,8 +791,115 @@ export type PanelsView = {
   panelWidth: number;
 };
 
+// ── OWNER KEYS — the panel is per-THREAD now (SWIT-47) ───────────────────────
+// Every public function still takes a SESSION id (the tab is what callers
+// hold), but the maps key on an OWNER KEY:
+//
+//   `t:<threadId>`  — the session is bound to a thread. The panel follows the
+//                     THREAD: across an app restart (thread ids are durable,
+//                     so workspace v6 needs no key remap at all) and across a
+//                     revive into a fresh session.
+//   `s:<sessionId>` — a plain shell. Its panel is TRANSIENT: never persisted,
+//                     dies with the session (decided Q1/R1 — a shell is not a
+//                     thread).
+//
+// The resolver is INJECTED (App wires findThreadBySessionId) so this store
+// keeps importing nothing of threadStore. A null resolver (tests, boot before
+// wiring) keys everything `s:` — exactly the pre-SWIT-47 behavior.
+//
+// A binding that forms MID-SESSION (a shell promoted on `claude`, a revive
+// binding a fresh session) changes what a session's key RESOLVES to, so App
+// calls `notePanelThreadBinding` at every bind site and the store MOVES the
+// `s:` entries to the thread key. A binding that DISSOLVES (supersede) does
+// not move anything back: the strip stays filed under the OLD thread — a
+// panel is per-thread, and the superseded conversation keeps its context for
+// its revive. The tab starts a fresh panel, which is what "a new conversation"
+// means here.
+
+let threadKeyResolver: ((sessionId: string) => string | null) | null = null;
+
+/** App wires the session→thread lookup once, at module scope. */
+export function setPanelThreadResolver(
+  resolver: ((sessionId: string) => string | null) | null
+): void {
+  threadKeyResolver = resolver;
+}
+
+/** The map key a session's panel lives under. */
+function ownerKeyFor(sessionId: string): string {
+  const threadId = threadKeyResolver?.(sessionId) ?? null;
+  return threadId ? `t:${threadId}` : `s:${sessionId}`;
+}
+
+function isThreadKey(key: string): boolean {
+  return key.startsWith("t:");
+}
+
+/** Strip the prefix for persistence (only thread keys are persisted). */
+function threadIdOfKey(key: string): string {
+  return key.slice(2);
+}
+
+/** A session gained a thread binding — MOVE its transient entries under the
+ *  thread key, so the strip it accumulated as a shell follows it into the
+ *  thread. No-op when there is nothing to move or no binding resolves. */
+export function notePanelThreadBinding(sessionId: string): void {
+  const threadId = threadKeyResolver?.(sessionId) ?? null;
+  if (!threadId) return;
+  const from = `s:${sessionId}`;
+  const to = `t:${threadId}`;
+  let changed = false;
+  if (panels.has(from) && !panels.has(to)) {
+    panels = new Map(panels);
+    panels.set(to, panels.get(from)!);
+    panels.delete(from);
+    changed = true;
+  }
+  if (lastPanelStates.has(from) && !lastPanelStates.has(to)) {
+    lastPanelStates = new Map(lastPanelStates);
+    lastPanelStates.set(to, lastPanelStates.get(from)!);
+    lastPanelStates.delete(from);
+    changed = true;
+  }
+  if (panelSides.has(from) && !panelSides.has(to)) {
+    panelSides = new Map(panelSides);
+    panelSides.set(to, "left");
+    panelSides.delete(from);
+    changed = true;
+  }
+  if (previews.has(from) && !previews.has(to)) {
+    previews = new Map(previews);
+    previews.set(to, previews.get(from)!);
+    previews.delete(from);
+    changed = true;
+  }
+  if (previewBacks.has(from) && !previewBacks.has(to)) {
+    previewBacks = new Map(previewBacks);
+    previewBacks.set(to, previewBacks.get(from)!);
+    previewBacks.delete(from);
+    changed = true;
+  }
+  if (changed) bump();
+}
+
 let panels = new Map<string, PanelState>();
 let panelWidth = DEFAULT_PANEL_WIDTH;
+
+// ── The PREVIEW slot (SWIT-47, R3's rule 2) ─────────────────────────────────
+// Per owner key: WHICH strip entry is the preview (by artifact identity), and
+// the back stack of artifacts it replaced. A plain tree click opens INTO the
+// preview slot — the next plain click REPLACES it in place — while a pinned
+// tab (picker, offer chip, Ctrl-gesture, double-click) is permanent. VS
+// Code's preview-tab pattern; what stops link clicks piling tabs up.
+// Deliberately NOT persisted: a restored strip comes back all-pinned (nothing
+// is lost — the conservative direction), and a revived thread's preview is
+// gone by design (requirements §Revive).
+
+/** Cap on a preview back stack — bounds memory; older history just falls off. */
+export const PREVIEW_BACK_CAP = 20;
+
+let previews = new Map<string, string>();
+let previewBacks = new Map<string, Artifact[]>();
 
 /** Per-tab memory of the LAST STRIP a panel showed, written when the panel
  *  goes away so Ctrl+Shift+P can bring it back (A3 — the chord is a real
@@ -817,7 +927,7 @@ export type PanelSide = "left" | "right";
 let panelSides = new Map<string, "left">();
 
 export function panelSideFor(sessionId: string | null): PanelSide {
-  return sessionId && panelSides.has(sessionId) ? "left" : "right";
+  return sessionId && panelSides.has(ownerKeyFor(sessionId)) ? "left" : "right";
 }
 
 export function usePanelSide(sessionId: string | null): PanelSide {
@@ -826,9 +936,10 @@ export function usePanelSide(sessionId: string | null): PanelSide {
 
 export function setPanelSide(sessionId: string, side: PanelSide): void {
   if (panelSideFor(sessionId) === side) return;
+  const key = ownerKeyFor(sessionId);
   panelSides = new Map(panelSides);
-  if (side === "left") panelSides.set(sessionId, "left");
-  else panelSides.delete(sessionId);
+  if (side === "left") panelSides.set(key, "left");
+  else panelSides.delete(key);
   bump();
 }
 
@@ -836,9 +947,14 @@ export function togglePanelSide(sessionId: string): void {
   setPanelSide(sessionId, panelSideFor(sessionId) === "left" ? "right" : "left");
 }
 
-/** Lean record for the workspace blob: only the left-side tabs. */
+/** Lean record for the workspace blob: only the left-side THREAD panels,
+ *  keyed by thread id (a shell's side is transient, like its strip). */
 export function getPanelSidesRecord(): Record<string, "left"> {
-  return Object.fromEntries(panelSides);
+  const out: Record<string, "left"> = {};
+  for (const key of panelSides.keys()) {
+    if (isThreadKey(key)) out[threadIdOfKey(key)] = "left";
+  }
+  return out;
 }
 
 /** Tolerant parse of a saved `panelSides` record: keeps `"left"` entries with
@@ -852,9 +968,13 @@ export function parsePanelSides(raw: unknown): Record<string, "left"> {
   return out;
 }
 
-/** Seed at boot (with initPanelStore); a re-seed replaces the whole map. */
+/** Seed at boot (with initPanelStore); a re-seed replaces the whole map. The
+ *  blob's keys are THREAD ids (workspace v6), wrapped into thread owner keys
+ *  here. */
 export function initPanelSides(initial: unknown): void {
-  panelSides = new Map(Object.entries(parsePanelSides(initial)));
+  panelSides = new Map(
+    Object.keys(parsePanelSides(initial)).map((threadId) => [`t:${threadId}`, "left" as const])
+  );
   bump();
 }
 
@@ -995,7 +1115,7 @@ export function usePanelIdentity(sessionId: string | null): string {
  *  SHOWING", which is exactly the active tab. Use `panelStateFor` for the
  *  whole strip. */
 export function artifactFor(sessionId: string): Artifact | null {
-  const state = panels.get(sessionId);
+  const state = panels.get(ownerKeyFor(sessionId));
   if (!state || state.artifacts.length === 0) return null;
   return state.artifacts[clampActiveIndex(state.artifacts.length, state.activeIndex)] ?? null;
 }
@@ -1005,16 +1125,22 @@ export function artifactFor(sessionId: string): Artifact | null {
  *  a snapshot. */
 export function panelStateFor(sessionId: string | null): PanelState | null {
   if (!sessionId) return null;
-  return panels.get(sessionId) ?? null;
+  return panels.get(ownerKeyFor(sessionId)) ?? null;
 }
 
 export function getPanelWidth(): number {
   return panelWidth;
 }
 
-/** Current panels as a lean plain record — buildSavedWorkspace's source. */
+/** Current panels as a lean plain record — buildSavedWorkspace's source.
+ *  THREAD panels only, keyed by thread id (SWIT-47): a shell's strip is
+ *  transient by rule and is deliberately not written. */
 export function getPanelsRecord(): Record<string, PanelState> {
-  return serializePanels(panels);
+  const threadPanels = new Map<string, PanelState>();
+  for (const [key, state] of panels) {
+    if (isThreadKey(key)) threadPanels.set(threadIdOfKey(key), state);
+  }
+  return serializePanels(threadPanels);
 }
 
 /** Seed the store at boot from the migrated workspace blob (both arguments
@@ -1030,13 +1156,24 @@ export function initPanelStore(
   for (const [tab, state] of lastPanelStates) {
     audit("store-reseeded", tab, auditNames(state), "hidden");
   }
-  panels = new Map(Object.entries(parsePanels(initial)));
+  // The blob's keys are THREAD ids (workspace v6) — wrapped into thread owner
+  // keys here. Thread ids are durable, so no key remap ever applies to them;
+  // only the session ARTIFACTS inside the strips go through the restore idMap
+  // (remapPanelSessions).
+  panels = new Map(
+    Object.entries(parsePanels(initial)).map(([threadId, state]) => [`t:${threadId}`, state])
+  );
   // Seeding is a fresh start for the toggle memory too: `lastPanelStates` is
-  // keyed by session ids belonging to the workspace being replaced, so
+  // keyed by owner keys belonging to the workspace being replaced, so
   // carrying it across a re-seed could reopen an artifact into a stranger's
   // tab. (Boot calls this exactly once, before any open — this is a guard, not
   // a live path.)
   lastPanelStates = new Map();
+  // Preview marks are session-lifetime UI state (a restored strip comes back
+  // all-pinned — the conservative direction; a revived thread's preview is
+  // gone by design).
+  previews = new Map();
+  previewBacks = new Map();
   // Parked terminals are session-lifetime state and are never persisted (see
   // `parkedSessions`) — a re-seed starts with none, so a restored blob can
   // never hide a fresh shell behind a picker row.
@@ -1066,7 +1203,18 @@ export function initPanelStore(
  *  That is exactly the loss the widened memory (see `lastPanelStates`) exists
  *  to prevent, so opening into a hidden panel REVIVES its strip and appends
  *  to it — the same strip the chord would have brought back. */
-export function openInPanel(sessionId: string, artifact: Artifact): void {
+export function openInPanel(
+  sessionId: string,
+  artifact: Artifact,
+  opts: {
+    /** SWIT-47 (R3 rule 2): open INTO the preview slot — the next plain open
+     *  replaces it in place. Default false = a PINNED tab (the picker, the
+     *  offer chip, inheritance, `+ → new terminal` all mean "keep this").
+     *  Tree/link clicks pass true through applyOpenDecision. A `session`
+     *  artifact is never a preview — a live shell is not a glance. */
+    preview?: boolean;
+  } = {}
+): void {
   if (sessionId.length === 0) {
     // Every caller of this is a USER GESTURE. Returning silently on a bad
     // argument is how a click becomes "nothing happened" with no trace, which
@@ -1084,6 +1232,7 @@ export function openInPanel(sessionId: string, artifact: Artifact): void {
     log.warn(`panel-open refused reason=invalid-artifact artifact=${auditName(artifact)}`);
     return;
   }
+  const key = ownerKeyFor(sessionId);
   if (clean.kind === "session") {
     // ONE SESSION, ONE HOME (increment H). A live shell must not be listed in
     // two strips: only one panel renders at a time, so it would not produce two
@@ -1091,38 +1240,154 @@ export function openInPanel(sessionId: string, artifact: Artifact): void {
     // between hosts, and both strips would claim it. Opening it here takes it
     // out of wherever it was (and out of the parked set), which is exactly what
     // "the panel that holds it" should mean.
-    dropSessionArtifact(clean.sessionId, sessionId, "session-taken", `to=${sessionId}`);
+    dropSessionArtifact(clean.sessionId, key, "session-taken", `to=${key}`);
     if (parkedSessions.has(clean.sessionId)) {
       parkedSessions = new Set(parkedSessions);
       parkedSessions.delete(clean.sessionId);
     }
   }
-  const live = panels.get(sessionId) ?? null;
-  const revived = live === null ? lastPanelStates.get(sessionId) ?? null : null;
+  const wantsPreview = opts.preview === true && clean.kind !== "session";
+  const live = panels.get(key) ?? null;
+  const revived = live === null ? lastPanelStates.get(key) ?? null : null;
   const current = live ?? revived;
+
+  // THE PREVIEW REPLACE (SWIT-47). Applies only when the artifact is NOT
+  // already in the strip (an existing tab — pinned or preview — is activated,
+  // never duplicated: the dedupe rule is senior) and the strip HAS a preview
+  // to replace. Everything else falls through to append-or-activate, with the
+  // appended tab marked as the preview when one was asked for.
+  if (wantsPreview && current) {
+    const already = indexOfArtifact(current.artifacts, clean);
+    const previewId = previews.get(key) ?? null;
+    const previewIndex =
+      already < 0 && previewId !== null
+        ? current.artifacts.findIndex((a) => artifactIdentity(a) === previewId)
+        : -1;
+    if (previewIndex >= 0) {
+      const replaced = current.artifacts[previewIndex];
+      audit("preview-replace", key, replaced, `by=${auditName(clean)}`);
+      const artifacts = current.artifacts.map((a, i) => (i === previewIndex ? clean : a));
+      const stack = [...(previewBacks.get(key) ?? []), replaced].slice(-PREVIEW_BACK_CAP);
+      previewBacks = new Map(previewBacks);
+      previewBacks.set(key, stack);
+      previews = new Map(previews);
+      previews.set(key, artifactIdentity(clean));
+      if (revived !== null) forgetPanel(key);
+      panels = new Map(panels);
+      panels.set(key, { artifacts, activeIndex: previewIndex });
+      bump();
+      return;
+    }
+  }
+
   const next = appendOrActivate(current, clean);
   // `next === current` means "already the ACTIVE tab". For a live panel that
   // is a genuine no-op; for a revived one the panel must still come back on
   // screen, so only the live case returns early.
   if (next === current && revived === null) return;
+  // A NEW tab that was asked for as a preview becomes the strip's preview
+  // (there was none to replace, or the strip is fresh).
+  if (wantsPreview && (!current || indexOfArtifact(current.artifacts, clean) < 0)) {
+    previews = new Map(previews);
+    previews.set(key, artifactIdentity(clean));
+  }
   // The strip is live again — the memory is only ever for panels that are
   // currently hidden, and leaving a copy behind would let a later hide be
   // undone by a stale one.
-  if (revived !== null) forgetPanel(sessionId);
+  if (revived !== null) forgetPanel(key);
   panels = new Map(panels);
-  panels.set(sessionId, next);
+  panels.set(key, next);
   bump();
+}
+
+// ── Preview-slot accessors (SWIT-47) ─────────────────────────────────────────
+
+/** Identity of the strip's preview tab, or "" when every tab is pinned. */
+export function previewIdentityFor(sessionId: string | null): string {
+  if (!sessionId) return "";
+  const key = ownerKeyFor(sessionId);
+  const id = previews.get(key);
+  if (!id) return "";
+  // The mark is honest only while the artifact is still IN the strip (a close
+  // clears it, but a stale mark must read as "no preview", never dangle).
+  const state = panels.get(key) ?? lastPanelStates.get(key);
+  if (!state || !state.artifacts.some((a) => artifactIdentity(a) === id)) return "";
+  return id;
+}
+
+export function usePreviewIdentity(sessionId: string | null): string {
+  return useSyncExternalStore(subscribe, () => previewIdentityFor(sessionId));
+}
+
+/** PIN the preview tab (double-click it, per the wireframe): the tab stays,
+ *  it just stops being replaceable. Clears the back stack — the lineage ended
+ *  in a keep. */
+export function pinPreview(sessionId: string): void {
+  const key = ownerKeyFor(sessionId);
+  if (!previews.has(key) && !previewBacks.has(key)) return;
+  previews = new Map(previews);
+  previews.delete(key);
+  previewBacks = new Map(previewBacks);
+  previewBacks.delete(key);
+  bump();
+}
+
+/** Is there anywhere for the preview to go BACK to? */
+export function previewBackAvailableFor(sessionId: string | null): boolean {
+  if (!sessionId) return false;
+  const key = ownerKeyFor(sessionId);
+  return previewIdentityFor(sessionId) !== "" && (previewBacks.get(key)?.length ?? 0) > 0;
+}
+
+export function usePreviewBackAvailable(sessionId: string | null): boolean {
+  return useSyncExternalStore(subscribe, () => previewBackAvailableFor(sessionId));
+}
+
+/** Step the preview tab back to the artifact it replaced. The current preview
+ *  is discarded (that is what a preview is); the restored one is the preview
+ *  again, so forward-going plain clicks keep replacing. */
+export function goPreviewBack(sessionId: string): void {
+  const key = ownerKeyFor(sessionId);
+  const stack = previewBacks.get(key);
+  const currentId = previewIdentityFor(sessionId);
+  if (!stack || stack.length === 0 || currentId === "") return;
+  const state = panels.get(key);
+  if (!state) return;
+  const index = state.artifacts.findIndex((a) => artifactIdentity(a) === currentId);
+  if (index < 0) return;
+  const target = stack[stack.length - 1];
+  audit("preview-replace", key, state.artifacts[index], `back-to=${auditName(target)}`);
+  previewBacks = new Map(previewBacks);
+  previewBacks.set(key, stack.slice(0, -1));
+  previews = new Map(previews);
+  previews.set(key, artifactIdentity(target));
+  panels = new Map(panels);
+  panels.set(key, {
+    artifacts: state.artifacts.map((a, i) => (i === index ? target : a)),
+    activeIndex: index,
+  });
+  bump();
+}
+
+/** Clear a strip's preview mark + stack (the preview tab was closed). */
+function clearPreview(key: string): void {
+  if (!previews.has(key) && !previewBacks.has(key)) return;
+  previews = new Map(previews);
+  previews.delete(key);
+  previewBacks = new Map(previewBacks);
+  previewBacks.delete(key);
 }
 
 /** Switch which tab of a session's strip is showing. Out-of-range indices and
  *  no-op activations are ignored (no snapshot churn). */
 export function activateArtifact(sessionId: string, index: number): void {
-  const state = panels.get(sessionId);
+  const key = ownerKeyFor(sessionId);
+  const state = panels.get(key);
   if (!state) return;
   if (!Number.isInteger(index) || index < 0 || index >= state.artifacts.length) return;
   if (index === state.activeIndex) return;
   panels = new Map(panels);
-  panels.set(sessionId, { ...state, activeIndex: index });
+  panels.set(key, { ...state, activeIndex: index });
   bump();
 }
 
@@ -1134,18 +1399,22 @@ export function closeArtifactAt(
   index: number,
   reason: PanelRemovalReason = "user-close"
 ): void {
-  const state = panels.get(sessionId);
+  const key = ownerKeyFor(sessionId);
+  const state = panels.get(key);
   if (!state) return;
   const next = closeArtifactIn(state, index);
   if (next === state) return; // out of range — nothing happened
-  audit(reason, sessionId, state.artifacts[index], `index=${index} of=${state.artifacts.length}`);
+  const closed = state.artifacts[index];
+  audit(reason, key, closed, `index=${index} of=${state.artifacts.length}`);
+  // Closing the PREVIEW tab ends its lineage — mark and back stack go with it.
+  if (closed && previews.get(key) === artifactIdentity(closed)) clearPreview(key);
   panels = new Map(panels);
   if (next === null) {
-    audit("strip-emptied", sessionId, auditNames(state), `after=${reason}`);
-    rememberPanel(sessionId, state);
-    panels.delete(sessionId);
+    audit("strip-emptied", key, auditNames(state), `after=${reason}`);
+    rememberPanel(key, state);
+    panels.delete(key);
   } else {
-    panels.set(sessionId, next);
+    panels.set(key, next);
   }
   bump();
 }
@@ -1206,7 +1475,7 @@ function forgetPanel(sessionId: string): void {
  *  last tab the panel is removed entirely, REMEMBERING the strip so the toggle
  *  can bring it back. No-op when the session has no panel. */
 export function closePanel(sessionId: string): void {
-  const state = panels.get(sessionId);
+  const state = panels.get(ownerKeyFor(sessionId));
   if (!state) return;
   closeArtifactAt(
     sessionId,
@@ -1224,25 +1493,26 @@ export function closePanel(sessionId: string): void {
  *  artifacts open, closing one tab is not "the panel went away". */
 export function togglePanel(sessionId: string | null): void {
   if (!sessionId) return;
-  const open = panels.get(sessionId);
+  const key = ownerKeyFor(sessionId);
+  const open = panels.get(key);
   if (open) {
     // RECOVERABLE — the whole strip goes into `lastPanelStates` and the same
     // chord brings it back. Logged anyway: from the screen it is identical to
     // a close, and telling the two apart is the entire point of this seam.
-    audit("toggle-hide", sessionId, auditNames(open));
-    rememberPanel(sessionId, open);
+    audit("toggle-hide", key, auditNames(open));
+    rememberPanel(key, open);
     panels = new Map(panels);
-    panels.delete(sessionId);
+    panels.delete(key);
     bump();
     return;
   }
-  const last = lastPanelStates.get(sessionId);
+  const last = lastPanelStates.get(key);
   if (!last) return;
   // Same invariant openInPanel's revive keeps: a strip that is live again is
   // no longer "remembered".
-  forgetPanel(sessionId);
+  forgetPanel(key);
   panels = new Map(panels);
-  panels.set(sessionId, last);
+  panels.set(key, last);
   bump();
 }
 
@@ -1250,7 +1520,8 @@ export function togglePanel(sessionId: string | null): void {
  *  panel but a remembered strip → brings it back). */
 export function panelToggleAvailableFor(sessionId: string | null): boolean {
   if (!sessionId) return false;
-  return panels.has(sessionId) || lastPanelStates.has(sessionId);
+  const key = ownerKeyFor(sessionId);
+  return panels.has(key) || lastPanelStates.has(key);
 }
 
 /** Narrow selector for the status-bar chip — a boolean snapshot, so App
@@ -1273,44 +1544,85 @@ export function removeSessionPanel(sessionId: string): void {
   // claiming an artifact belongs to a dead tab.
   const hadPopOut = poppedOut?.sessionId === sessionId;
   if (hadPopOut) poppedOut = null;
-  const hadPanel = panels.has(sessionId);
-  const hadMemory = lastPanelStates.has(sessionId);
-  // The tab's SIDE (SWIT-33) dies with it too — checked before the early
-  // return below, because a tab can have flipped its panel and then closed
-  // it, leaving a side with no strip and no memory.
-  const hadSide = panelSides.has(sessionId);
-  if (hadSide) {
-    panelSides = new Map(panelSides);
-    panelSides.delete(sessionId);
-  }
-  if (!hadPanel && !hadMemory) {
-    if (hadPopOut || hadSide) bump();
-    return;
-  }
+  const key = ownerKeyFor(sessionId);
+
   // PANEL TERMINALS OUTLIVE THEIR HOST TAB (increment H). This tab is being
   // destroyed, and its strip may hold live shells — a dev server among them.
   // Killing them because their host tab closed is precisely the surprise the
   // close guard exists to prevent, so they are PARKED instead: still running,
   // still owned by the panel, listed under RUNNING TERMINALS in any tab's `+`.
   const orphans: string[] = [];
-  for (const state of [panels.get(sessionId), lastPanelStates.get(sessionId)]) {
+  for (const state of [panels.get(key), lastPanelStates.get(key)]) {
     if (state) for (const a of state.artifacts) if (a.kind === "session") orphans.push(a.sessionId);
   }
-  if (hadPanel) {
-    audit("session-destroyed", sessionId, auditNames(panels.get(sessionId)));
-    panels = new Map(panels);
-    panels.delete(sessionId);
-  }
-  if (hadMemory) {
-    audit("session-destroyed", sessionId, auditNames(lastPanelStates.get(sessionId)), "hidden");
-    lastPanelStates = new Map(lastPanelStates);
-    lastPanelStates.delete(sessionId);
+
+  let changed = hadPopOut;
+  if (isThreadKey(key)) {
+    // A THREAD's panel SURVIVES its tab (SWIT-47): the thread is severed, not
+    // deleted, and its strip comes back when the thread revives — that is
+    // what "the panel is per-thread" buys. Only the session ARTIFACTS leave
+    // the strip (their shells are parked above and their session ids will die
+    // or be respawned; a dead id in a revived strip would render a note
+    // forever). The side and the preview mark stay with the thread too.
+    for (const [map, setMap, note] of [
+      [panels.get(key), (s: PanelState | null) => {
+        panels = new Map(panels);
+        if (s) panels.set(key, s);
+        else panels.delete(key);
+      }, ""],
+      [lastPanelStates.get(key), (s: PanelState | null) => {
+        lastPanelStates = new Map(lastPanelStates);
+        if (s) lastPanelStates.set(key, s);
+        else lastPanelStates.delete(key);
+      }, "hidden"],
+    ] as const) {
+      if (!map) continue;
+      let state: PanelState | null = map;
+      for (const a of map.artifacts) {
+        if (a.kind !== "session" || !state) continue;
+        const idx = state.artifacts.findIndex(
+          (x) => x.kind === "session" && x.sessionId === a.sessionId
+        );
+        if (idx >= 0) {
+          audit("session-parked", key, a, `host-tab-closed ${note}`.trim());
+          state = closeArtifactIn(state, idx);
+        }
+      }
+      if (state !== map) {
+        setMap(state);
+        changed = true;
+      }
+    }
+  } else {
+    // A SHELL's panel is transient and dies with its tab, exactly as before.
+    const hadPanel = panels.has(key);
+    const hadMemory = lastPanelStates.has(key);
+    const hadSide = panelSides.has(key);
+    if (hadSide) {
+      panelSides = new Map(panelSides);
+      panelSides.delete(key);
+      changed = true;
+    }
+    clearPreview(key);
+    if (hadPanel) {
+      audit("session-destroyed", key, auditNames(panels.get(key)));
+      panels = new Map(panels);
+      panels.delete(key);
+      changed = true;
+    }
+    if (hadMemory) {
+      audit("session-destroyed", key, auditNames(lastPanelStates.get(key)), "hidden");
+      lastPanelStates = new Map(lastPanelStates);
+      lastPanelStates.delete(key);
+      changed = true;
+    }
   }
   if (orphans.length > 0) {
     parkedSessions = new Set(parkedSessions);
     for (const id of orphans) parkedSessions.add(id);
+    changed = true;
   }
-  bump();
+  if (changed) bump();
 }
 
 /** Set the global panel width (clamped). */
@@ -1321,30 +1633,52 @@ export function setPanelWidth(w: number): void {
   bump();
 }
 
-/** Remap all panel keys after workspace restore through the same session
- *  idMap the thread remap uses; unmapped keys are dropped (pass an empty map
- *  on fresh starts to drop every binding). */
-export function remapPanelSessions(idMap: Map<string, string>): void {
-  panels = new Map(Object.entries(remapPanels(Object.fromEntries(panels), idMap)));
-  // Sides follow the same map: an unmapped tab's side is dropped with it.
-  {
-    const next = new Map<string, "left">();
-    for (const id of panelSides.keys()) {
-      const mapped = idMap.get(id);
-      if (mapped) next.set(mapped, "left");
+/** Reconcile the restored store after workspace restore (SWIT-47).
+ *
+ *  KEYS need no session idMap any more — thread ids are durable, so a
+ *  `t:<threadId>` strip is KEPT verbatim when its thread survived the merge
+ *  (`threadIds`), dropped with an audit line when the thread is gone (deleted
+ *  on disk between runs). A stray `s:` key cannot survive a restore (shell
+ *  panels are never persisted) and is dropped defensively.
+ *
+ *  The session ARTIFACTS inside a strip still go through the idMap exactly as
+ *  before: a panel terminal was respawned under a fresh id, and an entry whose
+ *  session did not come back is dropped (a dead id would render a note
+ *  forever). A strip left empty is dropped whole. */
+export function remapPanelSessions(idMap: Map<string, string>, threadIds: ReadonlySet<string>): void {
+  const next = new Map<string, PanelState>();
+  for (const [key, state] of panels) {
+    if (!isThreadKey(key)) {
+      audit("remap-unmapped-tab", key, auditNames(state), "restore shell-transient");
+      continue;
     }
-    panelSides = next;
+    if (!threadIds.has(threadIdOfKey(key))) {
+      audit("remap-unmapped-tab", key, auditNames(state), "restore thread-gone");
+      continue;
+    }
+    const remapped = remapPanelState(state, idMap, key);
+    if (remapped) next.set(key, remapped);
+    else audit("strip-emptied", key, auditNames(state), "restore");
   }
-  // Parked ids follow the same map for completeness. In practice this set is
+  panels = next;
+  // Sides: thread-keyed sides survive with their thread, everything else goes.
+  {
+    const sides = new Map<string, "left">();
+    for (const key of panelSides.keys()) {
+      if (isThreadKey(key) && threadIds.has(threadIdOfKey(key))) sides.set(key, "left");
+    }
+    panelSides = sides;
+  }
+  // Parked ids follow the idMap for completeness. In practice this set is
   // empty at restore time (it is never persisted), so this is a guard against a
   // future caller remapping mid-session, not a live path.
   if (parkedSessions.size > 0) {
-    const next = new Set<string>();
+    const nextParked = new Set<string>();
     for (const id of parkedSessions) {
       const mapped = idMap.get(id);
-      if (mapped) next.add(mapped);
+      if (mapped) nextParked.add(mapped);
     }
-    parkedSessions = next;
+    parkedSessions = nextParked;
   }
   bump();
 }
@@ -1962,7 +2296,9 @@ export function applyOpenDecision(decision: OpenDecision): void {
   }
   // Content first, screen second: the terminal screen paints with the panel
   // already holding the right artifact instead of flashing the previous one.
-  openInPanel(decision.sessionId, decision.artifact);
+  // A tree/link click is a PREVIEW open (SWIT-47, R3 rule 2): the next plain
+  // click replaces it; the picker, the offer chip and Ctrl-gestures pin.
+  openInPanel(decision.sessionId, decision.artifact, { preview: true });
   if (decision.revealTerminal) navigate({ screen: "terminal" });
 }
 
@@ -1991,6 +2327,9 @@ export function __resetPanelStoreForTests(): void {
   panels = new Map();
   lastPanelStates = new Map();
   parkedSessions = new Set();
+  previews = new Map();
+  previewBacks = new Map();
+  threadKeyResolver = null;
   sessionLabels = new Map();
   panelSides = new Map();
   activeTabSessionId = null;

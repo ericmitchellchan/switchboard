@@ -14,6 +14,7 @@ import {
   removeSessionPanel,
   subscribeToPanelStore,
   panelWidthFromDrag,
+  setPanelThreadResolver,
 } from "./panelStore";
 
 beforeEach(() => {
@@ -26,12 +27,17 @@ describe("panel side", () => {
     expect(panelSideFor(null)).toBe("right");
   });
 
-  it("toggles per tab and records ONLY the left ones", () => {
+  it("toggles per tab; the workspace record holds THREAD-bound left sides only (SWIT-47)", () => {
+    setPanelThreadResolver((s) => (s === "t1" ? "th1" : null));
     togglePanelSide("t1");
     expect(panelSideFor("t1")).toBe("left");
     expect(panelSideFor("t2")).toBe("right");
-    expect(getPanelSidesRecord()).toEqual({ t1: "left" });
+    expect(getPanelSidesRecord()).toEqual({ th1: "left" });
     togglePanelSide("t1");
+    expect(getPanelSidesRecord()).toEqual({});
+    // A SHELL's side works live but is transient — never persisted.
+    togglePanelSide("t2");
+    expect(panelSideFor("t2")).toBe("left");
     expect(getPanelSidesRecord()).toEqual({});
   });
 
@@ -51,12 +57,12 @@ describe("panel side", () => {
     expect(parsePanelSides(["left"])).toEqual({});
   });
 
-  it("seeds from a saved record and follows the restore idMap", () => {
-    initPanelSides({ old1: "left", old2: "left" });
-    remapPanelSessions(new Map([["old1", "new1"]]));
-    expect(panelSideFor("new1")).toBe("left");
-    expect(panelSideFor("old1")).toBe("right");
-    expect(panelSideFor("old2")).toBe("right"); // unmapped → dropped
+  it("seeds from a saved record (thread-keyed, SWIT-47) and survives restore with its thread", () => {
+    initPanelSides({ th1: "left", th2: "left" });
+    remapPanelSessions(new Map(), new Set(["th1"]));
+    setPanelThreadResolver((s) => (s === "sess1" ? "th1" : s === "sess2" ? "th2" : null));
+    expect(panelSideFor("sess1")).toBe("left");
+    expect(panelSideFor("sess2")).toBe("right"); // its thread is gone → dropped
   });
 
   it("dies with the tab", () => {
