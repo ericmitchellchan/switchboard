@@ -225,6 +225,20 @@ export function surfacePinTargetFor(artifact: Extract<Artifact, { kind: "surface
   };
 }
 
+/** Where a VIEW artifact's pins live (SWIT-50): the SAME per-project
+ *  surface-pins file — one sidecar, one shared record, one writer — with a
+ *  namespaced doc key (`view:<threadId>:<viewId>`) that cannot collide with a
+ *  page id. A pin on a view row/bar/bin therefore rides the whole existing
+ *  anchored-pins machinery unchanged. */
+export function viewPinTargetFor(project: string, threadId: string, viewId: string): PinTarget {
+  const segments = mirrorSegments(project);
+  const dir = segments.join("/");
+  return {
+    sidecarPath: dir.length > 0 ? `${dir}/${SURFACE_PINS_NAME}` : SURFACE_PINS_NAME,
+    docKey: `view:${threadId}:${viewId}`,
+  };
+}
+
 /** A surface pin's extra fields. `anchorLabel` is what the page called the
  *  thing when the pin was placed — printed in the rail even after the page
  *  can no longer locate the key (a trade filtered out). `origin` says who

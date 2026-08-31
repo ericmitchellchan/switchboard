@@ -98,6 +98,23 @@ export async function readThreadFile(threadId: string, name: string): Promise<st
   return invoke("read_thread_file", { threadId, name });
 }
 
+/** A thread's view ids, newest-first (SWIT-50). Missing dir = []. */
+export async function listThreadViews(threadId: string): Promise<string[]> {
+  return invoke("list_thread_views", { threadId });
+}
+
+/** One view's SPEC json ("" when missing — the cannot-render card's case). */
+export async function readThreadView(threadId: string, viewId: string): Promise<string> {
+  return invoke("read_thread_view", { threadId, viewId });
+}
+
+/** A view's DATA file — path relative to the thread's working dir, resolved
+ *  and containment-checked server-side (the thread id is the root's key;
+ *  no path root ever crosses this seam). Size-capped in Rust. */
+export async function readViewData(threadId: string, relPath: string): Promise<string> {
+  return invoke("read_view_data", { threadId, relPath });
+}
+
 /** Prepare a thread's launch (SWIT-49): create its data dir + write the
  *  per-spawn mcp-config pointing claude at Switchboard's page-tool server.
  *  Resolves to the config file's absolute path; a rejection means the caller

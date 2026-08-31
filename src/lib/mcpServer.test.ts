@@ -9,6 +9,7 @@ import { describe, it, expect } from "vitest";
 // runtime provides the real module, and the require result is cast below.
 import { createRequire } from "node:module";
 import { parsePageFile, mergePage } from "./pageStore";
+import { parseViewSpec } from "./viewStore";
 
 const require = createRequire(import.meta.url);
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -19,7 +20,13 @@ const server = require("../../src-tauri/resources/mcp/switchboard-mcp.cjs") as {
     args: Record<string, unknown>,
     now: number
   ) => { page: Record<string, unknown>; message: string };
+  buildViewSpec: (
+    args: Record<string, unknown>,
+    existingIds: string[],
+    now: number
+  ) => Record<string, unknown>;
   PAGE_TOOL: { name: string; description: string; inputSchema: unknown };
+  VIEW_TOOL: { name: string; description: string; inputSchema: unknown };
   OpError: new (message: string) => Error;
   TURN_CAP: number;
   TURN_LINE_CAP: number;
@@ -169,5 +176,58 @@ describe("ROUND-TRIP: the server's writes parse through pageStore (the seam)", (
     for (const rule of ["2–5 plain lines", "UPDATES its row", "never ask the same question twice"]) {
       expect(server.PAGE_TOOL.description).toContain(rule);
     }
+  });
+});
+
+describe("the view tool (SWIT-50)", () => {
+  const base = {
+    op: "show",
+    kind: "candles",
+    title: "MNQ entries",
+    source: { type: "file", path: "out/bars.json" },
+    markers: [{ ts: "2026-08-31T10:35:00Z", label: "entry", id: "t-41" }],
+  };
+
+  it("builds a spec, minting sequential ids when none is given", () => {
+    const spec = server.buildViewSpec(base, ["v1", "v3"], NOW);
+    expect(spec).toMatchObject({ id: "v4", kind: "candles", builtBy: "agent" });
+    expect(spec.builtAt).toBe("2026-08-31T10:00:00.000Z");
+  });
+
+  it("refuses escapes, absolute paths and non-local query urls — visibly", () => {
+    const withSource = (source: Record<string, unknown>) => ({ ...base, source });
+    expect(() => server.buildViewSpec(withSource({ type: "file", path: "../secrets.json" }), [], NOW)).toThrow();
+    expect(() => server.buildViewSpec(withSource({ type: "file", path: "C:/Windows/x" }), [], NOW)).toThrow();
+    expect(() => server.buildViewSpec(withSource({ type: "file", path: "/etc/passwd" }), [], NOW)).toThrow();
+    expect(() => server.buildViewSpec(withSource({ type: "query", url: "https://evil.example/x" }), [], NOW)).toThrow(/local backend/);
+    expect(() => server.buildViewSpec({ ...base, kind: "pie" }, [], NOW)).toThrow(/kind must be/);
+    expect(() => server.buildViewSpec({ ...base, id: "no spaces!" }, [], NOW)).toThrow(/must match/);
+  });
+
+  it("a local query url passes", () => {
+    const spec = server.buildViewSpec(
+      { ...base, source: { type: "query", url: "http://127.0.0.1:8799/api/bars" } },
+      [],
+      NOW
+    );
+    expect(spec.source).toEqual({ type: "query", url: "http://127.0.0.1:8799/api/bars" });
+  });
+
+  it("ROUND-TRIP: what the server writes parses through viewStore's parseViewSpec", () => {
+    const spec = server.buildViewSpec(
+      { ...base, columns: ["situation", "n"], keyColumn: "situation", kind: "table" },
+      [],
+      NOW
+    );
+    const { spec: parsed, specError } = parseViewSpec(JSON.stringify(spec));
+    expect(specError).toBeNull();
+    expect(parsed).toMatchObject({ id: "v1", kind: "table", keyColumn: "situation" });
+    expect(parsed?.markers?.[0]).toEqual({ ts: "2026-08-31T10:35:00Z", label: "entry", id: "t-41" });
+  });
+
+  it("the view tool's description carries the never-executes contract", () => {
+    expect(server.VIEW_TOOL.name).toBe("view");
+    expect(server.VIEW_TOOL.description).toContain("NEVER runs your code");
+    expect(server.VIEW_TOOL.description).toContain("you cannot make a view poll");
   });
 });

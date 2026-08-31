@@ -20,7 +20,7 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, saveTranscript } from "./lib/ipc";
+import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, listThreadViews, saveTranscript } from "./lib/ipc";
 import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty, isSessionDirty, serializeForPip, plainTextTerminal, setTerminalScreenVisible } from "./lib/terminal";
 import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing, sendPipHost } from "./lib/pipBridge";
 import { bumpSessionGeneration, addSessionInputListener, getSessionGeneration } from "./lib/terminalRegistry";
@@ -1156,6 +1156,55 @@ export default function App() {
     const id = window.setInterval(tick, PROMOTION_POLL_MS);
     return () => window.clearInterval(id);
   }, []);
+
+  // ── View intents (SWIT-50) ─────────────────────────────────────────────────
+  // How an agent's `view show` becomes a panel tab with no push channel: the
+  // ACTIVE thread's views/ dir is polled at the pins cadence, and an id not
+  // seen before opens as a pinned view tab. The FIRST listing per thread is a
+  // BASELINE (marked seen, nothing opened): a revived thread's old views are
+  // scratch surfaces that were gone by design, and re-opening them all on
+  // revive would be the billion-tabs failure wearing a new hat. Per-thread
+  // seen sets live for the app session only, in a ref.
+  const seenViewsRef = useRef(new Map<string, Set<string>>());
+  useEffect(() => {
+    if (route.screen !== "terminal" || !activeSessionId) return;
+    const thread = findThreadBySessionId(activeSessionId);
+    if (!thread) return;
+    const threadId = thread.id;
+    const sessionId = activeSessionId;
+    let cancelled = false;
+    let busy = false;
+    const tick = async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        const ids = await listThreadViews(threadId);
+        if (cancelled) return;
+        let seen = seenViewsRef.current.get(threadId);
+        if (!seen) {
+          // Baseline: everything already on disk is old news.
+          seenViewsRef.current.set(threadId, new Set(ids));
+          return;
+        }
+        for (const viewId of ids) {
+          if (seen.has(viewId)) continue;
+          seen.add(viewId);
+          log.info(`View intent: thread=${threadId} view=${viewId} — opening in the panel`);
+          openInPanel(sessionId, { kind: "view", threadId, viewId });
+        }
+      } catch {
+        // A failed listing is a quiet tick — the next one retries.
+      } finally {
+        busy = false;
+      }
+    };
+    void tick();
+    const id = window.setInterval(() => void tick(), 2_500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [route.screen, activeSessionId, sessions]);
 
   // Bridge "open terminal here" (Explorer project rows) to the SAME creation
   // path the repo picker uses — handleCreateSession → doCreateSession →

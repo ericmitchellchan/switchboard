@@ -37,6 +37,7 @@ import { DocView } from "./DocView";
 import { FileViewer } from "../ExplorerView";
 import { LocalhostView } from "./LocalhostView";
 import { PageView } from "./PageView";
+import { ViewSurface } from "../views/ViewSurface";
 import { SurfaceHost } from "../../surfaces/SurfaceHost";
 
 export function ArtifactSurface({
@@ -91,25 +92,13 @@ export function ArtifactSurface({
         </div>
       );
     case "view":
-      // SWIT-48 stub — the renderer is SWIT-50. The tab exists so nothing is
-      // lost; the body says what it will become rather than drawing nothing.
       return (
-        <div
-          style={{
-            flex: 1,
-            minHeight: 0,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 24,
-            textAlign: "center",
-            fontFamily: "var(--font-mono)",
-            fontSize: 11,
-            color: "var(--text-dim)",
-          }}
-        >
-          A rendered view lands here — table, candles, distribution — once the
-          view renderer ships.
+        <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+          {/* Keyed by identity like every other stateful kind: two views share
+              an element type, and sort order / pin mode / loaded rows are
+              per-view. Loading policy is viewStore's (spec at pins cadence;
+              query data only on Eric's re-run — R4). */}
+          <ViewSurface key={artifactIdentity(artifact)} artifact={artifact} active={active} />
         </div>
       );
     case "session":

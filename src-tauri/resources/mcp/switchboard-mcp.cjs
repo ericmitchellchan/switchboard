@@ -212,6 +212,168 @@ function applyOp(page, args, now) {
   }
 }
 
+// ── Views (SWIT-50) — a rendered dataset the shell draws ─────────────────────
+
+const VIEW_KINDS = ["table", "candles", "dist"];
+const VIEW_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const VIEW_MARKER_CAP = 200;
+
+function validViewSourcePath(p) {
+  if (typeof p !== "string" || p.trim().length === 0) return false;
+  // Relative, inside the thread's working dir — the shell re-validates with
+  // canonicalized containment; this is the friendly early error.
+  if (p.includes("..")) return false;
+  if (/^[A-Za-z]:/.test(p) || p.startsWith("/") || p.startsWith("\\")) return false;
+  return true;
+}
+
+/** Validate + normalize a view op into the spec the shell renders. Pure;
+ *  throws OpError with agent-readable messages. */
+function buildViewSpec(args, existingIds, now) {
+  const kind = args.kind;
+  if (!VIEW_KINDS.includes(kind)) {
+    throw new OpError(`kind must be one of ${VIEW_KINDS.join(", ")}`);
+  }
+  const title = text(args.title, "title");
+  const source = args.source;
+  if (typeof source !== "object" || source === null) {
+    throw new OpError("source is required: {type:'file', path} or {type:'query', url}");
+  }
+  let cleanSource;
+  if (source.type === "file") {
+    if (!validViewSourcePath(source.path)) {
+      throw new OpError("source.path must be a relative path inside this thread's working directory (no .., no absolute paths)");
+    }
+    cleanSource = { type: "file", path: source.path.trim() };
+  } else if (source.type === "query") {
+    const url = text(source.url, "source.url");
+    if (!/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|\/)/.test(url)) {
+      throw new OpError("source.url must be a local backend (127.0.0.1 / localhost)");
+    }
+    cleanSource = { type: "query", url };
+    if (typeof source.body === "string" && source.body.length > 0) {
+      cleanSource.body = source.body.slice(0, 4000);
+    }
+  } else {
+    throw new OpError('source.type must be "file" or "query"');
+  }
+  let id;
+  if (typeof args.id === "string" && args.id.trim().length > 0) {
+    id = args.id.trim();
+    if (!VIEW_ID_RE.test(id)) throw new OpError("id must match [A-Za-z0-9_-]{1,64}");
+  } else {
+    let n = 0;
+    for (const e of existingIds) {
+      const m = e.match(/^v(\d+)$/);
+      if (m) n = Math.max(n, Number(m[1]));
+    }
+    id = `v${n + 1}`;
+  }
+  const spec = {
+    id,
+    kind,
+    title,
+    source: cleanSource,
+    builtAt: new Date(now).toISOString(),
+    builtBy: "agent",
+  };
+  if (Array.isArray(args.columns)) {
+    spec.columns = args.columns
+      .filter((c) => typeof c === "string" && c.trim().length > 0)
+      .slice(0, 24);
+  }
+  if (typeof args.keyColumn === "string" && args.keyColumn.trim().length > 0) {
+    spec.keyColumn = args.keyColumn.trim();
+  }
+  if (Array.isArray(args.markers)) {
+    spec.markers = args.markers
+      .filter((m) => m && typeof m === "object" && typeof m.ts === "string" && m.ts.length > 0)
+      .map((m) => ({
+        ts: m.ts,
+        label: typeof m.label === "string" ? m.label.slice(0, 80) : "",
+        ...(typeof m.id === "string" && m.id.length > 0 ? { id: m.id.slice(0, 64) } : {}),
+      }))
+      .slice(0, VIEW_MARKER_CAP);
+  }
+  return spec;
+}
+
+function listViewIds(viewsDir) {
+  try {
+    return fs
+      .readdirSync(viewsDir)
+      .filter((f) => f.endsWith(".json"))
+      .map((f) => f.slice(0, -5));
+  } catch {
+    return [];
+  }
+}
+
+function performViewOp(threadDir, args, now) {
+  const viewsDir = path.join(threadDir, "views");
+  const existing = listViewIds(viewsDir);
+  if (args.op === "update") {
+    const id = typeof args.id === "string" ? args.id.trim() : "";
+    if (!existing.includes(id)) {
+      throw new OpError(`no view with id ${id} — use op "show" to create one`);
+    }
+  } else if (args.op !== "show") {
+    throw new OpError('op must be "show" or "update"');
+  }
+  const spec = buildViewSpec(args, existing, now);
+  fs.mkdirSync(viewsDir, { recursive: true });
+  const file = path.join(viewsDir, `${spec.id}.json`);
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(spec, null, 2));
+  fs.renameSync(tmp, file);
+  return {
+    spec,
+    message:
+      args.op === "update"
+        ? `View ${spec.id} updated — the open tab re-renders within a couple of seconds.`
+        : `View ${spec.id} is opening in the panel beside the terminal. Update it later with op "update" and the same id.`,
+  };
+}
+
+const VIEW_TOOL = {
+  name: "view",
+  description:
+    "SHOW the user rendered data in the panel — a table, a candle chart with markers, or a " +
+    "distribution — drawn by Switchboard's own chart components from data YOU supply. Use it " +
+    "when the user asks to see something, or as the direct output of an analysis they asked " +
+    "for — never as a side effect of a turn. Two sources: write rows to a JSON file in this " +
+    "thread's working directory (an ARRAY of flat objects; for candles each row needs " +
+    "time/open/high/low/close, time as ISO or epoch seconds) and pass source " +
+    "{type:'file', path:'relative/path.json'}; or point at the project's local backend with " +
+    "{type:'query', url}. The view NEVER runs your code — it renders your data. op 'show' " +
+    "opens it (id minted if omitted); op 'update' with the same id refreshes the open tab. " +
+    "For tables pass columns (display order) and keyColumn (the column whose value names a " +
+    "row for pins). For candles pass markers [{ts, label, id?}] for entries/exits. The user " +
+    "can pin rows/bars/bins and keep the view; you cannot make a view poll — re-running a " +
+    "query is their gesture.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      op: { type: "string", enum: ["show", "update"], description: "show = create/open; update = refresh an existing id." },
+      id: { type: "string", description: "View id ([A-Za-z0-9_-]). Omit on show to mint one; required on update." },
+      kind: { type: "string", enum: ["table", "candles", "dist"], description: "How the data renders." },
+      title: { type: "string", description: "A few plain words — the tab and toolbar name." },
+      source: {
+        type: "object",
+        description: "{type:'file', path: relative JSON file in the thread cwd} or {type:'query', url: local backend, body?: JSON string → POST}.",
+      },
+      columns: { type: "array", items: { type: "string" }, description: "table: column display order (subset of the row keys)." },
+      keyColumn: { type: "string", description: "table: the column whose value identifies a row (pin anchors). Default: the first column." },
+      markers: {
+        type: "array",
+        items: { type: "object" },
+        description: "candles: [{ts: ISO time, label, id?}] — entry/exit marks on the nearest bar.",
+      },
+    },
+    required: ["op", "kind", "title", "source"],
+  },
+};
+
 // ── The tool table (the behavioural contract lives HERE) ─────────────────────
 
 const PAGE_TOOL = {
@@ -345,12 +507,12 @@ function serve(threadDir) {
         return;
       }
       if (method === "tools/list") {
-        respond({ jsonrpc: "2.0", id, result: { tools: [PAGE_TOOL] } });
+        respond({ jsonrpc: "2.0", id, result: { tools: [PAGE_TOOL, VIEW_TOOL] } });
         return;
       }
       if (method === "tools/call") {
         const name = params && params.name;
-        if (name !== "page") {
+        if (name !== "page" && name !== "view") {
           respond({
             jsonrpc: "2.0",
             id,
@@ -359,7 +521,11 @@ function serve(threadDir) {
           return;
         }
         try {
-          const message = performOp(threadDir, (params && params.arguments) || {}, Date.now());
+          const args = (params && params.arguments) || {};
+          const message =
+            name === "view"
+              ? performViewOp(threadDir, args, Date.now()).message
+              : performOp(threadDir, args, Date.now());
           respond({
             jsonrpc: "2.0",
             id,
@@ -405,7 +571,10 @@ module.exports = {
   parsePage,
   applyOp,
   performOp,
+  buildViewSpec,
+  performViewOp,
   PAGE_TOOL,
+  VIEW_TOOL,
   OpError,
   TURN_CAP,
   TURN_LINE_CAP,

@@ -239,10 +239,16 @@ export function artifactRef(artifact: Artifact, opts: RefOptions = {}): string {
         REF_MAX
       );
     }
-    case "view":
-      // SWIT-50 gives a view its spec file; until then both seams stay
-      // silent about one — degraded, never wrong.
-      return "";
+    case "view": {
+      // A view's SPEC is a file too (SWIT-50): reading it tells the agent
+      // what is rendered and where the data came from.
+      const root = normalizePath(opts.threadsRoot ?? "");
+      if (root.length === 0) return "";
+      return sanitizeForTypedLine(
+        `view ${joinPath(root, `${artifact.threadId}/views/${artifact.viewId}.json`)}`,
+        REF_MAX
+      );
+    }
   }
 }
 

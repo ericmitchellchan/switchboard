@@ -331,6 +331,139 @@ async fn read_thread_file(thread_id: String, name: String) -> Result<String, Str
     }
 }
 
+// ── Views (SWIT-50) ──────────────────────────────────────────────────────────
+
+fn valid_view_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// A thread's view ids, NEWEST-FIRST by modified time. The app polls this at
+/// the pins cadence for the ACTIVE thread and opens ids it has not seen —
+/// that is how an agent's `view show` becomes a panel tab without any push
+/// channel. Missing dir = no views, the ordinary state.
+#[tauri::command]
+async fn list_thread_views(thread_id: String) -> Result<Vec<String>, String> {
+    if !valid_thread_id(&thread_id) {
+        return Err("invalid thread id".into());
+    }
+    let dir = threads_data_dir()?.join(&thread_id).join("views");
+    let mut entries: Vec<(std::time::SystemTime, String)> = Vec::new();
+    let read = match std::fs::read_dir(&dir) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.to_string()),
+    };
+    for entry in read.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(id) = name.strip_suffix(".json") {
+            if valid_view_id(id) {
+                let modified = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                entries.push((modified, id.to_string()));
+            }
+        }
+    }
+    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(entries.into_iter().map(|(_, id)| id).collect())
+}
+
+/// Read one view's SPEC. Missing = "" (the tab renders its cannot-render card
+/// naming the id, not an error toast).
+#[tauri::command]
+async fn read_thread_view(thread_id: String, view_id: String) -> Result<String, String> {
+    if !valid_thread_id(&thread_id) {
+        return Err("invalid thread id".into());
+    }
+    if !valid_view_id(&view_id) {
+        return Err("invalid view id".into());
+    }
+    let path = threads_data_dir()?
+        .join(&thread_id)
+        .join("views")
+        .join(format!("{}.json", view_id));
+    match std::fs::read_to_string(&path) {
+        Ok(content) => Ok(content),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Cap on a view's data file — over it the read refuses and the renderer's
+/// card says so (the agent should aggregate or window before showing).
+const VIEW_DATA_CAP: u64 = 8 * 1024 * 1024;
+
+/// The thread's WORKING DIR, from the threads.json disk mirror — the server-
+/// side root for `read_view_data`, so the data root is never client-supplied
+/// (the explorer.rs posture; the frontend hands over a thread ID, not a path).
+fn thread_working_dir(thread_id: &str) -> Result<std::path::PathBuf, String> {
+    let raw = std::fs::read_to_string(threads_path()?)
+        .map_err(|e| format!("threads mirror unreadable: {}", e))?;
+    let data: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("threads mirror unparseable: {}", e))?;
+    let threads = data
+        .get("threads")
+        .and_then(|t| t.as_array())
+        .ok_or("threads mirror has no threads array")?;
+    for t in threads {
+        if t.get("id").and_then(|v| v.as_str()) == Some(thread_id) {
+            let dir = t
+                .get("workingDir")
+                .and_then(|v| v.as_str())
+                .ok_or("thread has no workingDir")?;
+            return Ok(std::path::PathBuf::from(dir));
+        }
+    }
+    Err(format!("unknown thread: {}", thread_id))
+}
+
+/// Read a view's DATA file: a path RELATIVE to the thread's working dir,
+/// component-validated (no `..`, no absolute/drive/UNC forms) and then
+/// containment-checked against the canonicalized root — the same two-layer
+/// guard kb.rs and explorer.rs use. Size-capped; the renderer windows rows
+/// for display on top of this.
+#[tauri::command]
+async fn read_view_data(thread_id: String, rel_path: String) -> Result<String, String> {
+    if !valid_thread_id(&thread_id) {
+        return Err("invalid thread id".into());
+    }
+    // Layer 1: the RAW relative path, component-wise.
+    if rel_path.is_empty() || rel_path.len() > 512 {
+        return Err("invalid data path".into());
+    }
+    for component in rel_path.split(['/', '\\']) {
+        if component.is_empty() || component == "." || component == ".." || component.contains(':') {
+            return Err("data path must be relative, inside the thread's working directory".into());
+        }
+    }
+    let root = thread_working_dir(&thread_id)?;
+    let root_canon = std::fs::canonicalize(&root)
+        .map_err(|e| format!("thread working dir unresolvable: {}", e))?;
+    let candidate = root_canon.join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+    // Layer 2: containment of the CANONICALIZED final path (closes junctions;
+    // canonicalize requires existence, so the final component is covered).
+    let canon = std::fs::canonicalize(&candidate)
+        .map_err(|e| format!("data file unreadable: {}", e))?;
+    if !canon.starts_with(&root_canon) {
+        return Err("data path escapes the thread's working directory".into());
+    }
+    let meta = std::fs::metadata(&canon).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("data path is not a file".into());
+    }
+    if meta.len() > VIEW_DATA_CAP {
+        return Err(format!(
+            "data file is {} bytes; the cap is {} — aggregate or window the rows before showing them",
+            meta.len(),
+            VIEW_DATA_CAP
+        ));
+    }
+    std::fs::read_to_string(&canon).map_err(|e| e.to_string())
+}
+
 /// Prepare a thread's LAUNCH (SWIT-49): create its data dir and write the
 /// per-spawn `--mcp-config` file pointing claude at Switchboard's own MCP
 /// server (a dependency-free Node script shipped as a resource). Regenerated
@@ -976,6 +1109,9 @@ fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         threads_root,
         read_thread_file,
         prepare_thread_launch,
+        list_thread_views,
+        read_thread_view,
+        read_view_data,
         save_transcript,
         save_scrollback,
         load_scrollback,
