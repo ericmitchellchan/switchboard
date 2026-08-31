@@ -419,6 +419,21 @@ export function getScrollbackRootForContext(): string | null {
   return scrollbackRootCache;
 }
 
+/** The ✦-page one-liner for a spawn WHOSE MCP CONFIG ATTACHED (SWIT-49).
+ *  Deliberately SHORT — the full behavioural contract (R2 language rules, R3
+ *  tab rules) rides in the page tool's own DESCRIPTION, which travels over
+ *  MCP with no shell-line limits and refreshes every session; this line only
+ *  tells the agent the page exists and to use the tool. Composed FIRST in
+ *  the joined context so a long panel ref truncates its own tail, never this. */
+export function buildPageContractLine(): string {
+  return sanitizeForTypedLine(
+    "This thread has a PAGE beside the terminal — the one surface the user reads. " +
+      "After each turn of work, record what happened with the page tool and keep its " +
+      "evidence and items current; the tool description has the rules.",
+    SPAWN_CONTEXT_MAX
+  );
+}
+
 /** Same shape for the per-thread data root (SWIT-48): fetched once at boot;
  *  unset = a page has no ref, exactly the pre-page behaviour. */
 let threadsRootCache: string | null = null;

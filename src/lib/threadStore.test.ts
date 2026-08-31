@@ -120,6 +120,40 @@ describe("launchCommand", () => {
       "claude --resume abc-123"
     );
   });
+
+  // SWIT-49: the per-spawn mcp-config flag.
+  it("mcpConfig appends --mcp-config with backslashes folded to forward slashes", () => {
+    expect(
+      launchCommand({
+        chatSessionId: "abc-123",
+        resume: true,
+        mcpConfig: "C:\\Users\\eric\\AppData\\Local\\switchboard\\threads\\t1\\mcp-config.json",
+      })
+    ).toBe(
+      'claude --resume abc-123 --mcp-config "C:/Users/eric/AppData/Local/switchboard/threads/t1/mcp-config.json"'
+    );
+  });
+
+  it("null/empty mcpConfig omits the flag entirely — degraded, never an empty arg", () => {
+    expect(launchCommand({ chatSessionId: "a", resume: false, mcpConfig: null })).toBe(
+      "claude --session-id a"
+    );
+    expect(launchCommand({ chatSessionId: "a", resume: false, mcpConfig: "" })).toBe(
+      "claude --session-id a"
+    );
+  });
+
+  it("mcp-config and append-system-prompt compose on one line, config first", () => {
+    const line = launchCommand({
+      chatSessionId: "a",
+      resume: false,
+      appendSystemPrompt: "context here",
+      mcpConfig: "C:/t/mcp-config.json",
+    });
+    expect(line).toBe(
+      'claude --session-id a --mcp-config "C:/t/mcp-config.json" --append-system-prompt "context here"'
+    );
+  });
 });
 
 // ─── chatStarted detector ────────────────────────────────────────────────────

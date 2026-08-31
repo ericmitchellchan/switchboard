@@ -28,6 +28,7 @@
     "active": true,
     "targets": ["nsis", "dmg", "app"],
     "createUpdaterArtifacts": "v1Compatible",
+    "resources": ["resources/mcp/switchboard-mcp.cjs"],
     "icon": [
       "icons/32x32.png",
       "icons/64x64.png",

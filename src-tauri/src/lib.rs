@@ -331,6 +331,59 @@ async fn read_thread_file(thread_id: String, name: String) -> Result<String, Str
     }
 }
 
+/// Prepare a thread's LAUNCH (SWIT-49): create its data dir and write the
+/// per-spawn `--mcp-config` file pointing claude at Switchboard's own MCP
+/// server (a dependency-free Node script shipped as a resource). Regenerated
+/// at EVERY spawn — stale config dies with the session — and thread identity
+/// rides in the server's ENV, so tools carry no thread-id param. Returns the
+/// config file's absolute path; any failure means the frontend simply omits
+/// the flag (degraded: the thread runs without page tools, exactly as before).
+#[tauri::command]
+async fn prepare_thread_launch(app: tauri::AppHandle, thread_id: String) -> Result<String, String> {
+    if !valid_thread_id(&thread_id) {
+        return Err("invalid thread id".into());
+    }
+    let thread_dir = threads_data_dir()?.join(&thread_id);
+    std::fs::create_dir_all(&thread_dir).map_err(|e| e.to_string())?;
+    // The server script: the bundled resource in a packaged build; the
+    // checkout's copy under `cargo`/`tauri dev` (resource_dir may not carry
+    // dev resources on every platform, and the checkout path is exact there).
+    let resource = app
+        .path()
+        .resource_dir()
+        .ok()
+        .map(|d| d.join("resources").join("mcp").join("switchboard-mcp.cjs"))
+        .filter(|p| p.exists());
+    let dev_copy = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join("mcp")
+        .join("switchboard-mcp.cjs");
+    let server = match resource {
+        Some(p) => p,
+        None if dev_copy.exists() => dev_copy,
+        None => return Err("switchboard-mcp.cjs not found in resources".into()),
+    };
+    let config = serde_json::json!({
+        "mcpServers": {
+            "switchboard": {
+                "command": "node",
+                "args": [server.to_string_lossy()],
+                "env": {
+                    "SWITCHBOARD_THREAD_ID": thread_id,
+                    "SWITCHBOARD_THREAD_DIR": thread_dir.to_string_lossy(),
+                }
+            }
+        }
+    });
+    let config_path = thread_dir.join("mcp-config.json");
+    std::fs::write(
+        &config_path,
+        serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(config_path.to_string_lossy().into_owned())
+}
+
 // Thread records disk mirror (T5). Same storage pattern as scrollback: a JSON
 // blob under the app's local data dir. The frontend owns the payload shape
 // (threadStore.serializeThreadsForDisk); this is a dumb byte store. Written
@@ -922,6 +975,7 @@ fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         scrollback_root,
         threads_root,
         read_thread_file,
+        prepare_thread_launch,
         save_transcript,
         save_scrollback,
         load_scrollback,

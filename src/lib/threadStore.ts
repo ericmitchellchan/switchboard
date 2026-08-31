@@ -98,12 +98,20 @@ export function launchCommand(args: {
   chatSessionId: string;
   resume: boolean;
   appendSystemPrompt?: string | null;
+  /** SWIT-49: absolute path of the per-spawn mcp-config file (Switchboard's
+   *  own page-tool server). Regenerated at every spawn; null/empty omits the
+   *  flag entirely — the thread runs without page tools, degraded not broken.
+   *  Backslashes fold to forward slashes BEFORE the sanitizer (which strips
+   *  `\` as a shell metachar) — node and claude accept `/` on Windows. */
+  mcpConfig?: string | null;
 }): string {
   const base = args.resume
     ? `claude --resume ${args.chatSessionId}`
     : `claude --session-id ${args.chatSessionId}`;
+  const mcp = sanitizeForTypedLine((args.mcpConfig ?? "").replace(/\\/g, "/"), 400);
+  const withMcp = mcp.length > 0 ? `${base} --mcp-config "${mcp}"` : base;
   const context = sanitizeForTypedLine(args.appendSystemPrompt ?? "", SPAWN_CONTEXT_MAX);
-  return context.length > 0 ? `${base} --append-system-prompt "${context}"` : base;
+  return context.length > 0 ? `${withMcp} --append-system-prompt "${context}"` : withMcp;
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];

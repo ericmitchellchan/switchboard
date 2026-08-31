@@ -20,7 +20,7 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, saveTranscript } from "./lib/ipc";
+import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, saveTranscript } from "./lib/ipc";
 import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty, isSessionDirty, serializeForPip, plainTextTerminal, setTerminalScreenVisible } from "./lib/terminal";
 import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing, sendPipHost } from "./lib/pipBridge";
 import { bumpSessionGeneration, addSessionInputListener, getSessionGeneration } from "./lib/terminalRegistry";
@@ -107,6 +107,7 @@ import {
   setKbRootForContext,
   setScrollbackRootForContext,
   setThreadsRootForContext,
+  buildPageContractLine,
 } from "./lib/agentContext";
 import { runPromotionPass, promotionPassReason, PROMOTION_POLL_MS } from "./lib/threadPromotion";
 import { explorerProjects, registerExplorerActions } from "./lib/explorer";
@@ -789,10 +790,26 @@ export default function App() {
       } catch (err) {
         log.warn(`Panel context unavailable for thread id=${threadId}: ${err}`);
       }
+      // SWIT-49: the per-spawn mcp-config (Switchboard's page-tool server).
+      // Regenerated every launch; a failure just omits the flag — the thread
+      // runs without page tools rather than not at all.
+      let mcpConfig: string | null = null;
+      try {
+        mcpConfig = await prepareThreadLaunch(threadId);
+      } catch (err) {
+        log.warn(`MCP config unavailable for thread id=${threadId} — no page tools: ${err}`);
+      }
+      // The page one-liner rides ONLY when the tools actually attached (a
+      // sentence about a tool that does not exist would be a lie), and FIRST,
+      // so a long panel ref truncates its own tail.
+      const context = [mcpConfig ? buildPageContractLine() : null, panelContext]
+        .filter((s): s is string => s !== null && s.length > 0)
+        .join(" ");
       const line = launchCommand({
         chatSessionId: thread.chatSessionId,
         resume,
-        appendSystemPrompt: panelContext,
+        appendSystemPrompt: context.length > 0 ? context : null,
+        mcpConfig,
       });
       log.info(`Thread launch id=${threadId} session=${sessionId} exists=${resume}: ${line}`);
       try {

@@ -98,6 +98,14 @@ export async function readThreadFile(threadId: string, name: string): Promise<st
   return invoke("read_thread_file", { threadId, name });
 }
 
+/** Prepare a thread's launch (SWIT-49): create its data dir + write the
+ *  per-spawn mcp-config pointing claude at Switchboard's page-tool server.
+ *  Resolves to the config file's absolute path; a rejection means the caller
+ *  omits `--mcp-config` and the thread runs without page tools. */
+export async function prepareThreadLaunch(threadId: string): Promise<string> {
+  return invoke("prepare_thread_launch", { threadId });
+}
+
 /** Write the AGENT-FACING plain-text transcript for a session (see
  *  lib.rs's TRANSCRIPT_SUFFIX for why it is a second file). */
 export async function saveTranscript(sessionId: string, data: string): Promise<void> {
