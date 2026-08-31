@@ -56,7 +56,7 @@ import {
   waitForShellReady,
   tryBeginRevive,
   endRevive,
-  selectMenuThreads,
+  groupMenuThreads,
   getThreadsView,
   publishMenuSessions,
 } from "./lib/threadStore";
@@ -567,16 +567,17 @@ export default function App() {
       // PTY may already be gone
     }
     removeSession(id);
+    // PANEL FIRST, THEN UNBIND (SWIT-47 review finding 1) — removeSessionPanel
+    // resolves the session's owner key through the thread binding, and its
+    // thread branch (keep the strip for the revive, PARK its terminals) only
+    // runs while that binding still exists. Severing first re-keyed every
+    // thread tab as a shell, so a panel dev server was never parked and became
+    // unreachable. Any PANEL TERMINALS in the strip are parked rather than
+    // killed: they keep running and stay reachable from any tab's `+`.
+    removeSessionPanel(id);
     // Closing a thread's TAB kills the session but NOT the thread — the
     // binding is severed and the side menu shows the revive chip.
     unbindThreadsForSession(id);
-    // The tab's panel binding dies WITH the tab (per-tab state, nothing to
-    // revive) — unlike the thread record, which survives severed. Any PANEL
-    // TERMINALS in that strip are PARKED rather than killed (increment H — see
-    // removeSessionPanel): they keep running and stay reachable from any tab's
-    // `+`, because a dev server dying because its host tab closed is the same
-    // surprise the close guard exists to prevent.
-    removeSessionPanel(id);
     // If THIS session was itself a panel terminal, the panel stops owning it in
     // the same batch as removeSession below — never before, or the pane tree
     // would mount a session that is already disposed.
@@ -960,13 +961,17 @@ export default function App() {
     [switchToSession, handleReviveThread]
   );
 
-  // Ctrl+1–9 (SWIT-45): jump to the Nth THREAD in side-menu order — the same
-  // selection + ordering the rail renders (selectMenuThreads: live first,
-  // archived hidden), so the chord and the menu can never disagree about what
-  // "thread 3" is. A dead thread revives, exactly like clicking its row.
+  // Ctrl+1–9 (SWIT-45): jump to the Nth THREAD in side-menu order. The rail
+  // renders groupMenuThreads (grouped by project — SWIT-46), and GROUPING
+  // REORDERS rows whenever projects interleave in the flat ranking, so the
+  // chord flattens the SAME grouped selection the rail draws (review finding
+  // 3: the flat selectMenuThreads list disagreed with the visible rows). A
+  // dead thread revives, exactly like clicking its row.
   const handleJumpToThread = useCallback(
     (index: number) => {
-      const rows = selectMenuThreads(getThreads(), getThreadsView().launched, 9);
+      const rows = groupMenuThreads(getThreads(), getThreadsView().launched).flatMap(
+        (g) => g.threads
+      );
       const thread = rows[index];
       if (thread) handleOpenThread(thread.id);
     },

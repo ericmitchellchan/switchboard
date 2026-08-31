@@ -494,6 +494,27 @@ describe("remapPanelSessions (store, SWIT-47 — thread-keyed)", () => {
     expect(panelStateFor("shell-1")).toEqual(one(KB_DOC));
     expect(getPanelsRecord()).toEqual({ "th-9": one(KB_DOC) });
   });
+
+  it("collision: the shell's strip MERGES into the thread's surviving strip (review finding 2)", () => {
+    // A severed thread's strip survived the restart (v6)…
+    initPanelStore({ "th-9": one(REPO_FILE) });
+    // …Eric opens a doc in a plain shell, then `claude --resume` rebinds it.
+    openInPanel("shell-1", KB_DOC);
+    setPanelThreadResolver((s) => (s === "shell-1" ? "th-9" : null));
+    notePanelThreadBinding("shell-1");
+    // Nothing stranded, nothing lost: both artifacts, one strip, deduped.
+    expect(panelStateFor("shell-1")).toEqual(strip([REPO_FILE, KB_DOC], 1));
+    expect(getPanelsRecord()).toEqual({ "th-9": strip([REPO_FILE, KB_DOC], 1) });
+  });
+
+  it("collision with a SESSION artifact: the live shell stays reachable through the merged strip", () => {
+    initPanelStore({ "th-9": one(KB_DOC) });
+    openInPanel("shell-1", SESSION_A);
+    setPanelThreadResolver((s) => (s === "shell-1" ? "th-9" : null));
+    notePanelThreadBinding("shell-1");
+    expect(panelStateFor("shell-1")).toEqual(strip([KB_DOC, SESSION_A], 1));
+    expect(isPanelOwnedSession("pty-a")).toBe(true);
+  });
 });
 
 // ─── Store behavior ──────────────────────────────────────────────────────────

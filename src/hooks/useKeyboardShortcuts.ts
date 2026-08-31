@@ -45,6 +45,11 @@ function isOurShortcut(e: KeyboardEvent): boolean {
   if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "r") return true;
 
   if (!e.ctrlKey) return false;
+  // Ctrl+Alt is NOT ours (SWIT-45 review): AltGr reports ctrl+alt on Windows,
+  // and on intl layouts AltGr produces brackets/digits — intercepting those
+  // would eat typed characters. The split-focus chords that used to live on
+  // Ctrl+Alt+Arrow are retired, so nothing of ours is here at all.
+  if (e.altKey) return false;
   const key = e.key.toLowerCase();
 
   // Ctrl+key. The split chords (Ctrl+\ / Ctrl+-) and Ctrl+Alt+Arrow are
@@ -149,6 +154,10 @@ export function useKeyboardShortcuts(
       }
 
       if (!e.ctrlKey) return;
+      // AltGr = ctrl+alt on Windows: a German AltGr+8 ("[") must insert a
+      // bracket in the composer/editor, never fire onPrevTab. Ctrl+Alt has no
+      // chords of ours any more (the split set retired), so hand it all back.
+      if (e.altKey) return;
 
       const key = e.key.toLowerCase();
       const a = actionsRef.current;

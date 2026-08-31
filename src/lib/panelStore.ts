@@ -840,42 +840,84 @@ function threadIdOfKey(key: string): string {
   return key.slice(2);
 }
 
-/** A session gained a thread binding — MOVE its transient entries under the
- *  thread key, so the strip it accumulated as a shell follows it into the
- *  thread. No-op when there is nothing to move or no binding resolves. */
+/** A session gained a thread binding — its transient `s:` entries follow it
+ *  under the thread key, so the strip it accumulated as a shell survives the
+ *  promotion. No-op when there is nothing to move or no binding resolves.
+ *
+ *  COLLISION (SWIT-47 review finding 2): the thread may ALREADY hold a strip
+ *  (a severed thread's panel survives restarts now, and a `claude --resume`
+ *  in a shell that opened its own artifacts rebinds exactly here). Doing
+ *  nothing stranded the shell's strip under a key nothing reads again —
+ *  silent artifact loss the removal audit could not see, and a stranded
+ *  SESSION artifact kept a live shell panel-owned with no strip rendering it
+ *  (unreachable). So the shell's artifacts MERGE into the thread's strip,
+ *  one appendOrActivate each (dedupe holds; a session artifact keeps its
+ *  one-home invariant because it existed in only one strip to begin with). */
 export function notePanelThreadBinding(sessionId: string): void {
   const threadId = threadKeyResolver?.(sessionId) ?? null;
   if (!threadId) return;
   const from = `s:${sessionId}`;
   const to = `t:${threadId}`;
   let changed = false;
-  if (panels.has(from) && !panels.has(to)) {
-    panels = new Map(panels);
-    panels.set(to, panels.get(from)!);
-    panels.delete(from);
+  const moveOrMerge = (
+    getFrom: () => PanelState | undefined,
+    getTo: () => PanelState | undefined,
+    write: (key: string, state: PanelState | null) => void,
+    note: string
+  ) => {
+    const source = getFrom();
+    if (!source) return;
+    const target = getTo();
+    if (!target) {
+      write(to, source);
+      write(from, null);
+      changed = true;
+      return;
+    }
+    let merged = target;
+    for (const a of source.artifacts) merged = appendOrActivate(merged, a);
+    audit("strip-emptied", from, auditNames(source), `merged-into=${to} ${note}`.trim());
+    write(to, merged);
+    write(from, null);
     changed = true;
-  }
-  if (lastPanelStates.has(from) && !lastPanelStates.has(to)) {
-    lastPanelStates = new Map(lastPanelStates);
-    lastPanelStates.set(to, lastPanelStates.get(from)!);
-    lastPanelStates.delete(from);
-    changed = true;
-  }
-  if (panelSides.has(from) && !panelSides.has(to)) {
+  };
+  moveOrMerge(
+    () => panels.get(from),
+    () => panels.get(to),
+    (key, state) => {
+      panels = new Map(panels);
+      if (state) panels.set(key, state);
+      else panels.delete(key);
+    },
+    ""
+  );
+  moveOrMerge(
+    () => lastPanelStates.get(from),
+    () => lastPanelStates.get(to),
+    (key, state) => {
+      lastPanelStates = new Map(lastPanelStates);
+      if (state) lastPanelStates.set(key, state);
+      else lastPanelStates.delete(key);
+    },
+    "hidden"
+  );
+  if (panelSides.has(from)) {
     panelSides = new Map(panelSides);
-    panelSides.set(to, "left");
+    if (!panelSides.has(to)) panelSides.set(to, "left");
     panelSides.delete(from);
     changed = true;
   }
-  if (previews.has(from) && !previews.has(to)) {
+  // Preview marks: the thread's own mark wins a collision; either way the
+  // shell's transient mark is consumed.
+  if (previews.has(from)) {
     previews = new Map(previews);
-    previews.set(to, previews.get(from)!);
+    if (!previews.has(to)) previews.set(to, previews.get(from)!);
     previews.delete(from);
     changed = true;
   }
-  if (previewBacks.has(from) && !previewBacks.has(to)) {
+  if (previewBacks.has(from)) {
     previewBacks = new Map(previewBacks);
-    previewBacks.set(to, previewBacks.get(from)!);
+    if (!previewBacks.has(to)) previewBacks.set(to, previewBacks.get(from)!);
     previewBacks.delete(from);
     changed = true;
   }

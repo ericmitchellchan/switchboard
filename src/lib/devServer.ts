@@ -739,17 +739,20 @@ let allKnownCacheVersion = -1;
 export function allKnownServers(): readonly DevServerHit[] {
   if (allKnownCacheVersion === version) return allKnownCache;
   allKnownCacheVersion = version;
-  const seenKeys = new Set<string>();
-  const collected: DevServerHit[] = [];
+  // Dedupe by server; when two sessions announced the same server, the
+  // better-CLASSIFIED sighting wins (unknown never overrides a named source —
+  // same rule as noteDevServerOutput's upgrade path).
+  const byKey = new Map<string, DevServerHit>();
   for (const state of sessions.values()) {
     for (const hit of state.known) {
       const key = serverKey(hit.url);
-      if (seenKeys.has(key)) continue;
-      seenKeys.add(key);
-      collected.push(hit);
+      const existing = byKey.get(key);
+      if (!existing || (existing.source === "unknown" && hit.source !== "unknown")) {
+        byKey.set(key, hit);
+      }
     }
   }
-  allKnownCache = collected.length === 0 ? NO_HITS : rankHits(collected);
+  allKnownCache = byKey.size === 0 ? NO_HITS : rankHits(Array.from(byKey.values()));
   return allKnownCache;
 }
 
