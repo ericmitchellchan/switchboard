@@ -12,13 +12,18 @@
 // SEEN_DWELL_MS the stamp advances; anything dated after the PREVIOUS stamp
 // carries a dot until then. A first visit marks nothing.
 //
+// EVIDENCE IS A HISTORY (SWIT-66): the section renders kind-group chips with
+// counts (`recent` default) over rows merged from the agent's page.json AND
+// the scrollback scan (evidenceScan, union) — an agent row wins an address
+// collision, a doc/file row that resolves opens beside the thread.
+//
 // SKIN (SWIT-57): the kit's PAGE SECTIONS — every section is a band header +
 // dense list rows, no section is a box, and nothing on the page explains the
 // page (design/wireframe-kit/components.md). A question row is a row with a
 // `?` glyph; a post is an origin line and its text; the empty state is one
 // line.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import {
   usePage,
@@ -31,6 +36,14 @@ import {
 import type { InboxPost, PageItem, PageQuestion } from "../../lib/pageStore";
 import { parseSurfaceAddress } from "../../lib/surfaceParams";
 import { openArtifact } from "../../lib/panelStore";
+import type { OpenableArtifact } from "../../lib/panelStore";
+import { groupEvidence, mergeScannedEvidence, resolveDocTarget } from "../../lib/evidenceModel";
+import type { EvidenceGroupId } from "../../lib/evidenceModel";
+import { useScannedEvidence } from "../../lib/evidenceScan";
+import { getCachedDocList, refreshDocList } from "../../lib/kb";
+import { explorerProjects } from "../../lib/ipc";
+import { projectKeyForDir } from "../../lib/explorer";
+import { getThreads } from "../../lib/threadStore";
 
 const MONO = "var(--font-mono)";
 
@@ -87,6 +100,24 @@ const ROW_META: CSSProperties = {
   color: "var(--text-dim)",
 };
 
+/** kit: chip (BacklogPanel's measurements) — the Evidence group tabs; the
+ *  active one carries the brighter border + text, never a fill. */
+function chipStyle(on: boolean): CSSProperties {
+  return {
+    fontFamily: MONO,
+    fontSize: 9,
+    padding: "0 5px",
+    lineHeight: "15px",
+    border: `1px solid ${on ? "var(--text-secondary)" : "var(--border-subtle)"}`,
+    borderRadius: 4,
+    background: "transparent",
+    color: on ? "var(--text-primary)" : "var(--text-muted)",
+    whiteSpace: "nowrap",
+    flex: "none",
+    cursor: "pointer",
+  };
+}
+
 /** Item state glyphs — text, no new colour (the kit's rule). */
 const STATE_GLYPH: Record<PageItem["state"], string> = {
   todo: "○",
@@ -106,6 +137,55 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
     setSeenAt(loadPageSeen(threadId));
   }, [threadId]);
 
+  // SWIT-66: Evidence as a thread HISTORY — the agent's rows UNIONED with the
+  // scrollback scan, merged at RENDER time (an agent-posted row wins an
+  // address collision; page.json is never written by the app — the same
+  // one-writer pattern as the synthesized `decision:` rows), then folded into
+  // fixed kind groups the chips below the band header switch between.
+  const scanned = useScannedEvidence(threadId);
+  const evidence = useMemo(
+    () => mergeScannedEvidence(page.evidence, scanned),
+    [page.evidence, scanned]
+  );
+  const groups = useMemo(() => groupEvidence(evidence), [evidence]);
+  const [groupId, setGroupId] = useState<EvidenceGroupId>("recent");
+  useEffect(() => setGroupId("recent"), [threadId]);
+  const activeGroup = groups.find((g) => g.id === groupId) ?? groups[0] ?? null;
+
+  // The doc/file link rule's context: the REAL KB doc list (a KB row must
+  // exist to link) and the thread's own project key (a repo path resolves
+  // syntactically against it — evidenceModel.resolveDocTarget).
+  const [kbDocs, setKbDocs] = useState<readonly string[] | null>(() => getCachedDocList());
+  const [projectKey, setProjectKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (getCachedDocList() !== null) return;
+    let cancelled = false;
+    refreshDocList()
+      .then((docs) => {
+        if (!cancelled) setKbDocs(docs);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    setProjectKey(null);
+    const dir = getThreads().find((t) => t.id === threadId)?.workingDir;
+    if (!dir) return;
+    explorerProjects()
+      .then((projects) => {
+        if (!cancelled) setProjectKey(projectKeyForDir(projects, dir));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [threadId]);
+  const linkTarget = (address: string): OpenableArtifact | null =>
+    parseSurfaceAddress(address) ?? resolveDocTarget(address, kbDocs, projectKey);
+
   // Dwell: after SEEN_DWELL_MS on screen the stored stamp advances (a glance
   // while switching threads clears nothing). The in-memory `seenAt` keeps its
   // old value so the dots stay judgeable until the next visit.
@@ -115,7 +195,7 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
     return () => window.clearTimeout(id);
   }, [threadId, active, revision]);
 
-  if (page.isEmpty) {
+  if (page.isEmpty && evidence.length === 0) {
     return (
       <div
         style={{
@@ -205,9 +285,23 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
         </Section>
       )}
 
-      {page.evidence.length > 0 && (
-        <Section title="Evidence" meta={String(page.evidence.length)}>
-          {page.evidence.map((e) => (
+      {evidence.length > 0 && (
+        <Section title="Evidence" meta={String(evidence.length)}>
+          {groups.length > 1 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, margin: "2px 0 4px" }}>
+              {groups.map((g) => (
+                <button
+                  key={g.id}
+                  type="button"
+                  onClick={() => setGroupId(g.id)}
+                  style={chipStyle(g.id === (activeGroup?.id ?? "recent"))}
+                >
+                  {g.label} {g.count}
+                </button>
+              ))}
+            </div>
+          )}
+          {(activeGroup?.rows ?? []).map((e) => (
             <div
               key={e.address}
               style={{
@@ -219,7 +313,7 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
               }}
             >
               {isNewSince(e.updatedAt, seenAt) && <span style={NEW_DOT} />}
-              <EvidenceAddress address={e.address} />
+              <EvidenceAddress address={e.address} target={linkTarget(e.address)} />
               <span style={{ color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis" }}>
                 {e.label}
               </span>
@@ -340,19 +434,24 @@ function ItemRow({ item }: { item: PageItem }) {
   );
 }
 
-/** An Evidence row's address (T9 — SWIT-63): a `surface:<project>/<page>?k=v`
- *  address is a LINK that opens that page in that state through the same open
- *  rule as a destination click (the preview slot beside this thread; Ctrl =
- *  full width). Anything else — a ticket key, a PR, a path, or a surface
- *  address with a malformed query — prints as plain text, no link. */
-function EvidenceAddress({ address }: { address: string }) {
-  const target = parseSurfaceAddress(address);
+/** An Evidence row's address: a `surface:<project>/<page>?k=v` address (T9 —
+ *  SWIT-63) and a RESOLVED doc/file address (SWIT-66 — the KB doc list, else
+ *  the thread's project + a repo-relative path) are LINKS that open through
+ *  the same rule as a destination click (the preview slot beside this thread;
+ *  Ctrl = full width). Anything else — a ticket key, a PR, an unresolved
+ *  path, a malformed surface query — prints as plain text, no link. The
+ *  caller resolves; this component only draws. */
+function EvidenceAddress({ address, target }: { address: string; target: OpenableArtifact | null }) {
   if (!target) return <span style={{ color: "var(--text-primary)", flex: "none" }}>{address}</span>;
+  const title =
+    target.kind === "surface"
+      ? `open ${target.project} / ${target.page}${target.params ? " in that state" : ""} beside this thread (Ctrl+click: full width)`
+      : "open beside this thread (Ctrl+click: full width)";
   return (
     <button
       type="button"
       onClick={(e) => openArtifact(target, { modifier: e.ctrlKey || e.metaKey })}
-      title={`open ${target.project} / ${target.page}${target.params ? " in that state" : ""} beside this thread (Ctrl+click: full width)`}
+      title={title}
       style={{
         flex: "none",
         background: "none",

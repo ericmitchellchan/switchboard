@@ -135,6 +135,7 @@ import {
   backlogThreadTitle,
   getBacklogItems,
 } from "./lib/backlogStore";
+import { scanThreadTranscript } from "./lib/evidenceScan";
 import { consumeDropClaim, DROP_CLAIM_DEFER_MS, stagePastedBase64 } from "./lib/attachments";
 import { isBare } from "./lib/shellMode";
 import { parsePinsFile, pinsForDoc, pinTargetFor, surfacePinTargetFor } from "./lib/pins";
@@ -1402,6 +1403,20 @@ export default function App() {
         const threads = activeThreads(getThreads());
         const unread: Record<string, number> = {};
         for (const t of threads) {
+          const sessionId = t.sessionId;
+          const live =
+            sessionId !== null &&
+            isThreadLaunched(t.id) &&
+            sessionsRef.current.some((s) => s.id === sessionId && s.status !== "exited");
+          // SWIT-66: the evidence scrollback scan rides the same pass — a
+          // live thread's terminal buffer, as plain text, scanned for ticket
+          // keys / PR URLs / doc+file paths. Union, add-only, runtime-only;
+          // no new timer, and a thread with no live terminal keeps what it
+          // already has (the scan never removes).
+          if (live && sessionId !== null) {
+            const text = plainTextTerminal(sessionId);
+            if (text !== null) scanThreadTranscript(t.id, text);
+          }
           let posts;
           try {
             posts = parseInboxFile(await readThreadFile(t.id, "inbox.json"));
@@ -1419,11 +1434,6 @@ export default function App() {
             deliveredPostsRef.current.set(t.id, new Set(posts.map((p) => p.id)));
             continue;
           }
-          const sessionId = t.sessionId;
-          const live =
-            sessionId !== null &&
-            isThreadLaunched(t.id) &&
-            sessionsRef.current.some((s) => s.id === sessionId && s.status !== "exited");
           for (const post of posts) {
             if (delivered.has(post.id)) continue;
             delivered.add(post.id);
