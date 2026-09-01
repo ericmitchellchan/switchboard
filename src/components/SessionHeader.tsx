@@ -4,6 +4,7 @@ import { STATUS_CONFIGS } from "../lib/statusConfig";
 import { clearDevServerOffer, useDevServerOffer, useDevServerOfferExtras } from "../lib/devServer";
 import { explorerProjects, liveProjectFor } from "../lib/explorer";
 import { getActiveTabSession, openInPanel } from "../lib/panelStore";
+import { getThreadActions, unpreparedThreadReason, useThreadsView } from "../lib/threadStore";
 import { navigate, getNavState } from "../lib/route";
 import { log } from "../lib/logger";
 import { Icon } from "./icons";
@@ -202,6 +203,54 @@ export function DevServerOffer({
   );
 }
 
+/** SWIT-65 — a thread that launched without page tools says so.
+ *
+ *  When `prepare_thread_launch` rejects (or the conversation was started
+ *  outside Switchboard and discovered by the promotion pass), the session is a
+ *  PLAIN SHELL: no `--mcp-config`, none of the four tools, no ✦ page tab. The
+ *  absence used to be silent — an empty panel reads as "broken", not "never
+ *  wired". This chip is the whole surface: threads only (a plain shell has no
+ *  record and can never chip — unpreparedThreadReason is the pure rule), live
+ *  only, `title` = the recorded reason. Clicking re-runs prep and, on success,
+ *  restarts the thread's claude through the revive path (App's
+ *  relaunchWithPageTools; a live session confirms first). On another failure
+ *  the chip stays and the reason updates.
+ *
+ *  Subscribes on its own (useThreadsView) so SessionHeader's memo comparator
+ *  needs no new prop — a store change re-renders this child directly. */
+function PrepChip({ sessionId, compact }: { sessionId: string; compact: boolean }) {
+  const view = useThreadsView();
+  const hit = unpreparedThreadReason(sessionId, view.threads, view.launched, view.prepared);
+  if (!hit) return null;
+  return (
+    <button
+      type="button"
+      onClick={() => getThreadActions()?.relaunchWithPageTools(hit.threadId)}
+      title={
+        `${hit.reason}\n\n` +
+        `Relaunch this thread's claude with page tools — the conversation resumes via --resume.`
+      }
+      style={{
+        fontFamily: "var(--font-mono)",
+        fontSize: compact ? 9 : 10,
+        lineHeight: 1,
+        padding: compact ? "2px 5px" : "3px 7px",
+        background: "transparent",
+        border: "1px solid var(--border-subtle)",
+        borderRadius: 3,
+        color: "var(--text-dim)",
+        cursor: "pointer",
+        whiteSpace: "nowrap",
+        flex: "none",
+      }}
+      onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-secondary)")}
+      onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-dim)")}
+    >
+      no page — plain shell
+    </button>
+  );
+}
+
 export const SessionHeader = memo(function SessionHeader({ session, compact }: SessionHeaderProps) {
   const cfg = STATUS_CONFIGS[session.status] || STATUS_CONFIGS.running;
   const repoColor = session.repoColor || "#A78BFA";
@@ -283,6 +332,9 @@ export const SessionHeader = memo(function SessionHeader({ session, compact }: S
         {/* Increment F: renders only when this session actually announced a
             dev-server URL, so it costs nothing on every other shell. */}
         <DevServerOffer session={session} compact={compact === true} />
+        {/* SWIT-65: renders only when this session's THREAD launched without
+            page tools, so it costs nothing on every other shell. */}
+        <PrepChip sessionId={session.id} compact={compact === true} />
       </div>
       {!compact && (
         <div

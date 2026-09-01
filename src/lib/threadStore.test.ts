@@ -1289,3 +1289,120 @@ describe("orderThreadRepoChoices", () => {
     expect(orderThreadRepoChoices([], "C:/p/x")).toEqual({ repos: [], defaultIsRepo: false });
   });
 });
+
+// ── SWIT-65: page-tool prep outcome ─────────────────────────────────────────
+// Namespace import on purpose: the file's named import block above predates
+// these tests and the store exports collide-free either way.
+import * as prep from "./threadStore";
+
+describe("prepFailureReason", () => {
+  it("uses an Error's message", () => {
+    expect(prep.prepFailureReason(new Error("boom"))).toBe("boom");
+  });
+
+  it("stringifies non-Errors", () => {
+    expect(prep.prepFailureReason("plain string")).toBe("plain string");
+  });
+
+  it("collapses control chars and whitespace into single spaces", () => {
+    const out = prep.prepFailureReason(new Error("a\x1b[31m\n\tb\x00c"));
+    expect(out).not.toMatch(/[\u0000-\u001f\u007f]/);
+    expect(out).toBe("a [31m b c");
+  });
+
+  it("caps at PREP_REASON_MAX with an ellipsis", () => {
+    const out = prep.prepFailureReason(new Error("x".repeat(500)));
+    expect(out.length).toBe(prep.PREP_REASON_MAX);
+    expect(out.endsWith("…")).toBe(true);
+  });
+
+  it("is never empty", () => {
+    expect(prep.prepFailureReason("")).toBe("unknown error");
+    expect(prep.prepFailureReason(undefined)).toBe("unknown error");
+    expect(prep.prepFailureReason(new Error("\x01\x02"))).toBe("unknown error");
+  });
+});
+
+describe("thread prepared state (SWIT-65)", () => {
+  beforeEach(() => prep.__resetThreadStoreForTests());
+
+  /** A bound, launched thread — the shape the chip rule cares about. */
+  function liveThread(sessionId = "s1") {
+    const t = prep.createThreadRecord({ title: "t", workingDir: "C:/x" });
+    prep.bindThreadSession(t.id, sessionId);
+    prep.markThreadLaunched(t.id);
+    return t;
+  }
+
+  function chip(sessionId: string) {
+    const v = prep.getThreadsView();
+    return prep.unpreparedThreadReason(sessionId, v.threads, v.launched, v.prepared);
+  }
+
+  it("chips a launched thread whose launch recorded prepared:false", () => {
+    const t = liveThread();
+    prep.setThreadPrepared(t.id, { prepared: false, reason: "mcp dir unwritable" });
+    expect(chip("s1")).toEqual({ threadId: t.id, reason: "mcp dir unwritable" });
+  });
+
+  it("no entry = no claim = no chip", () => {
+    liveThread();
+    expect(chip("s1")).toBeNull();
+  });
+
+  it("prepared:true = no chip", () => {
+    const t = liveThread();
+    prep.setThreadPrepared(t.id, { prepared: true });
+    expect(chip("s1")).toBeNull();
+  });
+
+  it("a dead thread never chips (launched is part of the rule)", () => {
+    const t = liveThread();
+    prep.setThreadPrepared(t.id, { prepared: false, reason: "r" });
+    prep.markThreadSessionExited("s1");
+    expect(chip("s1")).toBeNull();
+  });
+
+  it("a session with no thread record never chips", () => {
+    expect(chip("plain-shell")).toBeNull();
+  });
+
+  it("setThreadPrepared overwrites — the reason updates on a failed relaunch", () => {
+    const t = liveThread();
+    prep.setThreadPrepared(t.id, { prepared: false, reason: "first" });
+    prep.setThreadPrepared(t.id, { prepared: false, reason: "second" });
+    expect(chip("s1")?.reason).toBe("second");
+  });
+
+  it("noteThreadPreparedOutside fills only a MISSING entry", () => {
+    const t = liveThread();
+    prep.setThreadPrepared(t.id, { prepared: true });
+    prep.noteThreadPreparedOutside(t.id);
+    expect(chip("s1")).toBeNull();
+    const t2 = liveThread("s2");
+    prep.noteThreadPreparedOutside(t2.id);
+    expect(chip("s2")).toEqual({ threadId: t2.id, reason: prep.OUTSIDE_SWITCHBOARD_REASON });
+  });
+
+  it("session exit clears the entry, so a later rediscovery may fill it", () => {
+    const t = liveThread();
+    prep.setThreadPrepared(t.id, { prepared: true });
+    prep.markThreadSessionExited("s1");
+    // Rebound + relaunched by the promotion pass: prep never ran this time.
+    prep.bindThreadSession(t.id, "s1");
+    prep.markThreadLaunched(t.id);
+    prep.noteThreadPreparedOutside(t.id);
+    expect(chip("s1")).toEqual({ threadId: t.id, reason: prep.OUTSIDE_SWITCHBOARD_REASON });
+  });
+
+  it("unbind and delete clear the entry", () => {
+    const t = liveThread();
+    prep.setThreadPrepared(t.id, { prepared: false, reason: "r" });
+    prep.unbindThread(t.id);
+    expect(prep.getThreadsView().prepared.has(t.id)).toBe(false);
+    const t2 = liveThread("s2");
+    prep.setThreadPrepared(t2.id, { prepared: false, reason: "r" });
+    prep.deleteThread(t2.id);
+    expect(prep.getThreadsView().prepared.has(t2.id)).toBe(false);
+  });
+});

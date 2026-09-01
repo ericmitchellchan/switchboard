@@ -792,6 +792,54 @@ export function applyWorkspaceStaleness(
   };
 }
 
+// ── Page-tool prep outcome (SWIT-65) ─────────────────────────────────────────
+// `prepare_thread_launch` writes the per-spawn mcp-config; when it rejects the
+// thread launches as a PLAIN SHELL — no page/view/post/backlog tools, no ✦
+// page tab — and until now nothing said so. These pure rules decide what is
+// recorded and when the header chip shows; the map itself lives in the store
+// below, transient like `launched`.
+
+export type ThreadPrepared =
+  | { prepared: true }
+  | { prepared: false; reason: string };
+
+/** The honest reason for a conversation the promotion pass discovered: it was
+ *  typed as a plain `claude`, so prep never ran and no flag was passed. */
+export const OUTSIDE_SWITCHBOARD_REASON = "started outside Switchboard";
+
+/** Cap on a recorded prep-failure reason — it becomes a chip `title`, and an
+ *  IPC error can carry a whole stack. */
+export const PREP_REASON_MAX = 200;
+
+/** Fold an unknown rejection into a chip-titleable one-liner: message over
+ *  Error-toString, control chars and newlines collapsed, capped. Never
+ *  empty — an unreadable reason still has to say something. */
+export function prepFailureReason(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err ?? "");
+  // eslint-disable-next-line no-control-regex
+  const clean = raw.replace(/[ -]+/g, " ").replace(/\s+/g, " ").trim();
+  const s = clean.length > 0 ? clean : "unknown error";
+  return s.length > PREP_REASON_MAX ? `${s.slice(0, PREP_REASON_MAX - 1)}…` : s;
+}
+
+/** THE chip rule (pure, over view pieces): the header shows `no page — plain
+ *  shell` for a session that is bound to a THREAD (plain shells have no
+ *  record, so they can never chip), whose claude is LIVE in this app run
+ *  (`launched` — a dead row's dot already says everything), and whose last
+ *  launch recorded `prepared: false`. No entry = no claim = no chip. */
+export function unpreparedThreadReason(
+  sessionId: string,
+  threads: readonly Thread[],
+  launched: ReadonlySet<string>,
+  prepared: ReadonlyMap<string, ThreadPrepared>
+): { threadId: string; reason: string } | null {
+  const t = threads.find((x) => x.sessionId === sessionId);
+  if (!t || !launched.has(t.id)) return null;
+  const p = prepared.get(t.id);
+  if (!p || p.prepared) return null;
+  return { threadId: t.id, reason: p.reason };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Store
 // ─────────────────────────────────────────────────────────────────────────────
@@ -813,6 +861,14 @@ export type ThreadsView = {
   launched: ReadonlySet<string>;
   /** Threads in the ~10s revive-boot window (MCP/tool reload). */
   booting: ReadonlySet<string>;
+  /** Per-thread page-tool prep outcome for THIS app run (SWIT-65). Recorded
+   *  by the launch path at every spawn (`prepare_thread_launch` succeeded or
+   *  not) and by the promotion pass for conversations it discovers (those
+   *  never went through prep — "started outside Switchboard"). Transient like
+   *  `launched`, and for the same reason: a revive re-runs prep, so runtime
+   *  is the honest scope. A thread with NO entry draws nothing — we only
+   *  claim what a launch actually told us. */
+  prepared: ReadonlyMap<string, ThreadPrepared>;
   sessionStatuses: Readonly<Record<string, AgentStatus>>;
   activeSessionId: string | null;
   /** Tab-bar-less sessions (SWIT-46) — App publishes its TAB sessions here so
@@ -834,6 +890,7 @@ export type ThreadsView = {
 let threads: Thread[] = [];
 const launched = new Set<string>();
 const booting = new Set<string>();
+const prepared = new Map<string, ThreadPrepared>();
 let sessionStatuses: Record<string, AgentStatus> = {};
 let activeSessionId: string | null = null;
 let menuSessions: readonly MenuSession[] = [];
@@ -872,6 +929,7 @@ export function getThreadsView(): ThreadsView {
       threads,
       launched: new Set(launched),
       booting: new Set(booting),
+      prepared: new Map(prepared),
       sessionStatuses,
       activeSessionId,
       menuSessions,
@@ -949,6 +1007,7 @@ export function initThreadStore(initial: Thread[]): void {
   threads = sanitizeThreads(initial);
   launched.clear();
   booting.clear();
+  prepared.clear();
   bump();
 }
 
@@ -1028,6 +1087,7 @@ export function unbindThread(threadId: string): void {
   threads = threads.map((x) => (x.id === threadId ? { ...x, sessionId: null } : x));
   launched.delete(threadId);
   booting.delete(threadId);
+  prepared.delete(threadId);
   bump();
 }
 
@@ -1104,6 +1164,24 @@ export function clearThreadLaunched(threadId: string): void {
   bump();
 }
 
+/** Record the page-tool prep outcome for a launch (SWIT-65). The launch path
+ *  calls this at EVERY spawn — success and failure both — so the entry always
+ *  describes the claude currently behind the row, never a previous one. */
+export function setThreadPrepared(threadId: string, state: ThreadPrepared): void {
+  prepared.set(threadId, state);
+  bump();
+}
+
+/** The promotion pass found a conversation it did not launch — prep never ran
+ *  for it. Only fills a MISSING entry: the exit/unbind paths clear the map, so
+ *  an entry that survives to here was written by OUR launch of this very
+ *  claude (idempotent re-detection of the same uuid) and is the truer record. */
+export function noteThreadPreparedOutside(threadId: string): void {
+  if (prepared.has(threadId)) return;
+  prepared.set(threadId, { prepared: false, reason: OUTSIDE_SWITCHBOARD_REASON });
+  bump();
+}
+
 // ── Revive re-entrancy gate ──────────────────────────────────────────────────
 // handleReviveThread awaits session creation before it can bind/mark the
 // thread, so a second click in that window would see sessionId=null and
@@ -1153,6 +1231,10 @@ export function markThreadSessionExited(sessionId: string): void {
   if (!t) return;
   launched.delete(t.id);
   booting.delete(t.id);
+  // The process the prep record described is gone; the next launch (any
+  // path) records a fresh outcome. Clearing here is also what makes
+  // noteThreadPreparedOutside's fill-if-missing guard correct.
+  prepared.delete(t.id);
   bump();
 }
 
@@ -1166,6 +1248,7 @@ export function unbindThreadsForSession(sessionId: string): void {
   );
   launched.delete(t.id);
   booting.delete(t.id);
+  prepared.delete(t.id);
   bump();
 }
 
@@ -1177,6 +1260,7 @@ export function deleteThread(threadId: string): void {
   threads = threads.filter((t) => t.id !== threadId);
   launched.delete(threadId);
   booting.delete(threadId);
+  prepared.delete(threadId);
   if (renameRequest === threadId) renameRequest = null;
   bump();
 }
@@ -1254,6 +1338,12 @@ export type ThreadActions = {
    *  text, the item as spawn context, and a `thread` link recorded on the
    *  item. No dialog, no question. */
   openBacklogItemInThread: (itemId: string) => void;
+  /** The header's `no page — plain shell` chip (SWIT-65): re-run
+   *  prepare_thread_launch and, on success, restart the thread's claude
+   *  through the revive path (a live session confirms first — the restart
+   *  resumes via --resume, but it is still a restart). On another prep
+   *  failure the chip stays and its reason updates. */
+  relaunchWithPageTools: (threadId: string) => void;
   /** Row menu → Delete, behind the ConfirmDialog. There is no unconfirmed
    *  delete action any more (increment E, Decision 3): the record is the only
    *  route back to a conversation, on BOTH surfaces, so the bare `×` that used
@@ -1286,6 +1376,7 @@ export function __resetThreadStoreForTests(): void {
   threads = [];
   launched.clear();
   booting.clear();
+  prepared.clear();
   reviveInFlight.clear();
   sessionStatuses = {};
   activeSessionId = null;

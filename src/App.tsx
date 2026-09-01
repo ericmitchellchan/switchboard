@@ -34,6 +34,9 @@ import {
   markThreadLaunched,
   clearThreadLaunched,
   isThreadLaunched,
+  setThreadPrepared,
+  noteThreadPreparedOutside,
+  prepFailureReason,
   markChatStarted,
   sameWorkingDir,
   promoteThreadRecord,
@@ -847,8 +850,12 @@ export default function App() {
       let mcpConfig: string | null = null;
       try {
         mcpConfig = await prepareThreadLaunch(threadId);
+        // SWIT-65: recorded at EVERY spawn — the entry describes the claude
+        // this launch line is about to start, never a previous one.
+        setThreadPrepared(threadId, { prepared: true });
       } catch (err) {
-        log.warn(`MCP config unavailable for thread id=${threadId} — no page tools: ${err}`);
+        log.error(`MCP config unavailable for thread id=${threadId} — no page tools: ${err}`);
+        setThreadPrepared(threadId, { prepared: false, reason: prepFailureReason(err) });
       }
       // SWIT-58: the decisions already standing on this thread's page, so a
       // re-launched agent knows what is settled before it asks. Read at
@@ -1167,6 +1174,62 @@ export default function App() {
     [config.repos, doCreateSession, paneLayout, switchToSession, handleRestartSession, launchClaudeInSession]
   );
 
+  // SWIT-65: the header chip's one click. Prep is proven FIRST — a relaunch
+  // that killed a live claude and then failed prep would trade the running
+  // conversation for nothing. On success the thread's claude is restarted
+  // through the SAME revive machinery a dead row's click uses (restart the
+  // bound shell, then revive — --resume picks the conversation back up); a
+  // live session confirms before anything is touched. On another prep failure
+  // the chip stays and its reason updates.
+  const handleRelaunchThreadWithPageTools = useCallback(
+    async (threadId: string) => {
+      const thread = getThreadById(threadId);
+      if (!thread) return;
+      log.info(`Relaunch with page tools requested id=${threadId}`);
+      try {
+        await prepareThreadLaunch(threadId);
+      } catch (err) {
+        log.error(`Relaunch prep failed id=${threadId}: ${err}`);
+        setThreadPrepared(threadId, { prepared: false, reason: prepFailureReason(err) });
+        return;
+      }
+      const restart = async () => {
+        const bound = thread.sessionId
+          ? sessionsRef.current.find((s) => s.id === thread.sessionId)
+          : undefined;
+        clearThreadLaunched(threadId);
+        try {
+          // A live shell is hosting the old (tool-less) claude — the launch
+          // line cannot be typed INTO a running TUI, so the PTY is restarted
+          // in place (the existing generation-guarded machinery). An exited
+          // shell needs nothing: revive's bound branch restarts it itself.
+          if (bound && bound.status !== "exited") await handleRestartSession(bound.id);
+        } catch (err) {
+          log.error(`Relaunch restart failed id=${threadId}: ${err}`);
+        }
+        void handleReviveThread(threadId);
+      };
+      if (isThreadLaunched(threadId)) {
+        setConfirmState({
+          open: true,
+          title: "Restart this thread's claude with page tools?",
+          confirmLabel: "Restart claude",
+          enterConfirms: false,
+          message:
+            `This thread's claude launched without page tools (no ✦ page tab, no page/view/post/backlog).\n\n` +
+            `Restarting relaunches claude with them. The conversation resumes via --resume — nothing on disk is lost — but anything mid-flight in the terminal right now is interrupted.`,
+          onConfirm: () => {
+            closeConfirm();
+            void restart();
+          },
+        });
+      } else {
+        void restart();
+      }
+    },
+    [handleRestartSession, handleReviveThread, closeConfirm]
+  );
+
   const handleOpenThread = useCallback(
     (threadId: string) => {
       const thread = getThreadById(threadId);
@@ -1295,6 +1358,7 @@ export default function App() {
       newThread: () => setNewThreadDialogOpen(true),
       createThreadNow: (target) => void handleCreateThreadNow(target),
       openBacklogItemInThread: (itemId) => void handleOpenBacklogItemInThread(itemId),
+      relaunchWithPageTools: (threadId) => void handleRelaunchThreadWithPageTools(threadId),
       confirmDeleteThread: handleConfirmDeleteThread,
       renameThread: handleRenameThread,
       setThreadArchived: handleSetThreadArchived,
@@ -1304,6 +1368,7 @@ export default function App() {
   }, [
     handleOpenThread,
     handleReviveThread,
+    handleRelaunchThreadWithPageTools,
     handleConfirmDeleteThread,
     handleCreateThreadNow,
     handleOpenBacklogItemInThread,
@@ -1448,7 +1513,14 @@ export default function App() {
         // uuid — the old thread is released (still revivable) and the pass
         // creates a new one through the SAME createThread above.
         unbindThread,
-        markLaunched: markThreadLaunched,
+        // SWIT-65: a discovered conversation never went through prep — it has
+        // no page tools, and the header chip should say so. Fill-if-missing:
+        // a conversation WE launched re-detected under the same uuid keeps the
+        // record its own launch wrote.
+        markLaunched: (threadId) => {
+          markThreadLaunched(threadId);
+          noteThreadPreparedOutside(threadId);
+        },
         persist: () => void saveThreadsToDisk(),
         defaultTitle: (repoName) => defaultThreadTitle(repoName),
         repoName: threadRepoName,
