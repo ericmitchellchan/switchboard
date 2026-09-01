@@ -231,7 +231,7 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
       setBusy(true);
       setNote(null);
       try {
-        const outcome = await answerQuestion(digest.thread.id, question.id, question.text, clean);
+        const outcome = await answerQuestion(digest.thread.id, question.id, question.text, clean, question.kind);
         setNote(outcome === "sent" ? "answered → sent to the thread" : "answered → saved on the page");
       } catch (err) {
         setNote(`could not save: ${err instanceof Error ? err.message : String(err)}`);
@@ -239,7 +239,7 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
         setBusy(false);
       }
     },
-    [busy, digest.thread.id, question.id, question.text]
+    [busy, digest.thread.id, question.id, question.text, question.kind]
   );
   return (
     <div style={{ ...CARD, flexDirection: "column", gap: 6 }}>

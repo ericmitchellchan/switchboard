@@ -387,6 +387,33 @@ async fn write_thread_answer(
     Ok(())
 }
 
+/// SWIT-58 — the ONE file the app appends `convention` answers to. Fixed
+/// here and resolved through the explorer's registry guard (project KEY →
+/// canonical repo root → containment → must already exist), so the frontend
+/// supplies a LINE and never a path. The agent never edits this file for a
+/// convention answer: the app is the writer, the heading is created once.
+const CONVENTIONS_PROJECT: &str = "switchboard";
+const CONVENTIONS_REL: &str = "design/wireframe-kit/conventions.md";
+const CONVENTIONS_HEADING: &str = "## Decisions recorded by the app";
+const CONVENTION_LINE_CAP: usize = 2000;
+
+#[tauri::command]
+async fn append_convention(line: String) -> Result<(), String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Err("a convention cannot be empty".into());
+    }
+    if trimmed.len() > CONVENTION_LINE_CAP {
+        return Err(format!("convention too long (cap {} bytes)", CONVENTION_LINE_CAP));
+    }
+    explorer::append_line_for_project(
+        CONVENTIONS_PROJECT,
+        CONVENTIONS_REL,
+        CONVENTIONS_HEADING,
+        trimmed,
+    )
+}
+
 /// ISO-8601 UTC "now" without pulling the chrono crate in for one format:
 /// seconds precision is plenty for an answer stamp.
 fn chrono_like_now_iso() -> String {
@@ -1264,6 +1291,7 @@ fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         read_thread_view,
         read_view_data,
         write_thread_answer,
+        append_convention,
         save_transcript,
         save_scrollback,
         load_scrollback,

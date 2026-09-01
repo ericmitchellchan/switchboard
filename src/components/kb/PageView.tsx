@@ -26,6 +26,7 @@ import {
   markPageSeen,
   isNewSince,
   SEEN_DWELL_MS,
+  orderedOptions,
 } from "../../lib/pageStore";
 import type { InboxPost, PageItem, PageQuestion } from "../../lib/pageStore";
 
@@ -288,7 +289,7 @@ function QuestionRow({ question, isNew }: { question: PageQuestion; isNew: boole
         <span style={{ color: "var(--text-primary)" }}>{question.text}</span>
         {isNew && <span style={{ ...NEW_DOT, marginLeft: 6, verticalAlign: "middle" }} />}
         {question.options.length > 0 && (
-          <div style={{ fontSize: 10, color: "var(--text-dim)" }}>{question.options.join(" · ")}</div>
+          <div style={{ fontSize: 10, color: "var(--text-dim)" }}>{orderedOptions(question).join(" · ")}</div>
         )}
       </div>
     </div>

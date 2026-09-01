@@ -56,6 +56,7 @@ import { serverKey } from "./devServer";
 // in a plain node environment).
 import type { IconName } from "../components/icons";
 import { log } from "./logger";
+import type { PageQuestionKind } from "./pageStore";
 import { surfaceLabel } from "../surfaces/registry";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2078,12 +2079,15 @@ export type PanelActions = {
    *  then — when the thread has a live terminal — type the answer in as
    *  Eric's message and resolve "sent"; with no live terminal resolve
    *  "saved" (the tab stays and says so). Rejection = the WRITE failed and
-   *  nothing was typed; the view keeps the text in the box. */
+   *  nothing was typed; the view keeps the text in the box. `kind` (SWIT-58)
+   *  is the question's own: a `convention` is also appended to
+   *  conventions.md by App, after the answer is durable. */
   answerQuestion: (
     threadId: string,
     questionId: string,
     questionText: string,
-    answerText: string
+    answerText: string,
+    kind?: PageQuestionKind
   ) => Promise<"sent" | "saved">;
   /** Write a session's CURRENT scrollback to its mirror file, right now.
    *
@@ -2268,11 +2272,12 @@ export function answerQuestion(
   threadId: string,
   questionId: string,
   questionText: string,
-  answerText: string
+  answerText: string,
+  kind: PageQuestionKind = "decision"
 ): Promise<"sent" | "saved"> {
   const actions = panelActions;
   if (!actions) return Promise.reject(new Error("the app is not ready to answer"));
-  return actions.answerQuestion(threadId, questionId, questionText, answerText);
+  return actions.answerQuestion(threadId, questionId, questionText, answerText, kind);
 }
 
 /** Close the tab holding `identity` in a session's strip (SWIT-51 — the

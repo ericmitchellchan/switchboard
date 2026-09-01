@@ -35,6 +35,10 @@ const TURN_LINE_CAP = 6;
 const EVIDENCE_CAP = 60;
 const QUESTION_CAP = 20;
 const TEXT_CAP = 500; // any single text field — a page line is a sentence, not a document
+/** SWIT-58: what an `ask` wants back. decision = a choice that shapes this
+ *  work; convention = a standing rule (the app appends the answer to the
+ *  design conventions file); info = a fact only the user knows. */
+const QUESTION_KINDS = ["decision", "convention", "info"];
 
 // ── Pure core ────────────────────────────────────────────────────────────────
 
@@ -151,16 +155,35 @@ function applyOp(page, args, now, answeredIds = new Set()) {
             .map((o) => text(o, "an option"))
             .slice(0, 6)
         : [];
+      // SWIT-58 — a question says WHAT KIND of answer it wants and PROPOSES
+      // one. `kind` defaults to decision (the common case); `default` must be
+      // one of the options, so the proposal is a real choice the UI can list
+      // first, never free text the user has to re-type.
+      const kind =
+        args.kind === undefined || args.kind === null ? "decision" : args.kind;
+      if (!QUESTION_KINDS.includes(kind)) {
+        throw new OpError(`kind must be one of ${QUESTION_KINDS.join(", ")}`);
+      }
+      let dflt = null;
+      if (args.default !== undefined && args.default !== null) {
+        if (typeof args.default !== "string" || args.default.trim().length === 0) {
+          throw new OpError("default must be one of the options (a non-empty string)");
+        }
+        dflt = args.default.trim();
+        if (!options.includes(dflt)) {
+          throw new OpError(`default must be one of the options (${options.length === 0 ? "none were given" : options.map((o) => `"${o}"`).join(", ")})`);
+        }
+      }
       const id = typeof args.id === "string" && args.id.trim().length > 0
         ? args.id.trim()
         : nextId(page.questions, "q");
       if (page.questions.some((q) => q && q.id === id)) {
         throw new OpError(`a question with id ${id} already exists — do not ask a question twice`);
       }
-      const questions = [{ id, text: t, options, askedAt: at }, ...page.questions];
+      const questions = [{ id, text: t, options, askedAt: at, kind, default: dflt }, ...page.questions];
       return {
         page: { ...page, questions },
-        message: `Question ${id} recorded on the page. Wait for the user's answer — it arrives as their next message. Do not ask it again.`,
+        message: `Question ${id} recorded on the page. Wait for the user's answer — it arrives as their next message and becomes evidence row decision:${id}. Do not ask it again.`,
       };
     }
     case "item": {
@@ -522,9 +545,15 @@ const PAGE_TOOL = {
     "item (owner agent|user|team, state todo|in_progress|waiting|done; status changes go in " +
     "the item's note or state, never a new turn). Something only the user can answer: op " +
     "ask (prefer 2–4 short options) — it lands under Needs You on the page; the answer " +
-    "arrives as their next message, so never ask the same question twice. Set op theme once " +
-    "to one line saying what this thread is working on. Never open anything for an answer — " +
-    "the page IS where your findings go.",
+    "arrives as their next message, so never ask the same question twice. Asking is HELP ME " +
+    "HELP YOU: ask only when the answer changes the work; batch related questions into one " +
+    "ask; always propose a default (one of the options — the user confirms it in one " +
+    "click); say what kind of answer you need (kind decision | convention | info — a " +
+    "convention is a standing rule the app records in the design conventions file, so " +
+    "nobody has to state it twice). Every answer becomes an evidence row decision:<id> " +
+    "with status decided — check Evidence for an existing decision: row BEFORE asking, and " +
+    "reuse it instead of asking. Set op theme once to one line saying what this thread is " +
+    "working on. Never open anything for an answer — the page IS where your findings go.",
   inputSchema: {
     type: "object",
     properties: {
@@ -552,6 +581,16 @@ const PAGE_TOOL = {
         type: "array",
         items: { type: "string" },
         description: "ask: 2–4 short answer options (free text is always possible).",
+      },
+      kind: {
+        type: "string",
+        enum: ["decision", "convention", "info"],
+        description:
+          "ask: what the answer is. decision (default) = a choice for this work; convention = a standing rule, recorded in the design conventions file by the app; info = a fact only the user knows.",
+      },
+      default: {
+        type: "string",
+        description: "ask: your proposal — must be one of options. Listed first and marked as the default; the user confirms it in one click.",
       },
       itemOp: { type: "string", enum: ["add", "update", "close"], description: "item: which item operation." },
       id: { type: "string", description: "item update/close: the item id. ask: optional stable question id." },
@@ -735,6 +774,7 @@ module.exports = {
   PAGE_TOOL,
   VIEW_TOOL,
   OpError,
+  QUESTION_KINDS,
   TURN_CAP,
   TURN_LINE_CAP,
   EVIDENCE_CAP,

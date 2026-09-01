@@ -17,7 +17,10 @@ import {
   SEND_REFERENCE_MAX,
   SPAWN_CONTEXT_MAX,
   TRANSCRIPT_SUFFIX,
+  DECISION_LABELS_NAMED,
+  DECISION_LABEL_MAX,
   artifactRef,
+  buildPageContractLine,
   buildSendReference,
   buildSpawnContext,
   getKbRootForContext,
@@ -491,6 +494,40 @@ describe("launchCommand + spawn context", () => {
 });
 
 // ─── Anchored pins + surfaces (Inc 3d — SWIT-38) ─────────────────────────────
+
+describe("buildPageContractLine + standing decisions (SWIT-58)", () => {
+  it("with no decisions the line is the page contract alone — one line, no clause", () => {
+    const line = buildPageContractLine();
+    expect(line).toContain("This thread has a PAGE");
+    expect(line).not.toContain("decision");
+    expect(buildPageContractLine(null)).toBe(line);
+    expect(buildPageContractLine({ count: 0, labels: [] })).toBe(line);
+    expect(line.split("\n")).toHaveLength(1);
+  });
+
+  it("names the count and the newest three labels, plain text", () => {
+    const line = buildPageContractLine({ count: 5, labels: ["per-market", "no", "keep it", "fourth", "fifth"] });
+    expect(line).toContain("already made 5 decisions on this page");
+    expect(line).toContain("the newest: per-market; no; keep it");
+    expect(line).not.toContain("fourth");
+    expect(line).toContain("do not re-ask");
+    expect(buildPageContractLine({ count: 1, labels: ["x"] })).toContain("1 decision on");
+    expect(DECISION_LABELS_NAMED).toBe(3);
+  });
+
+  it("labels are sanitized for the typed line and capped individually", () => {
+    const hostile = 'say "hi"\n$(rm -rf /) `x` %PATH%';
+    const line = buildPageContractLine({ count: 1, labels: [hostile] });
+    expect(line).not.toMatch(/["\\$%`\n]/);
+    expect(line).toContain("say hi (rm -rf /) x PATH");
+    const long = "w".repeat(DECISION_LABEL_MAX * 3);
+    const cut = buildPageContractLine({ count: 2, labels: [long, "second"] });
+    expect(cut).toContain("…; second");
+    expect(cut.length).toBeLessThanOrEqual(SPAWN_CONTEXT_MAX);
+    // An all-junk label vanishes and the count still speaks.
+    expect(buildPageContractLine({ count: 1, labels: ['"""'] })).toContain("tagged decision:)");
+  });
+});
 
 describe("anchored pin references + surface spawn context (3d)", () => {
   const SURFACE: Artifact = { kind: "surface", project: "lodestar", page: "trading" };

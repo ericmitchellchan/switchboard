@@ -30,6 +30,7 @@ const server = require("../../src-tauri/resources/mcp/switchboard-mcp.cjs") as {
   PAGE_TOOL: { name: string; description: string; inputSchema: unknown };
   VIEW_TOOL: { name: string; description: string; inputSchema: unknown };
   OpError: new (message: string) => Error;
+  QUESTION_KINDS: string[];
   TURN_CAP: number;
   TURN_LINE_CAP: number;
   EVIDENCE_CAP: number;
@@ -128,6 +129,39 @@ describe("applyOp semantics", () => {
     expect(() => server.applyOp(page, { op: "item", itemOp: "close", id: "i9" }, NOW)).toThrow(/no item/);
   });
 
+  it("ask carries kind (default decision) and a default that must be one of the options (SWIT-58)", () => {
+    expect(server.QUESTION_KINDS).toEqual(["decision", "convention", "info"]);
+    const plain = server.applyOp(empty(), { op: "ask", text: "Which?", options: ["a", "b"] }, NOW);
+    const q0 = (plain.page.questions as Array<Record<string, unknown>>)[0];
+    expect(q0.kind).toBe("decision");
+    expect(q0.default).toBeNull();
+
+    const full = server.applyOp(
+      empty(),
+      { op: "ask", text: "Which?", options: ["a", "b"], kind: "convention", default: "b" },
+      NOW
+    );
+    const q1 = (full.page.questions as Array<Record<string, unknown>>)[0];
+    expect(q1.kind).toBe("convention");
+    expect(q1.default).toBe("b");
+    expect(q1.options).toEqual(["a", "b"]); // the asked order — the UI moves the default up
+    expect(full.message).toContain("decision:q1");
+
+    // Validation is VISIBLE (OpError), never a silent drop.
+    expect(() =>
+      server.applyOp(empty(), { op: "ask", text: "Which?", options: ["a"], kind: "whim" }, NOW)
+    ).toThrow(/kind must be one of/);
+    expect(() =>
+      server.applyOp(empty(), { op: "ask", text: "Which?", options: ["a", "b"], default: "c" }, NOW)
+    ).toThrow(/default must be one of the options/);
+    expect(() => server.applyOp(empty(), { op: "ask", text: "Which?", default: "a" }, NOW)).toThrow(
+      /none were given/
+    );
+    expect(() =>
+      server.applyOp(empty(), { op: "ask", text: "Which?", options: ["a"], default: 4 }, NOW)
+    ).toThrow(/default must be one of the options/);
+  });
+
   it("a hand-corrupted page (nulls in the arrays) does not break ask / item add (review)", () => {
     const corrupted = server.parsePage(
       JSON.stringify({ questions: [null, { id: "q2", text: "t" }], items: [null] })
@@ -155,7 +189,7 @@ describe("ROUND-TRIP: the server's writes parse through pageStore (the seam)", (
       { op: "turn", lines: ["Second turn.", "Two lines."] },
       { op: "evidence", address: "SWIT-49", label: "the server", status: "in progress" },
       { op: "evidence", address: "switchboard #61", label: "the PR", status: "open" },
-      { op: "ask", text: "Same set or per-market?", options: ["same set", "per-market"] },
+      { op: "ask", text: "Same set or per-market?", options: ["same set", "per-market"], default: "per-market", kind: "convention" },
       { op: "item", itemOp: "add", title: "Publish anchors", state: "in_progress" },
       { op: "item", itemOp: "add", title: "Check the pins", owner: "user", note: "blocks R1" },
       { op: "item", itemOp: "add", title: "Old thing" },
@@ -167,6 +201,8 @@ describe("ROUND-TRIP: the server's writes parse through pageStore (the seam)", (
     expect(parsed.turns[0].lines).toEqual(["Second turn.", "Two lines."]); // newest first
     expect(parsed.evidence.map((e) => e.address)).toEqual(["switchboard #61", "SWIT-49"]);
     expect(parsed.questions).toHaveLength(1);
+    expect(parsed.questions[0].kind).toBe("convention");
+    expect(parsed.questions[0].defaultOption).toBe("per-market");
     expect(parsed.items).toHaveLength(3);
 
     const merged = mergePage(parsed, { q1: { text: "same set", at: "2026-08-31T10:05:00Z" } }, []);
@@ -174,11 +210,14 @@ describe("ROUND-TRIP: the server's writes parse through pageStore (the seam)", (
     expect(merged.theme).toBe("Give every market an anchor");
     expect(merged.openQuestions).toHaveLength(0); // answered
     expect(merged.answeredQuestions[0].answer.text).toBe("same set");
+    // The answer surfaces as a decided evidence row beside the agent's rows.
+    expect(merged.evidence.map((e) => e.address)).toEqual(["decision:q1", "switchboard #61", "SWIT-49"]);
+    expect(merged.evidence[0].status).toBe("decided");
     expect(merged.userItems.map((i) => i.title)).toEqual(["Check the pins"]);
     expect(merged.openItems).toHaveLength(2);
     expect(merged.doneItems).toHaveLength(1);
     expect(merged.latestTurn?.lines[0]).toBe("Second turn.");
-    expect(merged.evidence[0].status).toBe("open");
+    expect(merged.evidence[1].status).toBe("open");
   });
 
   it("timestamps the server writes are ISO strings pageStore's dot rule can parse", () => {
@@ -189,9 +228,22 @@ describe("ROUND-TRIP: the server's writes parse through pageStore (the seam)", (
 
   it("the tool table carries the behavioural contract", () => {
     expect(server.PAGE_TOOL.name).toBe("page");
-    for (const rule of ["2–5 plain lines", "UPDATES its row", "never ask the same question twice"]) {
+    for (const rule of [
+      "2–5 plain lines",
+      "UPDATES its row",
+      "never ask the same question twice",
+      // SWIT-58 — help me help you.
+      "ask only when the answer changes the work",
+      "batch related questions into one",
+      "propose a default",
+      "decision | convention | info",
+      "check Evidence for an existing decision: row BEFORE asking",
+    ]) {
       expect(server.PAGE_TOOL.description).toContain(rule);
     }
+    const props = (server.PAGE_TOOL.inputSchema as { properties: Record<string, { enum?: string[] }> }).properties;
+    expect(props.kind.enum).toEqual(["decision", "convention", "info"]);
+    expect(props.default).toBeDefined();
   });
 });
 

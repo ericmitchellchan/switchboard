@@ -445,12 +445,43 @@ export function getScrollbackRootForContext(): string | null {
  *  MCP with no shell-line limits and refreshes every session; this line only
  *  tells the agent the page exists and to use the tool. Composed FIRST in
  *  the joined context so a long panel ref truncates its own tail, never this. */
-export function buildPageContractLine(): string {
-  return sanitizeForTypedLine(
+export function buildPageContractLine(decisions: StandingDecisions | null = null): string {
+  const base =
     "This thread has a PAGE beside the terminal — the one surface the user reads. " +
-      "After each turn of work, record what happened with the page tool and keep its " +
-      "evidence and items current; the tool description has the rules.",
-    SPAWN_CONTEXT_MAX
+    "After each turn of work, record what happened with the page tool and keep its " +
+    "evidence and items current; the tool description has the rules.";
+  return sanitizeForTypedLine(base + standingDecisionsClause(decisions), SPAWN_CONTEXT_MAX);
+}
+
+/** The standing decisions a thread's page holds (SWIT-58): how many, and
+ *  the newest labels (answer texts) first. Built by App from pageStore's
+ *  merge at EVERY spawn — never cached on the thread record. */
+export type StandingDecisions = { count: number; labels: string[] };
+
+/** How many decision labels the spawn line names (the count says the rest). */
+export const DECISION_LABELS_NAMED = 3;
+/** Cap per named label — an answer is a sentence at most; a long one is cut
+ *  with `…` rather than crowding the panel ref out of the line. */
+export const DECISION_LABEL_MAX = 80;
+
+/** The clause a re-launch adds when decisions already stand: the count and
+ *  the newest three, plain text, so the agent does not re-ask what the page
+ *  already settles (the "never asked twice" half of help-me-help-you). Empty
+ *  with zero decisions — a sentence about nothing is noise. Each label is
+ *  sanitized on its own before joining so a label's cut never eats the
+ *  separator. */
+function standingDecisionsClause(decisions: StandingDecisions | null): string {
+  if (!decisions || !Number.isFinite(decisions.count) || decisions.count <= 0) return "";
+  const count = Math.trunc(decisions.count);
+  const named = decisions.labels
+    .slice(0, DECISION_LABELS_NAMED)
+    .map((l) => sanitizeForTypedLine(l, DECISION_LABEL_MAX))
+    .filter((l) => l.length > 0);
+  const newest = named.length > 0 ? `; the newest: ${named.join("; ")}` : "";
+  return (
+    ` The user has already made ${count} decision${count === 1 ? "" : "s"} on this page ` +
+    `(evidence rows tagged decision:${newest}) — read them before asking anything, ` +
+    `and do not re-ask what they settle.`
   );
 }
 

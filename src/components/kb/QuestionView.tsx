@@ -16,11 +16,17 @@
 // sentence about where the answer goes: that sentence is requirements.md R4's,
 // not the tab's. Outcome states are one plain line. Everything here traces to
 // design/wireframe-kit/components.md (list row, textarea, quiet button).
+//
+// THE DEFAULT (SWIT-58): the agent's proposal is listed FIRST (pageStore's
+// orderedOptions — the file keeps the asked order) with one dim `default`
+// word after it, no sentence. The question's KIND rides with the answer so a
+// `convention` is appended to conventions.md by the app; the tab draws no
+// kind marker — the kit has no shape for one and the outcome is the same row.
 
 import { useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent } from "react";
 import type { Artifact } from "../../types";
-import { usePage } from "../../lib/pageStore";
+import { usePage, orderedOptions } from "../../lib/pageStore";
 import { answerQuestion, closeArtifactByIdentity, artifactIdentity, getActiveTabSession } from "../../lib/panelStore";
 
 const MONO = "var(--font-mono)";
@@ -92,7 +98,7 @@ export function QuestionView({ artifact, active }: { artifact: QuestionArtifact;
     setBusy(true);
     setNote(null);
     try {
-      const outcome = await answerQuestion(threadId, questionId, open.text, clean);
+      const outcome = await answerQuestion(threadId, questionId, open.text, clean, open.kind);
       if (outcome === "sent") {
         // Written on the page AND typed into the terminal — the tab's job is
         // done. Close SELF (the host session's strip holds this identity).
@@ -175,8 +181,14 @@ export function QuestionView({ artifact, active }: { artifact: QuestionArtifact;
             else if (e.key === "ArrowUp") moveFocus(e, -1);
           }}
         >
-          {open!.options.map((o) => (
-            <OptionRow key={o} label={o} disabled={busy} onPick={() => void submit(o)} />
+          {orderedOptions(open!).map((o) => (
+            <OptionRow
+              key={o}
+              label={o}
+              isDefault={o === open!.defaultOption}
+              disabled={busy}
+              onPick={() => void submit(o)}
+            />
           ))}
         </div>
       )}
@@ -227,7 +239,17 @@ export function QuestionView({ artifact, active }: { artifact: QuestionArtifact;
 
 /** One option = one list row. Hover fills `--bg-active`; keyboard focus draws
  *  the active bar (the kit's selected-row mark), so ↑/↓ shows where you are. */
-function OptionRow({ label, disabled, onPick }: { label: string; disabled: boolean; onPick: () => void }) {
+function OptionRow({
+  label,
+  isDefault,
+  disabled,
+  onPick,
+}: {
+  label: string;
+  isDefault: boolean;
+  disabled: boolean;
+  onPick: () => void;
+}) {
   const [hover, setHover] = useState(false);
   const [focus, setFocus] = useState(false);
   return (
@@ -251,6 +273,9 @@ function OptionRow({ label, disabled, onPick }: { label: string; disabled: boole
       }}
     >
       <span style={{ flex: 1, minWidth: 0 }}>{label}</span>
+      {isDefault && (
+        <span style={{ flex: "none", fontSize: 9.5, color: "var(--text-dim)" }}>default</span>
+      )}
     </button>
   );
 }

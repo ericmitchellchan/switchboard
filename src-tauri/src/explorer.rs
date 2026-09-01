@@ -330,6 +330,85 @@ fn write_at(project: &ProjectInfo, rel_path: &str, content: &str) -> Result<(), 
     fs::write(&canon, content.as_bytes()).map_err(|e| format!("cannot write {:?}: {}", rel_path, e))
 }
 
+/// Append ONE bullet line to a markdown file that ALREADY EXISTS inside a
+/// registry project's repo (SWIT-58 — the app records a `convention` answer
+/// in the design conventions file). The guard is `write_at`'s, verbatim:
+/// resolve → symlink refusal → containment → must be a file. On top of it:
+///   · the caller names NO path. lib.rs's `append_convention` passes FIXED
+///     constants (project key + repo-relative path + heading); this is the
+///     only append path and the frontend supplies a line, nothing else;
+///   · `heading` is written ONCE — the first append whose file holds no line
+///     equal to it adds `\n<heading>\n\n` before the bullet; after that the
+///     bullet lands at the end of the file, under whatever is last;
+///   · `line` must be a single line (a `\n` / `\r` inside is refused — one
+///     rule per bullet is the file's whole shape) and gets the `- ` itself.
+/// The existing content is never rewritten: bytes go at the END (after a
+/// newline if the file does not already end in one).
+pub fn append_line_at(
+    project: &ProjectInfo,
+    rel_path: &str,
+    heading: &str,
+    line: &str,
+) -> Result<(), String> {
+    let clean = line.trim();
+    if clean.is_empty() {
+        return Err("nothing to append".to_string());
+    }
+    if clean.contains('\n') || clean.contains('\r') {
+        return Err("a convention is one line".to_string());
+    }
+    let (root, rest) = resolve_repo_rel(project, rel_path)?;
+    if rest.is_empty() {
+        return Err("not a file".to_string());
+    }
+    let target = root.join(&rest);
+    if let Ok(meta) = fs::symlink_metadata(&target) {
+        if meta.file_type().is_symlink() {
+            return Err(format!("refusing to append through symlink {:?}", rel_path));
+        }
+    }
+    let canon = canonicalize_within(&root, &target)?;
+    let meta = fs::metadata(&canon).map_err(|e| format!("cannot stat {:?}: {}", rel_path, e))?;
+    if !meta.is_file() {
+        return Err(format!("not a file: {:?}", rel_path));
+    }
+    let existing =
+        fs::read_to_string(&canon).map_err(|e| format!("cannot read {:?}: {}", rel_path, e))?;
+    let mut out = String::new();
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        out.push('\n');
+    }
+    let has_heading = existing.lines().any(|l| l.trim_end() == heading);
+    if !has_heading {
+        out.push('\n');
+        out.push_str(heading);
+        out.push_str("\n\n");
+    }
+    out.push_str("- ");
+    out.push_str(clean);
+    out.push('\n');
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&canon)
+        .map_err(|e| format!("cannot open {:?}: {}", rel_path, e))?;
+    file.write_all(out.as_bytes())
+        .map_err(|e| format!("cannot append to {:?}: {}", rel_path, e))
+}
+
+/// `append_line_at` addressed by registry KEY — the entry lib.rs's fixed-path
+/// command uses. An unknown key is an error, never a fallback path.
+pub fn append_line_for_project(
+    key: &str,
+    rel_path: &str,
+    heading: &str,
+    line: &str,
+) -> Result<(), String> {
+    let projects = load_registry()?;
+    let project = find_project(&projects, key)?;
+    append_line_at(&project, rel_path, heading, line)
+}
+
 // ── Tauri commands ───────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -738,6 +817,39 @@ mod explorer_tests {
             assert!(fs::symlink_metadata(&junction).unwrap().file_type().is_symlink());
         }
         let _ = fs::remove_file(&outside);
+    }
+
+    // ── Append guard (SWIT-58) ──
+    // The same two layers + must-exist rule as write_at, plus the append's
+    // own two: the heading is written once, and a line is one line.
+
+    #[test]
+    fn append_writes_heading_once_then_bullets_and_keeps_the_rest() {
+        let root = temp_repo("append-ok");
+        write(&root, "design/conventions.md", "# Conventions\n\n- old rule");
+        let project = project_for(&root);
+        append_line_at(&project, "design/conventions.md", "## Decisions", "2026-09-01 — first").unwrap();
+        append_line_at(&project, "design/conventions.md", "## Decisions", "2026-09-01 — second").unwrap();
+        let text = read_at(&project, "design/conventions.md").unwrap();
+        assert_eq!(
+            text,
+            "# Conventions\n\n- old rule\n\n## Decisions\n\n- 2026-09-01 — first\n- 2026-09-01 — second\n"
+        );
+        assert_eq!(text.matches("## Decisions").count(), 1);
+    }
+
+    #[test]
+    fn append_refuses_missing_file_multiline_and_empty() {
+        let root = temp_repo("append-refuse");
+        let project = project_for(&root);
+        // Missing: the append NEVER creates (the heading included).
+        assert!(append_line_at(&project, "design/conventions.md", "## D", "x").is_err());
+        assert!(!root.join("design").exists());
+        write(&root, "design/conventions.md", "# C\n");
+        assert!(append_line_at(&project, "design/conventions.md", "## D", "two\nlines").is_err());
+        assert!(append_line_at(&project, "design/conventions.md", "## D", "   ").is_err());
+        assert!(append_line_at(&project, "../outside.md", "## D", "x").is_err());
+        assert_eq!(read_at(&project, "design/conventions.md").unwrap(), "# C\n");
     }
 
     /// Create an NTFS junction (no privilege required). Returns false if the

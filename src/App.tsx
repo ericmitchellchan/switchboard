@@ -20,7 +20,7 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, listThreadViews, readThreadFile, writeThreadAnswer, writeThreadPost, saveTranscript } from "./lib/ipc";
+import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, listThreadViews, readThreadFile, writeThreadAnswer, appendConvention, writeThreadPost, saveTranscript } from "./lib/ipc";
 import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty, isSessionDirty, serializeForPip, plainTextTerminal, setTerminalScreenVisible } from "./lib/terminal";
 import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing, sendPipHost } from "./lib/pipBridge";
 import { bumpSessionGeneration, addSessionInputListener, getSessionGeneration } from "./lib/terminalRegistry";
@@ -116,9 +116,10 @@ import {
   setScrollbackRootForContext,
   setThreadsRootForContext,
   buildPageContractLine,
+  type StandingDecisions,
 } from "./lib/agentContext";
 import { runPromotionPass, promotionPassReason, PROMOTION_POLL_MS } from "./lib/threadPromotion";
-import { parsePageFile, parseAnswersFile, parseInboxFile, countUnreadPosts, loadInboxSeen, markInboxSeen } from "./lib/pageStore";
+import { parsePageFile, parseAnswersFile, parseInboxFile, mergePage, conventionLine, countUnreadPosts, loadInboxSeen, markInboxSeen, type PageQuestionKind } from "./lib/pageStore";
 import { explorerProjects, registerExplorerActions, quickThreadTarget, sessionRepoOptions } from "./lib/explorer";
 import { isBare } from "./lib/shellMode";
 import { parsePinsFile, pinsForDoc, pinTargetFor, surfacePinTargetFor } from "./lib/pins";
@@ -809,10 +810,27 @@ export default function App() {
       } catch (err) {
         log.warn(`MCP config unavailable for thread id=${threadId} — no page tools: ${err}`);
       }
+      // SWIT-58: the decisions already standing on this thread's page, so a
+      // re-launched agent knows what is settled before it asks. Read at
+      // EVERY spawn from the same two files the page renders — never cached
+      // on the record — and a failed read is no clause, not a failed launch.
+      let standing: StandingDecisions | null = null;
+      if (mcpConfig) {
+        try {
+          const [pageRaw, answersRaw] = await Promise.all([
+            readThreadFile(threadId, "page.json"),
+            readThreadFile(threadId, "answers.json"),
+          ]);
+          const merged = mergePage(parsePageFile(pageRaw), parseAnswersFile(answersRaw), []);
+          standing = { count: merged.decisions.length, labels: merged.decisions.map((d) => d.label) };
+        } catch (err) {
+          log.warn(`Standing decisions unavailable for thread id=${threadId}: ${err}`);
+        }
+      }
       // The page one-liner rides ONLY when the tools actually attached (a
       // sentence about a tool that does not exist would be a lie), and FIRST,
       // so a long panel ref truncates its own tail.
-      const context = [mcpConfig ? buildPageContractLine() : null, panelContext]
+      const context = [mcpConfig ? buildPageContractLine(standing) : null, panelContext]
         .filter((s): s is string => s !== null && s.length > 0)
         .join(" ");
       const line = launchCommand({
@@ -1998,10 +2016,25 @@ export default function App() {
       threadId: string,
       questionId: string,
       questionText: string,
-      answerText: string
+      answerText: string,
+      kind: PageQuestionKind = "decision"
     ): Promise<"sent" | "saved"> => {
       await writeThreadAnswer(threadId, questionId, answerText); // throws → the view keeps the text
       const thread = getThreadById(threadId);
+      if (kind === "convention") {
+        // SWIT-58: a standing rule is written down where the next agent (and
+        // the next mock) reads it — by the APP, through the fixed-path append
+        // in Rust; the agent never edits conventions.md for this. SECONDARY
+        // to the answer, which is already durable: a failed append is logged
+        // and toasted, never thrown, so the answer still reaches the terminal.
+        try {
+          await appendConvention(conventionLine(questionText, answerText, thread?.title ?? null));
+          log.info(`Convention recorded question=${questionId} thread=${threadId}`);
+        } catch (err) {
+          log.error(`Convention append failed question=${questionId} thread=${threadId}: ${err}`);
+          addToast(NO_SESSION, "Convention not recorded", String(err));
+        }
+      }
       const sessionId = thread?.sessionId ?? null;
       const live =
         sessionId !== null &&
@@ -2024,7 +2057,7 @@ export default function App() {
         return "saved";
       }
     },
-    []
+    [addToast]
   );
 
   // THE ONE LIVE VIEW of a panel terminal. Handed to ArtifactPanel, which
@@ -2128,8 +2161,8 @@ export default function App() {
   useEffect(() => {
     registerPanelActions({
       sendToThread: (text) => panelActionsRef.current?.sendToThread(text),
-      answerQuestion: (threadId, questionId, questionText, answerText) =>
-        panelActionsRef.current?.answerQuestion(threadId, questionId, questionText, answerText) ??
+      answerQuestion: (threadId, questionId, questionText, answerText, kind) =>
+        panelActionsRef.current?.answerQuestion(threadId, questionId, questionText, answerText, kind) ??
         Promise.reject(new Error("the app is not ready to answer")),
       popOutArtifact: (artifact) => panelActionsRef.current?.popOutArtifact(artifact),
       createPanelTerminal: (tabSessionId, target) =>

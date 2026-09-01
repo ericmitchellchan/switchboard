@@ -18,7 +18,11 @@ import {
   QUESTION_CAP,
   DONE_FOLD,
   countUnreadPosts,
+  orderedOptions,
+  decisionAddress,
+  conventionLine,
 } from "./pageStore";
+import type { PageQuestion } from "./pageStore";
 
 const PAGE = {
   theme: "Give every market an anchor",
@@ -90,6 +94,44 @@ describe("parsePageFile (tolerant)", () => {
     expect(p.turns[0].lines).toHaveLength(TURN_LINE_CAP);
     expect(p.evidence).toHaveLength(EVIDENCE_CAP);
     expect(p.questions).toHaveLength(QUESTION_CAP);
+  });
+});
+
+describe("question kind + default (SWIT-58)", () => {
+  const q = (extra: Record<string, unknown>): PageQuestion =>
+    parsePageFile(
+      JSON.stringify({ questions: [{ id: "q1", text: "Which?", options: ["a", "b", "c"], ...extra }] })
+    ).questions[0];
+
+  it("kind defaults to decision; convention / info parse; junk falls back", () => {
+    expect(q({}).kind).toBe("decision");
+    expect(q({ kind: "convention" }).kind).toBe("convention");
+    expect(q({ kind: "info" }).kind).toBe("info");
+    expect(q({ kind: "whim" }).kind).toBe("decision");
+    expect(q({ kind: 7 }).kind).toBe("decision");
+  });
+
+  it("default is kept ONLY when it is one of the options — never trusted otherwise", () => {
+    expect(q({ default: "b" }).defaultOption).toBe("b");
+    expect(q({ default: "zzz" }).defaultOption).toBeNull();
+    expect(q({ default: "" }).defaultOption).toBeNull();
+    expect(q({}).defaultOption).toBeNull();
+  });
+
+  it("orderedOptions lists the default FIRST and leaves the file order alone", () => {
+    const withDefault = q({ default: "b" });
+    expect(orderedOptions(withDefault)).toEqual(["b", "a", "c"]);
+    expect(withDefault.options).toEqual(["a", "b", "c"]); // the file's order, untouched
+    expect(orderedOptions(q({}))).toEqual(["a", "b", "c"]);
+  });
+
+  it("conventionLine is ONE dated line in the file's own shape, no leading bullet", () => {
+    const line = conventionLine("Tabs\nor spaces?", "two-space  indent", "lodestar · Sep 1", new Date(2026, 8, 1));
+    expect(line).toBe("2026-09-01 — two-space indent (asked: Tabs or spaces?; thread: lodestar · Sep 1)");
+    expect(line.startsWith("- ")).toBe(false);
+    expect(line).not.toMatch(/[\r\n]/);
+    expect(conventionLine("Q", "A", null, new Date(2026, 0, 9))).toBe("2026-01-09 — A (asked: Q)");
+    expect(conventionLine("Q", "A", "   ", new Date(2026, 0, 9))).toBe("2026-01-09 — A (asked: Q)");
   });
 });
 
@@ -166,6 +208,47 @@ describe("mergePage", () => {
     ]);
     expect(merged.requests.map((p) => p.id)).toEqual(["p1"]);
     expect(merged.updates.map((p) => p.id)).toEqual(["p2"]);
+  });
+
+  it("an answer becomes a decision:<id> evidence row — decided, labelled by the answer, in the merge only", () => {
+    const merged = mergePage(
+      page,
+      {
+        q1: { text: "per-market", at: "2026-08-31T11:00:00Z" },
+        q2: { text: "no", at: "2026-08-31T09:30:00Z" },
+      },
+      []
+    );
+    // Newest first across the agent's rows AND the decided rows.
+    expect(merged.evidence.map((e) => e.address)).toEqual(["decision:q1", "SWIT-43", "decision:q2"]);
+    expect(merged.evidence[0]).toEqual({
+      address: decisionAddress("q1"),
+      label: "per-market",
+      status: "decided",
+      updatedAt: "2026-08-31T11:00:00Z",
+    });
+    expect(merged.decisions.map((d) => d.label)).toEqual(["per-market", "no"]);
+    // page.json's own evidence is untouched — the row exists in the MERGE
+    // (answers.json is the app's file; the agent's file gains nothing).
+    expect(page.evidence.map((e) => e.address)).toEqual(["SWIT-43"]);
+    // No answers → no decided rows and the agent's evidence passes through.
+    expect(mergePage(page, {}, []).decisions).toEqual([]);
+    expect(mergePage(page, {}, []).evidence).toEqual(page.evidence);
+  });
+
+  it("a decided row wins over an agent-written row at the same address", () => {
+    const withAgentRow = parsePageFile(
+      JSON.stringify({
+        ...PAGE,
+        evidence: [
+          { address: "decision:q1", label: "agent's guess", status: "open", updatedAt: "2026-08-31T12:00:00Z" },
+        ],
+      })
+    );
+    const merged = mergePage(withAgentRow, { q1: { text: "per-market", at: "2026-08-31T11:00:00Z" } }, []);
+    expect(merged.evidence).toHaveLength(1);
+    expect(merged.evidence[0].label).toBe("per-market");
+    expect(merged.evidence[0].status).toBe("decided");
   });
 
   it("isEmpty is true only when EVERYTHING is empty", () => {

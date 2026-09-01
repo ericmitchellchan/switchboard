@@ -4,7 +4,9 @@
 //   page.json    ← the agent, through the MCP server (SWIT-49). Theme, turns,
 //                  evidence rows, questions, to-do items.
 //   answers.json ← the app (SWIT-51): Eric's answers, joined to questions by
-//                  id at render time — page.json is never touched.
+//                  id at render time — page.json is never touched. Each answer
+//                  ALSO renders as a `decision:<id>` evidence row (SWIT-58),
+//                  synthesized in the merge — never written to page.json.
 //   inbox.json   ← the app (SWIT-52): cross-thread posts, folded under Needs
 //                  You / What Happened with their origin.
 //
@@ -47,11 +49,19 @@ export type PageEvidence = {
   status: string | null;
   updatedAt: string;
 };
+/** SWIT-58: what an `ask` wants back. Mirrors the server's QUESTION_KINDS. */
+export type PageQuestionKind = "decision" | "convention" | "info";
 export type PageQuestion = {
   id: string;
   text: string;
   options: string[];
   askedAt: string;
+  /** decision (the default) · convention (a standing rule — the app appends
+   *  the answer to conventions.md) · info (a fact only the user knows). */
+  kind: PageQuestionKind;
+  /** The agent's PROPOSAL — one of `options`, or null. The UI lists it
+   *  first and marks it; the file keeps `options` in the order asked. */
+  defaultOption: string | null;
 };
 export type PageItemOwner = "agent" | "user" | "team";
 export type PageItemState = "todo" | "in_progress" | "waiting" | "done";
@@ -157,13 +167,19 @@ export function parsePageFile(raw: string): PageFile {
       const text = str(q.text);
       if (!id || !text || seenQuestionIds.has(id)) continue;
       seenQuestionIds.add(id);
+      const options = Array.isArray(q.options)
+        ? q.options.filter((o): o is string => typeof o === "string" && o.length > 0)
+        : [];
+      // A default that is not one of the options is dropped, not trusted:
+      // the server refuses one at write time, so only a hand-edit gets here.
+      const dflt = str(q.default);
       questions.push({
         id,
         text,
-        options: Array.isArray(q.options)
-          ? q.options.filter((o): o is string => typeof o === "string" && o.length > 0)
-          : [],
+        options,
         askedAt: str(q.askedAt) ?? "",
+        kind: q.kind === "convention" || q.kind === "info" ? q.kind : "decision",
+        defaultOption: dflt !== null && options.includes(dflt) ? dflt : null,
       });
       if (questions.length >= QUESTION_CAP) break;
     }
@@ -237,6 +253,42 @@ export function parseInboxFile(raw: string): InboxPost[] {
   return out;
 }
 
+// ── Question helpers (pure) ──────────────────────────────────────────────────
+
+/** The options as the UI lists them: the agent's default FIRST, the rest in
+ *  the order asked. The file order is untouched (`options` is what the agent
+ *  wrote); only the presentation moves the proposal to the top. */
+export function orderedOptions(q: PageQuestion): string[] {
+  if (q.defaultOption === null || !q.options.includes(q.defaultOption)) return q.options;
+  return [q.defaultOption, ...q.options.filter((o) => o !== q.defaultOption)];
+}
+
+/** Evidence address of the decision an answered question became. The
+ *  `decision:` prefix is what the agent's contract tells it to look for
+ *  before asking (the server's tool description names it). */
+export function decisionAddress(questionId: string): string {
+  return `decision:${questionId}`;
+}
+
+/** The ONE line the app appends to conventions.md for a `convention` answer
+ *  (SWIT-58) — the file's own dated-bullet shape, minus the leading `- `
+ *  (the Rust append adds it, so a line can never be two bullets). Whitespace
+ *  runs fold to one space: the file is one rule per line, and the Rust side
+ *  refuses a line break outright. */
+export function conventionLine(
+  question: string,
+  answer: string,
+  threadTitle: string | null,
+  now: Date = new Date()
+): string {
+  const flat = (s: string) => s.replace(/\s+/g, " ").trim();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  const who = threadTitle && flat(threadTitle).length > 0 ? `; thread: ${flat(threadTitle)}` : "";
+  return `${y}-${m}-${d} — ${flat(answer)} (asked: ${flat(question)}${who})`;
+}
+
 // ── The merge (pure) ─────────────────────────────────────────────────────────
 
 export type AnsweredQuestion = { question: PageQuestion; answer: PageAnswer };
@@ -256,7 +308,15 @@ export type RenderedPage = {
   latestTurn: PageTurn | null;
   earlierTurns: PageTurn[];
   updates: InboxPost[];
+  /** EVIDENCE — the agent's rows PLUS one `decision:<id>` row per answered
+   *  question (status `decided`, label = the answer), newest first. The
+   *  decided rows are synthesized HERE from answers.json: page.json stays
+   *  the agent's file (one writer), and the page still shows every decision
+   *  where the agent's contract says to look for it. */
   evidence: PageEvidence[];
+  /** The decided rows alone, newest first — what the spawn context names as
+   *  the standing decisions. */
+  decisions: PageEvidence[];
   /** QUESTIONS — answered ones, answer joined by id. */
   answeredQuestions: AnsweredQuestion[];
   /** DONE — folded past DONE_FOLD. */
@@ -265,6 +325,16 @@ export type RenderedPage = {
   /** Nothing anywhere — the agent has not written yet. */
   isEmpty: boolean;
 };
+
+/** Newest first by `updatedAt`; an unparseable stamp sorts LAST, and equal
+ *  stamps keep their input order (Array.prototype.sort is stable). */
+function byNewest(a: PageEvidence, b: PageEvidence): number {
+  const ta = Date.parse(a.updatedAt);
+  const tb = Date.parse(b.updatedAt);
+  const na = Number.isFinite(ta) ? ta : -Infinity;
+  const nb = Number.isFinite(tb) ? tb : -Infinity;
+  return nb - na;
+}
 
 export function mergePage(page: PageFile, answers: AnswersFile, inbox: InboxPost[]): RenderedPage {
   const openQuestions = page.questions.filter((q) => !(q.id in answers));
@@ -276,6 +346,22 @@ export function mergePage(page: PageFile, answers: AnswersFile, inbox: InboxPost
   const doneItems = doneAll.slice(0, DONE_FOLD);
   const requests = inbox.filter((p) => p.kind === "request");
   const updates = inbox.filter((p) => p.kind === "update");
+  const decisions: PageEvidence[] = answeredQuestions
+    .map(({ question, answer }) => ({
+      address: decisionAddress(question.id),
+      label: answer.text,
+      status: "decided",
+      updatedAt: answer.at,
+    }))
+    .sort(byNewest);
+  // A decided row wins over an agent-written row at the same address (the
+  // answer is ground truth); the rest merge newest-first, which keeps the
+  // agent's own newest-first order among themselves (stable sort).
+  const decidedAddresses = new Set(decisions.map((d) => d.address));
+  const evidence = [
+    ...decisions,
+    ...page.evidence.filter((e) => !decidedAddresses.has(e.address)),
+  ].sort(byNewest);
   const merged: RenderedPage = {
     theme: page.theme,
     openQuestions,
@@ -285,7 +371,8 @@ export function mergePage(page: PageFile, answers: AnswersFile, inbox: InboxPost
     latestTurn: page.turns[0] ?? null,
     earlierTurns: page.turns.slice(1),
     updates,
-    evidence: page.evidence,
+    evidence,
+    decisions,
     answeredQuestions,
     doneItems,
     doneFolded: Math.max(0, doneAll.length - DONE_FOLD),

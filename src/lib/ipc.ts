@@ -145,6 +145,14 @@ export async function writeThreadAnswer(
   return invoke("write_thread_answer", { threadId, questionId, text });
 }
 
+/** Append ONE dated line to the design conventions file (SWIT-58) — the
+ *  app's record of a `convention` answer. The target is FIXED in Rust (the
+ *  switchboard repo's `design/wireframe-kit/conventions.md`, by registry
+ *  key); nothing here names a path. Rejects when the file is missing. */
+export async function appendConvention(line: string): Promise<void> {
+  return invoke("append_convention", { line });
+}
+
 /** Prepare a thread's launch (SWIT-49): create its data dir + write the
  *  per-spawn mcp-config pointing claude at Switchboard's page-tool server.
  *  Resolves to the config file's absolute path; a rejection means the caller
