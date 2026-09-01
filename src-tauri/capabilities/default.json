@@ -14,6 +14,7 @@
     "global-shortcut:allow-unregister",
     "global-shortcut:allow-is-registered",
     "dialog:allow-save",
+    "dialog:allow-open",
     "log:default",
     "notification:default",
     "core:window:allow-request-user-attention",

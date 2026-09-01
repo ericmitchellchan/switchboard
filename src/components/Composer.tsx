@@ -7,13 +7,34 @@
 // format (lib/composer.composeWrite) strips them out of composed text rather
 // than forwarding them.
 //
-// Dictation (the motivating case): Wispr Flow injects by PASTING. There is
-// deliberately NO onPaste handler on the textarea below — the browser's native
-// paste inserts the text exactly once. xterm's clipboard path needed explicit
-// rules to avoid double-pasting precisely because it intercepts; a textarea
-// that does not intercept has nothing to get wrong. Do not add one.
+// PASTE (the rule, revised for SWIT-59). Dictation is the motivating case:
+// Wispr Flow injects by PASTING, and the browser's native paste into a
+// textarea inserts the text exactly once. xterm's clipboard path needed
+// explicit rules to avoid double-pasting precisely because it intercepts; a
+// textarea that does not intercept has nothing to get wrong. So the ONE paste
+// handler below is a CAPTURE-phase filter that acts on clipboard items whose
+// `kind === "file"` ONLY (a screenshot, a copied PDF): those it stages as
+// attachments and preventDefaults — nothing sensible could be inserted for a
+// file anyway. A paste with no file item returns before touching the event,
+// so plain text — dictation included — still reaches the textarea untouched
+// and lands once. Do not widen it to text; do not add a second handler.
+//
+// Two paste routes end here. This handler sees every paste the WEBVIEW sees
+// (right-click Paste, Shift+Insert). Ctrl+V does NOT reach it: the global
+// hotkey (lib.rs, RegisterHotKey) consumes the keystroke before WebView2 and
+// re-delivers the clipboard as an app event — text as `clipboard-paste`
+// (App inserts it into the focused textarea), an image as
+// `clipboard-paste-image` (App stages it for the composer whose textarea is
+// focused, found by `data-composer-session`).
+//
+// ATTACHMENTS. Chips sit in a row ABOVE the textarea that exists only while
+// there is at least one chip — never a permanent empty bar. Its appearance is
+// a height change like the box growing: the pane's ResizeObserver → fitQueue
+// → grow-only policy handle it, and the busy gate defers the refit while the
+// agent is RUNNING. Nothing here resizes anything.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { writeToSession } from "../lib/ipc";
 import { getTerminal } from "../lib/terminal";
 import { findThreadBySessionId, markChatStarted, getThreadActions } from "../lib/threadStore";
@@ -21,16 +42,23 @@ import { saveThreadsToDisk } from "../lib/workspace";
 import { log } from "../lib/logger";
 import {
   DRAFT_INDEX,
+  attachmentAgentBlock,
+  composeMessage,
   composeWrite,
+  formatAttachmentSize,
   parseThreadPost,
   getComposerDraft,
   getSendHistory,
   hideComposer,
   recordSend,
+  removeComposerAttachment,
   setComposerDraft,
   shouldNavigateHistory,
   stepHistory,
+  useComposerAttachments,
 } from "../lib/composer";
+import { pickPastedFiles, stagePastedFiles, stagePaths } from "../lib/attachments";
+import { useFileDropZone } from "../hooks/useFileDropZone";
 
 // One line tall by default, growing to MAX_ROWS then scrolling (spec §Visual).
 // The box's height is computed from these rather than measured from a rendered
@@ -50,6 +78,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const [value, setValue] = useState(() => getComposerDraft(sessionId));
   const [error, setError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const attachments = useComposerAttachments(sessionId);
 
   // Refs, not state, for everything an async send or a key handler reads: the
   // same stale-closure rule the PTY callbacks follow elsewhere in this app.
@@ -61,6 +90,14 @@ export function Composer({ sessionId }: { sessionId: string }) {
   // ↓ can put it back.
   const historyIndexRef = useRef(DRAFT_INDEX);
   const draftRef = useRef("");
+
+  // Drop a file anywhere on the composer to attach it (the webview drag-drop
+  // event; HTML5 drop never fires under Tauri — see hooks/useFileDropZone).
+  const drop = useFileDropZone<HTMLDivElement>((paths) => {
+    stagePaths(sessionId, paths);
+    setError(null);
+    textareaRef.current?.focus();
+  });
 
   // Auto-grow. Height is set imperatively (not via rows) so the box tracks
   // wrapped lines too. The pane's ResizeObserver sees the resulting container
@@ -79,7 +116,8 @@ export function Composer({ sessionId }: { sessionId: string }) {
   // Stash the unsent draft on unmount. Panes are remounted by things that are
   // not "the user is done" — splitting, unsplitting, moving a tab — and losing
   // half a dictated message to a layout change would be the same class of bug
-  // as swallowing a failed send.
+  // as swallowing a failed send. (Attachments need no stash: they live in the
+  // store from the moment they are staged.)
   useEffect(() => {
     return () => {
       setComposerDraft(sessionId, valueRef.current);
@@ -89,22 +127,30 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const send = useCallback(async () => {
     if (inFlightRef.current) return;
     const text = valueRef.current;
+    const paths = attachments.map((a) => a.path);
 
     // `@thread …` (SWIT-52): a message addressed to ANOTHER thread. Resolved
     // + delivered by App through the actions bridge — nothing is typed into
-    // THIS terminal, and a resolution failure keeps the text right here.
+    // THIS terminal, and a resolution failure keeps the text right here. The
+    // Read block rides along: the paths are absolute, so the other thread's
+    // agent can open them just the same.
     const post = parseThreadPost(text);
     if (post) {
       const actions = getThreadActions();
       if (!actions) return;
       inFlightRef.current = true;
       try {
-        const confirmation = await actions.postToThread(sessionId, post.target, post.body);
+        const confirmation = await actions.postToThread(
+          sessionId,
+          post.target,
+          post.body + attachmentAgentBlock(paths)
+        );
         setError(`→ ${confirmation}`);
         if (valueRef.current === text) {
           setValue("");
           setComposerDraft(sessionId, "");
         }
+        for (const p of paths) removeComposerAttachment(sessionId, p);
         recordSend(sessionId, text);
         historyIndexRef.current = DRAFT_INDEX;
         draftRef.current = "";
@@ -119,8 +165,8 @@ export function Composer({ sessionId }: { sessionId: string }) {
       return;
     }
 
-    const payload = composeWrite(text);
-    // Empty / whitespace-only: a no-op. Never a bare Enter.
+    const payload = composeWrite(composeMessage(text, paths));
+    // Empty / whitespace-only and nothing attached: a no-op. Never a bare Enter.
     if (payload.length === 0) return;
 
     inFlightRef.current = true;
@@ -140,11 +186,14 @@ export function Composer({ sessionId }: { sessionId: string }) {
     historyIndexRef.current = DRAFT_INDEX;
     draftRef.current = "";
     // Clear only what we actually sent. The write is a round trip; anything
-    // typed (or dictated) during it is a NEW draft and must survive.
+    // typed (or dictated) during it is a NEW draft and must survive. Chips are
+    // cleared by PATH for the same reason — one staged mid-flight is the next
+    // message's.
     if (valueRef.current === text) {
       setValue("");
       setComposerDraft(sessionId, "");
     }
+    for (const p of paths) removeComposerAttachment(sessionId, p);
     textareaRef.current?.focus();
 
     // Decision 4 — chatStarted is marked EXPLICITLY here. `writeToSession`
@@ -172,7 +221,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
       // crash inside the 30s periodic window would relaunch instead of resume.
       void saveThreadsToDisk();
     }
-  }, [sessionId]);
+  }, [sessionId, attachments]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -240,85 +289,221 @@ export function Composer({ sessionId }: { sessionId: string }) {
     setError(null);
   }, []);
 
+  // The file-only paste filter — see the header. Files are taken SYNCHRONOUSLY
+  // (clipboardData is void after the first await) and the event is claimed
+  // only when there is at least one; text falls through untouched.
+  const handlePasteCapture = useCallback(
+    (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      const picked = pickPastedFiles(e.clipboardData?.items);
+      if (picked.length === 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      void stagePastedFiles(sessionId, picked).then((result) => {
+        if (result.error) {
+          log.error(`Composer paste session=${sessionId}: ${result.error}`);
+          setError(result.error);
+        } else {
+          setError(null);
+        }
+      });
+    },
+    [sessionId]
+  );
+
+  // `+` → the native file picker → chips by path. open() rejects when the
+  // dialog permission is missing; that must not vanish into the click.
+  // No extension filter: a filtered dialog HIDES the PDF you came for.
+  const handlePick = useCallback(async () => {
+    try {
+      const sel = await openFileDialog({ multiple: true });
+      if (!sel) return;
+      stagePaths(sessionId, Array.isArray(sel) ? sel : [sel]);
+      setError(null);
+    } catch (err) {
+      log.error(`Composer picker session=${sessionId}: ${err}`);
+      setError("Couldn't open the file picker.");
+    } finally {
+      textareaRef.current?.focus();
+    }
+  }, [sessionId]);
+
   return (
     <div
+      ref={drop.ref}
       style={{
         flex: "none",
         display: "flex",
-        alignItems: "flex-end",
-        gap: 8,
-        padding: "5px 8px 5px 10px",
-        backgroundColor: "#0A0A0B",
-        borderTop: "1px solid #1E1E22",
+        flexDirection: "column",
+        gap: 4,
+        padding: "5px 8px 5px 8px",
+        backgroundColor: "var(--bg-secondary)",
+        borderTop: `1px solid ${drop.isOver ? "var(--text-secondary)" : "var(--border)"}`,
       }}
     >
-      <textarea
-        ref={textareaRef}
-        value={value}
-        onChange={handleChange}
-        onKeyDown={handleKeyDown}
-        rows={1}
-        spellCheck={false}
-        placeholder="Message this session — Enter sends, Shift+Enter newline"
-        title={HINT_TITLE}
-        style={{
-          flex: 1,
-          minWidth: 0,
-          height: MIN_HEIGHT,
-          maxHeight: MAX_HEIGHT,
-          resize: "none",
-          border: "1px solid #1E1E22",
-          borderRadius: 4,
-          backgroundColor: "#0C0C0E",
-          color: "#E4E4E7",
-          fontFamily: "var(--font-mono)",
-          fontSize: FONT_SIZE,
-          lineHeight: `${LINE_HEIGHT}px`,
-          padding: `${PAD_Y}px 8px`,
-          outline: "none",
-          overflowY: "hidden",
-        }}
-      />
+      {attachments.length > 0 && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            gap: 4,
+            paddingLeft: 2,
+          }}
+        >
+          {attachments.map((a) => (
+            <span
+              key={a.path}
+              title={a.path}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 5,
+                flex: "none",
+                maxWidth: 220,
+                height: 18,
+                padding: "0 5px",
+                border: "1px solid var(--border-subtle)",
+                borderRadius: 4,
+                fontFamily: "var(--font-mono)",
+                fontSize: 9,
+                color: "var(--text-muted)",
+                whiteSpace: "nowrap",
+              }}
+            >
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", color: "var(--text-secondary)" }}>
+                {a.name}
+              </span>
+              {a.size !== undefined && <span>{formatAttachmentSize(a.size)}</span>}
+              <button
+                type="button"
+                onClick={() => removeComposerAttachment(sessionId, a.path)}
+                title={`Remove ${a.name}`}
+                aria-label={`Remove ${a.name}`}
+                style={{
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  padding: 0,
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 11,
+                  lineHeight: 1,
+                  color: "var(--text-dim)",
+                }}
+              >
+                {"×"}
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
       <div
         style={{
           display: "flex",
-          alignItems: "center",
+          alignItems: "flex-end",
           gap: 8,
-          height: MIN_HEIGHT,
-          flex: "none",
         }}
       >
-        <span
-          title={error ? undefined : HINT_TITLE}
-          style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: 9,
-            color: error ? "#F87171" : "#3F3F46",
-            whiteSpace: "nowrap",
-            maxWidth: 320,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-          }}
-        >
-          {error ?? HINT}
-        </span>
         <button
-          onClick={() => hideComposer(sessionId)}
-          title="Hide composer (Ctrl+Shift+M)"
-          aria-label="Hide composer"
+          type="button"
+          onClick={() => void handlePick()}
+          title="Attach a file"
+          aria-label="Attach a file"
           style={{
-            background: "none",
+            flex: "none",
+            width: 24,
+            height: 24,
+            marginBottom: (MIN_HEIGHT - 24) / 2,
+            borderRadius: 4,
             border: "none",
+            background: "transparent",
             cursor: "pointer",
             fontFamily: "var(--font-mono)",
-            fontSize: 12,
+            fontSize: 14,
             lineHeight: 1,
-            color: "#52525B",
-            padding: "2px 4px",
+            color: "var(--text-muted)",
+            padding: 0,
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.color = "var(--text-primary)";
+            e.currentTarget.style.backgroundColor = "var(--bg-elevated)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.color = "var(--text-muted)";
+            e.currentTarget.style.backgroundColor = "transparent";
           }}
         >
-          {"×"}
+          {"+"}
         </button>
+        <textarea
+          ref={textareaRef}
+          data-composer-session={sessionId}
+          value={value}
+          onChange={handleChange}
+          onKeyDown={handleKeyDown}
+          onPasteCapture={handlePasteCapture}
+          rows={1}
+          spellCheck={false}
+          placeholder="Message this session — Enter sends, Shift+Enter newline"
+          title={HINT_TITLE}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            height: MIN_HEIGHT,
+            maxHeight: MAX_HEIGHT,
+            resize: "none",
+            border: "1px solid var(--border)",
+            borderRadius: 4,
+            backgroundColor: "var(--bg-primary)",
+            color: "var(--text-primary)",
+            fontFamily: "var(--font-mono)",
+            fontSize: FONT_SIZE,
+            lineHeight: `${LINE_HEIGHT}px`,
+            padding: `${PAD_Y}px 8px`,
+            outline: "none",
+            overflowY: "hidden",
+          }}
+        />
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            height: MIN_HEIGHT,
+            flex: "none",
+          }}
+        >
+          <span
+            title={error ? undefined : HINT_TITLE}
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 9,
+              color: error ? "#F87171" : "var(--text-faint)",
+              whiteSpace: "nowrap",
+              maxWidth: 320,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {error ?? HINT}
+          </span>
+          <button
+            onClick={() => hideComposer(sessionId)}
+            title="Hide composer (Ctrl+Shift+M)"
+            aria-label="Hide composer"
+            style={{
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              fontFamily: "var(--font-mono)",
+              fontSize: 12,
+              lineHeight: 1,
+              color: "var(--text-dim)",
+              padding: "2px 4px",
+            }}
+          >
+            {"×"}
+          </button>
+        </div>
       </div>
     </div>
   );

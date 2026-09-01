@@ -414,6 +414,163 @@ async fn append_convention(line: String) -> Result<(), String> {
     )
 }
 
+// ── Composer attachments (SWIT-59) ───────────────────────────────────────────
+// A PASTED image/file is saved under the thread's data dir:
+// `threads/<threadId>/attachments/<name>`. Dropped and picked files never
+// come through here (they are paths the agent Reads in place). Guard posture,
+// same as the thread files above: the thread id is uuid-alphabet only, the
+// thread must be KNOWN (in the threads.json mirror — the frontend flushes it
+// at thread creation and on promotion), the file name is held to a closed
+// alphabet with no separator in it, and the only dir this creates is
+// `attachments/` itself.
+
+/// Mirrors `MAX_PASTE_BYTES` in lib/attachments.ts — change one, change both.
+const ATTACHMENT_CAP: usize = 25 * 1024 * 1024;
+
+/// A file name for the attachments dir: `[A-Za-z0-9._-]` only (so no `/`,
+/// `\`, `:`, no spaces), non-empty, not `.`/`..`, not dot-led, <= 128 bytes,
+/// and with an extension — the agent picks its reader from it. REFUSED, not
+/// mangled: the frontend already produces `<ts>-<n>.<ext>`, so anything else
+/// is a caller bug, not input to clean up.
+fn attachment_name_ok(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 128 {
+        return Err("invalid attachment name".into());
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    {
+        return Err("invalid attachment name".into());
+    }
+    if name.starts_with('.') {
+        return Err("invalid attachment name".into());
+    }
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => Ok(()),
+        _ => Err("attachment name needs an extension".into()),
+    }
+}
+
+/// Everything about the write EXCEPT the write: the thread's existence (from
+/// the mirror's content), the name, the size. Pure so the guard tests need no
+/// data dir; the command wires the two files in.
+fn attachment_target(
+    threads_dir: &std::path::Path,
+    mirror_raw: &str,
+    thread_id: &str,
+    name: &str,
+    byte_len: usize,
+) -> Result<std::path::PathBuf, String> {
+    if !valid_thread_id(thread_id) {
+        return Err("invalid thread id".into());
+    }
+    working_dir_from_mirror(mirror_raw, thread_id)?;
+    attachment_name_ok(name)?;
+    if byte_len == 0 {
+        return Err("empty attachment".into());
+    }
+    if byte_len > ATTACHMENT_CAP {
+        return Err(format!(
+            "attachment too large ({} bytes, cap {})",
+            byte_len, ATTACHMENT_CAP
+        ));
+    }
+    Ok(threads_dir.join(thread_id).join("attachments").join(name))
+}
+
+/// Save pasted bytes as `threads/<thread_id>/attachments/<name>` and return
+/// the absolute path. Never overwrites: the frontend stamps names, and a
+/// collision means two pastes in one millisecond, which should fail loudly
+/// rather than replace a file an agent may already have been told about.
+#[tauri::command]
+async fn save_thread_attachment(
+    thread_id: String,
+    name: String,
+    data_base64: String,
+) -> Result<String, String> {
+    use base64::Engine;
+    // Refuse before decoding: base64 is 4/3 of the payload, so anything past
+    // this is over the cap by construction and not worth allocating for.
+    if data_base64.len() > ATTACHMENT_CAP / 3 * 4 + 4 {
+        return Err(format!("attachment too large (cap {} bytes)", ATTACHMENT_CAP));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.as_bytes())
+        .map_err(|e| format!("decode attachment: {}", e))?;
+    let mirror = std::fs::read_to_string(threads_path()?)
+        .map_err(|e| format!("threads mirror unreadable: {}", e))?;
+    let path = attachment_target(&threads_data_dir()?, &mirror, &thread_id, &name, bytes.len())?;
+    let dir = path.parent().ok_or("no attachments dir")?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    if path.exists() {
+        return Err(format!("attachment already exists: {}", name));
+    }
+    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    log::info!(
+        "Saved attachment thread={} name={} bytes={}",
+        thread_id,
+        name,
+        bytes.len()
+    );
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod attachment_guard_tests {
+    use super::{attachment_name_ok, attachment_target, ATTACHMENT_CAP};
+    use std::path::Path;
+
+    const THREAD: &str = "3f1c2a9e-0b7d-4c1e-9a55-1234567890ab";
+    fn mirror() -> String {
+        format!(
+            r#"{{"threads":[{{"id":"{}","workingDir":"C:\\Users\\ericm\\projects\\switchboard"}}]}}"#,
+            THREAD
+        )
+    }
+
+    #[test]
+    fn good_name_lands_under_the_thread_attachments_dir() {
+        let root = Path::new("C:/data/threads");
+        let p = attachment_target(root, &mirror(), THREAD, "1725000000000-1.png", 10).unwrap();
+        assert_eq!(p, root.join(THREAD).join("attachments").join("1725000000000-1.png"));
+    }
+
+    #[test]
+    fn traversal_and_separators_refused() {
+        for bad in ["../x.png", "..\\x.png", "a/b.png", "a\\b.png", "C:x.png", "..", "."] {
+            assert!(attachment_name_ok(bad).is_err(), "{bad}");
+            assert!(attachment_target(Path::new("r"), &mirror(), THREAD, bad, 1).is_err());
+        }
+    }
+
+    #[test]
+    fn bad_names_refused() {
+        for bad in ["", ".hidden.png", "no-extension", "sp ace.png", "ünïcode.png", "x.png\0"] {
+            assert!(attachment_name_ok(bad).is_err(), "{bad:?}");
+        }
+        let long = format!("{}.png", "a".repeat(130));
+        assert!(attachment_name_ok(&long).is_err());
+        assert!(attachment_name_ok("report.final-v2_x.PDF").is_ok());
+    }
+
+    #[test]
+    fn oversize_and_empty_refused() {
+        assert!(attachment_target(Path::new("r"), &mirror(), THREAD, "a.png", ATTACHMENT_CAP).is_ok());
+        assert!(attachment_target(Path::new("r"), &mirror(), THREAD, "a.png", ATTACHMENT_CAP + 1).is_err());
+        assert!(attachment_target(Path::new("r"), &mirror(), THREAD, "a.png", 0).is_err());
+    }
+
+    #[test]
+    fn unknown_thread_refused() {
+        let other = "9999aaaa-0b7d-4c1e-9a55-1234567890ab";
+        let err = attachment_target(Path::new("r"), &mirror(), other, "a.png", 1).unwrap_err();
+        assert!(err.contains("unknown thread"), "{err}");
+        // A malformed id never reaches the mirror lookup.
+        assert!(attachment_target(Path::new("r"), &mirror(), "../x", "a.png", 1).is_err());
+        assert!(attachment_target(Path::new("r"), "not json", THREAD, "a.png", 1).is_err());
+    }
+}
+
 /// ISO-8601 UTC "now" without pulling the chrono crate in for one format:
 /// seconds precision is plenty for an answer stamp.
 fn chrono_like_now_iso() -> String {
@@ -575,8 +732,14 @@ const VIEW_DATA_CAP: u64 = 8 * 1024 * 1024;
 fn thread_working_dir(thread_id: &str) -> Result<std::path::PathBuf, String> {
     let raw = std::fs::read_to_string(threads_path()?)
         .map_err(|e| format!("threads mirror unreadable: {}", e))?;
+    working_dir_from_mirror(&raw, thread_id)
+}
+
+/// The lookup itself, over the mirror's CONTENT — pure, so "unknown thread"
+/// is testable without a disk (the attachment guard below shares it).
+fn working_dir_from_mirror(raw: &str, thread_id: &str) -> Result<std::path::PathBuf, String> {
     let data: serde_json::Value =
-        serde_json::from_str(&raw).map_err(|e| format!("threads mirror unparseable: {}", e))?;
+        serde_json::from_str(raw).map_err(|e| format!("threads mirror unparseable: {}", e))?;
     let threads = data
         .get("threads")
         .and_then(|t| t.as_array())
@@ -1098,6 +1261,58 @@ fn close_surface_window(app_handle: tauri::AppHandle, label: String) -> Result<(
     Ok(())
 }
 
+/// PNG-encode a clipboard image off the hotkey thread and emit it as
+/// `clipboard-paste-image` `{ dataBase64, byteLength }`. The frontend stages it
+/// for the FOCUSED composer only (App.tsx); anywhere else it is dropped, as an
+/// image paste always was. Oversize images are logged and dropped here so a
+/// 4K wallpaper does not cross the bridge just to be refused.
+fn emit_clipboard_image(app: tauri::AppHandle, rgba: Vec<u8>, width: u32, height: u32) {
+    use base64::Engine;
+    std::thread::spawn(move || {
+        if width == 0 || height == 0 || rgba.len() != (width as usize) * (height as usize) * 4 {
+            log::warn!(
+                "Clipboard image has an unexpected shape ({}x{}, {} bytes)",
+                width,
+                height,
+                rgba.len()
+            );
+            return;
+        }
+        let mut png_bytes: Vec<u8> = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png_bytes, width, height);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = match encoder.write_header() {
+                Ok(w) => w,
+                Err(e) => {
+                    log::error!("Clipboard image: png header failed: {}", e);
+                    return;
+                }
+            };
+            if let Err(e) = writer.write_image_data(&rgba) {
+                log::error!("Clipboard image: png encode failed: {}", e);
+                return;
+            }
+        }
+        if png_bytes.len() > ATTACHMENT_CAP {
+            log::warn!("Clipboard image too large to paste ({} bytes)", png_bytes.len());
+            return;
+        }
+        log::debug!(
+            "Clipboard image paste triggered, {}x{}, png bytes={}",
+            width,
+            height,
+            png_bytes.len()
+        );
+        let data_base64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+        let _ = app.emit(
+            "clipboard-paste-image",
+            serde_json::json!({ "dataBase64": data_base64, "byteLength": png_bytes.len() }),
+        );
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app_state = Arc::new(AppState {
@@ -1132,7 +1347,20 @@ pub fn run() {
                             if !text.is_empty() {
                                 log::debug!("Clipboard paste triggered, content length={}", text.len());
                                 let _ = app.emit("clipboard-paste", text);
+                                return;
                             }
+                        }
+                        // No text: an IMAGE (a screenshot) is the other thing
+                        // a clipboard holds (SWIT-59). RegisterHotKey consumed
+                        // the keystroke, so the webview will never see a paste
+                        // event for it — encode it here and hand it over.
+                        if let Ok(image) = app.clipboard().read_image() {
+                            emit_clipboard_image(
+                                app.clone(),
+                                image.rgba().to_vec(),
+                                image.width(),
+                                image.height(),
+                            );
                         }
                     }
                 })
@@ -1292,6 +1520,7 @@ fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         read_view_data,
         write_thread_answer,
         append_convention,
+        save_thread_attachment,
         save_transcript,
         save_scrollback,
         load_scrollback,

@@ -121,6 +121,7 @@ import {
 import { runPromotionPass, promotionPassReason, PROMOTION_POLL_MS } from "./lib/threadPromotion";
 import { parsePageFile, parseAnswersFile, parseInboxFile, mergePage, conventionLine, countUnreadPosts, loadInboxSeen, markInboxSeen, type PageQuestionKind } from "./lib/pageStore";
 import { explorerProjects, registerExplorerActions, quickThreadTarget, sessionRepoOptions } from "./lib/explorer";
+import { consumeDropClaim, DROP_CLAIM_DEFER_MS, stagePastedBase64 } from "./lib/attachments";
 import { isBare } from "./lib/shellMode";
 import { parsePinsFile, pinsForDoc, pinTargetFor, surfacePinTargetFor } from "./lib/pins";
 import { configurePinsIO, getPinsFile } from "./lib/pinsStore";
@@ -2394,24 +2395,63 @@ export default function App() {
     };
   }, [closeConfirm]);
 
-  // Listen for file drop events — paste file paths into the active terminal
+  // The OS-level paste route's IMAGE half (SWIT-59). The global Ctrl+V hotkey
+  // consumes the keystroke before WebView2 sees it, so a screenshot on the
+  // clipboard never reaches the composer as a paste EVENT; lib.rs reads the
+  // clipboard image instead, encodes it as PNG and emits it here. It is staged
+  // ONLY for a composer whose textarea holds focus (`data-composer-session`)
+  // — a terminal cannot take an image, so with focus anywhere else this is a
+  // no-op, exactly as before.
+  useEffect(() => {
+    const unlisten = listen<{ dataBase64: string; byteLength: number }>(
+      "clipboard-paste-image",
+      (event) => {
+        const active = document.activeElement;
+        const sessionId =
+          active instanceof HTMLTextAreaElement ? active.dataset.composerSession : undefined;
+        if (!sessionId) return;
+        const { dataBase64, byteLength } = event.payload;
+        log.debug(`Clipboard image paste received, bytes=${byteLength} session=${sessionId}`);
+        void stagePastedBase64(sessionId, dataBase64, "png", byteLength).then((result) => {
+          if (result.error) {
+            log.error(`Clipboard image paste session=${sessionId}: ${result.error}`);
+            addToast(sessionId, "composer", result.error);
+          }
+        });
+      }
+    );
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [addToast]);
+
+  // Listen for file drop events — paste file paths into the active terminal.
+  // A beat later, not at once: the composer's drop zone sees the SAME drop
+  // through the webview's drag-drop event and CLAIMS it when the cursor was
+  // over a composer (lib/attachments.consumeDropClaim); a claimed drop is a
+  // chip, not a paste, and the order of the two events is not something to
+  // rely on.
   useEffect(() => {
     const unlisten = listen<string[]>("file-drop", (event) => {
       const paths = event.payload;
       if (!paths || paths.length === 0) return;
 
-      // Quote paths containing spaces, join with space separator
-      const formatted = paths
-        .map((p) => (p.includes(" ") ? `"${p}"` : p))
-        .join(" ");
+      setTimeout(() => {
+        if (consumeDropClaim(paths)) return;
 
-      const sessionId = effectiveActiveIdRef.current;
-      if (sessionId) {
-        const instance = getTerminal(sessionId);
-        if (instance) {
-          instance.terminal.paste(formatted);
+        // Quote paths containing spaces, join with space separator
+        const formatted = paths
+          .map((p) => (p.includes(" ") ? `"${p}"` : p))
+          .join(" ");
+
+        const sessionId = effectiveActiveIdRef.current;
+        if (sessionId) {
+          const instance = getTerminal(sessionId);
+          if (instance) {
+            instance.terminal.paste(formatted);
+          }
         }
-      }
+      }, DROP_CLAIM_DEFER_MS);
     });
 
     return () => {

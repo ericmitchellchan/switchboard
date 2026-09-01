@@ -348,3 +348,149 @@ describe("per-session composer state", () => {
     expect(getComposerDraft("s2")).toBe("keep me");
   });
 });
+
+// ── Attachments (SWIT-59) ──────────────────────────────────────────────────
+import {
+  attachmentAgentBlock,
+  attachmentStandInBody,
+  composeMessage,
+  mergeAttachments,
+  basenameOf,
+  extOf,
+  pastedAttachmentFileName,
+  pastedAttachmentLabel,
+  formatAttachmentSize,
+  getComposerAttachments,
+  addComposerAttachments,
+  removeComposerAttachment,
+  clearComposerAttachments,
+} from "./composer";
+
+describe("attachmentAgentBlock — Ky's wording, verbatim", () => {
+  it("is empty for no paths", () => {
+    expect(attachmentAgentBlock([])).toBe("");
+  });
+
+  it("one path: singular, `it`", () => {
+    expect(attachmentAgentBlock(["C:\\a\\shot.png"])).toBe(
+      "\n\n[The user attached 1 file. Use the Read tool to open it — it renders images and PDFs directly; for other formats (Word, Excel, etc.) extract or convert the content first:\n- C:\\a\\shot.png\n]"
+    );
+  });
+
+  it("n paths: plural, `them`, one bullet per path in order", () => {
+    expect(attachmentAgentBlock(["/a.png", "/b.pdf", "/c.xlsx"])).toBe(
+      "\n\n[The user attached 3 files. Use the Read tool to open them — it renders images and PDFs directly; for other formats (Word, Excel, etc.) extract or convert the content first:\n- /a.png\n- /b.pdf\n- /c.xlsx\n]"
+    );
+  });
+});
+
+describe("composeMessage — text + block, and the stand-in body", () => {
+  it("no attachments: the text untouched", () => {
+    expect(composeMessage("hello", [])).toBe("hello");
+    expect(composeMessage("  ", [])).toBe("  ");
+  });
+
+  it("text + attachments: text (trailing blank space dropped) then the block", () => {
+    expect(composeMessage("look at this\n\n", ["/x.png"])).toBe("look at this" + attachmentAgentBlock(["/x.png"]));
+  });
+
+  it("attachments and no words: Ky's stand-in body carries the block", () => {
+    expect(attachmentStandInBody(1)).toBe("(see attached file)");
+    expect(attachmentStandInBody(2)).toBe("(see attached files)");
+    expect(composeMessage("", ["/x.png"])).toBe("(see attached file)" + attachmentAgentBlock(["/x.png"]));
+    expect(composeMessage("  \n", ["/x.png", "/y.png"])).toBe(
+      "(see attached files)" + attachmentAgentBlock(["/x.png", "/y.png"])
+    );
+  });
+
+  it("a send with attachments is ONE bracketed paste with ONE submit", () => {
+    const wire = composeWrite(composeMessage("", ["C:\\a\\shot.png"]));
+    expect(wire.startsWith(PASTE_START)).toBe(true);
+    expect(wire.endsWith(PASTE_END + CR)).toBe(true);
+    expect(wire.slice(PASTE_START.length, -PASTE_END.length - 1)).toBe(
+      "(see attached file)" + attachmentAgentBlock(["C:\\a\\shot.png"]).replace(/\n/g, CR)
+    );
+    // Exactly one CR outside the markers, none of them a submit inside.
+    expect(wire.split(CR).length - 1).toBe(1 + 4);
+    expect(wire.slice(0, -1).includes(ESC + "[201~" + CR)).toBe(false);
+  });
+
+  it("with attachments, a text that is only whitespace still sends", () => {
+    expect(composeWrite(composeMessage("   ", ["/x.png"]))).not.toBe("");
+    expect(composeWrite(composeMessage("   ", []))).toBe("");
+  });
+});
+
+describe("attachment helpers", () => {
+  it("mergeAttachments dedupes by path and keeps identity when nothing changes", () => {
+    const cur = [{ path: "/a", name: "a" }];
+    expect(mergeAttachments(cur, [{ path: "/a", name: "a again" }])).toBe(cur);
+    expect(mergeAttachments(cur, [{ path: "", name: "blank" }])).toBe(cur);
+    expect(mergeAttachments(cur, [{ path: "/b", name: "b" }, { path: "/b", name: "b dup" }])).toEqual([
+      { path: "/a", name: "a" },
+      { path: "/b", name: "b" },
+    ]);
+  });
+
+  it("basenameOf / extOf handle both separators and dotfiles", () => {
+    expect(basenameOf("C:\\Users\\e\\shot.PNG")).toBe("shot.PNG");
+    expect(basenameOf("/tmp/a/b.pdf")).toBe("b.pdf");
+    expect(basenameOf("plain")).toBe("plain");
+    expect(extOf("shot.PNG")).toBe("png");
+    expect(extOf(".bashrc")).toBe("");
+    expect(extOf("noext")).toBe("");
+  });
+
+  it("pastedAttachmentFileName is <ts>-<n>.<ext> in the server's alphabet", () => {
+    expect(pastedAttachmentFileName(1725000000000, 2, "png")).toBe("1725000000000-2.png");
+    expect(pastedAttachmentFileName(1725000000000, 1, "svg+xml")).toBe("1725000000000-1.svgxml");
+    expect(pastedAttachmentFileName(1, 1, "")).toBe("1-1.bin");
+    expect(pastedAttachmentFileName(-5, 0, "PNG")).toBe("0-1.png");
+    expect(pastedAttachmentFileName(1, 1, "../../x")).toBe("1-1.x");
+  });
+
+  it("pastedAttachmentLabel prefers a real name, else pasted[-n].<ext>", () => {
+    expect(pastedAttachmentLabel("report.pdf", "pdf", 1, 1)).toBe("report.pdf");
+    expect(pastedAttachmentLabel("", "png", 1, 1)).toBe("pasted.png");
+    // Chromium names a screenshot `image.png`, which is no name at all.
+    expect(pastedAttachmentLabel("image.png", "png", 2, 3)).toBe("pasted-2.png");
+  });
+
+  it("formatAttachmentSize", () => {
+    expect(formatAttachmentSize(812)).toBe("812 B");
+    expect(formatAttachmentSize(24 * 1024)).toBe("24 KB");
+    expect(formatAttachmentSize(1.3 * 1024 * 1024)).toBe("1.3 MB");
+    expect(formatAttachmentSize(-1)).toBe("");
+  });
+});
+
+describe("staged attachments store — next to the draft, per session", () => {
+  it("starts empty with a stable snapshot", () => {
+    expect(getComposerAttachments("s1")).toEqual([]);
+    expect(getComposerAttachments("s1")).toBe(getComposerAttachments("s2"));
+  });
+
+  it("add dedupes, remove drops one, clear drops all; other sessions untouched", () => {
+    addComposerAttachments("s1", [{ path: "/a", name: "a" }]);
+    addComposerAttachments("s1", [{ path: "/a", name: "a" }, { path: "/b", name: "b" }]);
+    addComposerAttachments("s2", [{ path: "/z", name: "z" }]);
+    expect(getComposerAttachments("s1").map((c) => c.path)).toEqual(["/a", "/b"]);
+    removeComposerAttachment("s1", "/a");
+    expect(getComposerAttachments("s1").map((c) => c.path)).toEqual(["/b"]);
+    removeComposerAttachment("s1", "/nope");
+    expect(getComposerAttachments("s1").map((c) => c.path)).toEqual(["/b"]);
+    clearComposerAttachments("s1");
+    expect(getComposerAttachments("s1")).toEqual([]);
+    expect(getComposerAttachments("s2").map((c) => c.path)).toEqual(["/z"]);
+  });
+
+  it("survives the draft round trip and goes with clearComposerState", () => {
+    setComposerDraft("s1", "half a line");
+    addComposerAttachments("s1", [{ path: "/a", name: "a" }]);
+    expect(getComposerDraft("s1")).toBe("half a line");
+    expect(getComposerAttachments("s1").length).toBe(1);
+    clearComposerState("s1");
+    expect(getComposerAttachments("s1")).toEqual([]);
+    expect(getComposerDraft("s1")).toBe("");
+  });
+});

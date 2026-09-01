@@ -4297,6 +4297,7 @@ dependencies = [
  "base64 0.22.1",
  "dirs 5.0.1",
  "log",
+ "png 0.17.16",
  "portable-pty",
  "serde",
  "serde_json",

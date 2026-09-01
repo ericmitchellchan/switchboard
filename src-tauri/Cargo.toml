@@ -29,6 +29,10 @@ portable-pty = "=0.8.1"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
+# PNG encoding for the OS-level image paste (SWIT-59): the global Ctrl+V
+# hotkey reads the clipboard in Rust, and an image comes back as raw RGBA.
+# Already in the graph through tauri's `image-png`; no new download.
+png = "0.17"
 dirs = "5"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"

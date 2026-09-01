@@ -153,6 +153,19 @@ export async function appendConvention(line: string): Promise<void> {
   return invoke("append_convention", { line });
 }
 
+/** Save PASTED bytes as a thread attachment (SWIT-59):
+ *  `threads/<threadId>/attachments/<name>`, the dir derived server-side from
+ *  the thread id (uuid alphabet only) and the name held to `[A-Za-z0-9._-]`,
+ *  capped at 25 MB. Resolves to the ABSOLUTE path the agent will `Read`.
+ *  Dropped and picked files never come through here — they are paths. */
+export async function saveThreadAttachment(
+  threadId: string,
+  name: string,
+  dataBase64: string
+): Promise<string> {
+  return invoke("save_thread_attachment", { threadId, name, dataBase64 });
+}
+
 /** Prepare a thread's launch (SWIT-49): create its data dir + write the
  *  per-spawn mcp-config pointing claude at Switchboard's page-tool server.
  *  Resolves to the config file's absolute path; a rejection means the caller

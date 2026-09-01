@@ -90,6 +90,111 @@ export function composeWrite(text: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Attachments (SWIT-59)
+// ─────────────────────────────────────────────────────────────────────────────
+// Ky's convention, verbatim: the agent is told to `Read` the attached files.
+// A path is all an agent needs — Read renders images and PDFs directly — so
+// pasted images are saved to the thread's attachments dir and dropped/picked
+// files are staged BY PATH (never copied). The block rides on the composed
+// text and goes through `composeWrite` like any other multi-line message.
+
+export type ComposerAttachment = {
+  /** Absolute path the agent will `Read`. Identity of the chip. */
+  path: string;
+  /** What the chip prints (a pasted screenshot has no real name: `pasted.png`). */
+  name: string;
+  /** Bytes, when known (pasted files always; dropped/picked files never —
+   *  they are paths, and stat-ing them would be a second IPC per chip). */
+  size?: number;
+};
+
+/** The block appended to text SENT to the agent, telling it to Read the
+ *  attached files. Copied from ky-desktop's `useAttachments.attachmentAgentBlock`
+ *  WORD FOR WORD — the two apps must speak one convention. Pure. */
+export function attachmentAgentBlock(paths: string[]): string {
+  if (paths.length === 0) return "";
+  const list = paths.map((p) => `- ${p}`).join("\n");
+  const plural = paths.length === 1 ? "" : "s";
+  const it = paths.length === 1 ? "it" : "them";
+  return `\n\n[The user attached ${paths.length} file${plural}. Use the Read tool to open ${it} — it renders images and PDFs directly; for other formats (Word, Excel, etc.) extract or convert the content first:\n${list}\n]`;
+}
+
+/** Ky's stand-in body when attachments are sent with no words of your own. */
+export function attachmentStandInBody(count: number): string {
+  return count === 1 ? "(see attached file)" : "(see attached files)";
+}
+
+/** What a send is MADE OF: the typed text plus the Read block. No attachments
+ *  → the text untouched. Attachments and no words → the stand-in body carries
+ *  the block, so the message never opens with two blank lines. The result is
+ *  multi-line whenever there is a block, which is exactly what puts it on
+ *  `composeWrite`'s bracketed-paste path: the block is ONE message. */
+export function composeMessage(text: string, paths: readonly string[]): string {
+  if (paths.length === 0) return text;
+  const words = text.trim().length > 0 ? text.replace(/[ \t\n]+$/, "") : attachmentStandInBody(paths.length);
+  return words + attachmentAgentBlock([...paths]);
+}
+
+/** Merge staged attachments, keyed by path — dropping the same file twice, or
+ *  a pasted screenshot re-added, must not produce two chips (and two `- path`
+ *  lines in the block). Returns the SAME array when nothing changes so a
+ *  useSyncExternalStore snapshot stays stable. */
+export function mergeAttachments(
+  current: readonly ComposerAttachment[],
+  incoming: readonly ComposerAttachment[]
+): ComposerAttachment[] {
+  const seen = new Set(current.map((a) => a.path));
+  const fresh = incoming.filter((a) => {
+    if (a.path.length === 0 || seen.has(a.path)) return false;
+    seen.add(a.path);
+    return true;
+  });
+  return fresh.length === 0 ? (current as ComposerAttachment[]) : [...current, ...fresh];
+}
+
+export function basenameOf(p: string): string {
+  const parts = p.split(/[\\/]/);
+  return parts[parts.length - 1] || p;
+}
+
+export function extOf(name: string): string {
+  const i = name.lastIndexOf(".");
+  return i > 0 ? name.slice(i + 1).toLowerCase() : "";
+}
+
+/** The file name a pasted item is SAVED under: `<ts>-<n>.<ext>`, the shape
+ *  lib.rs's `save_thread_attachment` accepts (`[A-Za-z0-9._-]` only). The
+ *  extension is reduced to that alphabet too — a mime subtype like
+ *  `svg+xml` would otherwise be refused server-side. */
+export function pastedAttachmentFileName(stamp: number, index: number, ext: string): string {
+  const safeExt = ext.replace(/[^A-Za-z0-9]/g, "").toLowerCase().slice(0, 8) || "bin";
+  return `${Math.max(0, Math.floor(stamp))}-${Math.max(1, Math.floor(index))}.${safeExt}`;
+}
+
+/** What the CHIP prints for a pasted item: the clipboard's real file name
+ *  when it has one (a copied `report.pdf`), else `pasted.<ext>` — numbered
+ *  only when one paste carried several. */
+export function pastedAttachmentLabel(
+  fileName: string,
+  ext: string,
+  index: number,
+  total: number
+): string {
+  const base = basenameOf(fileName.trim());
+  if (base.length > 0 && base !== "image.png") return base;
+  const safeExt = ext.replace(/[^A-Za-z0-9]/g, "").toLowerCase() || "bin";
+  return total > 1 ? `pasted-${index}.${safeExt}` : `pasted.${safeExt}`;
+}
+
+/** Human size for a chip: `812 B`, `24 KB`, `1.3 MB`. */
+export function formatAttachmentSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // @thread posts (SWIT-52)
 // ─────────────────────────────────────────────────────────────────────────────
 // `@sim-audit re-run the pin check` / `@"markets · Aug 30" look at this` —
@@ -193,7 +298,12 @@ type ComposerState = {
    *  the tree, which unmounts panes that never went away visually). */
   draft: string;
   history: string[];
+  /** Staged attachments (SWIT-59) — next to the draft, for the same reason:
+   *  a chip must survive a tab/thread switch as a half-dictated line does. */
+  attachments: ComposerAttachment[];
 };
+
+const NO_ATTACHMENTS: ComposerAttachment[] = [];
 
 const states = new Map<string, ComposerState>();
 const listeners = new Set<() => void>();
@@ -212,7 +322,7 @@ function subscribeComposerStore(listener: () => void): () => void {
 function stateFor(sessionId: string): ComposerState {
   let s = states.get(sessionId);
   if (!s) {
-    s = { draft: "", history: [] };
+    s = { draft: "", history: [], attachments: NO_ATTACHMENTS };
     states.set(sessionId, s);
   }
   return s;
@@ -277,6 +387,51 @@ export function getSendHistory(sessionId: string): readonly string[] {
 export function recordSend(sessionId: string, text: string): void {
   const s = stateFor(sessionId);
   s.history = pushSendHistory(s.history, text);
+}
+
+export function getComposerAttachments(sessionId: string): readonly ComposerAttachment[] {
+  return states.get(sessionId)?.attachments ?? NO_ATTACHMENTS;
+}
+
+/** Stage attachments for a session (deduped by path). Notifies — unlike the
+ *  draft, a chip is drawn by the store's own hook, and a paste that lands
+ *  while the pane is unmounted must still be there when it comes back. */
+export function addComposerAttachments(
+  sessionId: string,
+  items: readonly ComposerAttachment[]
+): void {
+  const s = stateFor(sessionId);
+  const next = mergeAttachments(s.attachments, items);
+  if (next === s.attachments) return;
+  s.attachments = next;
+  bump();
+}
+
+/** Remove one chip. Drops the RECORD only: a pasted image stays on disk in
+ *  the thread's attachments dir (cheap, and the agent may already have been
+ *  told about it in an earlier send). */
+export function removeComposerAttachment(sessionId: string, path: string): void {
+  const s = states.get(sessionId);
+  if (!s) return;
+  const next = s.attachments.filter((a) => a.path !== path);
+  if (next.length === s.attachments.length) return;
+  s.attachments = next.length === 0 ? NO_ATTACHMENTS : next;
+  bump();
+}
+
+/** Clear every chip — the successful-send path and the discard path alike.
+ *  Files are never deleted here (see removeComposerAttachment). */
+export function clearComposerAttachments(sessionId: string): void {
+  const s = states.get(sessionId);
+  if (!s || s.attachments.length === 0) return;
+  s.attachments = NO_ATTACHMENTS;
+  bump();
+}
+
+/** React hook: this session's staged attachments. The snapshot is the store's
+ *  own array (replaced only on change), so the row re-renders per real change. */
+export function useComposerAttachments(sessionId: string): readonly ComposerAttachment[] {
+  return useSyncExternalStore(subscribeComposerStore, () => getComposerAttachments(sessionId));
 }
 
 /** Drop everything the composer remembers about a session. Called from
