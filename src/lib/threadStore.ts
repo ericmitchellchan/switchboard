@@ -1197,6 +1197,11 @@ export type ThreadActions = {
    *  else the tab's cwd) — open it, and put its title into inline rename.
    *  No dialog, no question. */
   createThreadNow: () => void;
+  /** SWIT-64, the backlog row's `open in thread`: the createThreadNow path
+   *  with the item's project resolved to its repo dir, titled from the item
+   *  text, the item as spawn context, and a `thread` link recorded on the
+   *  item. No dialog, no question. */
+  openBacklogItemInThread: (itemId: string) => void;
   /** Row menu → Delete, behind the ConfirmDialog. There is no unconfirmed
    *  delete action any more (increment E, Decision 3): the record is the only
    *  route back to a conversation, on BOTH surfaces, so the bare `×` that used

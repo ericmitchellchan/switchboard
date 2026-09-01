@@ -10,6 +10,7 @@ import { PulsingDot } from "./PulsingDot";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
 import { tabRepoSuffix } from "../lib/tabLabel";
 import { Icon } from "./icons";
+import { TodosButton } from "./BacklogPanel";
 
 interface TopBarProps {
   route: Route;
@@ -42,6 +43,10 @@ interface TopBarProps {
   /** The active tab has a panel open OR remembers one → the button toggles.
    *  False means it opens the picker. */
   panelToggleAvailable?: boolean;
+  /** SWIT-64 `To-dos · N`: the ACTIVE thread's project (the quick-add tag's
+   *  default) and the registry project keys the tag cycles through. */
+  backlogDefaultProject?: string | null;
+  backlogProjects?: readonly string[];
 }
 
 const DIM: React.CSSProperties = { color: "#52525B" };
@@ -60,6 +65,8 @@ export function TopBar({
   onPanelButton,
   panelOpen = false,
   panelToggleAvailable = false,
+  backlogDefaultProject = null,
+  backlogProjects = [],
 }: TopBarProps) {
   return (
     <div
@@ -137,7 +144,7 @@ export function TopBar({
         <Breadcrumb route={route} activeSession={activeSession} isThread={isThread} onRename={onRename} />
       </div>
 
-      {/* Right actions: ⇄ side · float · panel. */}
+      {/* Right actions: To-dos · ⇄ side · float · panel. */}
       <div
         style={{
           display: "flex",
@@ -148,6 +155,9 @@ export function TopBar({
           flexShrink: 0,
         }}
       >
+        {/* SWIT-64 — Ky's placement: the personal to-do list lives at the
+            right end of the top bar, on every screen. */}
+        <TodosButton defaultProject={backlogDefaultProject} projectOptions={backlogProjects} />
         {panelOpen && onTogglePanelSide && (
           <TextAction
             label={`⇄ ${panelSide === "left" ? "right" : "left"}`}

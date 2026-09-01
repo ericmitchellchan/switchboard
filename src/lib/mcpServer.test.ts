@@ -11,6 +11,7 @@ import { createRequire } from "node:module";
 import { parsePageFile, mergePage } from "./pageStore";
 import { parseViewSpec } from "./viewStore";
 import { parseInboxFile } from "./pageStore";
+import { parseBacklogInbox } from "./backlogStore";
 // Source text of the two loopback predicates, for the byte-identical check.
 import viewStoreSource from "./viewStore.ts?raw";
 import mcpServerSource from "../../src-tauri/resources/mcp/switchboard-mcp.cjs?raw";
@@ -568,5 +569,53 @@ describe("the post tool (SWIT-52)", () => {
     const parsed = parseInboxFile(JSON.stringify({ posts: [post] }));
     expect(parsed).toHaveLength(1);
     expect(parsed[0]).toMatchObject({ id: "p1", from: "sim audit", kind: "request", text: "re-run it" });
+  });
+});
+
+describe("the backlog tool (SWIT-64) — ONE op, an inbox the app drains", () => {
+  const srv = server as unknown as {
+    buildBacklogEntry: (args: Record<string, unknown>, self: string, now: number) => Record<string, unknown>;
+    appendBacklogEntry: (list: unknown, entry: Record<string, unknown>) => unknown[];
+    BACKLOG_TOOL: { name: string; description: string; inputSchema: { properties: Record<string, { enum?: string[] }>; required: string[] } };
+    BACKLOG_INBOX_CAP: number;
+  };
+
+  it("validates op / itemId / kind / ref with sentences the agent can act on", () => {
+    const ok = srv.buildBacklogEntry({ op: "link", itemId: "bmf1x2a01", kind: "ticket", ref: " SWIT-64 " }, "t1", NOW);
+    expect(ok).toMatchObject({ itemId: "bmf1x2a01", kind: "ticket", ref: "SWIT-64", threadId: "t1", at: new Date(NOW).toISOString() });
+    expect(String(ok.id)).toMatch(/^bl/);
+    expect(() => srv.buildBacklogEntry({ op: "unlink", itemId: "a", kind: "ticket", ref: "x" }, "t1", NOW)).toThrow(/`op` must be "link"/);
+    expect(() => srv.buildBacklogEntry({ op: "link", itemId: "../a", kind: "ticket", ref: "x" }, "t1", NOW)).toThrow(/itemId/);
+    expect(() => srv.buildBacklogEntry({ op: "link", itemId: "a", kind: "thread", ref: "x" }, "t1", NOW)).toThrow(/ticket \| spec/);
+    expect(() => srv.buildBacklogEntry({ op: "link", itemId: "a", kind: "spec", ref: "  " }, "t1", NOW)).toThrow(/ref must be a non-empty string/);
+    expect(() => srv.buildBacklogEntry({ op: "link", itemId: "a", kind: "spec", ref: "x".repeat(501) }, "t1", NOW)).toThrow(/too long/);
+  });
+
+  it("the queue file shape: {version, entries[]} appended newest-last, capped, tolerant of junk — and it parses on the app side", () => {
+    const entry = srv.buildBacklogEntry({ op: "link", itemId: "i1", kind: "spec", ref: "switchboard/features/backlog/requirements.md" }, "t1", NOW);
+    expect(srv.appendBacklogEntry(undefined, entry)).toEqual([entry]);
+    expect(srv.appendBacklogEntry([null, "junk", { id: "old", itemId: "i0", kind: "ticket", ref: "SWIT-1" }], entry)).toHaveLength(2);
+    const many = Array.from({ length: srv.BACKLOG_INBOX_CAP + 10 }, (_, i) => ({ id: `e${i}`, itemId: "i1", kind: "ticket", ref: `T-${i}` }));
+    const capped = srv.appendBacklogEntry(many, entry);
+    expect(capped).toHaveLength(srv.BACKLOG_INBOX_CAP);
+    expect(capped[capped.length - 1]).toBe(entry);
+    // ROUND-TRIP: what the server writes is what backlogStore drains.
+    const parsed = parseBacklogInbox(JSON.stringify({ version: 1, entries: [entry] }));
+    expect(parsed).toEqual([{ id: entry.id, itemId: "i1", kind: "spec", ref: "switchboard/features/backlog/requirements.md", threadId: "t1", at: entry.at }]);
+  });
+
+  it("the tool table carries the one-writer contract and the single op", () => {
+    const tool = srv.BACKLOG_TOOL;
+    expect(tool.name).toBe("backlog");
+    expect(tool.inputSchema.properties.op.enum).toEqual(["link"]);
+    expect(tool.inputSchema.properties.kind.enum).toEqual(["ticket", "spec"]);
+    expect(tool.inputSchema.required).toEqual(["op", "itemId", "kind", "ref"]);
+    expect(tool.description).toMatch(/never writes the backlog itself/);
+    expect(tool.description).toMatch(/inbox file the app applies/);
+    expect(tool.description).toMatch(/app alone rewrites backlog\.json/);
+    expect(tool.description).toMatch(/re-sending the same link is harmless/);
+    // The server's env → tool wiring names the inbox path, never backlog.json.
+    expect(mcpServerSource).toContain("SWITCHBOARD_BACKLOG_INBOX");
+    expect(mcpServerSource).not.toMatch(/["'`]backlog\.json["'`]/);
   });
 });

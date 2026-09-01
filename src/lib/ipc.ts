@@ -207,6 +207,24 @@ export async function loadThreads(): Promise<string> {
   return invoke("load_threads");
 }
 
+/** The backlog file (SWIT-64): `%LOCALAPPDATA%/switchboard/backlog.json`,
+ *  fixed path, the app its only writer. Missing = "". */
+export async function readBacklog(): Promise<string> {
+  return invoke("read_backlog");
+}
+
+/** Replace backlog.json — shape-checked + capped in Rust; rejects, never
+ *  repairs. */
+export async function writeBacklog(data: string): Promise<void> {
+  return invoke("write_backlog", { data });
+}
+
+/** TAKE the agent's `backlog-inbox.json` (renamed away, read, deleted — so a
+ *  server append racing the drain lands in a fresh file). "" when none. */
+export async function takeBacklogInbox(): Promise<string> {
+  return invoke("take_backlog_inbox");
+}
+
 /** Ground truth for revive: does claude's transcript for this conversation
  *  exist on disk (~/.claude/projects/<munged-cwd>/<sessionId>.jsonl)? Decides
  *  --resume vs --session-id; the chatStarted flag is a UI hint only. */

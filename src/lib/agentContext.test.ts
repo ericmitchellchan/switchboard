@@ -20,6 +20,7 @@ import {
   DECISION_LABELS_NAMED,
   DECISION_LABEL_MAX,
   artifactRef,
+  buildBacklogItemLine,
   buildPageContractLine,
   buildSendReference,
   buildSpawnContext,
@@ -562,5 +563,46 @@ describe("anchored pin references + surface spawn context (3d)", () => {
     expect(line?.split("\n")).toHaveLength(1);
     // Zero pins still names the file — the agent needs it to ADD one.
     expect(buildSpawnContext(SURFACE, 0, { kbRoot: KB_ROOT })).toContain(`pins file ${KB_ROOT}/lodestar/surface-pins.json`);
+  });
+});
+
+// ─── SWIT-64: the backlog-item sentence ──────────────────────────────────────
+
+describe("backlog item spawn context (SWIT-64)", () => {
+  const ITEM = { id: "bmf1x2a01", text: "look at duckdb for the tennis table" };
+
+  it("stands ALONE when the tab has no panel, names the id, frames the text, points at the tool", () => {
+    const line = buildSpawnContext(null, 0, { backlogItem: ITEM });
+    expect(line).toBe(
+      "You were opened from backlog item bmf1x2a01: “look at duckdb for the tennis table”. Start there. " +
+        "If you create a ticket or a spec for it, record it with the backlog tool (op link, itemId bmf1x2a01)."
+    );
+    expect(buildBacklogItemLine(ITEM)).toBe(line);
+  });
+
+  it("rides AFTER the panel clause when there is one; no item → the panel line is unchanged", () => {
+    const withItem = buildSpawnContext(DOC, 2, { kbRoot: KB_ROOT, backlogItem: ITEM }) as string;
+    const without = buildSpawnContext(DOC, 2, { kbRoot: KB_ROOT }) as string;
+    expect(withItem.startsWith(without)).toBe(true);
+    expect(withItem).toContain(" You were opened from backlog item bmf1x2a01");
+    expect(buildSpawnContext(DOC, 2, { kbRoot: KB_ROOT, backlogItem: null })).toBe(without);
+    expect(withItem.split("\n")).toHaveLength(1);
+  });
+
+  it("is SANITIZED like every typed line: quotes, metachars, newlines and a bad id cannot break out", () => {
+    const line = buildSpawnContext(null, 0, {
+      backlogItem: { id: "x1", text: 'rm -rf "$HOME"\n`whoami` %PATH% \\ ok' },
+    }) as string;
+    expect(line).not.toMatch(/["\\$%`\n\r]/);
+    expect(line).toContain("“rm -rf HOME whoami PATH ok”");
+    // An id that is not id-alphabet is dropped, and with it the sentence —
+    // a link instruction naming a fake id would send the agent nowhere.
+    expect(buildSpawnContext(null, 0, { backlogItem: { id: "../x y", text: "t" } })).toBeNull();
+    expect(buildSpawnContext(null, 0, { backlogItem: { id: "ok", text: "   " } })).toBeNull();
+    // Long text is capped by code point with an ellipsis; the tool clause survives.
+    const long = buildSpawnContext(null, 0, { backlogItem: { id: "ok", text: "é".repeat(2000) } }) as string;
+    expect(long).toContain("…”. Start there.");
+    expect(long).toContain("(op link, itemId ok)");
+    expect(Array.from(long).length).toBeLessThanOrEqual(SPAWN_CONTEXT_MAX);
   });
 });

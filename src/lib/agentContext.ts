@@ -149,7 +149,40 @@ export type RefOptions = {
    *  Without it a `page` artifact has no ref — same degrade rule as the
    *  scrollback root. */
   threadsRoot?: string | null;
+  /** SWIT-64: the backlog item this thread was opened from (looked up by the
+   *  item's `thread` link at EVERY spawn, so a revive still carries it). Adds
+   *  one sentence to the spawn one-liner — after the panel clause, or alone
+   *  when the tab has no panel. */
+  backlogItem?: BacklogItemContext | null;
 };
+
+/** What the spawn line needs about a backlog item: its id (so the agent can
+ *  `backlog link` it) and its text. */
+export type BacklogItemContext = { id: string; text: string };
+
+/** Cap on the item text inside the spawn sentence — an item is a thought,
+ *  not a brief; the id is what makes it findable. */
+export const BACKLOG_ITEM_TEXT_MAX = 300;
+
+/** SWIT-64: the sentence a thread opened from a backlog item boots with. The
+ *  item text is framed in TYPOGRAPHIC quotes: the whole line is sanitized
+ *  once more at the launch seam and straight quotes would be stripped there
+ *  (they would close the flag's argument), while `“ ”` are inert in a
+ *  double-quoted shell argument and read as quotes to the agent. Names the
+ *  item ID so the agent can record the ticket/spec it creates with the
+ *  `backlog` tool. Empty when the item has no usable text or id. */
+export function buildBacklogItemLine(item: BacklogItemContext | null | undefined): string {
+  if (!item) return "";
+  // The id is REFUSED, not cleaned, when it is not id-alphabet (backlogStore's
+  // rule): a link instruction naming a mangled id would send the agent nowhere.
+  const id = typeof item.id === "string" ? item.id : "";
+  const text = sanitizeForTypedLine(item.text ?? "", BACKLOG_ITEM_TEXT_MAX);
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id) || text.length === 0) return "";
+  return (
+    `You were opened from backlog item ${id}: “${text}”. Start there. ` +
+    `If you create a ticket or a spec for it, record it with the backlog tool (op link, itemId ${id}).`
+  );
+}
 
 /** Where a session's transcript is mirrored, or `""` when the root is unknown.
  *  The file is written by workspace.saveAllScrollbacks (periodically, and
@@ -283,6 +316,22 @@ export function buildSpawnContext(
   artifact: Artifact | null,
   pinCount: number,
   opts: RefOptions = {}
+): string | null {
+  // SWIT-64: the backlog sentence rides AFTER the panel clause (the panel is
+  // what is on screen; the item is why the thread exists) and stands alone
+  // when there is no panel. The join is re-sanitized as a whole so the cap
+  // holds for the assembled line.
+  const panel = buildPanelSpawnContext(artifact, pinCount, opts);
+  const backlog = buildBacklogItemLine(opts.backlogItem);
+  if (backlog.length === 0) return panel;
+  return sanitizeForTypedLine(panel ? `${panel} ${backlog}` : backlog, SPAWN_CONTEXT_MAX);
+}
+
+/** The panel half of the spawn one-liner (everything before SWIT-64). */
+function buildPanelSpawnContext(
+  artifact: Artifact | null,
+  pinCount: number,
+  opts: RefOptions
 ): string | null {
   if (!artifact) return null;
   // A QUESTION tab (SWIT-51) has its own sentence — Ky's, near-verbatim: the

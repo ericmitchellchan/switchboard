@@ -20,7 +20,7 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, listThreadViews, readThreadFile, writeThreadAnswer, appendConvention, writeThreadPost, saveTranscript } from "./lib/ipc";
+import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, listThreadViews, readThreadFile, writeThreadAnswer, appendConvention, writeThreadPost, saveTranscript, readBacklog, writeBacklog, takeBacklogInbox } from "./lib/ipc";
 import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty, isSessionDirty, serializeForPip, plainTextTerminal, setTerminalScreenVisible } from "./lib/terminal";
 import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing, sendPipHost } from "./lib/pipBridge";
 import { bumpSessionGeneration, addSessionInputListener, getSessionGeneration } from "./lib/terminalRegistry";
@@ -120,7 +120,17 @@ import {
 } from "./lib/agentContext";
 import { runPromotionPass, promotionPassReason, PROMOTION_POLL_MS } from "./lib/threadPromotion";
 import { parsePageFile, parseAnswersFile, parseInboxFile, mergePage, conventionLine, countUnreadPosts, loadInboxSeen, markInboxSeen, type PageQuestionKind } from "./lib/pageStore";
-import { explorerProjects, registerExplorerActions, quickThreadTarget, sessionRepoOptions } from "./lib/explorer";
+import { explorerProjects, registerExplorerActions, quickThreadTarget, sessionRepoOptions, useSessionRepos, projectKeyForDir } from "./lib/explorer";
+import {
+  configureBacklogIO,
+  initBacklog,
+  drainBacklogInbox,
+  flushBacklogWrites,
+  backlogAddLink,
+  backlogItemForThread,
+  backlogThreadTitle,
+  getBacklogItems,
+} from "./lib/backlogStore";
 import { consumeDropClaim, DROP_CLAIM_DEFER_MS, stagePastedBase64 } from "./lib/attachments";
 import { isBare } from "./lib/shellMode";
 import { parsePinsFile, pinsForDoc, pinTargetFor, surfacePinTargetFor } from "./lib/pins";
@@ -157,6 +167,9 @@ import "@xterm/xterm/css/xterm.css";
 // too late). The store owns sharing + scheduling; these are the only two file
 // operations it performs.
 configurePinsIO({ read: kbReadDoc, write: kbWriteDoc });
+// SWIT-64: the backlog's three IPC calls — the app is backlog.json's only
+// writer; the take is how the agent's inbox reaches it.
+configureBacklogIO({ read: readBacklog, write: writeBacklog, takeInbox: takeBacklogInbox });
 
 // SWIT-47: the panel is per-THREAD. panelStore resolves a session to its
 // thread through this injected lookup (it must not import threadStore); a
@@ -213,9 +226,14 @@ function waitForSessionShellReady(sessionId: string): Promise<void> {
 //
 // Never throws and never blocks the launch: a missing/unreadable sidecar just
 // means zero pins.
-async function resolveSpawnContext(sessionId: string): Promise<string | null> {
+async function resolveSpawnContext(sessionId: string, threadId: string): Promise<string | null> {
   const artifact = artifactFor(sessionId);
-  if (!artifact) return null;
+  // SWIT-64: the backlog item this thread was opened from, found by the
+  // item's `thread` link at EVERY spawn (a revive still carries it). With no
+  // panel the sentence stands alone; with one it follows the panel clause.
+  const item = backlogItemForThread(threadId);
+  const backlogItem = item ? { id: item.id, text: item.text } : null;
+  if (!artifact) return buildSpawnContext(null, 0, { backlogItem });
   let pinCount = 0;
   // Both FILE kinds can carry pins now: a KB doc's sidecar sits next to it, a
   // repo file's is mirrored into the hidden `_repo-pins/` KB tree. pinTargetFor
@@ -231,6 +249,7 @@ async function resolveSpawnContext(sessionId: string): Promise<string | null> {
     return buildSpawnContext(artifact, 0, {
       ...refOptions(),
       sessionName: artifactShortTitle(artifact),
+      backlogItem,
     });
   }
   if (artifact.kind === "kb-doc" || artifact.kind === "repo-file" || artifact.kind === "surface") {
@@ -260,6 +279,7 @@ async function resolveSpawnContext(sessionId: string): Promise<string | null> {
     // A surface's anchor vocabulary is the PAGE's (registry pinHint).
     anchorHint:
       artifact.kind === "surface" ? (findSurface(artifact.project, artifact.page)?.pinHint ?? null) : null,
+    backlogItem,
   });
 }
 
@@ -318,6 +338,24 @@ export default function App() {
     // mutation lands, so `promote to tab` can release ownership and switch to
     // the promoted session in the same breath.
   } = useSessions(useCallback((s: Session) => !isPanelOwnedSession(s.id), []));
+
+  // SWIT-64: what the top bar's To-dos needs — the registry's live project
+  // keys (the tag chip's cycle) and the ACTIVE thread's project (the quick-add
+  // default). The registry fetch is the SAME hook both repo dialogs use; an
+  // unanswered registry degrades to no tags, never to a blocked add.
+  const sessionRepos = useSessionRepos(config.repos);
+  const backlogProjects = useMemo(
+    () => (sessionRepos.projects ?? []).filter((p) => p.status !== "archived").map((p) => p.key),
+    [sessionRepos.projects]
+  );
+  const backlogDefaultProject = useMemo(() => {
+    const thread = activeSessionId ? findThreadBySessionId(activeSessionId) : undefined;
+    const dir = thread?.workingDir ?? sessionDirFor(activeSessionId);
+    return dir ? projectKeyForDir(sessionRepos.projects ?? [], dir) : null;
+    // sessions: a promotion binds a thread to the active tab without changing
+    // activeSessionId.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSessionId, sessions, sessionRepos.projects]);
 
   // Sessions the TAB BAR and the PANE TREE may show: everything the panel does
   // not own. This is the load-bearing half of the one-live-view invariant —
@@ -798,7 +836,7 @@ export default function App() {
       // carries current context and a failure degrades to no flag at all.
       let panelContext: string | null = null;
       try {
-        panelContext = await resolveSpawnContext(sessionId);
+        panelContext = await resolveSpawnContext(sessionId, threadId);
       } catch (err) {
         log.warn(`Panel context unavailable for thread id=${threadId}: ${err}`);
       }
@@ -867,6 +905,10 @@ export default function App() {
         /** SWIT-56, the header `+`: once the thread is open, put its title
          *  into inline rename in the rail. */
         renameOnCreate?: boolean;
+        /** SWIT-64: the backlog item this thread is opened from. The item
+         *  gets a `thread` link BEFORE the launch, because the spawn context
+         *  finds the item BY that link (re-derived at every spawn). */
+        backlogItemId?: string;
       }
     ) => {
       setNewThreadDialogOpen(false);
@@ -874,6 +916,7 @@ export default function App() {
       // default now belongs to PROMOTED threads only (threadStore.NEW_THREAD_TITLE).
       const finalTitle = explicitThreadTitle(title);
       const thread = createThreadRecord({ title: finalTitle, workingDir });
+      if (opts?.backlogItemId) backlogAddLink(opts.backlogItemId, { kind: "thread", ref: thread.id });
       // Same re-entrancy gate as handleReviveThread, taken SYNCHRONOUSLY
       // before the first await: the row renders as soon as the record exists,
       // but sessionId stays null until the create below resolves — clicking
@@ -970,6 +1013,53 @@ export default function App() {
       creatingThreadRef.current = false;
     }
   }, [config.repos, handleCreateThread]);
+
+  // SWIT-64 — a backlog row's `open in thread`: the SAME direct-create path
+  // as the header `+`, with the target chosen by the ITEM. Its project tag
+  // resolves to that registry project's repo (the merged registry+config list
+  // Ctrl+T offers, so the tab prints with the repo's identity); an untagged
+  // item — "just a thought" — takes the `+` rule's target (the active
+  // thread's dir, else the last repo, else the tab's cwd / home). Titled from
+  // the item text; the item gets a `thread` link before the launch, which is
+  // how the spawn line knows the item (resolveSpawnContext). One create at a
+  // time, same gate as the `+`.
+  const handleOpenBacklogItemInThread = useCallback(
+    async (itemId: string) => {
+      const item = getBacklogItems().find((i) => i.id === itemId);
+      if (!item || creatingThreadRef.current) return;
+      creatingThreadRef.current = true;
+      try {
+        let projects: Awaited<ReturnType<typeof explorerProjects>> | null = null;
+        try {
+          projects = await explorerProjects();
+        } catch {
+          projects = null;
+        }
+        const options = sessionRepoOptions(projects, config.repos);
+        const title = backlogThreadTitle(item.text);
+        const tagged = item.project
+          ? options.find((o) => !o.archived && (o.name === item.project || o.name.startsWith(`${item.project}/`)))
+          : undefined;
+        if (tagged) {
+          await handleCreateThread(tagged.name, tagged.path, tagged.color, tagged.group, title, { backlogItemId: itemId });
+          return;
+        }
+        const known = quickCreateWorkingDir(getThreads(), activeIdRef.current);
+        const dir = known ?? quickThreadTarget(projects, sessionDirFor(getActiveTabSession()), homeDirRef.current);
+        const path = typeof dir === "string" ? dir : dir.path;
+        const option = options.find((o) => sameWorkingDir(o.path, path));
+        if (option) {
+          await handleCreateThread(option.name, option.path, option.color, option.group, title, { backlogItemId: itemId });
+          return;
+        }
+        const project = typeof dir === "string" ? quickThreadTarget(projects, dir, "").project : dir.project;
+        await handleCreateThread(project, path, undefined, undefined, title, { backlogItemId: itemId });
+      } finally {
+        creatingThreadRef.current = false;
+      }
+    },
+    [config.repos, handleCreateThread]
+  );
 
   // Revive a dead thread: get a live shell (reuse the bound tab when one
   // exists — restart it if its PTY exited — else spawn a fresh session in
@@ -1193,6 +1283,7 @@ export default function App() {
       reviveThread: (id) => void handleReviveThread(id),
       newThread: () => setNewThreadDialogOpen(true),
       createThreadNow: () => void handleCreateThreadNow(),
+      openBacklogItemInThread: (itemId) => void handleOpenBacklogItemInThread(itemId),
       confirmDeleteThread: handleConfirmDeleteThread,
       renameThread: handleRenameThread,
       setThreadArchived: handleSetThreadArchived,
@@ -1204,6 +1295,7 @@ export default function App() {
     handleReviveThread,
     handleConfirmDeleteThread,
     handleCreateThreadNow,
+    handleOpenBacklogItemInThread,
     handleRenameThread,
     handleSetThreadArchived,
     handlePostToThread,
@@ -1228,6 +1320,9 @@ export default function App() {
       if (busy) return;
       busy = true;
       try {
+        // SWIT-64: the agent's backlog inbox rides the same pass — one take,
+        // folded into backlog.json by the app (the file's only writer).
+        await drainBacklogInbox();
         const threads = activeThreads(getThreads());
         const unread: Record<string, number> = {};
         for (const t of threads) {
@@ -1770,6 +1865,9 @@ export default function App() {
     threadsRoot()
       .then(setThreadsRootForContext)
       .catch((err) => log.warn(`threads_root unavailable — pages stay unreferenceable: ${err}`));
+    // SWIT-64: the backlog, loaded once. A failed read leaves the store
+    // unloaded — no write can then clobber a file we could not read.
+    void initBacklog();
   }, []);
 
   // T8 seam 2 — send-to-thread. TYPES the reference into the terminal and
@@ -2672,6 +2770,9 @@ export default function App() {
       // so the 400ms debounce can never swallow the last few keystrokes on the
       // way out (increment G, acceptance 6). An F5 reload lands here too.
       flushDrafts();
+      // SWIT-64: an owed backlog write goes out now (IPC, fire-and-forget —
+      // the 400ms debounce must not swallow the last edit on the way out).
+      void flushBacklogWrites();
     };
 
     window.addEventListener("beforeunload", handleBeforeUnload);
@@ -2842,6 +2943,11 @@ export default function App() {
         onPanelButton={activeSessionId ? handlePanelButton : undefined}
         panelOpen={activePanelIdentity !== ""}
         panelToggleAvailable={panelToggleAvailable}
+        // SWIT-64: quick-add defaults to the ACTIVE thread's project (its
+        // working dir matched against the registry); the tag cycles the
+        // registry's live project keys.
+        backlogDefaultProject={backlogDefaultProject}
+        backlogProjects={backlogProjects}
       />
 
       {newSessionDialogOpen && repoPickerAvailable && (
@@ -3059,7 +3165,7 @@ export default function App() {
             }}
           >
             <ScreenErrorBoundary resetKey="home">
-              <Home active={route.screen === "home"} />
+              <Home active={route.screen === "home"} backlogProjects={backlogProjects} />
             </ScreenErrorBoundary>
           </div>
         )}

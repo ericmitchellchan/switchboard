@@ -9,7 +9,9 @@
 // one file shipped as a plain Tauri resource. Runs on any Node ≥ 18.
 //
 // ONE WRITER, ONE FILE: this process is the SOLE writer of its thread's
-// page.json (the app writes answers.json / inbox.json; the rendered page is
+// page.json, and (SWIT-64) an APPENDER to the app-wide backlog-inbox.json —
+// never of backlog.json, which the app alone rewrites after draining the
+// inbox (the app writes answers.json / inbox.json; the rendered page is
 // a merge — see src/lib/pageStore.ts, whose parser this file's shapes MUST
 // round-trip through; the vitest suite asserts exactly that). Thread identity
 // arrives by ENV (SWITCHBOARD_THREAD_DIR), so tools carry no thread-id param
@@ -729,6 +731,94 @@ const POST_TOOL = {
   },
 };
 
+// ── Backlog links (SWIT-64) ──────────────────────────────────────────────────
+// The agent NEVER writes backlog.json — the app is that file's only writer.
+// What a thread working a backlog item may do is RECORD the ticket key or
+// spec path it created, and it does that by appending to an INBOX file the
+// app drains on its 5s pass (take = rename away, so an append racing the
+// drain lands in a fresh inbox; a re-emitted entry is folded idempotently —
+// links are a set per item). One writer per file: this server appends to
+// backlog-inbox.json; the app rewrites backlog.json. The inbox path arrives
+// by ENV like everything else here.
+
+const BACKLOG_ITEM_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const BACKLOG_LINK_KINDS = ["ticket", "spec"];
+const BACKLOG_REF_CAP = 500;
+const BACKLOG_INBOX_CAP = 200;
+
+/** Validate + build one inbox entry. Pure; throws OpError with a sentence. */
+function buildBacklogEntry(args, selfThreadId, now) {
+  if (args.op !== "link") throw new OpError("`op` must be \"link\"");
+  const itemId = String(args.itemId || "").trim();
+  if (!BACKLOG_ITEM_ID_RE.test(itemId)) {
+    throw new OpError("`itemId` must be the backlog item's id (letters, digits, - and _; ≤ 64) — it is in your spawn context");
+  }
+  const kind = args.kind;
+  if (!BACKLOG_LINK_KINDS.includes(kind)) {
+    throw new OpError(`\`kind\` must be one of ${BACKLOG_LINK_KINDS.join(" | ")}`);
+  }
+  const ref = text(args.ref, "ref");
+  if (ref.length > BACKLOG_REF_CAP) {
+    throw new OpError(`ref too long (cap ${BACKLOG_REF_CAP}) — a ticket key or a KB path`);
+  }
+  return {
+    id: `bl${now.toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+    itemId,
+    kind,
+    ref,
+    threadId: selfThreadId || "",
+    at: new Date(now).toISOString(),
+  };
+}
+
+/** Append to the raw inbox list (tolerant of garbage), newest kept, capped. */
+function appendBacklogEntry(list, entry) {
+  const entries = Array.isArray(list) ? list.filter((e) => e && typeof e === "object") : [];
+  return [...entries, entry].slice(-BACKLOG_INBOX_CAP);
+}
+
+function performBacklogOp(env, args, now) {
+  const { backlogInboxPath, selfThreadId } = env;
+  if (!backlogInboxPath) throw new OpError("the backlog is not wired in this session");
+  const entry = buildBacklogEntry(args, selfThreadId, now);
+  let existing = [];
+  try {
+    const parsed = JSON.parse(fs.readFileSync(backlogInboxPath, "utf-8"));
+    existing = Array.isArray(parsed) ? parsed : Array.isArray(parsed.entries) ? parsed.entries : [];
+  } catch {
+    // no inbox yet
+  }
+  const entries = appendBacklogEntry(existing, entry);
+  fs.mkdirSync(path.dirname(backlogInboxPath), { recursive: true });
+  const tmp = `${backlogInboxPath}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ version: 1, entries }, null, 2));
+  fs.renameSync(tmp, backlogInboxPath);
+  return {
+    message: `Queued: backlog item ${entry.itemId} → ${entry.kind} ${entry.ref}. The app applies it within a few seconds; the item's stage moves to ${entry.kind} if it was still a plain backlog item.`,
+  };
+}
+
+const BACKLOG_TOOL = {
+  name: "backlog",
+  description:
+    "Record that a BACKLOG ITEM now has a ticket or a spec. Use it ONLY when this thread was " +
+    "opened from a backlog item (your spawn context names the item id) and you have actually " +
+    "created the ticket (a Linear key like SWIT-64 or its URL) or the spec (a KB path). One op: " +
+    "link {itemId, kind: ticket | spec, ref}. CONTRACT: this tool never writes the backlog " +
+    "itself — it queues the link in an inbox file the app applies on its next pass and the " +
+    "app alone rewrites backlog.json; re-sending the same link is harmless.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      op: { type: "string", enum: ["link"] },
+      itemId: { type: "string", description: "The backlog item's id, from your spawn context." },
+      kind: { type: "string", enum: BACKLOG_LINK_KINDS, description: "ticket = a tracker issue; spec = a KB document." },
+      ref: { type: "string", description: "The ticket key/URL or the spec's KB-relative path." },
+    },
+    required: ["op", "itemId", "kind", "ref"],
+  },
+};
+
 // ── The tool table (the behavioural contract lives HERE) ─────────────────────
 
 const PAGE_TOOL = {
@@ -892,12 +982,12 @@ function serve(threadDir) {
         return;
       }
       if (method === "tools/list") {
-        respond({ jsonrpc: "2.0", id, result: { tools: [PAGE_TOOL, VIEW_TOOL, POST_TOOL] } });
+        respond({ jsonrpc: "2.0", id, result: { tools: [PAGE_TOOL, VIEW_TOOL, POST_TOOL, BACKLOG_TOOL] } });
         return;
       }
       if (method === "tools/call") {
         const name = params && params.name;
-        if (name !== "page" && name !== "view" && name !== "post") {
+        if (name !== "page" && name !== "view" && name !== "post" && name !== "backlog") {
           respond({
             jsonrpc: "2.0",
             id,
@@ -910,6 +1000,15 @@ function serve(threadDir) {
           const message =
             name === "view"
               ? performViewOp(threadDir, args, Date.now()).message
+              : name === "backlog"
+                ? performBacklogOp(
+                    {
+                      backlogInboxPath: process.env.SWITCHBOARD_BACKLOG_INBOX,
+                      selfThreadId: process.env.SWITCHBOARD_THREAD_ID,
+                    },
+                    args,
+                    Date.now()
+                  ).message
               : name === "post"
                 ? performPostOp(
                     {
@@ -975,6 +1074,11 @@ module.exports = {
   resolvePostTarget,
   appendPost,
   performPostOp,
+  buildBacklogEntry,
+  appendBacklogEntry,
+  performBacklogOp,
+  BACKLOG_TOOL,
+  BACKLOG_INBOX_CAP,
   POST_TOOL,
   PAGE_TOOL,
   VIEW_TOOL,

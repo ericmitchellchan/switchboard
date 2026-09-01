@@ -855,6 +855,10 @@ async fn prepare_thread_launch(app: tauri::AppHandle, thread_id: String) -> Resu
                     // (to resolve a title to a thread id, read-only).
                     "SWITCHBOARD_THREADS_ROOT": threads_data_dir()?.to_string_lossy(),
                     "SWITCHBOARD_THREADS_JSON": threads_path()?.to_string_lossy(),
+                    // SWIT-64: the `backlog` tool's ONE write target — the
+                    // inbox the app drains. backlog.json itself is never
+                    // handed to the server.
+                    "SWITCHBOARD_BACKLOG_INBOX": backlog_inbox_path()?.to_string_lossy(),
                 }
             }
         }
@@ -917,6 +921,255 @@ async fn load_threads() -> Result<String, String> {
             log::error!("Failed to load threads.json: {}", e);
             Err(e.to_string())
         }
+    }
+}
+
+// ── Backlog (SWIT-64) ────────────────────────────────────────────────────────
+// `backlog.json` sits beside `threads.json` under the same identity-scoped
+// data dir (a `.dev` build keeps its own backlog), and the APP is its ONLY
+// writer: two narrow commands, a FIXED path, and a shape check on the way in
+// so a hand-edited or runaway payload never lands. The agent's `backlog` MCP
+// tool never touches this file — it appends to `backlog-inbox.json`, which
+// the app DRAINS (take = rename away + read + delete, so an append that
+// races the drain lands in a fresh inbox rather than being lost) and folds
+// into backlog.json on its 5s pass. One writer per file, both files.
+//
+// Caps mirror `src/lib/backlogStore.ts` — change one, change the other.
+
+const BACKLOG_ITEM_CAP: usize = 500;
+/// Characters, not bytes: the frontend counts code points.
+const BACKLOG_TEXT_CAP: usize = 500;
+const BACKLOG_LINK_CAP: usize = 8;
+const BACKLOG_ID_MAX: usize = 64;
+const BACKLOG_REF_CAP: usize = 500;
+const BACKLOG_PROJECT_CAP: usize = 64;
+const BACKLOG_STAGES: [&str; 4] = ["backlog", "ticket", "spec", "done"];
+const BACKLOG_LINK_KINDS: [&str; 3] = ["ticket", "spec", "thread"];
+/// Bytes; a JSON document this size holds the item cap several times over.
+const BACKLOG_BYTES_CAP: usize = 2 * 1024 * 1024;
+
+fn backlog_path() -> Result<std::path::PathBuf, String> {
+    let base = dirs::data_local_dir().ok_or("Cannot resolve local data dir")?;
+    Ok(base.join(data_dir_name()).join("backlog.json"))
+}
+
+fn backlog_inbox_path() -> Result<std::path::PathBuf, String> {
+    let base = dirs::data_local_dir().ok_or("Cannot resolve local data dir")?;
+    Ok(base.join(data_dir_name()).join("backlog-inbox.json"))
+}
+
+fn backlog_id_ok(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= BACKLOG_ID_MAX
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// The SHAPE gate for `write_backlog`, pure over the raw text so the tests
+/// need no data dir. Refuses, never repairs: the frontend's `parseBacklog`
+/// already tolerates and drops bad fields on the way IN, so anything that
+/// reaches this command malformed is a caller bug.
+fn validate_backlog(raw: &str) -> Result<(), String> {
+    if raw.len() > BACKLOG_BYTES_CAP {
+        return Err(format!("backlog too large (cap {} bytes)", BACKLOG_BYTES_CAP));
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("backlog is not JSON: {}", e))?;
+    let obj = v.as_object().ok_or("backlog must be an object")?;
+    if obj.get("version").and_then(|x| x.as_u64()) != Some(1) {
+        return Err("backlog version must be 1".into());
+    }
+    let items = obj
+        .get("items")
+        .and_then(|x| x.as_array())
+        .ok_or("backlog.items must be an array")?;
+    if items.len() > BACKLOG_ITEM_CAP {
+        return Err(format!("too many backlog items (cap {})", BACKLOG_ITEM_CAP));
+    }
+    let mut ids = std::collections::HashSet::new();
+    for item in items {
+        let it = item.as_object().ok_or("backlog item must be an object")?;
+        let id = it.get("id").and_then(|x| x.as_str()).ok_or("backlog item needs an id")?;
+        if !backlog_id_ok(id) {
+            return Err(format!("invalid backlog item id {:?}", id));
+        }
+        if !ids.insert(id.to_string()) {
+            return Err(format!("duplicate backlog item id {:?}", id));
+        }
+        let text = it.get("text").and_then(|x| x.as_str()).ok_or("backlog item needs text")?;
+        let chars = text.chars().count();
+        if text.trim().is_empty() || chars > BACKLOG_TEXT_CAP {
+            return Err(format!("backlog item text must be 1..={} chars", BACKLOG_TEXT_CAP));
+        }
+        let stage = it.get("stage").and_then(|x| x.as_str()).ok_or("backlog item needs a stage")?;
+        if !BACKLOG_STAGES.contains(&stage) {
+            return Err(format!("invalid backlog stage {:?}", stage));
+        }
+        match it.get("project") {
+            None | Some(serde_json::Value::Null) => {}
+            Some(serde_json::Value::String(p)) => {
+                if p.chars().count() > BACKLOG_PROJECT_CAP {
+                    return Err("backlog project tag too long".into());
+                }
+            }
+            Some(_) => return Err("backlog project must be a string or null".into()),
+        }
+        let links = it
+            .get("links")
+            .and_then(|x| x.as_array())
+            .ok_or("backlog item needs a links array")?;
+        if links.len() > BACKLOG_LINK_CAP {
+            return Err(format!("too many links on one item (cap {})", BACKLOG_LINK_CAP));
+        }
+        for link in links {
+            let l = link.as_object().ok_or("backlog link must be an object")?;
+            let kind = l.get("kind").and_then(|x| x.as_str()).ok_or("backlog link needs a kind")?;
+            if !BACKLOG_LINK_KINDS.contains(&kind) {
+                return Err(format!("invalid backlog link kind {:?}", kind));
+            }
+            let r = l.get("ref").and_then(|x| x.as_str()).ok_or("backlog link needs a ref")?;
+            if r.trim().is_empty() || r.chars().count() > BACKLOG_REF_CAP {
+                return Err(format!("backlog link ref must be 1..={} chars", BACKLOG_REF_CAP));
+            }
+        }
+        for stamp in ["createdAt", "updatedAt"] {
+            if !it.get(stamp).map(|x| x.is_number()).unwrap_or(false) {
+                return Err(format!("backlog item needs a numeric {}", stamp));
+            }
+        }
+    }
+    Ok(())
+}
+
+static BACKLOG_SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The backlog file's text; missing = "" (no backlog yet is the ordinary
+/// first state, and the frontend's parse treats "" as empty).
+#[tauri::command]
+async fn read_backlog() -> Result<String, String> {
+    match std::fs::read_to_string(backlog_path()?) {
+        Ok(content) => Ok(content),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => {
+            log::error!("Failed to read backlog.json: {}", e);
+            Err(e.to_string())
+        }
+    }
+}
+
+/// Replace backlog.json — shape-checked, tmp + rename under a lock (the
+/// threads.json posture). The path is fixed; nothing about it is client data.
+#[tauri::command]
+async fn write_backlog(data: String) -> Result<(), String> {
+    validate_backlog(&data)?;
+    let path = backlog_path()?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let _guard = BACKLOG_SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, data.as_bytes()).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        log::error!("Failed to persist backlog.json: {}", e);
+        e.to_string()
+    })
+}
+
+/// TAKE the agent inbox: rename it away, read it, delete it, return the text
+/// ("" when there was none). The rename is what makes the drain safe against
+/// a server append in flight — the server writes tmp + rename, so a new
+/// entry either landed in the file we took or creates a fresh inbox after
+/// it; nothing is truncated under a writer. A server whose read predates the
+/// take re-emits already-taken entries on its next rename; the frontend's
+/// apply is idempotent for exactly that reason.
+#[tauri::command]
+async fn take_backlog_inbox() -> Result<String, String> {
+    let path = backlog_inbox_path()?;
+    let taken = path.with_extension("json.taking");
+    match std::fs::rename(&path, &taken) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(e) => return Err(e.to_string()),
+    }
+    let content = std::fs::read_to_string(&taken).map_err(|e| e.to_string())?;
+    if let Err(e) = std::fs::remove_file(&taken) {
+        log::warn!("Could not remove taken backlog inbox: {}", e);
+    }
+    Ok(content)
+}
+
+#[cfg(test)]
+mod backlog_guard_tests {
+    use super::{validate_backlog, BACKLOG_ITEM_CAP, BACKLOG_LINK_CAP, BACKLOG_TEXT_CAP};
+
+    fn item(id: &str, text: &str, stage: &str, links: &str) -> String {
+        format!(
+            r#"{{"id":"{}","text":"{}","project":null,"stage":"{}","links":[{}],"createdAt":1,"updatedAt":1}}"#,
+            id, text, stage, links
+        )
+    }
+    fn file(items: &[String]) -> String {
+        format!(r#"{{"version":1,"items":[{}]}}"#, items.join(","))
+    }
+
+    #[test]
+    fn a_well_formed_file_passes() {
+        let f = file(&[
+            item("a1", "look into duckdb", "backlog", ""),
+            item(
+                "b2",
+                "spec the thing",
+                "spec",
+                r#"{"kind":"spec","ref":"switchboard/features/x/requirements.md"},{"kind":"thread","ref":"3f1c2a9e-0b7d-4c1e-9a55-1234567890ab"}"#,
+            ),
+        ]);
+        assert!(validate_backlog(&f).is_ok());
+        assert!(validate_backlog(r#"{"version":1,"items":[]}"#).is_ok());
+    }
+
+    #[test]
+    fn shape_is_refused_not_repaired() {
+        for bad in [
+            "",
+            "not json",
+            "[]",
+            r#"{"version":2,"items":[]}"#,
+            r#"{"version":1}"#,
+            r#"{"version":1,"items":{}}"#,
+            r#"{"version":1,"items":[null]}"#,
+            r#"{"version":1,"items":[{"id":"a","text":"x","stage":"backlog","links":[]}]}"#, // no stamps
+        ] {
+            assert!(validate_backlog(bad).is_err(), "{bad}");
+        }
+        assert!(validate_backlog(&file(&[item("a", "x", "later", "")])).is_err());
+        assert!(validate_backlog(&file(&[item("../a", "x", "backlog", "")])).is_err());
+        assert!(validate_backlog(&file(&[item("a", "   ", "backlog", "")])).is_err());
+        assert!(validate_backlog(&file(&[item("a", "x", "backlog", r#"{"kind":"pr","ref":"1"}"#)])).is_err());
+        assert!(validate_backlog(&file(&[item("a", "x", "backlog", r#"{"kind":"ticket","ref":""}"#)])).is_err());
+        assert!(validate_backlog(&file(&[item("a", "x", "backlog", ""), item("a", "y", "backlog", "")])).is_err());
+    }
+
+    #[test]
+    fn caps_are_enforced() {
+        let long = "é".repeat(BACKLOG_TEXT_CAP);
+        assert!(validate_backlog(&file(&[item("a", &long, "backlog", "")])).is_ok());
+        let longer = "é".repeat(BACKLOG_TEXT_CAP + 1);
+        assert!(validate_backlog(&file(&[item("a", &longer, "backlog", "")])).is_err());
+        let links_ok: Vec<String> = (0..BACKLOG_LINK_CAP)
+            .map(|i| format!(r#"{{"kind":"ticket","ref":"SWIT-{}"}}"#, i))
+            .collect();
+        assert!(validate_backlog(&file(&[item("a", "x", "ticket", &links_ok.join(","))])).is_ok());
+        let mut links_over = links_ok.clone();
+        links_over.push(r#"{"kind":"ticket","ref":"SWIT-99"}"#.to_string());
+        assert!(validate_backlog(&file(&[item("a", "x", "ticket", &links_over.join(","))])).is_err());
+        let many: Vec<String> = (0..BACKLOG_ITEM_CAP)
+            .map(|i| item(&format!("i{}", i), "x", "backlog", ""))
+            .collect();
+        assert!(validate_backlog(&file(&many)).is_ok());
+        let mut over = many.clone();
+        over.push(item("extra", "x", "backlog", ""));
+        assert!(validate_backlog(&file(&over)).is_err());
     }
 }
 
@@ -1536,6 +1789,9 @@ fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         load_scrollback,
         save_threads,
         load_threads,
+        read_backlog,
+        write_backlog,
+        take_backlog_inbox,
         claude_session_exists,
         discover_claude_sessions,
         clear_scrollback,

@@ -6,7 +6,7 @@ Built with Tauri v2, React 18, TypeScript, and xterm.js.
 
 ## Features
 
-- **Thread-based terminal sessions** with per-session PTY processes — navigation lives in the side menu; the top bar is wordmark · breadcrumb · panel actions (the tab strip retired in SWIT-45)
+- **Thread-based terminal sessions** with per-session PTY processes — navigation lives in the side menu; the top bar is wordmark · breadcrumb · `To-dos · N` (your backlog — a thought, a to-do, something to look into; tag it with a project or nothing, open any item in a thread) · panel actions (the tab strip retired in SWIT-45)
 - **Agent status detection** — automatically detects running, waiting (needs approval), done, and error states from terminal output
 - **Persistent notifications** — background tabs that need input show a sticky toast until you respond
 - **Task sidebar** — auto-detects build errors, test failures, and git conflicts; also supports manual notes

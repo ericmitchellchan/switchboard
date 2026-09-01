@@ -33,6 +33,8 @@ import { answerQuestion } from "../lib/panelStore";
 import { readThreadFile, listScratchViews } from "../lib/ipc";
 import { navigate } from "../lib/route";
 import { useAllKnownServers, serverKey } from "../lib/devServer";
+import { useBacklog, openItems, HOME_BACKLOG_LIMIT } from "../lib/backlogStore";
+import { BacklogListing } from "./BacklogPanel";
 
 const MONO = "var(--font-mono)";
 
@@ -87,7 +89,14 @@ type ThreadDigest = {
   posts: InboxPost[];
 };
 
-export function Home({ active }: { active: boolean }) {
+export function Home({
+  active,
+  backlogProjects = [],
+}: {
+  active: boolean;
+  /** SWIT-64: registry project keys, for the rows' tag menu. */
+  backlogProjects?: readonly string[];
+}) {
   const view = useThreadsView();
   const [digests, setDigests] = useState<ThreadDigest[]>([]);
   const [kept, setKept] = useState<string[]>([]);
@@ -174,11 +183,37 @@ export function Home({ active }: { active: boolean }) {
           <LiveNow digests={digests} />
         </div>
         <div style={{ background: "var(--bg-primary)", padding: "14px 18px", display: "flex", flexDirection: "column", gap: 16, minHeight: 0, overflowY: "auto" }}>
+          <BacklogBlock projectOptions={backlogProjects} />
           <BetweenThreads digests={digests} />
           <Listening active={active} />
           <KeptViews kept={kept} />
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Backlog (SWIT-64) ────────────────────────────────────────────────────────
+
+/** Open items newest first, the first HOME_BACKLOG_LIMIT + `See all` (which
+ *  opens the top bar's dropdown — the one place the whole list lives). Same
+ *  row component as the dropdown; the block itself is a view over
+ *  backlogStore, like every other block here. */
+function BacklogBlock({ projectOptions }: { projectOptions: readonly string[] }) {
+  const view = useBacklog();
+  const open = openItems(view.items);
+  return (
+    <div>
+      <div style={BLOCK_TITLE}>
+        Backlog{" "}
+        <span style={BLOCK_TITLE_RIGHT}>{open.length === 0 ? "empty" : String(open.length)}</span>
+      </div>
+      <BacklogListing
+        items={open}
+        limit={HOME_BACKLOG_LIMIT}
+        projectOptions={projectOptions}
+        empty={<div style={RESERVED_BOX}>Nothing in the backlog. Add a thought from To-dos in the top bar.</div>}
+      />
     </div>
   );
 }
