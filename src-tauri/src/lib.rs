@@ -932,7 +932,12 @@ async fn load_threads() -> Result<String, String> {
 // tool never touches this file — it appends to `backlog-inbox.json`, which
 // the app DRAINS (take = rename away + read + delete, so an append that
 // races the drain lands in a fresh inbox rather than being lost) and folds
-// into backlog.json on its 5s pass. One writer per file, both files.
+// into backlog.json on its 5s pass. The writer rule differs per file:
+// backlog.json has ONE writer (the app); the inbox is APPEND-ONLY NDJSON
+// with MANY appenders (one MCP server per live thread, one `appendFileSync`
+// of one line each) and ONE taker (`take_backlog_inbox` below — a rename
+// takes an append-only file exactly as it took a rewritten one; the
+// frontend's line-wise parse drops a torn last line alone).
 //
 // Caps mirror `src/lib/backlogStore.ts` — change one, change the other.
 
@@ -945,8 +950,13 @@ const BACKLOG_REF_CAP: usize = 500;
 const BACKLOG_PROJECT_CAP: usize = 64;
 const BACKLOG_STAGES: [&str; 4] = ["backlog", "ticket", "spec", "done"];
 const BACKLOG_LINK_KINDS: [&str; 3] = ["ticket", "spec", "thread"];
-/// Bytes; a JSON document this size holds the item cap several times over.
-const BACKLOG_BYTES_CAP: usize = 2 * 1024 * 1024;
+/// Bytes. Sized ABOVE the content caps, not below them: the pretty-printed
+/// worst case under the caps (500 items × 500-char text + 8 × 500-char
+/// refs, 4-byte UTF-8) is ~9 MB, and 2 MiB refused a backlog that every
+/// other cap called legal. 8 MiB holds any realistic backlog (a real item is
+/// a sentence and a link is a key or a path — ~25 KB per item at the caps,
+/// under 1 KB in practice) while still stopping a runaway payload.
+const BACKLOG_BYTES_CAP: usize = 8 * 1024 * 1024;
 
 fn backlog_path() -> Result<std::path::PathBuf, String> {
     let base = dirs::data_local_dir().ok_or("Cannot resolve local data dir")?;

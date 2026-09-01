@@ -9,7 +9,8 @@
 // one file shipped as a plain Tauri resource. Runs on any Node ≥ 18.
 //
 // ONE WRITER, ONE FILE: this process is the SOLE writer of its thread's
-// page.json, and (SWIT-64) an APPENDER to the app-wide backlog-inbox.json —
+// page.json, and (SWIT-64) ONE OF MANY APPENDERS to the app-wide
+// backlog-inbox.json — an append-only NDJSON file with one taker (the app),
 // never of backlog.json, which the app alone rewrites after draining the
 // inbox (the app writes answers.json / inbox.json; the rendered page is
 // a merge — see src/lib/pageStore.ts, whose parser this file's shapes MUST
@@ -737,14 +738,21 @@ const POST_TOOL = {
 // spec path it created, and it does that by appending to an INBOX file the
 // app drains on its 5s pass (take = rename away, so an append racing the
 // drain lands in a fresh inbox; a re-emitted entry is folded idempotently —
-// links are a set per item). One writer per file: this server appends to
-// backlog-inbox.json; the app rewrites backlog.json. The inbox path arrives
-// by ENV like everything else here.
+// links are a set per item). The writer rule is per FILE and differs
+// between the two: backlog.json has ONE writer, the app. The inbox has MANY
+// APPENDERS — every live thread runs its own copy of this server — and ONE
+// TAKER, so it is APPEND-ONLY NDJSON: one `appendFileSync` of one JSON line
+// per link, no read-modify-write, no tmp file. (The first cut did
+// read → write `.tmp` → rename with ONE shared tmp name, which is a lost
+// update between any two threads linking at once. Review finding F3.) The
+// app's parse is line-wise and a torn last line drops alone. The inbox path
+// arrives by ENV like everything else here.
 
 const BACKLOG_ITEM_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const BACKLOG_LINK_KINDS = ["ticket", "spec"];
-const BACKLOG_REF_CAP = 500;
-const BACKLOG_INBOX_CAP = 200;
+/** Tighter than TEXT_CAP on purpose — a ticket key or a KB path, not prose —
+ *  so the `ref too long` sentence below is a branch that can actually fire. */
+const BACKLOG_REF_CAP = 300;
 
 /** Validate + build one inbox entry. Pure; throws OpError with a sentence. */
 function buildBacklogEntry(args, selfThreadId, now) {
@@ -771,28 +779,20 @@ function buildBacklogEntry(args, selfThreadId, now) {
   };
 }
 
-/** Append to the raw inbox list (tolerant of garbage), newest kept, capped. */
-function appendBacklogEntry(list, entry) {
-  const entries = Array.isArray(list) ? list.filter((e) => e && typeof e === "object") : [];
-  return [...entries, entry].slice(-BACKLOG_INBOX_CAP);
+/** The ONE inbox line an entry becomes: compact JSON + "\n". JSON.stringify
+ *  escapes every newline inside a string, so a line is one entry by
+ *  construction and the app's line-wise parse cannot be torn by content. */
+function formatBacklogEntry(entry) {
+  return `${JSON.stringify(entry)}\n`;
 }
 
 function performBacklogOp(env, args, now) {
   const { backlogInboxPath, selfThreadId } = env;
   if (!backlogInboxPath) throw new OpError("the backlog is not wired in this session");
   const entry = buildBacklogEntry(args, selfThreadId, now);
-  let existing = [];
-  try {
-    const parsed = JSON.parse(fs.readFileSync(backlogInboxPath, "utf-8"));
-    existing = Array.isArray(parsed) ? parsed : Array.isArray(parsed.entries) ? parsed.entries : [];
-  } catch {
-    // no inbox yet
-  }
-  const entries = appendBacklogEntry(existing, entry);
   fs.mkdirSync(path.dirname(backlogInboxPath), { recursive: true });
-  const tmp = `${backlogInboxPath}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({ version: 1, entries }, null, 2));
-  fs.renameSync(tmp, backlogInboxPath);
+  // Append-only: one syscall, no read, no tmp — N threads may do this at once.
+  fs.appendFileSync(backlogInboxPath, formatBacklogEntry(entry));
   return {
     message: `Queued: backlog item ${entry.itemId} → ${entry.kind} ${entry.ref}. The app applies it within a few seconds; the item's stage moves to ${entry.kind} if it was still a plain backlog item.`,
   };
@@ -1075,10 +1075,9 @@ module.exports = {
   appendPost,
   performPostOp,
   buildBacklogEntry,
-  appendBacklogEntry,
+  formatBacklogEntry,
   performBacklogOp,
   BACKLOG_TOOL,
-  BACKLOG_INBOX_CAP,
   POST_TOOL,
   PAGE_TOOL,
   VIEW_TOOL,

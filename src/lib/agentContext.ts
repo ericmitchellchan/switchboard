@@ -47,6 +47,14 @@
 //   - `$` dropped: POSIX + PowerShell variable/command expansion `$(...)`.
 //   - `` ` `` dropped: POSIX command substitution + PowerShell escape.
 //   - `%` dropped: cmd.exe variable expansion `%VAR%`.
+//   - TYPOGRAPHIC double quotes `“ ” „ ‟` (U+201C-201F) dropped: PowerShell
+//     5.1 — the default PTY shell — tokenizes them as `"`, so one in a
+//     dictated note or a backlog item split the `--append-system-prompt`
+//     argument and the words after it became positional args to `claude`
+//     (MEASURED 2026-09-01: a one-word item became claude's opening prompt).
+//     The single-quote family (U+2018-201B) is NOT on the list: PowerShell
+//     reads those as `'`, which is literal inside a double-quoted argument
+//     exactly like the straight `'` we also keep — measured in the same run.
 //   - whitespace runs collapsed, ends trimmed, length capped.
 //
 // The framing quotes around a pin note — and, in the send-to-thread seam,
@@ -81,7 +89,7 @@ export const SEND_REFERENCE_MAX = 800; // + PIN_ANCHOR_MAX and its parentheses (
 const MAX_PIN_NUMBER = 9999;
 
 const CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F]/g;
-const SHELL_METACHARS = /["\\$%`]/g;
+const SHELL_METACHARS = /["\\$%`\u201C-\u201F]/g;
 /** Invisible/direction-altering formatting characters (see the module header).
  *  The `u` flag is load-bearing: in Unicode mode the string is matched as CODE
  *  POINTS, so `\uD800-\uDFFF` hits only UNPAIRED surrogates — a well-formed
@@ -165,10 +173,13 @@ export type BacklogItemContext = { id: string; text: string };
 export const BACKLOG_ITEM_TEXT_MAX = 300;
 
 /** SWIT-64: the sentence a thread opened from a backlog item boots with. The
- *  item text is framed in TYPOGRAPHIC quotes: the whole line is sanitized
- *  once more at the launch seam and straight quotes would be stripped there
- *  (they would close the flag's argument), while `“ ”` are inert in a
- *  double-quoted shell argument and read as quotes to the agent. Names the
+ *  item text is framed in straight SINGLE quotes: the whole line is sanitized
+ *  once more at the launch seam and `"` would be stripped there (it would
+ *  close the flag's argument), while `'` is literal inside a double-quoted
+ *  argument in PowerShell, cmd and POSIX shells alike and reads as quotes to
+ *  the agent. (Shipped first with `“ ”`, which PowerShell 5.1 tokenizes as
+ *  `"` — the argument split and the item words reached `claude` as
+ *  positional args. Those characters are metacharacters now.) Names the
  *  item ID so the agent can record the ticket/spec it creates with the
  *  `backlog` tool. Empty when the item has no usable text or id. */
 export function buildBacklogItemLine(item: BacklogItemContext | null | undefined): string {
@@ -179,7 +190,7 @@ export function buildBacklogItemLine(item: BacklogItemContext | null | undefined
   const text = sanitizeForTypedLine(item.text ?? "", BACKLOG_ITEM_TEXT_MAX);
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(id) || text.length === 0) return "";
   return (
-    `You were opened from backlog item ${id}: “${text}”. Start there. ` +
+    `You were opened from backlog item ${id}: '${text}'. Start there. ` +
     `If you create a ticket or a spec for it, record it with the backlog tool (op link, itemId ${id}).`
   );
 }

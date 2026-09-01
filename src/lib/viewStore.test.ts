@@ -37,6 +37,42 @@ import {
 import type { ViewSpec } from "./viewStore";
 import { viewPinTargetFor } from "./pins";
 
+// ── python-backed smoke/parity helpers ───────────────────────────────────────
+// A fallback (synthetic data, a skipped parity check) is honest ONLY when the
+// tooling is absent. Everything else — a traceback, a bad exit, a timeout —
+// is a real failure and is rethrown WITH stderr, so it reads as one instead
+// of silently becoming synthetic data. (Review finding F2 on T7/T8.)
+
+type SpawnFailure = { code?: unknown; status?: unknown; signal?: unknown; stderr?: unknown; stdout?: unknown; message?: unknown };
+
+/** python itself is missing: spawn ENOENT, or the Windows store-alias stub
+ *  (exit 9009, which is also what cmd prints for "not recognized"). */
+function isPythonMissing(err: unknown): boolean {
+  const e = (err ?? {}) as SpawnFailure;
+  return e.code === "ENOENT" || e.status === 9009;
+}
+
+/** The DuckDB-backed smokes may also fall back on a
+ *  `ModuleNotFoundError: No module named 'duckdb'` on stderr — duckdb is the
+ *  one import those scripts need beyond the standard library. */
+function isPythonUnavailable(err: unknown): boolean {
+  if (isPythonMissing(err)) return true;
+  const stderr = typeof (err as SpawnFailure)?.stderr === "string" ? ((err as SpawnFailure).stderr as string) : "";
+  return /ModuleNotFoundError: No module named 'duckdb'/.test(stderr);
+}
+
+/** One line of what went wrong, stderr included (it was piped, not ignored). */
+function describeSpawnError(err: unknown): string {
+  const e = (err ?? {}) as SpawnFailure;
+  const parts = [
+    typeof e.message === "string" ? e.message : String(err),
+    e.status !== undefined && e.status !== null ? `exit ${String(e.status)}` : "",
+    e.signal ? `signal ${String(e.signal)}` : "",
+    typeof e.stderr === "string" && e.stderr.trim() ? `stderr:\n${e.stderr.trim()}` : "",
+  ];
+  return parts.filter(Boolean).join("\n");
+}
+
 const SPEC_RAW = JSON.stringify({
   id: "v1",
   kind: "table",
@@ -741,13 +777,19 @@ describe("T7 smoke — NQ daily close as a line, windows by setup as bars, from 
       "bar = c.execute(\"select symbol || ' ' || timeframe as setup, count(*) as n, coalesce(round(avg(fwd_ret_pct), 4), 0) as avg_fwd from pattern_windows group by 1 order by 1\").fetchall()",
       "print(json.dumps({'line': [{'ts': r[0], 'close': float(r[1]), 'rsi': float(r[2])} for r in line], 'bar': [{'setup': r[0], 'n': int(r[1]), 'avg_fwd': float(r[2])} for r in bar]}))",
     ].join("\n");
+    let out: string;
     try {
-      const out = cp.execFileSync("python", ["-c", script], { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "ignore"] });
-      const parsed = JSON.parse(out) as Payload;
-      return parsed.line.length > 0 && parsed.bar.length > 0 ? parsed : null;
-    } catch {
-      return null;
+      out = cp.execFileSync("python", ["-c", script], { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (err) {
+      // Synthetic ONLY when the tooling is absent; anything else is a real failure.
+      if (isPythonUnavailable(err)) return null;
+      throw new Error(`[t7 smoke] python failed: ${describeSpawnError(err)}`);
     }
+    const parsed = JSON.parse(out) as Payload;
+    if (parsed.line.length === 0 || parsed.bar.length === 0) {
+      throw new Error(`[t7 smoke] research.duckdb answered with no rows (line ${parsed.line.length}, bar ${parsed.bar.length})`);
+    }
+    return parsed;
   };
   const synthetic = (): Payload => ({
     line: Array.from({ length: 30 }, (_, i) => ({
@@ -1028,11 +1070,17 @@ describe("T8 — drillPathKey parity: scripts/export-tennis-match.py --path-key"
       out = cp.execFileSync("python", ["scripts/export-tennis-match.py", "--path-key", ...KEYS], {
         encoding: "utf8",
         timeout: 30_000,
-        stdio: ["ignore", "pipe", "ignore"],
+        stdio: ["ignore", "pipe", "pipe"],
       });
-    } catch {
-      console.info("[t8 parity] python unavailable — the JS↔Python drillPathKey parity check was SKIPPED");
-      return;
+    } catch (err) {
+      // Skip ONLY when python itself is missing (ENOENT, or the Windows
+      // store-alias stub's exit 9009). A traceback, a bad exit or a timeout
+      // is a parity FAILURE and must read as one — stderr included.
+      if (isPythonMissing(err)) {
+        console.info("[t8 parity] python unavailable — the JS↔Python drillPathKey parity check was SKIPPED");
+        return;
+      }
+      throw new Error(`[t8 parity] the exporter failed: ${describeSpawnError(err)}`);
     }
     const py = JSON.parse(out) as (string | null)[];
     expect(py.length).toBe(KEYS.length);
@@ -1093,18 +1141,21 @@ describe("T8 smoke — the tennis table's drill opens the exporter's timeline fi
 
   const runExporter = (): { path: string; rows: number; trades: number } | null => {
     if (!fs.existsSync(DB)) return null;
+    let out: string;
     try {
-      const out = cp.execFileSync(
+      out = cp.execFileSync(
         "python",
         ["scripts/export-tennis-match.py", "--top", "--min-trades", "500", dir],
-        { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "ignore"] }
+        { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] }
       );
-      const m = out.match(/^wrote (.+) \((\d+) rows, (\d+) trades\)\s*$/m);
-      if (!m) return null;
-      return { path: m[1], rows: Number(m[2]), trades: Number(m[3]) };
-    } catch {
-      return null;
+    } catch (err) {
+      // Synthetic ONLY when the tooling is absent; anything else is a real failure.
+      if (isPythonUnavailable(err)) return null;
+      throw new Error(`[t8 smoke] the exporter failed: ${describeSpawnError(err)}`);
     }
+    const m = out.match(/^wrote (.+) \((\d+) rows, (\d+) trades\)\s*$/m);
+    if (!m) throw new Error(`[t8 smoke] the exporter ran but printed no "wrote …" line:\n${out}`);
+    return { path: m[1], rows: Number(m[2]), trades: Number(m[3]) };
   };
   const synthesize = (): { path: string; rows: number; trades: number } => {
     const matchId = "KXSYNTH-26SEP01AAABBB";

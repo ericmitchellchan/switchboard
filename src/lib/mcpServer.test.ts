@@ -575,9 +575,8 @@ describe("the post tool (SWIT-52)", () => {
 describe("the backlog tool (SWIT-64) — ONE op, an inbox the app drains", () => {
   const srv = server as unknown as {
     buildBacklogEntry: (args: Record<string, unknown>, self: string, now: number) => Record<string, unknown>;
-    appendBacklogEntry: (list: unknown, entry: Record<string, unknown>) => unknown[];
+    formatBacklogEntry: (entry: Record<string, unknown>) => string;
     BACKLOG_TOOL: { name: string; description: string; inputSchema: { properties: Record<string, { enum?: string[] }>; required: string[] } };
-    BACKLOG_INBOX_CAP: number;
   };
 
   it("validates op / itemId / kind / ref with sentences the agent can act on", () => {
@@ -588,20 +587,30 @@ describe("the backlog tool (SWIT-64) — ONE op, an inbox the app drains", () =>
     expect(() => srv.buildBacklogEntry({ op: "link", itemId: "../a", kind: "ticket", ref: "x" }, "t1", NOW)).toThrow(/itemId/);
     expect(() => srv.buildBacklogEntry({ op: "link", itemId: "a", kind: "thread", ref: "x" }, "t1", NOW)).toThrow(/ticket \| spec/);
     expect(() => srv.buildBacklogEntry({ op: "link", itemId: "a", kind: "spec", ref: "  " }, "t1", NOW)).toThrow(/ref must be a non-empty string/);
+    // The ref cap (300) sits BELOW the generic text cap (500), so its own
+    // sentence is reachable — a ref is a ticket key or a KB path, not prose.
+    expect(() => srv.buildBacklogEntry({ op: "link", itemId: "a", kind: "spec", ref: "x".repeat(301) }, "t1", NOW)).toThrow(/ref too long \(cap 300\)/);
     expect(() => srv.buildBacklogEntry({ op: "link", itemId: "a", kind: "spec", ref: "x".repeat(501) }, "t1", NOW)).toThrow(/too long/);
   });
 
-  it("the queue file shape: {version, entries[]} appended newest-last, capped, tolerant of junk — and it parses on the app side", () => {
-    const entry = srv.buildBacklogEntry({ op: "link", itemId: "i1", kind: "spec", ref: "switchboard/features/backlog/requirements.md" }, "t1", NOW);
-    expect(srv.appendBacklogEntry(undefined, entry)).toEqual([entry]);
-    expect(srv.appendBacklogEntry([null, "junk", { id: "old", itemId: "i0", kind: "ticket", ref: "SWIT-1" }], entry)).toHaveLength(2);
-    const many = Array.from({ length: srv.BACKLOG_INBOX_CAP + 10 }, (_, i) => ({ id: `e${i}`, itemId: "i1", kind: "ticket", ref: `T-${i}` }));
-    const capped = srv.appendBacklogEntry(many, entry);
-    expect(capped).toHaveLength(srv.BACKLOG_INBOX_CAP);
-    expect(capped[capped.length - 1]).toBe(entry);
-    // ROUND-TRIP: what the server writes is what backlogStore drains.
-    const parsed = parseBacklogInbox(JSON.stringify({ version: 1, entries: [entry] }));
-    expect(parsed).toEqual([{ id: entry.id, itemId: "i1", kind: "spec", ref: "switchboard/features/backlog/requirements.md", threadId: "t1", at: entry.at }]);
+  it("the inbox is APPEND-ONLY NDJSON: an entry is ONE line, N servers append, and the app's line-wise parse drains them in order", () => {
+    const e1 = srv.buildBacklogEntry({ op: "link", itemId: "i1", kind: "spec", ref: "switchboard/features/backlog/requirements.md" }, "t1", NOW);
+    const e2 = srv.buildBacklogEntry({ op: "link", itemId: "i2", kind: "ticket", ref: "SWIT-64" }, "t2", NOW + 1);
+    const line1 = srv.formatBacklogEntry(e1);
+    // One line, terminated, with no newline INSIDE it whatever the content
+    // (JSON.stringify escapes them) — that is what makes a line one entry.
+    expect(line1.endsWith("\n")).toBe(true);
+    expect(line1.slice(0, -1)).not.toContain("\n");
+    expect(srv.formatBacklogEntry({ ...e1, ref: "a\nb" }).slice(0, -1)).not.toContain("\n");
+    // ROUND-TRIP: two servers' appends, in file order, are what backlogStore drains.
+    const parsed = parseBacklogInbox(line1 + srv.formatBacklogEntry(e2));
+    expect(parsed).toEqual([
+      { id: e1.id, itemId: "i1", kind: "spec", ref: "switchboard/features/backlog/requirements.md", threadId: "t1", at: e1.at },
+      { id: e2.id, itemId: "i2", kind: "ticket", ref: "SWIT-64", threadId: "t2", at: e2.at },
+    ]);
+    // The server never rewrites the file: no read, no tmp, no rename on the inbox path.
+    expect(mcpServerSource).toContain("fs.appendFileSync(backlogInboxPath");
+    expect(mcpServerSource).not.toMatch(/backlogInboxPath}\.tmp/);
   });
 
   it("the tool table carries the one-writer contract and the single op", () => {

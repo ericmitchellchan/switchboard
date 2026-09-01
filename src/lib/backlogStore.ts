@@ -7,18 +7,24 @@
 // might be just a thought" — the stage says how far it has graduated, and the
 // links say where (a ticket key, a spec path, the thread that worked it).
 //
-// ONE WRITER PER FILE, made structural (the pageStore lesson):
-//   backlog.json        ← THIS module, through two narrow Rust commands with a
-//                          fixed path (`read_backlog` / `write_backlog`, the
-//                          latter shape-checked + capped). The APP is the only
-//                          writer; the agent never touches it.
-//   backlog-inbox.json  ← the MCP server's `backlog link` op APPENDS; the app
-//                          TAKES the file (rename away + read + delete, in
-//                          Rust) on its existing 5s pass and folds the entries
-//                          in here (`applyInbox`), then rewrites backlog.json.
-//                          Apply is IDEMPOTENT — links are a set per item — so
-//                          an entry the server re-emits after a racing take
-//                          is harmless.
+// THE WRITER RULE IS PER FILE, and the two files differ (the pageStore lesson):
+//   backlog.json        ← ONE writer: THIS module, through two narrow Rust
+//                          commands with a fixed path (`read_backlog` /
+//                          `write_backlog`, the latter shape-checked + capped).
+//                          The agent never touches it.
+//   backlog-inbox.json  ← MANY APPENDERS, ONE TAKER. Every live thread's MCP
+//                          server may `backlog link` at once, so the file is
+//                          APPEND-ONLY NDJSON (one JSON line per entry, one
+//                          appendFileSync each — no read-modify-write, no
+//                          shared tmp name; the first cut had both and lost
+//                          updates between two threads). The app TAKES the
+//                          file (rename away + read + delete, in Rust) on its
+//                          existing 5s pass, parses it LINE-WISE (a torn last
+//                          line drops alone) and folds the entries in here
+//                          (`applyInbox`), then rewrites backlog.json. Apply
+//                          is IDEMPOTENT — links are a set per item — so an
+//                          entry the server re-emits after a racing take is
+//                          harmless.
 // The app never creates a Linear ticket or a KB file: graduation happens in
 // the thread, by the agent, and the inbox is how the agent tells the app what
 // it made.
@@ -187,16 +193,39 @@ export function serializeBacklog(items: readonly BacklogItem[]): string {
   return JSON.stringify(file, null, 2);
 }
 
-/** Tolerant read of the inbox the server appends to. */
+/** The raw candidates in an inbox file. The file is APPEND-ONLY NDJSON (one
+ *  entry per line — see the header), so the parse is LINE-WISE and a line
+ *  that does not parse drops ALONE: a torn last line (an append cut by the
+ *  take) costs that entry, never the file. The FIRST shape — one JSON
+ *  document, an array or `{entries: […]}` — is still accepted for one
+ *  version, so an inbox written by the previous server survives the update. */
+function inboxCandidates(raw: string): unknown[] {
+  try {
+    const whole: unknown = JSON.parse(raw);
+    if (Array.isArray(whole)) return whole;
+    if (isRecord(whole) && Array.isArray(whole.entries)) return whole.entries;
+    // A single NDJSON line also parses whole (one record, no `entries`) —
+    // it falls through to the line walk, which reads it as the one entry.
+  } catch {
+    // Not one document: NDJSON.
+  }
+  const out: unknown[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const t = line.trim();
+    if (t.length === 0) continue;
+    try {
+      out.push(JSON.parse(t));
+    } catch {
+      // Torn or junk line: drops alone.
+    }
+  }
+  return out;
+}
+
+/** Tolerant read of the inbox the servers append to. */
 export function parseBacklogInbox(raw: string): BacklogInboxEntry[] {
   if (typeof raw !== "string" || raw.trim().length === 0) return [];
-  let data: unknown;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    return [];
-  }
-  const list = isRecord(data) && Array.isArray(data.entries) ? data.entries : Array.isArray(data) ? data : [];
+  const list = inboxCandidates(raw);
   const out: BacklogInboxEntry[] = [];
   for (const e of list) {
     if (!isRecord(e)) continue;
@@ -376,8 +405,19 @@ export function cycleProjectTag(current: string | null, projects: readonly strin
   return i + 1 < projects.length ? projects[i + 1] : null;
 }
 
-export function threadLinkOf(item: BacklogItem): string | null {
-  return item.links.find((l) => l.kind === "thread")?.ref ?? null;
+/** The thread an item is currently worked in. An item can be opened into a
+ *  thread more than once (links are a set, capped, so several `thread` links
+ *  can stand), and the LAST one is the live one — keying on the first would
+ *  point "open in thread" at a conversation long archived. The optional
+ *  `known` predicate prefers the latest link whose thread the store still
+ *  has; with none known, the last link is returned so the caller can say so. */
+export function threadLinkOf(item: BacklogItem, known?: (threadId: string) => boolean): string | null {
+  const threads = item.links.filter((l) => l.kind === "thread").map((l) => l.ref);
+  if (threads.length === 0) return null;
+  if (known) {
+    for (let i = threads.length - 1; i >= 0; i--) if (known(threads[i])) return threads[i];
+  }
+  return threads[threads.length - 1];
 }
 
 /** The item a thread was opened from, if any (link kind `thread`). Re-derived

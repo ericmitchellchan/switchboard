@@ -358,7 +358,9 @@ export function BacklogRow({
   const [menuOpen, setMenuOpen] = useState(false);
   const [edit, setEdit] = useState<RefEdit>(null);
   const [refDraft, setRefDraft] = useState("");
-  const threadId = threadLinkOf(item);
+  // The LATEST thread link the store still knows (an item can be opened
+  // into a thread more than once); with none known, the latest at all.
+  const threadId = threadLinkOf(item, (id) => getThreadById(id) !== undefined);
   const linkedThreadKnown = threadId !== null && getThreadById(threadId) !== undefined;
   const done = item.stage === "done";
 

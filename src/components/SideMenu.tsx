@@ -208,11 +208,15 @@ export function SideMenu({ route }: { route: Route }) {
   );
 }
 
-/** Is this page what Eric is looking at — full width (the project route) OR
- *  in the active thread's panel (the shown artifact)? One predicate for every
- *  destination row, so the two homes light the same row. */
+/** Is this page ON SCREEN — full width (the project route) OR in the active
+ *  thread's panel, which renders on the TERMINAL screen only? One predicate
+ *  for every destination row, so the two homes light the same row. The
+ *  screen gate is what keeps the word "shown" true: the panel's artifact is
+ *  per-tab state that navigation never touches, so without it a row stayed
+ *  lit on Home / KB for a page nobody could see. */
 function isSurfaceShown(route: Route, shown: Artifact | null, project: string, page: string): boolean {
   if (route.screen === "project") return route.project === project && route.page === page;
+  if (route.screen !== "terminal") return false;
   return shown?.kind === "surface" && shown.project === project && shown.page === page;
 }
 

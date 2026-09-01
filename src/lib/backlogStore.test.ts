@@ -170,6 +170,30 @@ describe("parse + serialize", () => {
     expect(parseBacklogInbox("")).toEqual([]);
     expect(parseBacklogInbox("{")).toEqual([]);
   });
+
+  it("the inbox is APPEND-ONLY NDJSON: one entry per line, parsed line-wise, a bad line drops ALONE", () => {
+    const e1 = { id: "e1", itemId: "i1", kind: "ticket", ref: "SWIT-64", threadId: "t1", at: "2026-09-01T10:00:00Z" };
+    const e2 = { id: "e2", itemId: "i2", kind: "spec", ref: "switchboard/x.md", threadId: "t2", at: "2026-09-01T10:00:01Z" };
+    const e3 = { id: "e3", itemId: "i3", kind: "ticket", ref: "SWIT-65", threadId: "t3", at: "2026-09-01T10:00:02Z" };
+    // Two servers appended in turn; CRLF tolerated; blank lines ignored.
+    const ndjson = `${JSON.stringify(e1)}\n${JSON.stringify(e2)}\r\n\n${JSON.stringify(e3)}\n`;
+    expect(parseBacklogInbox(ndjson).map((e) => e.id)).toEqual(["e1", "e2", "e3"]);
+    // One line only (the common case: one link since the last drain) — the
+    // whole file parses as a single record, and it is still one entry.
+    expect(parseBacklogInbox(`${JSON.stringify(e1)}\n`).map((e) => e.id)).toEqual(["e1"]);
+    // A TORN last line — an append the take cut in half — costs that entry, never the file.
+    const torn = `${JSON.stringify(e1)}\n${JSON.stringify(e2)}\n${JSON.stringify(e3).slice(0, 30)}`;
+    expect(parseBacklogInbox(torn).map((e) => e.id)).toEqual(["e1", "e2"]);
+    // Junk in the middle drops alone too.
+    expect(parseBacklogInbox(`${JSON.stringify(e1)}\nnot json\n7\n${JSON.stringify(e3)}\n`).map((e) => e.id)).toEqual(["e1", "e3"]);
+  });
+
+  it("the previous inbox shape — one JSON document, an array or {version, entries} — is still read (one version of tolerance)", () => {
+    const e1 = { id: "e1", itemId: "i1", kind: "ticket", ref: "SWIT-64", threadId: "t1", at: "2026-09-01T10:00:00Z" };
+    const e2 = { id: "e2", itemId: "i2", kind: "spec", ref: "switchboard/x.md", threadId: "t2", at: "2026-09-01T10:00:01Z" };
+    expect(parseBacklogInbox(JSON.stringify({ version: 1, entries: [e1, e2] }, null, 2)).map((e) => e.id)).toEqual(["e1", "e2"]);
+    expect(parseBacklogInbox(JSON.stringify([e1, e2])).map((e) => e.id)).toEqual(["e1", "e2"]);
+  });
 });
 
 describe("the inbox drain merge", () => {
@@ -223,6 +247,23 @@ describe("selectors", () => {
     expect(itemForThread(items, "")).toBeNull();
     expect(threadLinkOf(items.find((i) => i.id === "i1")!)).toBe("t-1");
     expect(threadLinkOf(items.find((i) => i.id === "i2")!)).toBeNull();
+  });
+
+  it("threadLinkOf keys on the LATEST thread link, preferring the latest one the store still knows", () => {
+    // Opened into a thread twice: the first conversation is archived/gone,
+    // the second is live. Keying on the first forever pointed "open in
+    // thread" at the dead one (review finding F5).
+    let items = addLink(seed(), "i1", { kind: "thread", ref: "t-old" }, NOW);
+    items = addLink(items, "i1", { kind: "thread", ref: "t-new" }, NOW + 1);
+    const item = items.find((i) => i.id === "i1")!;
+    expect(item.links.filter((l) => l.kind === "thread").map((l) => l.ref)).toEqual(["t-old", "t-new"]);
+    expect(threadLinkOf(item)).toBe("t-new");
+    // With a `known` predicate: the latest KNOWN one wins over a later unknown.
+    expect(threadLinkOf(item, (id) => id === "t-old")).toBe("t-old");
+    expect(threadLinkOf(item, (id) => id === "t-new")).toBe("t-new");
+    // None known: the latest at all, so the caller can say "gone" about the right one.
+    expect(threadLinkOf(item, () => false)).toBe("t-new");
+    expect(threadLinkOf(items.find((i) => i.id === "i2")!, () => true)).toBeNull();
   });
 
   it("the thread title is the first ~40 chars, cut at a word, with an ellipsis", () => {
