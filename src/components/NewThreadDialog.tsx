@@ -1,6 +1,9 @@
-// New Thread dialog (T5) — the repo picker for `+ new thread`, plus an
-// optional title field. Default title = repo name + date
-// (threadStore.defaultThreadTitle), applied by App when the title is blank.
+// New Thread dialog (T5) — the repo picker for creating a thread, plus an
+// optional title field. A blank title becomes `New thread`
+// (threadStore.NEW_THREAD_TITLE, applied by App.handleCreateThread — SWIT-56;
+// `repo · date` is the PROMOTED thread's default now). Since SWIT-56 the rail's
+// header `+` creates directly and this dialog has no rail entry point; it
+// stays built and reachable through the `newThread` action.
 //
 // THE REPO SOURCE IS THE REGISTRY, exactly as `Ctrl+T`'s dialog reads it
 // (`explorer.useSessionRepos` = `mergeSessionRepos(explorerProjects(),
@@ -24,7 +27,6 @@ import { useSessionRepos, quickThreadTarget } from "../lib/explorer";
 import type { QuickThreadTarget } from "../lib/explorer";
 import { sessionDirFor } from "../lib/devServer";
 import { getActiveTabSession } from "../lib/panelStore";
-import { defaultThreadTitle } from "../lib/threadStore";
 
 interface NewThreadDialogProps {
   /** config.json repos — MERGED with the registry here, never the whole
@@ -151,17 +153,10 @@ export function NewThreadDialog({ repos, onCreate, onClose }: NewThreadDialogPro
       submittedRef.current = true;
       if (option.type === "quick") {
         // The row says "no repo", so it must not invent one — see
-        // QuickThreadTarget.project. The directory's LABEL is still the best
-        // default title ("ericm · Aug 2" says where the shell is), so it goes
-        // in as the title rather than leaking in as the session's identity;
-        // `defaultThreadTitle("")` would otherwise render a leading " · ".
-        onCreate(
-          option.target.project,
-          option.target.path,
-          undefined,
-          undefined,
-          title.trim() || defaultThreadTitle(option.target.name)
-        );
+        // QuickThreadTarget.project. A blank title is App's `New thread`
+        // default like every other row (SWIT-56); the directory's label no
+        // longer leaks into the title either.
+        onCreate(option.target.project, option.target.path, undefined, undefined, title.trim());
         return;
       }
       onCreate(option.name, option.path, option.color, option.group, title.trim());

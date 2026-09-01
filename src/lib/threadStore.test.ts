@@ -46,6 +46,12 @@ import {
   sortThreadsForHistory,
   selectMenuThreads,
   groupMenuThreads,
+  menuThreadRows,
+  quickCreateWorkingDir,
+  explicitThreadTitle,
+  NEW_THREAD_TITLE,
+  requestThreadRename,
+  clearThreadRenameRequest,
   selectShellSessions,
   resolveThreadByQuery,
   type MenuSession,
@@ -1054,5 +1060,131 @@ describe("parseThreadPost (the composer's @ form)", () => {
     expect(parseThreadPost("@target")).toBeNull(); // no body
     expect(parseThreadPost("email me @ home later")).toBeNull();
     expect(parseThreadPost("")).toBeNull();
+  });
+});
+
+// ── SWIT-56: the Ky-shaped band — flat rows, the `+`, the default title ──────
+
+describe("explicitThreadTitle (SWIT-56 default)", () => {
+  it("is what was typed, trimmed", () => {
+    expect(explicitThreadTitle("  fix the fit queue ")).toBe("fix the fit queue");
+  });
+
+  it("falls back to `New thread`, never to repo · date, when nothing was typed", () => {
+    expect(NEW_THREAD_TITLE).toBe("New thread");
+    expect(explicitThreadTitle("")).toBe(NEW_THREAD_TITLE);
+    expect(explicitThreadTitle("   ")).toBe(NEW_THREAD_TITLE);
+    expect(explicitThreadTitle(undefined)).toBe(NEW_THREAD_TITLE);
+    expect(explicitThreadTitle(null)).toBe(NEW_THREAD_TITLE);
+  });
+
+  it("leaves the promoted default alone — repo · date is still what a discovered thread is called", () => {
+    expect(defaultThreadTitle("lodestar", new Date(2026, 8, 1))).toBe("lodestar · Sep 1");
+  });
+});
+
+describe("menuThreadRows (what the rail draws = what Ctrl+1–9 counts)", () => {
+  const orbit = "C:\\repos\\orbit";
+  const lode = "C:\\repos\\lodestar";
+  // Interleaved projects so grouping and flat ranking DISAGREE.
+  const list = [
+    ht("o1", 10, { workingDir: orbit }),
+    ht("l1", 9, { workingDir: lode }),
+    ht("o2", 8, { workingDir: orbit }),
+    ht("l2", 7, { workingDir: lode }),
+  ];
+
+  it("flat (bare mode): live first, then most recent by last activity", () => {
+    expect(menuThreadRows(list, new Set(), false).map((t) => t.id)).toEqual(["o1", "l1", "o2", "l2"]);
+    expect(menuThreadRows(list, new Set(["l2"]), false).map((t) => t.id)).toEqual(["l2", "o1", "l1", "o2"]);
+  });
+
+  it("flat ordering is exactly selectMenuThreads' — one rule, two callers", () => {
+    const live = new Set(["o2"]);
+    expect(menuThreadRows(list, live, false)).toEqual(selectMenuThreads(list, live));
+  });
+
+  it("grouped (full mode): the SWIT-46 grouping, flattened in draw order", () => {
+    expect(menuThreadRows(list, new Set(), true).map((t) => t.id)).toEqual(["o1", "o2", "l1", "l2"]);
+    expect(menuThreadRows(list, new Set(), true)).toEqual(
+      groupMenuThreads(list, new Set()).flatMap((g) => g.threads)
+    );
+  });
+
+  it("keeps the cap and the live-never-truncated rule in both modes", () => {
+    const many = Array.from({ length: 20 }, (_, i) => ht(`t${i}`, i));
+    expect(menuThreadRows(many, new Set(), false)).toHaveLength(MENU_THREAD_LIMIT);
+    expect(menuThreadRows(many, new Set(), true)).toHaveLength(MENU_THREAD_LIMIT);
+    expect(menuThreadRows(many, new Set(["t0"]), false)[0].id).toBe("t0");
+    expect(menuThreadRows(many, new Set(["t0"]), true)[0].id).toBe("t0");
+  });
+
+  it("drops archived threads like the rail does", () => {
+    const withArchived = [...list, ht("gone", 100, { archivedAt: 5 })];
+    expect(menuThreadRows(withArchived, new Set(), false).map((t) => t.id)).not.toContain("gone");
+    expect(menuThreadRows(withArchived, new Set(), true).map((t) => t.id)).not.toContain("gone");
+  });
+});
+
+describe("quickCreateWorkingDir (where the header `+` puts a thread)", () => {
+  const orbit = "C:\\repos\\orbit";
+  const lode = "C:\\repos\\lodestar";
+
+  it("prefers the thread bound to the ACTIVE tab", () => {
+    const list = [
+      ht("recent", 100, { workingDir: lode }),
+      ht("bound", 1, { workingDir: orbit, sessionId: "s-active" }),
+    ];
+    expect(quickCreateWorkingDir(list, "s-active")).toBe(orbit);
+  });
+
+  it("else the most recently active thread's directory", () => {
+    const list = [
+      ht("old", 1, { workingDir: orbit }),
+      ht("recent", 100, { workingDir: lode }),
+    ];
+    expect(quickCreateWorkingDir(list, null)).toBe(lode);
+    // An active tab no thread claims (a plain shell) is the same case.
+    expect(quickCreateWorkingDir(list, "s-unbound")).toBe(lode);
+  });
+
+  it("counts an archived thread for recency — putting a thread away says nothing about the repo", () => {
+    const list = [
+      ht("old", 1, { workingDir: orbit }),
+      ht("recent-archived", 100, { workingDir: lode, archivedAt: 200 }),
+    ];
+    expect(quickCreateWorkingDir(list, null)).toBe(lode);
+  });
+
+  it("is null with no threads (or none with a directory) — the caller falls back to the tab's cwd", () => {
+    expect(quickCreateWorkingDir([], null)).toBeNull();
+    expect(quickCreateWorkingDir([ht("blank", 1, { workingDir: "  " })], null)).toBeNull();
+  });
+});
+
+describe("rename request (the `+` opens the title box)", () => {
+  beforeEach(() => __resetThreadStoreForTests());
+
+  it("is null until asked, set once asked, and cleared by the row that honoured it", () => {
+    expect(getThreadsView().renameRequest).toBeNull();
+    requestThreadRename("t1");
+    expect(getThreadsView().renameRequest).toBe("t1");
+    clearThreadRenameRequest("t1");
+    expect(getThreadsView().renameRequest).toBeNull();
+  });
+
+  it("a stale clear does not cancel a newer request", () => {
+    requestThreadRename("t1");
+    requestThreadRename("t2");
+    expect(getThreadsView().renameRequest).toBe("t2");
+    clearThreadRenameRequest("t1");
+    expect(getThreadsView().renameRequest).toBe("t2");
+  });
+
+  it("re-asking the same id does not notify again (no re-render churn)", () => {
+    requestThreadRename("t1");
+    const before = getThreadsView();
+    requestThreadRename("t1");
+    expect(getThreadsView()).toBe(before);
   });
 });

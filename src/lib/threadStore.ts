@@ -116,9 +116,27 @@ export function launchCommand(args: {
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-/** Default thread title: repo name + date ("lodestar · Jul 31"). */
+/** Default thread title: repo name + date ("lodestar · Jul 31"). Since
+ *  SWIT-56 this is the PROMOTED thread's default (a discovered conversation
+ *  has no name, so it is labelled by where and when it was found) and the
+ *  fallback for an emptied rename box (derivedThreadTitle). An EXPLICIT
+ *  creation no longer uses it — see NEW_THREAD_TITLE. */
 export function defaultThreadTitle(repoName: string, now: Date = new Date()): string {
   return `${repoName} · ${MONTHS[now.getMonth()]} ${now.getDate()}`;
+}
+
+/** The title an EXPLICITLY created thread gets when the user typed none —
+ *  the header `+` and the dialog with a blank title box alike (SWIT-56, on
+ *  Ky's model). A short, editable placeholder rather than `repo · date`: the
+ *  row's dim project suffix already says the repo, the `+` puts the title
+ *  straight into rename, and tabLabel's de-duplication keeps working because
+ *  a title that does not lead with the repo simply keeps its suffix. */
+export const NEW_THREAD_TITLE = "New thread";
+
+/** What an explicit creation is titled: what was typed, else NEW_THREAD_TITLE. */
+export function explicitThreadTitle(typed: string | undefined | null): string {
+  const t = (typed ?? "").trim();
+  return t.length > 0 ? t : NEW_THREAD_TITLE;
 }
 
 /** Do two paths name the same directory? Windows-shaped comparison: separator
@@ -471,6 +489,44 @@ export function groupMenuThreads(
   return groups;
 }
 
+/** THE rail's rows in the order they are DRAWN — and therefore the order
+ *  Ctrl+1–9 counts (SWIT-56). `grouped` (full shell mode) is the SWIT-46
+ *  project-grouped rendering flattened; bare mode is the flat selection
+ *  itself: live first, then most recent by last activity, capped by
+ *  selectMenuThreads' rule (a live thread is never truncated out). Both the
+ *  rail and the chord call this, so they cannot disagree (the review finding
+ *  that produced App.handleJumpToThread's flatten in the first place). */
+export function menuThreadRows(
+  threads: readonly Thread[],
+  live: ReadonlySet<string>,
+  grouped: boolean,
+  limit: number = MENU_THREAD_LIMIT
+): Thread[] {
+  return grouped
+    ? groupMenuThreads(threads, live, limit).flatMap((g) => g.threads)
+    : selectMenuThreads(threads, live, limit);
+}
+
+/** Where the header `+` puts a new thread (SWIT-56): the ACTIVE thread's
+ *  directory when the active tab is bound to one, else the directory of the
+ *  most recently active thread (the last repo he worked in), else null — the
+ *  caller then falls back to explorer.quickThreadTarget (the tab's cwd, else
+ *  home). Archived threads count for "most recent": putting a thread away
+ *  says nothing about the repo. */
+export function quickCreateWorkingDir(
+  threads: readonly Thread[],
+  activeSessionId: string | null
+): string | null {
+  if (activeSessionId) {
+    const bound = threads.find((t) => t.sessionId === activeSessionId);
+    if (bound && bound.workingDir.trim().length > 0) return bound.workingDir;
+  }
+  const recent = sortThreadsForHistory(threads, new Set()).find(
+    (t) => t.workingDir.trim().length > 0
+  );
+  return recent ? recent.workingDir : null;
+}
+
 /** The `shells` group: published sessions no thread record claims (the
  *  promote-on-claude rule defines the set — a plain Ctrl+T shell has no
  *  record until a claude conversation is actually running in it). Derived
@@ -715,6 +771,10 @@ export type ThreadsView = {
   /** Unread cross-thread posts per thread id — the `↓ N` chip. RENDER-SIDE
    *  ONLY until SWIT-52 publishes real counts; empty means no chip. */
   unreadPosts: Readonly<Record<string, number>>;
+  /** A thread whose title should be in INLINE RENAME the moment its row
+   *  renders (SWIT-56: the header `+` creates first and asks for the name
+   *  second). Consumed — cleared — by the row that honours it. Transient. */
+  renameRequest: string | null;
 };
 
 let threads: Thread[] = [];
@@ -724,6 +784,7 @@ let sessionStatuses: Record<string, AgentStatus> = {};
 let activeSessionId: string | null = null;
 let menuSessions: readonly MenuSession[] = [];
 let unreadPosts: Record<string, number> = {};
+let renameRequest: string | null = null;
 
 const listeners = new Set<() => void>();
 let cachedView: ThreadsView | null = null;
@@ -756,9 +817,26 @@ export function getThreadsView(): ThreadsView {
       activeSessionId,
       menuSessions,
       unreadPosts,
+      renameRequest,
     };
   }
   return cachedView;
+}
+
+/** Ask the rail to open `threadId`'s title in inline rename on its next
+ *  render (SWIT-56). One request at a time — a second replaces the first. */
+export function requestThreadRename(threadId: string): void {
+  if (renameRequest === threadId) return;
+  renameRequest = threadId;
+  bump();
+}
+
+/** The row honouring a request clears it, so a re-render (or a second mount
+ *  of the rail) does not re-open the box. A stale id clears nothing. */
+export function clearThreadRenameRequest(threadId: string): void {
+  if (renameRequest !== threadId) return;
+  renameRequest = null;
+  bump();
 }
 
 /** React hook: the thread view, re-rendering on any store change. */
@@ -1067,8 +1145,15 @@ export type ThreadActions = {
   openThread: (threadId: string) => void;
   /** Revive chip / dead-row click: spawn + type the launch line. */
   reviveThread: (threadId: string) => void;
-  /** "+ new thread" affordance: open the create dialog. */
+  /** Open the repo-picker CREATE DIALOG (NewThreadDialog). No rail row
+   *  calls it since SWIT-56 (the header `+` creates directly); kept
+   *  registered — the dialog stays built and reachable. */
   newThread: () => void;
+  /** The band header's `+` (SWIT-56): create a thread NOW — titled
+   *  NEW_THREAD_TITLE, in the active thread's repo (else the last-used repo,
+   *  else the tab's cwd) — open it, and put its title into inline rename.
+   *  No dialog, no question. */
+  createThreadNow: () => void;
   /** Row menu → Delete, behind the ConfirmDialog. There is no unconfirmed
    *  delete action any more (increment E, Decision 3): the record is the only
    *  route back to a conversation, on BOTH surfaces, so the bare `×` that used
@@ -1106,6 +1191,7 @@ export function __resetThreadStoreForTests(): void {
   activeSessionId = null;
   menuSessions = [];
   unreadPosts = {};
+  renameRequest = null;
   cachedView = null;
   threadActions = null;
   listeners.clear();

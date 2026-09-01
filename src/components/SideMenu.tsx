@@ -10,8 +10,9 @@
 //      expandables open INLINE; Research groups by project and renders ONLY
 //      projects with research pages (registry `section: "research"` — an
 //      empty group never draws, decided Q5).
-//   2. THREADS — grouped by project, live first within each group, plus the
-//      `shells` group (sessions no thread claims). ThreadsSection owns it.
+//   2. THREADS — ThreadsSection owns the whole band INCLUDING its header
+//      (`THREADS · SEE ALL · +`, SWIT-56): flat, live first, then recency in
+//      bare mode; the SWIT-46 project grouping + `shells` group in full mode.
 //   3. EXPLORER — pinned at the bottom, FOLDED by default: the SWIT-31
 //      Projects tree, unchanged inside.
 // Bands 1–2 share one scroll area; band 3 scrolls inside its own cap so an
@@ -168,10 +169,7 @@ export function SideMenu({ route }: { route: Route }) {
 
         <div style={{ height: 1, background: "var(--border)", margin: "8px 0 2px" }} />
 
-        {/* ── Band 2: threads by project ── */}
-        {/* The label jumps to the full history screen — reachable even when
-            the inline list is short enough that no `See all (N)` row shows. */}
-        <SectionLabel onClick={() => navigateToScreen("threads")}>Threads</SectionLabel>
+        {/* ── Band 2: threads ── header + rows, all ThreadsSection's (SWIT-56) */}
         <ThreadsSection />
       </div>
 

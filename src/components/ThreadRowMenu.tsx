@@ -54,15 +54,21 @@ export type ThreadMenuItem = {
  *
  *  The verbs read in the rail's own lowercase voice ("open full", "new
  *  thread"), and the first one names what will ACTUALLY happen: a dead thread
- *  is revived, not merely shown. */
+ *  is revived, not merely shown. The RAIL omits that first verb (SWIT-56, Ky's
+ *  `Rename · Archive · Delete`): its row IS the open/revive click, so the menu
+ *  would only repeat it. The history screen keeps it — there a row click also
+ *  opens, but the screen is where you go to find a thread, and the verb says
+ *  which of the two things the click will do. */
 export function threadMenuItems(args: {
   thread: Thread;
   /** claude is running behind this row in this app run. */
   live: boolean;
   /** Start this surface's inline title edit. */
   onRename: () => void;
+  /** Lead with `open`/`revive` (default). The rail passes false. */
+  openVerb?: boolean;
 }): ThreadMenuItem[] {
-  const { thread, live, onRename } = args;
+  const { thread, live, onRename, openVerb = true } = args;
   const actions = getThreadActions();
   const del: ThreadMenuItem = {
     label: "delete…",
@@ -80,13 +86,14 @@ export function threadMenuItems(args: {
       del,
     ];
   }
+  const open: ThreadMenuItem = {
+    label: live ? "open" : "revive",
+    icon: "open",
+    onSelect: () =>
+      live ? actions?.openThread(thread.id) : actions?.reviveThread(thread.id),
+  };
   return [
-    {
-      label: live ? "open" : "revive",
-      icon: "open",
-      onSelect: () =>
-        live ? actions?.openThread(thread.id) : actions?.reviveThread(thread.id),
-    },
+    ...(openVerb ? [open] : []),
     { label: "rename", icon: "rename", onSelect: onRename },
     {
       label: "archive",
