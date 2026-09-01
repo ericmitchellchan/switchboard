@@ -35,6 +35,11 @@ export interface ShortcutActions {
    *  forces one onto a plain shell. Per-session and remembered for the app's
    *  lifetime (lib/composer.toggleComposer). */
   onToggleComposer?: () => void;
+  /** Ctrl+Shift+F — toggle the active tab's panel FULL VIEW (SWIT-54): the
+   *  panel overlays the whole workspace, the terminal grid untouched beneath
+   *  it. A no-op on a tab with no open panel; Esc inside the panel restores
+   *  too. Plain Ctrl+F stays terminal search. */
+  onTogglePanelMaximize?: () => void;
 }
 
 // Keys we intercept from xterm.js
@@ -69,15 +74,16 @@ function isOurShortcut(e: KeyboardEvent): boolean {
 
   // Ctrl+Shift+W (close pane), Ctrl+Shift+S (export),
   // Ctrl+Shift+P (toggle artifact panel), Ctrl+Shift+O (toggle floating window),
-  // Ctrl+Shift+M (toggle composer). The tab-move chords (Ctrl+Shift+[/]) went
-  // with the tab strip.
+  // Ctrl+Shift+M (toggle composer), Ctrl+Shift+F (panel full view, SWIT-54).
+  // The tab-move chords (Ctrl+Shift+[/]) went with the tab strip.
   if (
     e.shiftKey &&
     (key === "w" ||
       key === "s" ||
       key === "p" ||
       key === "o" ||
-      key === "m")
+      key === "m" ||
+      key === "f")
   ) {
     return true;
   }
@@ -192,6 +198,11 @@ export function useKeyboardShortcuts(
         if (key === "m") {
           e.preventDefault();
           a.onToggleComposer?.();
+          return;
+        }
+        if (key === "f") {
+          e.preventDefault();
+          a.onTogglePanelMaximize?.();
           return;
         }
       }

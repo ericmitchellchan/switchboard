@@ -257,18 +257,29 @@ export const DIVIDER_WIDTH = 4;
 /** How the panel occupies the workspace container for a given container width. */
 export type PanelLayout = {
   /** "docked" = a real flex column beside the pane tree (divider draggable);
-   *  "overlay" = absolutely positioned over it (pane tree keeps its width). */
-  mode: "docked" | "overlay";
+   *  "overlay" = absolutely positioned over it (pane tree keeps its width);
+   *  "maximized" = an overlay covering the WHOLE container, both edges
+   *  (SWIT-54 full view — a viewing gesture, never persisted). */
+  mode: "docked" | "overlay" | "maximized";
   /** Painted width in px. */
   width: number;
+  /** Maximized only: px the host must RESERVE in the flex row (a phantom
+   *  spacer standing where the docked divider + panel stood), so the pane
+   *  tree's layout width is byte-identical to the un-maximized layout and no
+   *  resize ever reaches a running terminal grid. 0 when the underlying
+   *  layout is overlay (the tree already had the full container). */
+  spacer?: number;
 };
 
 /** LAYOUT width the pane tree occupies. In overlay mode the tree keeps its
  *  full width — the panel floats ON TOP of it — so this is what the terminal
  *  is sized/fitted to, NOT what the user can see. Use `shellVisibleWidthFor`
- *  for the "is any shell still visible" question. */
+ *  for the "is any shell still visible" question. Maximized keeps the tree at
+ *  exactly the width the UNDERLYING layout gave it (the spacer's job), which
+ *  is the whole point of the feature: full view without a refit. */
 export function paneTreeWidthFor(containerWidth: number, layout: PanelLayout): number {
   if (layout.mode === "overlay") return Math.round(containerWidth); // panel floats; tree keeps its width
+  if (layout.mode === "maximized") return Math.round(containerWidth) - (layout.spacer ?? 0);
   return Math.round(containerWidth) - DIVIDER_WIDTH - layout.width;
 }
 
@@ -278,8 +289,10 @@ export function paneTreeWidthFor(containerWidth: number, layout: PanelLayout): n
  *  a docked panel takes space from the tree, an overlay COVERS it, so
  *  `paneTreeWidthFor` alone cannot see an overlay that hides the shell
  *  completely — which is exactly the regression this exists to make
- *  assertable. */
+ *  assertable. Maximized covers the shell entirely BY DESIGN (Esc returns),
+ *  so it is the one mode allowed to answer 0. */
 export function shellVisibleWidthFor(containerWidth: number, layout: PanelLayout): number {
+  if (layout.mode === "maximized") return 0;
   if (layout.mode === "overlay") return Math.round(containerWidth) - layout.width;
   return paneTreeWidthFor(containerWidth, layout);
 }
@@ -305,16 +318,35 @@ export function shellVisibleWidthFor(containerWidth: number, layout: PanelLayout
  *  Both branches therefore hold the same promise wherever the container can
  *  afford it — `shellVisibleWidthFor >= MIN_TERMINAL_WIDTH` — so crossing the
  *  breakpoint changes the panel's MODE, never whether the shell is visible. */
-export function panelLayoutFor(containerWidth: number, requestedWidth: number): PanelLayout {
+export function panelLayoutFor(
+  containerWidth: number,
+  requestedWidth: number,
+  /** SWIT-54 full view: an overlay covering the whole container, both edges,
+   *  regardless of the stored width and side — which stay untouched, so
+   *  restoring is exact. The base (un-maximized) layout is still computed
+   *  because its docked width IS the spacer: the pane tree must keep the
+   *  exact width it had, or the maximize would refit a running terminal. */
+  maximized = false
+): PanelLayout {
   const want = clampPanelWidth(requestedWidth);
-  if (!Number.isFinite(containerWidth) || containerWidth <= 0) {
-    return { mode: "docked", width: want };
-  }
-  const box = Math.round(containerWidth);
-  if (box < OVERLAY_BREAKPOINT) {
-    return { mode: "overlay", width: Math.max(MIN_PANEL_WIDTH, Math.min(want, box - MIN_TERMINAL_WIDTH)) };
-  }
-  return { mode: "docked", width: Math.min(want, box - MIN_TERMINAL_WIDTH - DIVIDER_WIDTH) };
+  const base: PanelLayout = (() => {
+    if (!Number.isFinite(containerWidth) || containerWidth <= 0) {
+      return { mode: "docked", width: want };
+    }
+    const box = Math.round(containerWidth);
+    if (box < OVERLAY_BREAKPOINT) {
+      return { mode: "overlay", width: Math.max(MIN_PANEL_WIDTH, Math.min(want, box - MIN_TERMINAL_WIDTH)) };
+    }
+    return { mode: "docked", width: Math.min(want, box - MIN_TERMINAL_WIDTH - DIVIDER_WIDTH) };
+  })();
+  if (!maximized) return base;
+  const width =
+    Number.isFinite(containerWidth) && containerWidth > 0 ? Math.round(containerWidth) : base.width;
+  return {
+    mode: "maximized",
+    width,
+    spacer: base.mode === "docked" ? DIVIDER_WIDTH + base.width : 0,
+  };
 }
 
 /** Divider drag → new stored width. On the RIGHT side the panel is anchored
@@ -1151,6 +1183,59 @@ export function initPanelSides(initial: unknown): void {
   bump();
 }
 
+// ── Panel MAXIMIZE (SWIT-54 — full view over the terminal) ───────────────────
+// "Make the panel full view so I can view a table, a wireframe, or a document
+// full screen and still pin and comment." A per-tab TRANSIENT flag: maximizing
+// is a VIEWING gesture, so it is never persisted (sanitize/migration untouched)
+// and it does not survive looking away. One key, not a set, because at most
+// one tab is on screen and every way of leaving that tab clears the flag:
+//   · switching tabs (publishActiveTabSession) — coming back does NOT restore
+//     it: what you maximized you were looking at, and you stopped;
+//   · hiding the strip (togglePanel) — the restored strip comes back at its
+//     stored width/side, which the flag never touched;
+//   · the strip emptying (last close) or the host tab dying
+//     (removeSessionPanel) — no panel, nothing to be full view of.
+// Closing a NON-last artifact tab keeps the flag: you are still viewing full
+// screen, just a different tab of it. The stored width and side are never
+// written, so restore is exact by construction.
+let maximizedKey: string | null = null;
+
+/** Is this tab's panel in full view? */
+export function isPanelMaximized(sessionId: string | null): boolean {
+  return sessionId !== null && maximizedKey !== null && ownerKeyFor(sessionId) === maximizedKey;
+}
+
+export function useIsPanelMaximized(sessionId: string | null): boolean {
+  return useSyncExternalStore(subscribe, () => isPanelMaximized(sessionId));
+}
+
+/** Set the flag. Turning it ON requires a LIVE panel — a full view of nothing
+ *  is not a state. Turning it OFF is always allowed and idempotent. */
+export function setPanelMaximized(sessionId: string, on: boolean): void {
+  const key = ownerKeyFor(sessionId);
+  if (on) {
+    if (!panels.has(key) || maximizedKey === key) return;
+    maximizedKey = key;
+    bump();
+    return;
+  }
+  if (maximizedKey !== key) return;
+  maximizedKey = null;
+  bump();
+}
+
+export function togglePanelMaximized(sessionId: string): void {
+  setPanelMaximized(sessionId, !isPanelMaximized(sessionId));
+}
+
+/** Clear the flag when the panel it described stops being on screen. Returns
+ *  whether anything changed so callers that batch a bump can fold it in. */
+function clearMaximizedFor(key: string): boolean {
+  if (maximizedKey !== key) return false;
+  maximizedKey = null;
+  return true;
+}
+
 /** The ACTIVE TAB's session id, published by App (§Active-tab bridge below). */
 let activeTabSessionId: string | null = null;
 
@@ -1351,6 +1436,8 @@ export function initPanelStore(
   // `parkedSessions`) — a re-seed starts with none, so a restored blob can
   // never hide a fresh shell behind a picker row.
   parkedSessions = new Set();
+  // Full view is a viewing gesture (SWIT-54) — a fresh seed starts normal.
+  maximizedKey = null;
   panelWidth = clampPanelWidth(width);
   bump();
 }
@@ -1643,6 +1730,8 @@ export function closeArtifactAt(
     audit("strip-emptied", key, auditNames(state), `after=${reason}`);
     rememberPanel(key, state);
     panels.delete(key);
+    // No panel, nothing to be full view of (SWIT-54).
+    clearMaximizedFor(key);
   } else {
     panels.set(key, next);
   }
@@ -1740,6 +1829,9 @@ export function togglePanel(sessionId: string | null): void {
     rememberPanel(key, open);
     panels = new Map(panels);
     panels.delete(key);
+    // Hiding the strip ends the full view (SWIT-54); the chord brings the
+    // strip back at its stored width/side, not maximized.
+    clearMaximizedFor(key);
     bump();
     return;
   }
@@ -1854,6 +1946,8 @@ export function removeSessionPanel(sessionId: string): void {
       changed = true;
     }
   }
+  // The host tab is gone either way — its full view goes with it (SWIT-54).
+  if (clearMaximizedFor(key)) changed = true;
   if (orphans.length > 0) {
     parkedSessions = new Set(parkedSessions);
     for (const id of orphans) parkedSessions.add(id);
@@ -2103,6 +2197,9 @@ export function releasePanelSession(
 export function publishActiveTabSession(sessionId: string | null): void {
   if (sessionId === activeTabSessionId) return;
   activeTabSessionId = sessionId;
+  // Leaving a tab ends its full view (SWIT-54): the maximize was a viewing
+  // gesture on the tab you just left, and coming back starts normal.
+  maximizedKey = null;
   bump();
 }
 
@@ -2641,6 +2738,7 @@ export function __resetPanelStoreForTests(): void {
   threadKeyResolver = null;
   sessionLabels = new Map();
   panelSides = new Map();
+  maximizedKey = null;
   activeTabSessionId = null;
   panelActions = null;
   pickerSessionId = null;

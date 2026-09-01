@@ -63,7 +63,13 @@ export type IconName =
   // A LIVE APP SURFACE (SWIT-30) — a project's page rendered in-document. A
   // dashed frame with a trace through it: "a view", drawn distinct from the
   // solid `panel` frame and from `file` because a running page is neither.
-  | "surface";
+  | "surface"
+  // Panel FULL VIEW (SWIT-54) — the header's maximize/restore pair. Two
+  // diagonal arrows: outward to the corners = go full view, inward from the
+  // corners = come back. Same family as `open` (arrows mean "go"), distinct
+  // because these never leave the panel.
+  | "maximize"
+  | "restore";
 
 /** Default box for a content icon (folder / file / localhost / panel). Rows
  *  reserve exactly this much, so the icon column is identical at every depth
@@ -95,6 +101,8 @@ const STROKE: Record<IconName, number> = {
   save: 1.4,
   terminal: 1.4,
   surface: 1.3,
+  maximize: 1.4,
+  restore: 1.4,
 };
 
 // Every path below is centred on (8, 8) in the 16x16 box:
@@ -227,6 +235,27 @@ const PATHS: Record<IconName, ReactNode> = {
     <>
       <path d="M3.4 4.2 7 8l-3.6 3.8" />
       <path d="M8.2 11.8h4.4" />
+    </>
+  ),
+  // Maximize (SWIT-54): two arrows leaving the centre for opposite corners —
+  // "the panel takes the whole workspace". Ink x 2.75…13.25, centred on (8,8).
+  maximize: (
+    <>
+      <path d="M9.4 2.75h3.85V6.6" />
+      <path d="M13.25 2.75 9.35 6.65" />
+      <path d="M6.6 13.25H2.75V9.4" />
+      <path d="M2.75 13.25 6.65 9.35" />
+    </>
+  ),
+  // Restore: the same two diagonals with the heads reversed — arrows coming
+  // back IN from the corners. Drawn as maximize's mirror so the pair reads as
+  // one action and its undo, like archive/unarchive.
+  restore: (
+    <>
+      <path d="M12.9 6.6H9.4V3.1" />
+      <path d="M13.25 2.75 9.4 6.6" />
+      <path d="M3.1 9.4h3.5v3.5" />
+      <path d="M2.75 13.25 6.6 9.4" />
     </>
   ),
   // Delete: a bin with a lid and two staves.

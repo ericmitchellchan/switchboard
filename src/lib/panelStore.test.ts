@@ -94,6 +94,12 @@ import {
   publishSessionLabels,
   sessionLabelFor,
   SESSION_ICON,
+  // SWIT-54: panel full view (maximize)
+  isPanelMaximized,
+  setPanelMaximized,
+  togglePanelMaximized,
+  setPanelSide,
+  panelSideFor,
   // 2026-08-02: the removal audit
   __setPanelAuditSink,
   auditName,
@@ -1061,6 +1067,100 @@ describe("panelLayoutFor (docked vs overlay)", () => {
     expect(panelLayoutFor(1600, 10).width).toBe(MIN_PANEL_WIDTH);
     expect(panelLayoutFor(2400, 5000).width).toBe(MAX_PANEL_WIDTH);
     expect(panelLayoutFor(1600, NaN).width).toBe(DEFAULT_PANEL_WIDTH);
+  });
+});
+
+describe("panel full view (SWIT-54 — maximize)", () => {
+  it("maximized over a docked layout: full-bleed overlay, spacer = divider + docked width", () => {
+    const base = panelLayoutFor(1600, 420);
+    const max = panelLayoutFor(1600, 420, true);
+    expect(max).toEqual({ mode: "maximized", width: 1600, spacer: DIVIDER_WIDTH + 420 });
+    // The spacer is what keeps the pane tree's LAYOUT width byte-identical —
+    // the terminal-never-refits invariant, stated as arithmetic.
+    expect(paneTreeWidthFor(1600, max)).toBe(paneTreeWidthFor(1600, base));
+    // Full view covers the shell entirely, by design (Esc returns).
+    expect(shellVisibleWidthFor(1600, max)).toBe(0);
+  });
+
+  it("maximized over an overlay layout: no spacer (the tree already had the box)", () => {
+    const container = OVERLAY_BREAKPOINT - 1;
+    const base = panelLayoutFor(container, 420);
+    expect(base.mode).toBe("overlay");
+    const max = panelLayoutFor(container, 420, true);
+    expect(max).toEqual({ mode: "maximized", width: container, spacer: 0 });
+    expect(paneTreeWidthFor(container, max)).toBe(paneTreeWidthFor(container, base));
+  });
+
+  it("an unmeasured container maximizes at the base width until the observer corrects it", () => {
+    const max = panelLayoutFor(0, 500, true);
+    expect(max.mode).toBe("maximized");
+    expect(max.width).toBe(500);
+    expect(max.spacer).toBe(DIVIDER_WIDTH + 500);
+  });
+
+  it("turning ON requires a live panel; the stored width and side never move", () => {
+    setPanelMaximized("s1", true);
+    expect(isPanelMaximized("s1")).toBe(false); // no panel → refused
+
+    openInPanel("s1", KB_DOC);
+    setPanelWidth(500);
+    setPanelSide("s1", "left");
+    togglePanelMaximized("s1");
+    expect(isPanelMaximized("s1")).toBe(true);
+    expect(getPanelWidth()).toBe(500);
+    expect(panelSideFor("s1")).toBe("left");
+    // Restore is exact because the flag never touched either value.
+    togglePanelMaximized("s1");
+    expect(isPanelMaximized("s1")).toBe(false);
+    expect(getPanelWidth()).toBe(500);
+    expect(panelSideFor("s1")).toBe("left");
+  });
+
+  it("leaving the tab clears the flag — and coming back does not restore it", () => {
+    publishActiveTabSession("s1");
+    openInPanel("s1", KB_DOC);
+    setPanelMaximized("s1", true);
+    publishActiveTabSession("s2");
+    expect(isPanelMaximized("s1")).toBe(false);
+    publishActiveTabSession("s1");
+    expect(isPanelMaximized("s1")).toBe(false);
+  });
+
+  it("hiding the strip (Ctrl+Shift+P) clears; the restored strip is not maximized", () => {
+    openInPanel("s1", KB_DOC);
+    setPanelMaximized("s1", true);
+    togglePanel("s1"); // hide
+    expect(isPanelMaximized("s1")).toBe(false);
+    togglePanel("s1"); // bring the strip back
+    expect(panelStateFor("s1")).not.toBeNull();
+    expect(isPanelMaximized("s1")).toBe(false);
+  });
+
+  it("closing a NON-last tab keeps the full view; emptying the strip clears it", () => {
+    openInPanel("s1", KB_DOC);
+    openInPanel("s1", REPO_FILE);
+    setPanelMaximized("s1", true);
+    closeArtifactAt("s1", 1);
+    expect(isPanelMaximized("s1")).toBe(true); // still viewing, one tab fewer
+    closeArtifactAt("s1", 0);
+    expect(panelStateFor("s1")).toBeNull();
+    expect(isPanelMaximized("s1")).toBe(false); // no panel, nothing full view
+  });
+
+  it("destroying the host tab clears the flag", () => {
+    openInPanel("s1", KB_DOC);
+    setPanelMaximized("s1", true);
+    removeSessionPanel("s1");
+    expect(isPanelMaximized("s1")).toBe(false);
+  });
+
+  it("is transient: initPanelStore never resurrects it and the workspace blob never carries it", () => {
+    openInPanel("s1", KB_DOC);
+    setPanelMaximized("s1", true);
+    // Nothing about the flag is in the persisted record.
+    expect(JSON.stringify(getPanelsRecord())).not.toContain("maximiz");
+    initPanelStore({});
+    expect(isPanelMaximized("s1")).toBe(false);
   });
 });
 

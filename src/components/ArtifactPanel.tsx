@@ -91,6 +91,9 @@ import {
   setPanelWidth,
   usePanelSide,
   togglePanelSide,
+  useIsPanelMaximized,
+  setPanelMaximized,
+  togglePanelMaximized,
   sendToThread,
   useSendToThreadAvailable,
   useSessionLabel,
@@ -572,6 +575,10 @@ export function ArtifactPanel({
   // panel is EMPTY, and an empty panel renders nothing that could hold a
   // component-local flag.
   const pickerOpen = useArtifactPickerOpen(sessionId);
+  // FULL VIEW (SWIT-54): a transient viewing gesture — the panel covers the
+  // whole workspace container as an overlay. Same component tree either way
+  // (a style-only change; nothing remounts), Esc restores.
+  const maximized = useIsPanelMaximized(sessionId);
 
   // The picker belongs to the panel that opened it: a TAB SWITCH dismisses it
   // rather than leaving a modal that would open into a different tab. (A
@@ -612,8 +619,9 @@ export function ArtifactPanel({
     ) : null;
   }
 
-  const layout = panelLayoutFor(containerWidth, panelWidth);
+  const layout = panelLayoutFor(containerWidth, panelWidth, maximized);
   const overlay = layout.mode === "overlay";
+  const isMax = layout.mode === "maximized";
   const { icon, crumbs, title } = describeArtifact(artifact);
   // PANEL SIDE (SWIT-33) — per tab, from the store. The pane tree + panel row
   // is App's flex container: `row-reverse` for a left panel, so this fragment
@@ -632,6 +640,9 @@ export function ArtifactPanel({
   // relocates the live view rather than opening a second look at content.)
   const openFull = () => {
     if (artifact.kind !== "kb-doc" && artifact.kind !== "repo-file" && artifact.kind !== "surface") return;
+    // Leaving for the full-width screen ends the full view (SWIT-54) — coming
+    // back to the terminal finds the panel at its stored width and side.
+    setPanelMaximized(sessionId, false);
     navigate(fullWidthRoute(artifact));
   };
 
@@ -671,6 +682,9 @@ export function ArtifactPanel({
    *  the process is alive), everything else closes immediately. ONE function,
    *  used by the strip's `×`, the middle-click and the header's `×`. */
   const closeTabAt = (index: number) => {
+    // A close is a "done looking" gesture — it ends the full view first
+    // (SWIT-54), so the surviving tabs land back in the normal panel.
+    setPanelMaximized(sessionId, false);
     const target = state.artifacts[index];
     if (target?.kind === "session" && canHostTerminals) {
       closePanelTerminal(sessionId, target.sessionId);
@@ -681,12 +695,31 @@ export function ArtifactPanel({
 
   return (
     <>
-      {/* Docked only: in overlay mode the panel floats above the pane tree, so
-          there is no boundary to drag. */}
-      {!overlay && <PanelDivider side={side} />}
+      {/* Docked only: in overlay/full view the panel floats above the pane
+          tree, so there is no boundary to drag. */}
+      {layout.mode === "docked" && <PanelDivider side={side} />}
+      {/* FULL VIEW SPACER (SWIT-54): while maximized over a DOCKED layout the
+          divider and the docked column leave the flex row, so this phantom
+          reserves exactly their space — the pane tree's layout width stays
+          byte-identical and no resize ever reaches the running terminal grid
+          (the whole point of the feature). Invisible: the overlay covers it. */}
+      {isMax && (layout.spacer ?? 0) > 0 && (
+        <div aria-hidden style={{ flex: "none", width: layout.spacer }} />
+      )}
       <aside
         ref={asideRef}
         aria-label="Artifact panel"
+        // Esc restores from full view — a handler on the panel root, NOT
+        // window, so the pane tree's terminal never sees it. A panel TERMINAL
+        // keeps its own Esc (TUIs navigate with it): a key aimed inside an
+        // xterm is the shell's, not the chrome's.
+        onKeyDown={(e) => {
+          if (!isMax || e.key !== "Escape") return;
+          if ((e.target as HTMLElement | null)?.closest?.(".xterm")) return;
+          e.preventDefault();
+          e.stopPropagation();
+          setPanelMaximized(sessionId, false);
+        }}
         style={{
           display: "flex",
           flexDirection: "column",
@@ -702,19 +735,32 @@ export function ArtifactPanel({
           ...(onLeft
             ? { borderRight: "1px solid var(--border-subtle)" }
             : { borderLeft: "1px solid var(--border-subtle)" }),
-          width: layout.width,
-          ...(overlay
+          // FULL VIEW (SWIT-54): an overlay pinned to BOTH edges of the
+          // workspace container (which still excludes the TaskSidebar —
+          // App.tsx owns that nesting), so no `width` — left+right are the
+          // size. The stored width/side are untouched; restore is exact.
+          ...(isMax
             ? {
                 position: "absolute",
                 top: 0,
-                ...(onLeft ? { left: 0 } : { right: 0 }),
+                left: 0,
+                right: 0,
                 bottom: 0,
                 zIndex: 6,
-                boxShadow: onLeft
-                  ? "10px 0 28px rgba(0, 0, 0, 0.55)"
-                  : "-10px 0 28px rgba(0, 0, 0, 0.55)",
               }
-            : { flex: "none", minWidth: 0 }),
+            : overlay
+              ? {
+                  width: layout.width,
+                  position: "absolute",
+                  top: 0,
+                  ...(onLeft ? { left: 0 } : { right: 0 }),
+                  bottom: 0,
+                  zIndex: 6,
+                  boxShadow: onLeft
+                    ? "10px 0 28px rgba(0, 0, 0, 0.55)"
+                    : "-10px 0 28px rgba(0, 0, 0, 0.55)",
+                }
+              : { width: layout.width, flex: "none", minWidth: 0 }),
         }}
       >
         <TabStrip
@@ -837,7 +883,13 @@ export function ArtifactPanel({
               through the thread record, which the PiP webview does not load. */}
           <button
             type="button"
-            onClick={() => (isPoppedOut ? clearPoppedOutArtifact() : popOutArtifact(artifact))}
+            onClick={() => {
+              // Floating an artifact ends the full view first (SWIT-54): the
+              // panel left behind shows the placeholder at its normal size.
+              setPanelMaximized(sessionId, false);
+              if (isPoppedOut) clearPoppedOutArtifact();
+              else popOutArtifact(artifact);
+            }}
             disabled={!canPopOut}
             title={
               !canPopOut
@@ -881,6 +933,21 @@ export function ArtifactPanel({
           )}
           </>
           )}
+          {/* FULL VIEW (SWIT-54) — maximize the PANEL over the workspace
+              (table columns, wireframes and docs at full width, pins and
+              comments live). A property of the panel, not the artifact, so it
+              renders for every kind — sessions included. Esc restores. */}
+          <button
+            type="button"
+            onClick={() => togglePanelMaximized(sessionId)}
+            title={maximized ? "restore the panel — or Esc" : "full view — Esc returns"}
+            aria-label={maximized ? "Restore the panel" : "Panel full view"}
+            style={{ ...ACTION_STYLE, display: "flex", alignItems: "center", padding: "0 3px" }}
+            onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-primary)")}
+            onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-dim)")}
+          >
+            <Icon name={maximized ? "restore" : "maximize"} size={12} />
+          </button>
           {/* The ✦ page has no × anywhere (SWIT-48): it cannot close, and a
               button that silently refuses is a dead affordance. Ctrl+Shift+P
               still hides the whole panel. */}

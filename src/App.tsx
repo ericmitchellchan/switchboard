@@ -82,6 +82,7 @@ import {
   remapPanelSessions,
   removeSessionPanel,
   togglePanel,
+  togglePanelMaximized,
   panelToggleAvailableFor,
   openArtifactPicker,
   publishActiveTabSession,
@@ -2422,6 +2423,14 @@ export default function App() {
       onToggleSideMenu: toggleSideMenu,
       onTogglePanel: handleTogglePanel,
       onToggleComposer: handleToggleComposer,
+      // Ctrl+Shift+F — panel FULL VIEW (SWIT-54). Per-TAB like the panel
+      // itself; the store refuses when the tab has no open panel, so the
+      // chord is never a surprise on an empty tab.
+      // The closure is fresh every render (the hook reads through a ref), so
+      // `activeSessionId` here is the live TAB — per-TAB like the panel itself.
+      onTogglePanelMaximize: () => {
+        if (activeSessionId) togglePanelMaximized(activeSessionId);
+      },
     },
     effectiveActiveSessionId
   );
@@ -3113,7 +3122,14 @@ export default function App() {
             computed against space the pane tree can actually occupy, and (c)
             overlay mode's `right: 0` lands on the pane tree's right edge
             instead of covering the sidebar. `position: relative` is the
-            containing block that makes (c) true by construction. */}
+            containing block that makes (c) true by construction.
+
+            FULL VIEW (SWIT-54) rides the same containing block: a maximized
+            panel pins to BOTH edges of THIS container (the TaskSidebar stays
+            uncovered, by the same nesting), and the panel's phantom spacer
+            keeps the pane tree's flex width byte-identical while the overlay
+            floats above it — THE TERMINAL NEVER REFITS, which is the point of
+            the feature. */}
         <div
           style={{
             flex: 1,
