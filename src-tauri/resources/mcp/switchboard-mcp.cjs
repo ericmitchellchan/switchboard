@@ -264,6 +264,24 @@ function validViewSourcePath(p) {
   return true;
 }
 
+/** LOOPBACK-ONLY, as a REAL PARSE (review, T4-T6): the old prefix regex
+ *  accepted `http://localhost:1234@evil.com/x` — that `localhost:1234` is
+ *  userinfo and the request goes to evil.com. PAIRED WITH `isLocalBackendUrl`
+ *  in `src/lib/viewStore.ts` — byte-identical body (this file is
+ *  dependency-free and cannot import it). Change one, change the other. */
+function isLocalBackendUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+  if (parsed.username !== "" || parsed.password !== "") return false;
+  const host = parsed.hostname;
+  return host === "127.0.0.1" || host === "localhost" || host === "[::1]" || host === "::1";
+}
+
 /** Validate a view SOURCE — the top-level one or a drill's TEMPLATE (`field`
  *  names which, for the error). A template is checked with `{key}` replaced
  *  by a placeholder component, so `{key}` may sit in a path or a query
@@ -282,7 +300,7 @@ function buildViewSource(source, field) {
   }
   if (source.type === "query") {
     const url = text(source.url, `${field}.url`);
-    if (!/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|\/)/.test(fill(url))) {
+    if (!isLocalBackendUrl(fill(url))) {
       throw new OpError(`${field}.url must be a local backend (127.0.0.1 / localhost)`);
     }
     const clean = { type: "query", url };
@@ -867,6 +885,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  isLocalBackendUrl,
   VIEW_DEFINITION_CAP,
   VIEW_FILTER_CAP,
   VIEW_FILTER_KINDS,

@@ -17,7 +17,10 @@
 // attachments and preventDefaults — nothing sensible could be inserted for a
 // file anyway. A paste with no file item returns before touching the event,
 // so plain text — dictation included — still reaches the textarea untouched
-// and lands once. Do not widen it to text; do not add a second handler.
+// and lands once. A MIXED clipboard (Excel-style: a `text/plain` item beside
+// an image rendering of the same cells) is TEXT — files are attached only
+// when there is no text item; otherwise the paste falls through whole. Do not
+// widen it to text; do not add a second handler.
 //
 // Two paste routes end here. This handler sees every paste the WEBVIEW sees
 // (right-click Paste, Shift+Insert). Ctrl+V does NOT reach it: the global
@@ -291,10 +294,13 @@ export function Composer({ sessionId }: { sessionId: string }) {
 
   // The file-only paste filter — see the header. Files are taken SYNCHRONOUSLY
   // (clipboardData is void after the first await) and the event is claimed
-  // only when there is at least one; text falls through untouched.
+  // only when there is at least one AND no text item rides beside them; a
+  // mixed clipboard is text and falls through untouched.
   const handlePasteCapture = useCallback(
     (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-      const picked = pickPastedFiles(e.clipboardData?.items);
+      const items = e.clipboardData?.items;
+      if (items && Array.from(items).some((it) => it.kind === "string" && it.type === "text/plain")) return;
+      const picked = pickPastedFiles(items);
       if (picked.length === 0) return;
       e.preventDefault();
       e.stopPropagation();

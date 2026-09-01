@@ -2,7 +2,7 @@
 // keys, the candle/dist row mappings — and the freeze-rule import tripwire
 // (same guarantee as pageStore's).
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 // eslint-disable-next-line import/no-duplicates
 import viewStoreSource from "./viewStore.ts?raw";
 // @ts-expect-error — no @types/node in the frontend tsconfig; vitest's node
@@ -30,6 +30,7 @@ import {
   drillKeyForAnchor,
   markerAtBar,
   resolveDrill,
+  isLocalBackendUrl,
   drillFallbackSentence,
   specLines,
 } from "./viewStore";
@@ -296,6 +297,42 @@ describe("T6 — client-side filters", () => {
   });
 });
 
+describe("isLocalBackendUrl — a real parse, not a prefix", () => {
+  it("accepts the three loopback spellings, with or without a port, either scheme", () => {
+    expect(isLocalBackendUrl("http://127.0.0.1:8799/api/bars")).toBe(true);
+    expect(isLocalBackendUrl("http://localhost")).toBe(true);
+    expect(isLocalBackendUrl("https://localhost:8443/x?k=v")).toBe(true);
+    expect(isLocalBackendUrl("http://[::1]:8799/rows")).toBe(true);
+  });
+
+  it("REFUSES the userinfo bypass: `localhost:1234@evil.com` is a credential, not a host", () => {
+    expect(isLocalBackendUrl("http://localhost:1234@evil.com/x")).toBe(false);
+    expect(isLocalBackendUrl("http://127.0.0.1@evil.com/")).toBe(false);
+    expect(isLocalBackendUrl("http://user:pw@localhost:8799/")).toBe(false);
+  });
+
+  it("refuses a non-loopback host, a look-alike, a non-http scheme and an unparseable string", () => {
+    expect(isLocalBackendUrl("https://evil.example/x")).toBe(false);
+    expect(isLocalBackendUrl("http://127.0.0.1.evil.com/")).toBe(false);
+    expect(isLocalBackendUrl("http://localhost.evil.com/")).toBe(false);
+    expect(isLocalBackendUrl("ws://localhost:8799/")).toBe(false);
+    expect(isLocalBackendUrl("file:///C:/x")).toBe(false);
+    expect(isLocalBackendUrl("localhost:8799")).toBe(false);
+    expect(isLocalBackendUrl("not a url")).toBe(false);
+    expect(isLocalBackendUrl("")).toBe(false);
+  });
+
+  it("the reader refuses a spec whose query url smuggles a host through userinfo", () => {
+    const raw = JSON.stringify({
+      id: "q", kind: "table", title: "q", builtAt: "2026-09-01T10:00:00Z", builtBy: "agent",
+      source: { type: "query", url: "http://localhost:1234@evil.com/x" },
+    });
+    const r = parseViewSpec(raw);
+    expect(r.spec).toBeNull();
+    expect(r.specError).toMatch(/not a local backend/);
+  });
+});
+
 describe("T6 — drill resolution", () => {
   it("drillPathKey makes ONE path component out of any key, and refuses what cannot be one", () => {
     expect(drillPathKey("MNQ short flat")).toBe("MNQ_short_flat");
@@ -407,6 +444,9 @@ describe("T6 smoke — setup table → per-setup instances, from files in .sb-vi
   };
   const pathMod = nodeRequire("node:path") as { join: (...p: string[]) => string; resolve: (...p: string[]) => string };
   const cwd = pathMod.resolve(".sb-views", "t6-smoke");
+  // Cleanup lives here, not at the end of the test body: a failing expect
+  // must not strand `.sb-views/t6-smoke/` in the checkout.
+  afterEach(() => fs.rmSync(cwd, { recursive: true, force: true }));
 
   it("resolves and reads the child the agent would have written", () => {
     fs.rmSync(cwd, { recursive: true, force: true });
@@ -464,6 +504,5 @@ describe("T6 smoke — setup table → per-setup instances, from files in .sb-vi
     const second = resolveDrill(parent, rowAnchorId(rows[1], parent)!);
     expect(parseViewRows(fs.readFileSync(pathMod.join(cwd, (second.spec!.source as { path: string }).path), "utf8"))).toHaveLength(1);
     expect(viewPinScope({}, hit.key)).toBe("/MNQ%20short%20flat");
-    fs.rmSync(cwd, { recursive: true, force: true });
   });
 });

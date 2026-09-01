@@ -98,9 +98,31 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 /** LOOPBACK-ONLY, re-checked at the READER (review): the MCP server validates
  *  on the write side, but the spec is a plain file an agent could write with
  *  its own tools — the reader enforcing the same rule makes it structural
- *  rather than one-sided. Same regex the server uses. */
+ *  rather than one-sided.
+ *
+ *  A REAL PARSE, not a prefix regex (review, T4-T6): the old
+ *  `^https?://(127.0.0.1|localhost|[::1])(:|/)` accepted
+ *  `http://localhost:1234@evil.com/x` — `localhost:1234` is USERINFO there and
+ *  the fetch goes to evil.com. So: `new URL` must succeed, the scheme is
+ *  http(s), there is NO userinfo, and the parsed `hostname` is a literal
+ *  loopback. WHATWG keeps the brackets on an IPv6 hostname (`[::1]`), so both
+ *  spellings are listed.
+ *
+ *  PAIRED WITH `isLocalBackendUrl` in
+ *  `src-tauri/resources/mcp/switchboard-mcp.cjs` — byte-identical body; the
+ *  server is dependency-free and cannot import this module. Change one,
+ *  change the other (the `TRANSCRIPT_SUFFIX` arrangement). */
 export function isLocalBackendUrl(url: string): boolean {
-  return /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|\/)/.test(url);
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+  if (parsed.username !== "" || parsed.password !== "") return false;
+  const host = parsed.hostname;
+  return host === "127.0.0.1" || host === "localhost" || host === "[::1]" || host === "::1";
 }
 
 function parseViewSource(src: unknown): { source: ViewSource } | { error: string } {
@@ -469,8 +491,9 @@ export function markerAtBar(
  *  in a file path takes the path-component form (refused when it cannot be
  *  made one); in a query url/body it is URL-encoded; in the title it is the
  *  raw key. The child's query url is re-checked against the loopback rule
- *  after substitution — belt and braces, the encoding already makes a host
- *  change impossible. */
+ *  after substitution — the encoding keeps a key out of the host and the
+ *  userinfo slot, and the re-check is what holds if that ever stops being
+ *  true (a template with `{key}` in the authority is refused either way). */
 export function resolveDrill(
   parent: ViewSpec,
   key: string

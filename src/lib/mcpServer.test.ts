@@ -11,6 +11,9 @@ import { createRequire } from "node:module";
 import { parsePageFile, mergePage } from "./pageStore";
 import { parseViewSpec } from "./viewStore";
 import { parseInboxFile } from "./pageStore";
+// Source text of the two loopback predicates, for the byte-identical check.
+import viewStoreSource from "./viewStore.ts?raw";
+import mcpServerSource from "../../src-tauri/resources/mcp/switchboard-mcp.cjs?raw";
 
 const require = createRequire(import.meta.url);
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -27,6 +30,7 @@ const server = require("../../src-tauri/resources/mcp/switchboard-mcp.cjs") as {
     existingIds: string[],
     now: number
   ) => Record<string, unknown>;
+  isLocalBackendUrl: (url: string) => boolean;
   PAGE_TOOL: { name: string; description: string; inputSchema: unknown };
   VIEW_TOOL: { name: string; description: string; inputSchema: unknown };
   OpError: new (message: string) => Error;
@@ -268,6 +272,12 @@ describe("the view tool (SWIT-50)", () => {
     expect(() => server.buildViewSpec(withSource({ type: "file", path: "C:/Windows/x" }), [], NOW)).toThrow();
     expect(() => server.buildViewSpec(withSource({ type: "file", path: "/etc/passwd" }), [], NOW)).toThrow();
     expect(() => server.buildViewSpec(withSource({ type: "query", url: "https://evil.example/x" }), [], NOW)).toThrow(/local backend/);
+    // The userinfo bypass: `localhost:1234` is a credential here and the host is evil.com.
+    expect(() => server.buildViewSpec(withSource({ type: "query", url: "http://localhost:1234@evil.com/x" }), [], NOW)).toThrow(/local backend/);
+    expect(() => server.buildViewSpec(withSource({ type: "query", url: "http://127.0.0.1.evil.com/" }), [], NOW)).toThrow(/local backend/);
+    expect(() => server.buildViewSpec(withSource({ type: "query", url: "not a url" }), [], NOW)).toThrow(/local backend/);
+    expect(() => server.buildViewSpec(withSource({ type: "query", url: "http://[::1]:8799/rows" }), [], NOW)).not.toThrow();
+    expect(() => server.buildViewSpec(withSource({ type: "query", url: "http://localhost/rows" }), [], NOW)).not.toThrow();
     expect(() => server.buildViewSpec({ ...base, kind: "pie" }, [], NOW)).toThrow(/kind must be/);
     expect(() => server.buildViewSpec({ ...base, id: "no spaces!" }, [], NOW)).toThrow(/must match/);
   });
@@ -402,6 +412,29 @@ describe("the view tool (SWIT-50)", () => {
       const props = (server.VIEW_TOOL.inputSchema as { properties: Record<string, unknown> }).properties;
       expect(Object.keys(props)).toEqual(expect.arrayContaining(["definition", "filters", "drill"]));
     });
+  });
+});
+
+describe("isLocalBackendUrl — the server's copy is the reader's copy", () => {
+  it("a real parse: loopback spellings pass, userinfo / look-alikes / garbage fail", () => {
+    expect(server.isLocalBackendUrl("http://127.0.0.1:8799/api")).toBe(true);
+    expect(server.isLocalBackendUrl("http://localhost")).toBe(true);
+    expect(server.isLocalBackendUrl("http://[::1]:8799/x")).toBe(true);
+    expect(server.isLocalBackendUrl("http://localhost:1234@evil.com/x")).toBe(false);
+    expect(server.isLocalBackendUrl("https://evil.example/x")).toBe(false);
+    expect(server.isLocalBackendUrl("http://127.0.0.1.evil.com/")).toBe(false);
+    expect(server.isLocalBackendUrl("not a url")).toBe(false);
+  });
+
+  it("is BYTE-IDENTICAL to viewStore's body (the pairing comment is a promise; this is the check)", () => {
+    const body = (src: string) => {
+      const m = src.match(/function isLocalBackendUrl\([^)]*\)[^{]*\{[\s\S]*?\n\}/);
+      if (!m) throw new Error("isLocalBackendUrl not found");
+      // Only the TS annotations differ: strip them and the bodies must match.
+      return m[0].replace("(url: string): boolean", "(url)").replace("let parsed: URL;", "let parsed;");
+    };
+    expect(body(mcpServerSource)).toBe(body(viewStoreSource));
+    expect(body(mcpServerSource)).toContain("parsed.username");
   });
 });
 

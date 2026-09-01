@@ -117,7 +117,11 @@ export type PanelRemovalReason =
   | "promote-move"
   /** A plain open REPLACED the preview tab in place (SWIT-47, R3 rule 2).
    *  The replaced artifact went onto the strip's preview back stack. */
-  | "preview-replace";
+  | "preview-replace"
+  /** `goPreviewBack` (T6) whose back target was ALREADY A TAB: the preview
+   *  is CLOSED and that tab activated rather than restored in place, because
+   *  one artifact may not be listed twice. A gesture (the header's `←`). */
+  | "preview-back-close";
 
 export interface PanelRemoval {
   reason: PanelRemovalReason;
@@ -1519,9 +1523,9 @@ export function goPreviewBack(sessionId: string): void {
   const index = state.artifacts.findIndex((a) => artifactIdentity(a) === currentId);
   if (index < 0) return;
   const target = stack[stack.length - 1];
-  audit("preview-replace", key, state.artifacts[index], `back-to=${auditName(target)}`);
   const existing = indexOfArtifact(state.artifacts, target);
   if (existing >= 0 && existing !== index) {
+    audit("preview-back-close", key, state.artifacts[index], `activates=${auditName(target)}`);
     const artifacts = state.artifacts.filter((_, i) => i !== index);
     // The lineage ended in a pinned tab (as pinPreview's does): the rest of
     // the stack would only be reachable by a NEW preview that never replaced
@@ -1535,6 +1539,7 @@ export function goPreviewBack(sessionId: string): void {
     bump();
     return;
   }
+  audit("preview-replace", key, state.artifacts[index], `back-to=${auditName(target)}`);
   previewBacks = new Map(previewBacks);
   previewBacks.set(key, stack.slice(0, -1));
   previews = new Map(previews);

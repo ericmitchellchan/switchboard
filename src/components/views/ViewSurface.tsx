@@ -153,6 +153,14 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
   const pinScope = useMemo(() => viewPinScope(activeFilters, drillKey), [activeFilters, drillKey]);
   const [showSpec, setShowSpec] = useState(false);
   const [hover, setHover] = useState<HoverHint>(null);
+  // Per-filter value lists are a scan of every row; a hover re-render must
+  // not redo it (review, T4-T6). Keyed on the loaded rows + the declared
+  // filters only — the ACTIVE selection does not change the option set.
+  const specFilters = spec?.filters;
+  const filterOptions = useMemo(
+    () => (specFilters ?? []).map((f) => ({ filter: f, values: filterValues(rows ?? [], f) })),
+    [rows, specFilters]
+  );
   const canSend = useSendToThreadAvailable();
 
   // The project a view's pins + keeps file under: the thread's repo name.
@@ -353,8 +361,7 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
         <div style={TOOLBAR_STYLE}>
           <span style={{ color: "var(--text-primary)", flex: "none" }}>{spec.kind}</span>
           <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{spec.title}</span>
-          {(spec.filters ?? []).map((f) => {
-            const values = filterValues(rows ?? [], f);
+          {filterOptions.map(({ filter: f, values }) => {
             const current = activeFilters[f.column] ?? "";
             return (
               <select
@@ -623,7 +630,9 @@ function TableView({ spec, rows, onActivate, onHover }: RendererProps) {
  *  40 honest lines instead of bending uPlot into a histogram. Soft palette;
  *  no new colour. */
 function DistView({ spec, rows, onActivate, onHover }: RendererProps) {
-  const bins = toDistBins(rows, spec);
+  // Binning is a full pass over the rows; the parent's hover state re-renders
+  // this component with the same props, so the bins are memoised on them.
+  const bins = useMemo(() => toDistBins(rows, spec), [rows, spec]);
   if (bins.length === 0) {
     return (
       <div style={{ padding: 24, fontFamily: MONO, fontSize: 11, color: "var(--text-dim)" }}>

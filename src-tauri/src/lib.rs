@@ -421,8 +421,9 @@ async fn append_convention(line: String) -> Result<(), String> {
 // same as the thread files above: the thread id is uuid-alphabet only, the
 // thread must be KNOWN (in the threads.json mirror — the frontend flushes it
 // at thread creation and on promotion), the file name is held to a closed
-// alphabet with no separator in it, and the only dir this creates is
-// `attachments/` itself.
+// alphabet with no separator in it, and the only dirs this creates are
+// `attachments/` and, for a thread that is in the mirror but was never
+// launched (so has no data dir yet), the `threads/<threadId>/` above it.
 
 /// Mirrors `MAX_PASTE_BYTES` in lib/attachments.ts — change one, change both.
 const ATTACHMENT_CAP: usize = 25 * 1024 * 1024;
@@ -502,10 +503,19 @@ async fn save_thread_attachment(
     let path = attachment_target(&threads_data_dir()?, &mirror, &thread_id, &name, bytes.len())?;
     let dir = path.parent().ok_or("no attachments dir")?;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    if path.exists() {
-        return Err(format!("attachment already exists: {}", name));
+    // `create_new` makes never-overwrite a PROPERTY of the open, not a check
+    // a second paste could race past between `exists()` and `write`.
+    let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(format!("attachment already exists: {}", name));
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    {
+        use std::io::Write;
+        file.write_all(&bytes).map_err(|e| e.to_string())?;
     }
-    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
     log::info!(
         "Saved attachment thread={} name={} bytes={}",
         thread_id,
