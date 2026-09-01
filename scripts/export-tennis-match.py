@@ -28,6 +28,14 @@ only 73 of 137 matches. The row's `price` here is `price` on player 1's ticker a
 `100 - price` on player 2's; a ticker matching neither is left raw and counted in
 `meta.unfolded`. The raw value stays as `price_raw` with its `ticker`.
 
+`backs_player` IS THE TAKER'S STANCE, NOT THE QUOTE. It is derived in Lodestar's
+tennis_anomaly.py (trade_stance, lines 79-84) from buy-YES/buy-NO on the TRADED
+ticker: buying YES on player X's market backs X, buying NO backs the other player.
+The flagged moments over-represent bets AGAINST the on-court leader (the score
+favors disagreement), so a `backs_player = 2` mark at a folded price of ~86 is a
+cheap NO-side bet against a leading player 1 - expected, not inverted (verified
+against the DB 2026-09-01: all four ticker-side x stance cells match this reading).
+
 COVERAGE: the rows are FLAGGED moments only — and a subset of those: the `_moment`
 table holds the TOP 12 flagged moments per match (verified 2026-09-01: 12 rows for
 every one of the 137 matches, while `n_flagged` counts all flagged trades). The full
