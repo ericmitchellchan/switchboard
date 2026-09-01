@@ -10,6 +10,7 @@ import { describe, it, expect } from "vitest";
 import { createRequire } from "node:module";
 import { parsePageFile, mergePage } from "./pageStore";
 import { parseViewSpec } from "./viewStore";
+import { parseInboxFile } from "./pageStore";
 
 const require = createRequire(import.meta.url);
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -244,5 +245,51 @@ describe("the view tool (SWIT-50)", () => {
     expect(server.VIEW_TOOL.name).toBe("view");
     expect(server.VIEW_TOOL.description).toContain("NEVER runs your code");
     expect(server.VIEW_TOOL.description).toContain("you cannot make a view poll");
+  });
+});
+
+describe("the post tool (SWIT-52)", () => {
+  const threads = [
+    { id: "t1", title: "sim audit" },
+    { id: "t2", title: "markets - Aug 30" },
+    { id: "t3", title: "gone", archivedAt: 5 },
+  ];
+  const srv = server as unknown as {
+    resolvePostTarget: (t: unknown[], q: string, self: string) => { id: string; title: string };
+    appendPost: (list: unknown[], post: Record<string, unknown>, now: number) => unknown[];
+  };
+
+  it("resolves by id and by unique title fragment; self + archived excluded; misses are sentences", () => {
+    expect(srv.resolvePostTarget(threads, "t2", "t1").id).toBe("t2");
+    expect(srv.resolvePostTarget(threads, "markets", "t1").id).toBe("t2");
+    expect(() => srv.resolvePostTarget(threads, "sim", "t1")).toThrow(/THIS thread/);
+    expect(() => srv.resolvePostTarget(threads, "gone", "t1")).toThrow(/no thread matches/);
+    expect(() => srv.resolvePostTarget(threads, "zzz", "t1")).toThrow(/no thread matches/);
+  });
+
+  it("rate-limits per sending thread and caps the inbox", () => {
+    const mk = (i: number, agoMs: number) => ({
+      id: `p${i}`,
+      fromId: "t1",
+      kind: "update",
+      text: "x",
+      at: new Date(NOW - agoMs).toISOString(),
+    });
+    const recent = [mk(1, 1000), mk(2, 2000), mk(3, 3000), mk(4, 4000), mk(5, 5000)];
+    expect(() =>
+      srv.appendPost(recent, { id: "p6", fromId: "t1", kind: "update", text: "x", at: new Date(NOW).toISOString() }, NOW)
+    ).toThrow(/rate limit/);
+    // Old posts do not count against the window; the cap keeps the newest.
+    const old = Array.from({ length: 120 }, (_, i) => mk(i, 10 * 60_000));
+    const next = srv.appendPost(old, { id: "new", fromId: "t1", kind: "request", text: "x", at: new Date(NOW).toISOString() }, NOW);
+    expect(next).toHaveLength(100);
+    expect((next[next.length - 1] as { id: string }).id).toBe("new");
+  });
+
+  it("a post round-trips through pageStore's inbox parse", () => {
+    const post = { id: "p1", from: "sim audit", fromId: "t1", kind: "request", text: "re-run it", at: new Date(NOW).toISOString() };
+    const parsed = parseInboxFile(JSON.stringify({ posts: [post] }));
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]).toMatchObject({ id: "p1", from: "sim audit", kind: "request", text: "re-run it" });
   });
 });

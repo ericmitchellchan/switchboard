@@ -115,6 +115,25 @@ export async function readViewData(threadId: string, relPath: string): Promise<s
   return invoke("read_view_data", { threadId, relPath });
 }
 
+/** Deliver a cross-thread post into a TARGET thread's inbox (SWIT-52) — the
+ *  app-side writer behind the composer's `@thread …` form. Same record shape
+ *  the MCP server's `post` tool appends. */
+export async function writeThreadPost(
+  targetThreadId: string,
+  fromTitle: string,
+  fromId: string,
+  kind: "update" | "request",
+  text: string
+): Promise<void> {
+  return invoke("write_thread_post", { targetThreadId, fromTitle, fromId, kind, text });
+}
+
+/** Kept views (SWIT-52): every `.view.json` under `_scratch/`, rel paths,
+ *  newest first — the scratchpad's one window (the KB tree hides `_` roots). */
+export async function listScratchViews(): Promise<string[]> {
+  return invoke("list_scratch_views");
+}
+
 /** Record Eric's answer to a page question (SWIT-51). The APP is
  *  answers.json's sole writer; the write is atomic server-side. Durability
  *  first: callers write THIS before typing anything into a terminal. */

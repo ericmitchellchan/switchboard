@@ -90,6 +90,27 @@ export function composeWrite(text: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// @thread posts (SWIT-52)
+// ─────────────────────────────────────────────────────────────────────────────
+// `@sim-audit re-run the pin check` / `@"markets · Aug 30" look at this` —
+// the composer's address form for posting to ANOTHER thread by hand. Pure
+// parse; resolution and delivery are the app's (threadStore actions bridge).
+
+export type ThreadPost = { target: string; body: string };
+
+/** A message addressed to another thread, or null for an ordinary send. The
+ *  target is one word or a quoted phrase; the body is everything after. */
+export function parseThreadPost(text: string): ThreadPost | null {
+  if (typeof text !== "string") return null;
+  const m = text.trimStart().match(/^@(?:"([^"]{1,80})"|(\S{1,80}))[ 	]+([\s\S]+)$/);
+  if (!m) return null;
+  const target = (m[1] ?? m[2] ?? "").trim();
+  const body = (m[3] ?? "").trim();
+  if (target.length === 0 || body.length === 0) return null;
+  return { target, body };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Send history
 // ─────────────────────────────────────────────────────────────────────────────
 

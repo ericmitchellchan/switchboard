@@ -20,7 +20,7 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, listThreadViews, readThreadFile, writeThreadAnswer, saveTranscript } from "./lib/ipc";
+import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, listThreadViews, readThreadFile, writeThreadAnswer, writeThreadPost, saveTranscript } from "./lib/ipc";
 import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty, isSessionDirty, serializeForPip, plainTextTerminal, setTerminalScreenVisible } from "./lib/terminal";
 import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing, sendPipHost } from "./lib/pipBridge";
 import { bumpSessionGeneration, addSessionInputListener, getSessionGeneration } from "./lib/terminalRegistry";
@@ -59,6 +59,9 @@ import {
   groupMenuThreads,
   getThreadsView,
   publishMenuSessions,
+  publishThreadUnread,
+  resolveThreadByQuery,
+  activeThreads,
 } from "./lib/threadStore";
 import {
   initPanelStore,
@@ -104,13 +107,14 @@ import { dirtyCount, flushDrafts } from "./lib/editor";
 import {
   buildSpawnContext,
   refOptions,
+  sanitizeForTypedLine,
   setKbRootForContext,
   setScrollbackRootForContext,
   setThreadsRootForContext,
   buildPageContractLine,
 } from "./lib/agentContext";
 import { runPromotionPass, promotionPassReason, PROMOTION_POLL_MS } from "./lib/threadPromotion";
-import { parsePageFile, parseAnswersFile } from "./lib/pageStore";
+import { parsePageFile, parseAnswersFile, parseInboxFile, countUnreadPosts, loadInboxSeen, markInboxSeen } from "./lib/pageStore";
 import { explorerProjects, registerExplorerActions } from "./lib/explorer";
 import { parsePinsFile, pinsForDoc, pinTargetFor, surfacePinTargetFor } from "./lib/pins";
 import { configurePinsIO, getPinsFile } from "./lib/pinsStore";
@@ -1069,6 +1073,29 @@ export default function App() {
     void saveThreadsToDisk();
   }, []);
 
+  // The composer's `@thread …` form (SWIT-52): resolve the target by title
+  // among ACTIVE threads (self excluded), then deliver through the app-side
+  // inbox writer. Delivery to the target TERMINAL happens on the inbox poll
+  // below — one delivery path whether the post came from an agent or from
+  // Eric. Rejects with a human sentence the composer prints as-is.
+  const handlePostToThread = useCallback(
+    async (fromSessionId: string | null, targetQuery: string, body: string): Promise<string> => {
+      const fromThread = fromSessionId ? findThreadBySessionId(fromSessionId) : undefined;
+      const resolved = resolveThreadByQuery(getThreads(), targetQuery, fromThread?.id ?? null);
+      if ("error" in resolved) throw new Error(resolved.error);
+      await writeThreadPost(
+        resolved.thread.id,
+        fromThread?.title ?? "you",
+        fromThread?.id ?? "user",
+        "request",
+        body
+      );
+      log.info(`Cross-thread post -> "${resolved.thread.title}" (${resolved.thread.id})`);
+      return `posted to "${resolved.thread.title}"`;
+    },
+    []
+  );
+
   // Bridge App's handlers to ThreadsSection (module singleton — see
   // threadStore.ThreadActions).
   useEffect(() => {
@@ -1079,6 +1106,7 @@ export default function App() {
       confirmDeleteThread: handleConfirmDeleteThread,
       renameThread: handleRenameThread,
       setThreadArchived: handleSetThreadArchived,
+      postToThread: handlePostToThread,
     });
     return () => registerThreadActions(null);
   }, [
@@ -1087,7 +1115,85 @@ export default function App() {
     handleConfirmDeleteThread,
     handleRenameThread,
     handleSetThreadArchived,
+    handlePostToThread,
   ]);
+
+  // ── Inbox delivery (SWIT-52) ───────────────────────────────────────────────
+  // One 5s pass over every ACTIVE thread's inbox: unread counts for the rail
+  // chips (`↓ N` vs the device-local seen stamp — the ACTIVE thread is marked
+  // seen as it goes, its reference is in the terminal you are watching), and
+  // the TYPED delivery: a post not seen this app session goes into the target
+  // thread's LIVE terminal through the `→ thread` seam — sanitized, single
+  // line, NO trailing CR (decided Q2: immediately; it sits in the input box
+  // until the agent's next turn). The first listing per thread is a baseline
+  // (old posts are on the page and the chip; re-typing them each restart
+  // would be spam). No auto-forwarding is STRUCTURAL: delivery types a
+  // reference and nothing else — no path from here back to a post.
+  const deliveredPostsRef = useRef(new Map<string, Set<string>>());
+  useEffect(() => {
+    let cancelled = false;
+    let busy = false;
+    const tick = async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        const threads = activeThreads(getThreads());
+        const unread: Record<string, number> = {};
+        for (const t of threads) {
+          let posts;
+          try {
+            posts = parseInboxFile(await readThreadFile(t.id, "inbox.json"));
+          } catch {
+            continue;
+          }
+          if (cancelled) return;
+          if (posts.length === 0) continue;
+          const activeThread = findThreadBySessionId(activeIdRef.current ?? "");
+          if (activeThread?.id === t.id) markInboxSeen(t.id);
+          const n = countUnreadPosts(posts, loadInboxSeen(t.id));
+          if (n > 0) unread[t.id] = n;
+          let delivered = deliveredPostsRef.current.get(t.id);
+          if (!delivered) {
+            deliveredPostsRef.current.set(t.id, new Set(posts.map((p) => p.id)));
+            continue;
+          }
+          const sessionId = t.sessionId;
+          const live =
+            sessionId !== null &&
+            isThreadLaunched(t.id) &&
+            sessionsRef.current.some((s) => s.id === sessionId && s.status !== "exited");
+          for (const post of posts) {
+            if (delivered.has(post.id)) continue;
+            delivered.add(post.id);
+            if (!live || sessionId === null) continue; // page + chip carry it
+            const line = sanitizeForTypedLine(`[from thread "${post.from}"] ${post.text}`, 600);
+            if (line.length === 0) continue;
+            log.info(`Inbox delivery: post=${post.id} -> thread=${t.id}`);
+            writeToSession(sessionId, line).catch((err) =>
+              log.warn(`Inbox typed delivery failed thread=${t.id}: ${err}`)
+            );
+          }
+        }
+        if (!cancelled) publishThreadUnread(unread);
+      } finally {
+        busy = false;
+      }
+    };
+    void tick();
+    const id = window.setInterval(() => void tick(), 5_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  // Opening a thread marks its inbox seen — the reference was typed into the
+  // terminal now on screen; the chip clears on the next poll tick.
+  useEffect(() => {
+    if (!activeSessionId) return;
+    const thread = findThreadBySessionId(activeSessionId);
+    if (thread) markInboxSeen(thread.id);
+  }, [activeSessionId, sessions]);
 
   // ── Tab/thread parity (increment C) ────────────────────────────────────────
   // A conversation started by typing `claude` into a plain tab used to be

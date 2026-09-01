@@ -415,6 +415,68 @@ fn chrono_like_now_iso() -> String {
     )
 }
 
+// ── Cross-thread posts, app side (SWIT-52 — the `@thread` composer form) ─────
+// Same record shape the MCP server's `post` tool appends; same honest limit
+// (concurrent writers land last-writer-wins over an atomic rename).
+
+const POST_TEXT_CAP: usize = 1000;
+const INBOX_CAP: usize = 100;
+
+#[tauri::command]
+async fn write_thread_post(
+    target_thread_id: String,
+    from_title: String,
+    from_id: String,
+    kind: String,
+    text: String,
+) -> Result<(), String> {
+    if !valid_thread_id(&target_thread_id) {
+        return Err("invalid target thread id".into());
+    }
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("a post cannot be empty".into());
+    }
+    if trimmed.len() > POST_TEXT_CAP {
+        return Err(format!("post too long (cap {} bytes)", POST_TEXT_CAP));
+    }
+    let kind = if kind == "update" { "update" } else { "request" };
+    let dir = threads_data_dir()?.join(&target_thread_id);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let file = dir.join("inbox.json");
+    let mut posts: Vec<serde_json::Value> = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| {
+            v.get("posts")
+                .and_then(|p| p.as_array().cloned())
+                .or_else(|| v.as_array().cloned())
+        })
+        .unwrap_or_default();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    posts.push(serde_json::json!({
+        "id": format!("p{:x}", now_ms),
+        "from": if from_title.trim().is_empty() { "you" } else { from_title.trim() },
+        "fromId": from_id,
+        "kind": kind,
+        "text": trimmed,
+        "at": chrono_like_now_iso(),
+    }));
+    if posts.len() > INBOX_CAP {
+        let drop = posts.len() - INBOX_CAP;
+        posts.drain(0..drop);
+    }
+    let payload = serde_json::to_string_pretty(&serde_json::json!({ "posts": posts }))
+        .map_err(|e| e.to_string())?;
+    let tmp = dir.join("inbox.json.tmp");
+    std::fs::write(&tmp, payload).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &file).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // ── Views (SWIT-50) ──────────────────────────────────────────────────────────
 
 fn valid_view_id(id: &str) -> bool {
@@ -588,6 +650,11 @@ async fn prepare_thread_launch(app: tauri::AppHandle, thread_id: String) -> Resu
                 "env": {
                     "SWITCHBOARD_THREAD_ID": thread_id,
                     "SWITCHBOARD_THREAD_DIR": thread_dir.to_string_lossy(),
+                    // SWIT-52: what the `post` tool needs — the threads root
+                    // (to reach a TARGET thread's inbox) and the records file
+                    // (to resolve a title to a thread id, read-only).
+                    "SWITCHBOARD_THREADS_ROOT": threads_data_dir()?.to_string_lossy(),
+                    "SWITCHBOARD_THREADS_JSON": threads_path()?.to_string_lossy(),
                 }
             }
         }
@@ -1211,6 +1278,8 @@ fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         kb::kb_list_docs,
         kb::kb_read_doc,
         kb::kb_write_doc,
+        kb::list_scratch_views,
+        write_thread_post,
         explorer::explorer_projects,
         explorer::explorer_list,
         explorer::explorer_read,

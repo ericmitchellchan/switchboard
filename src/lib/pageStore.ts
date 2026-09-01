@@ -340,6 +340,47 @@ export function isNewSince(at: string, seenAt: number | null): boolean {
   return t > seenAt;
 }
 
+// ── Inbox seen (SWIT-52) — the `↓ N` chip's device-local stamp ───────────────
+// Same shape as the page stamp: opening the THREAD marks its inbox seen (the
+// reference was typed into the terminal you are now looking at); the chip
+// counts posts newer than the stamp.
+
+function inboxSeenKey(threadId: string): string {
+  return `switchboard:inboxSeen:${threadId}`;
+}
+
+export function loadInboxSeen(threadId: string): number | null {
+  try {
+    const raw = localStorage.getItem(inboxSeenKey(threadId));
+    if (raw === null) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+export function markInboxSeen(threadId: string, now: number = Date.now()): void {
+  try {
+    localStorage.setItem(inboxSeenKey(threadId), String(now));
+  } catch {
+    // no persistence — the chip just stays quiet
+  }
+}
+
+/** Unread posts for the chip. A null stamp = never opened = EVERYTHING
+ *  counts (a brand-new post to a thread you have not visited should chip).
+ *  Unparseable timestamps do not count — a chip must never be noise. Pure. */
+export function countUnreadPosts(posts: readonly InboxPost[], seenAt: number | null): number {
+  let n = 0;
+  for (const p of posts) {
+    const t = Date.parse(p.at);
+    if (!Number.isFinite(t)) continue;
+    if (seenAt === null || t > seenAt) n += 1;
+  }
+  return n;
+}
+
 // ── The hook — loading policy (2.5s active-gated, refreshPins rules) ─────────
 
 export const PAGE_POLL_MS = 2_500;

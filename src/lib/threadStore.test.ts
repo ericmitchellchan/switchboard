@@ -47,12 +47,14 @@ import {
   selectMenuThreads,
   groupMenuThreads,
   selectShellSessions,
+  resolveThreadByQuery,
   type MenuSession,
   filterThreads,
   relativeActivity,
   MENU_THREAD_LIMIT,
   __resetThreadStoreForTests,
 } from "./threadStore";
+import { parseThreadPost } from "./composer";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -1007,5 +1009,50 @@ describe("relativeActivity", () => {
 
   it("clamps a future timestamp instead of printing a negative age", () => {
     expect(relativeActivity(NOW + 60_000, NOW)).toBe("just now");
+  });
+});
+
+describe("resolveThreadByQuery (@thread targets, SWIT-52)", () => {
+  const list = [
+    ht("t1", 1, { title: "sim audit" }),
+    ht("t2", 2, { title: "markets - Aug 30" }),
+    ht("t3", 3, { title: "coaching reorg" }),
+    ht("t4", 4, { title: "old audit", archivedAt: 9 }),
+  ];
+
+  it("exact id wins; a unique title substring resolves case-insensitively", () => {
+    expect(resolveThreadByQuery(list, "t2")).toEqual({ thread: list[1] });
+    expect(resolveThreadByQuery(list, "COACHING")).toEqual({ thread: list[2] });
+    expect(resolveThreadByQuery(list, "markets")).toEqual({ thread: list[1] });
+  });
+
+  it("self is excluded, archived threads never match, misses and ambiguity are sentences", () => {
+    expect(resolveThreadByQuery(list, "sim audit", "t1")).toHaveProperty("error");
+    expect(resolveThreadByQuery(list, "old audit")).toHaveProperty("error"); // archived
+    expect("error" in resolveThreadByQuery(list, "nothing-matches")).toBe(true);
+    // "audit" matches only sim audit among ACTIVE threads -> unique.
+    expect(resolveThreadByQuery(list, "audit")).toEqual({ thread: list[0] });
+    const multi = resolveThreadByQuery([...list, ht("t5", 5, { title: "audit two" })], "audit");
+    expect("error" in multi).toBe(true);
+  });
+});
+
+describe("parseThreadPost (the composer's @ form)", () => {
+  it("one-word and quoted targets, body required", () => {
+    expect(parseThreadPost("@sim-audit re-run the check")).toEqual({
+      target: "sim-audit",
+      body: "re-run the check",
+    });
+    expect(parseThreadPost('@"markets - Aug 30" look at this')).toEqual({
+      target: "markets - Aug 30",
+      body: "look at this",
+    });
+  });
+
+  it("ordinary messages (and bare @) are NOT posts", () => {
+    expect(parseThreadPost("plain message")).toBeNull();
+    expect(parseThreadPost("@target")).toBeNull(); // no body
+    expect(parseThreadPost("email me @ home later")).toBeNull();
+    expect(parseThreadPost("")).toBeNull();
   });
 });

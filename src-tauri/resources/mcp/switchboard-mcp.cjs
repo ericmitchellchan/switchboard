@@ -382,6 +382,132 @@ const VIEW_TOOL = {
   },
 };
 
+// ── Cross-thread posts (SWIT-52) ─────────────────────────────────────────────
+// A post lands in the TARGET thread's inbox.json. HONEST LIMIT, documented:
+// inbox.json can be written by any thread's server plus the app (@thread) —
+// concurrent appends are last-writer-wins over an atomic rename. Single user,
+// sub-second windows; accepted over adding a lock file.
+
+const POST_TEXT_CAP = 1000;
+const INBOX_CAP = 100;
+const POST_RATE_WINDOW_MS = 60_000;
+const POST_RATE_MAX = 5;
+
+/** Resolve `to` against the app's thread records: exact id first, else a
+ *  case-insensitive title substring that matches EXACTLY ONE active thread.
+ *  Ambiguity and misses are agent-readable errors naming the candidates. */
+function resolvePostTarget(threads, query, selfId) {
+  const q = String(query || "").trim();
+  if (q.length === 0) throw new OpError("`to` must name a thread (a title fragment or id)");
+  const active = threads.filter((t) => t && typeof t.id === "string" && !t.archivedAt);
+  const byId = active.find((t) => t.id === q);
+  if (byId) return byId;
+  const needle = q.toLowerCase();
+  const matches = active.filter(
+    (t) => typeof t.title === "string" && t.title.toLowerCase().includes(needle)
+  );
+  const others = matches.filter((t) => t.id !== selfId);
+  if (others.length === 1) return others[0];
+  if (others.length === 0) {
+    if (matches.length > 0) throw new OpError("that names THIS thread — a post cannot target itself");
+    throw new OpError(`no thread matches "${q}"`);
+  }
+  throw new OpError(
+    `"${q}" is ambiguous — matches: ${others.map((t) => `"${t.title}"`).join(", ")}. Be more specific.`
+  );
+}
+
+/** Rate limit + append, pure over the raw inbox list. Returns the next list
+ *  (newest kept, capped). */
+function appendPost(list, post, now) {
+  const posts = Array.isArray(list) ? list.filter((p) => p && typeof p === "object") : [];
+  const recent = posts.filter(
+    (p) =>
+      p.fromId === post.fromId &&
+      typeof p.at === "string" &&
+      now - Date.parse(p.at) < POST_RATE_WINDOW_MS
+  );
+  if (recent.length >= POST_RATE_MAX) {
+    throw new OpError(
+      `rate limit: ${POST_RATE_MAX} posts to one thread per minute — batch what you have to say`
+    );
+  }
+  return [...posts, post].slice(-INBOX_CAP);
+}
+
+function readThreadsFile(threadsJsonPath) {
+  try {
+    const data = JSON.parse(fs.readFileSync(threadsJsonPath, "utf-8"));
+    return Array.isArray(data.threads) ? data.threads : [];
+  } catch {
+    return [];
+  }
+}
+
+function performPostOp(env, args, now) {
+  const { threadsRoot, threadsJsonPath, selfThreadId } = env;
+  if (!threadsRoot || !threadsJsonPath) {
+    throw new OpError("cross-thread posting is not wired in this session");
+  }
+  const kind = args.kind === "request" ? "request" : "update";
+  const body = text(args.text, "text");
+  if (body.length > POST_TEXT_CAP) {
+    throw new OpError(`text too long (cap ${POST_TEXT_CAP}) — a post is a sentence or two`);
+  }
+  const threads = readThreadsFile(threadsJsonPath);
+  const self = threads.find((t) => t && t.id === selfThreadId);
+  const target = resolvePostTarget(threads, args.to, selfThreadId);
+  const post = {
+    id: `p${now.toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+    from: self && typeof self.title === "string" ? self.title : "another thread",
+    fromId: selfThreadId || "",
+    kind,
+    text: body,
+    at: new Date(now).toISOString(),
+  };
+  const dir = path.join(threadsRoot, target.id);
+  const file = path.join(dir, "inbox.json");
+  let existing = [];
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
+    existing = Array.isArray(parsed) ? parsed : Array.isArray(parsed.posts) ? parsed.posts : [];
+  } catch {
+    // no inbox yet
+  }
+  const posts = appendPost(existing, post, now);
+  fs.mkdirSync(dir, { recursive: true });
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ posts }, null, 2));
+  fs.renameSync(tmp, file);
+  return {
+    message:
+      kind === "request"
+        ? `Request posted to "${target.title}" — it lands under Needs You on their page and is typed into their terminal.`
+        : `Update posted to "${target.title}" — it lands on their page and is typed into their terminal.`,
+  };
+}
+
+const POST_TOOL = {
+  name: "post",
+  description:
+    "Send an UPDATE or a REQUEST to another of the user's threads — only when the user asks " +
+    "you to, or when work they asked for directly concerns that thread. A request lands under " +
+    "Needs You on the target's page; an update lands in its What Happened — and either is " +
+    "typed into the target terminal as a quoted reference its agent reads on its next turn. " +
+    "Posts are never auto-forwarded: what the receiving agent does with it is its own call. " +
+    "Name the target by a title fragment (unique match required). A post is a sentence or " +
+    "two of plain language — not a report.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      to: { type: "string", description: "The target thread: a title fragment (must match exactly one) or its id." },
+      kind: { type: "string", enum: ["update", "request"], description: "request = needs the user/that thread to act; update = FYI." },
+      text: { type: "string", description: "One or two plain sentences." },
+    },
+    required: ["to", "kind", "text"],
+  },
+};
+
 // ── The tool table (the behavioural contract lives HERE) ─────────────────────
 
 const PAGE_TOOL = {
@@ -526,12 +652,12 @@ function serve(threadDir) {
         return;
       }
       if (method === "tools/list") {
-        respond({ jsonrpc: "2.0", id, result: { tools: [PAGE_TOOL, VIEW_TOOL] } });
+        respond({ jsonrpc: "2.0", id, result: { tools: [PAGE_TOOL, VIEW_TOOL, POST_TOOL] } });
         return;
       }
       if (method === "tools/call") {
         const name = params && params.name;
-        if (name !== "page" && name !== "view") {
+        if (name !== "page" && name !== "view" && name !== "post") {
           respond({
             jsonrpc: "2.0",
             id,
@@ -544,7 +670,17 @@ function serve(threadDir) {
           const message =
             name === "view"
               ? performViewOp(threadDir, args, Date.now()).message
-              : performOp(threadDir, args, Date.now());
+              : name === "post"
+                ? performPostOp(
+                    {
+                      threadsRoot: process.env.SWITCHBOARD_THREADS_ROOT,
+                      threadsJsonPath: process.env.SWITCHBOARD_THREADS_JSON,
+                      selfThreadId: process.env.SWITCHBOARD_THREAD_ID,
+                    },
+                    args,
+                    Date.now()
+                  ).message
+                : performOp(threadDir, args, Date.now());
           respond({
             jsonrpc: "2.0",
             id,
@@ -592,6 +728,10 @@ module.exports = {
   performOp,
   buildViewSpec,
   performViewOp,
+  resolvePostTarget,
+  appendPost,
+  performPostOp,
+  POST_TOOL,
   PAGE_TOOL,
   VIEW_TOOL,
   OpError,

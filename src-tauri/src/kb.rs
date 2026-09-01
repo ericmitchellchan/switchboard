@@ -221,6 +221,50 @@ pub async fn kb_write_doc(rel_path: String, content: String) -> Result<(), Strin
     write_doc_at(&root, &rel_path, &content)
 }
 
+/// Kept views (SWIT-52): the `_scratch/` listing Home shows. The scratchpad
+/// is `_`-prefixed so `skip_dir` hides it from the KB tree — this is its ONE
+/// deliberate window: `*.view.json` files under `_scratch/`, rel paths,
+/// newest-modified first. Missing dir = no kept views, the ordinary state.
+#[tauri::command]
+pub async fn list_scratch_views() -> Result<Vec<String>, String> {
+    let root = resolve_kb_root()?;
+    let scratch = root.join("_scratch");
+    let mut out: Vec<(std::time::SystemTime, String)> = Vec::new();
+    fn walk(
+        root: &Path,
+        dir: &Path,
+        out: &mut Vec<(std::time::SystemTime, String)>,
+    ) -> Result<(), String> {
+        let entries = match fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err.to_string()),
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let file_type = match entry.file_type() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if file_type.is_dir() {
+                walk(root, &entry.path(), out)?;
+            } else if file_type.is_file() && name.ends_with(".view.json") {
+                if let Ok(rel) = entry.path().strip_prefix(root) {
+                    let modified = entry
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    out.push((modified, rel.to_string_lossy().replace('\\', "/")));
+                }
+            }
+        }
+        Ok(())
+    }
+    walk(&root, &scratch, &mut out)?;
+    out.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(out.into_iter().map(|(_, p)| p).collect())
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

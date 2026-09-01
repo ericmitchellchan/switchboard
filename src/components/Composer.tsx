@@ -16,12 +16,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { writeToSession } from "../lib/ipc";
 import { getTerminal } from "../lib/terminal";
-import { findThreadBySessionId, markChatStarted } from "../lib/threadStore";
+import { findThreadBySessionId, markChatStarted, getThreadActions } from "../lib/threadStore";
 import { saveThreadsToDisk } from "../lib/workspace";
 import { log } from "../lib/logger";
 import {
   DRAFT_INDEX,
   composeWrite,
+  parseThreadPost,
   getComposerDraft,
   getSendHistory,
   hideComposer,
@@ -88,6 +89,36 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const send = useCallback(async () => {
     if (inFlightRef.current) return;
     const text = valueRef.current;
+
+    // `@thread …` (SWIT-52): a message addressed to ANOTHER thread. Resolved
+    // + delivered by App through the actions bridge — nothing is typed into
+    // THIS terminal, and a resolution failure keeps the text right here.
+    const post = parseThreadPost(text);
+    if (post) {
+      const actions = getThreadActions();
+      if (!actions) return;
+      inFlightRef.current = true;
+      try {
+        const confirmation = await actions.postToThread(sessionId, post.target, post.body);
+        setError(`→ ${confirmation}`);
+        if (valueRef.current === text) {
+          setValue("");
+          setComposerDraft(sessionId, "");
+        }
+        recordSend(sessionId, text);
+        historyIndexRef.current = DRAFT_INDEX;
+        draftRef.current = "";
+      } catch (err) {
+        setError(
+          `@post failed: ${err instanceof Error ? err.message : String(err)} — your text is still here`
+        );
+      } finally {
+        inFlightRef.current = false;
+        textareaRef.current?.focus();
+      }
+      return;
+    }
+
     const payload = composeWrite(text);
     // Empty / whitespace-only: a no-op. Never a bare Enter.
     if (payload.length === 0) return;

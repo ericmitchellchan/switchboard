@@ -17,6 +17,7 @@ import {
   EVIDENCE_CAP,
   QUESTION_CAP,
   DONE_FOLD,
+  countUnreadPosts,
 } from "./pageStore";
 
 const PAGE = {
@@ -204,5 +205,23 @@ describe("the freeze rule is unreachable from here (import graph)", () => {
     for (const spec of imports) {
       expect(spec).not.toMatch(/fitQueue|terminal|resizePolicy|paneLayout/i);
     }
+  });
+});
+
+describe("countUnreadPosts (the chip rule, SWIT-52)", () => {
+  const post = (id: string, at: string) => ({ id, from: "a", kind: "update" as const, text: "t", at });
+
+  it("a null stamp counts EVERYTHING - a post to a never-opened thread must chip", () => {
+    expect(countUnreadPosts([post("1", "2026-08-31T10:00:00Z")], null)).toBe(1);
+  });
+
+  it("counts posts newer than the stamp; junk timestamps never count", () => {
+    const stamp = Date.parse("2026-08-31T09:00:00Z");
+    expect(
+      countUnreadPosts(
+        [post("1", "2026-08-31T10:00:00Z"), post("2", "2026-08-31T08:00:00Z"), post("3", "junk")],
+        stamp
+      )
+    ).toBe(1);
   });
 });

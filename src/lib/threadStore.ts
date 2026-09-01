@@ -485,6 +485,36 @@ export function selectShellSessions(
   return sessions.filter((s) => !bound.has(s.id));
 }
 
+/** Resolve an `@thread` target (SWIT-52): exact id first, else a
+ *  case-insensitive TITLE substring matching EXACTLY ONE active thread
+ *  (self excluded — a post cannot target its own thread). Pure; errors are
+ *  human sentences the composer prints as-is. */
+export function resolveThreadByQuery(
+  threads: readonly Thread[],
+  query: string,
+  excludeThreadId: string | null = null
+): { thread: Thread } | { error: string } {
+  const q = query.trim();
+  if (q.length === 0) return { error: "name a thread after the @" };
+  const active = activeThreads(threads);
+  const byId = active.find((t) => t.id === q);
+  if (byId) {
+    return byId.id === excludeThreadId ? { error: "that is THIS thread" } : { thread: byId };
+  }
+  const needle = q.toLowerCase();
+  const matches = active.filter(
+    (t) => t.title.toLowerCase().includes(needle) && t.id !== excludeThreadId
+  );
+  if (matches.length === 1) return { thread: matches[0] };
+  if (matches.length === 0) return { error: `no thread matches "${q}"` };
+  return {
+    error: `"${q}" matches ${matches.length} threads (${matches
+      .slice(0, 3)
+      .map((t) => `"${t.title}"`)
+      .join(", ")}${matches.length > 3 ? ", …" : ""}) — be more specific`,
+  };
+}
+
 /** Free-text filter for the See-all screen: case-insensitive substring over
  *  TITLE + repo name. A blank/whitespace query matches everything. */
 export function filterThreads(threads: readonly Thread[], query: string): Thread[] {
@@ -1049,6 +1079,11 @@ export type ThreadActions = {
   /** Row menu → Archive / Unarchive. Reversible and lossless; never presented
    *  as deleting. */
   setThreadArchived: (threadId: string, archived: boolean) => void;
+  /** The composer's `@thread …` form (SWIT-52): resolve + deliver a post from
+   *  the given SESSION's thread (null = no source thread; still allowed —
+   *  Eric posting from a plain shell). Resolves to a confirmation sentence;
+   *  rejects with a human-readable reason the composer prints as-is. */
+  postToThread: (fromSessionId: string | null, targetQuery: string, body: string) => Promise<string>;
 };
 
 let threadActions: ThreadActions | null = null;
