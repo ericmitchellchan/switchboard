@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicedoc/tauri/refs/tags/tauri-v2.1.1/crates/tauri-schema-generator/schemas/config.schema.json",
   "productName": "Switchboard",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "identifier": "com.switchboard.app",
   "build": {
     "beforeDevCommand": "pnpm dev",
