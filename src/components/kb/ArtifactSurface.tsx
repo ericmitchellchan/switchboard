@@ -37,6 +37,7 @@ import { DocView } from "./DocView";
 import { FileViewer } from "../ExplorerView";
 import { LocalhostView } from "./LocalhostView";
 import { PageView } from "./PageView";
+import { QuestionView } from "./QuestionView";
 import { ViewSurface } from "../views/ViewSurface";
 import { SurfaceHost } from "../../surfaces/SurfaceHost";
 
@@ -99,6 +100,14 @@ export function ArtifactSurface({
               per-view. Loading policy is viewStore's (spec at pins cadence;
               query data only on Eric's re-run — R4). */}
           <ViewSurface key={artifactIdentity(artifact)} artifact={artifact} active={active} />
+        </div>
+      );
+    case "question":
+      return (
+        <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+          {/* Keyed by identity: two questions share an element type, and the
+              draft in the box is per-question. */}
+          <QuestionView key={artifactIdentity(artifact)} artifact={artifact} active={active} />
         </div>
       );
     case "session":

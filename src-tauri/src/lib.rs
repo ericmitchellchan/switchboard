@@ -331,6 +331,90 @@ async fn read_thread_file(thread_id: String, name: String) -> Result<String, Str
     }
 }
 
+// ── Question answers (SWIT-51) ───────────────────────────────────────────────
+// The APP is answers.json's SOLE writer (one-writer-per-file: page.json is
+// the MCP server's, this file is ours). Read-modify-write server-side,
+// atomic via tmp+rename so the server's read-only glance and the app's own
+// 2.5s poll never see a torn file. Single app instance; a lock is overkill.
+
+const ANSWER_TEXT_CAP: usize = 4000;
+
+fn valid_question_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+#[tauri::command]
+async fn write_thread_answer(
+    thread_id: String,
+    question_id: String,
+    text: String,
+) -> Result<(), String> {
+    if !valid_thread_id(&thread_id) {
+        return Err("invalid thread id".into());
+    }
+    if !valid_question_id(&question_id) {
+        return Err("invalid question id".into());
+    }
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("an answer cannot be empty".into());
+    }
+    if trimmed.len() > ANSWER_TEXT_CAP {
+        return Err(format!("answer too long (cap {} bytes)", ANSWER_TEXT_CAP));
+    }
+    let dir = threads_data_dir()?.join(&thread_id);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let file = dir.join("answers.json");
+    // Tolerant read: junk degrades to an empty record rather than blocking
+    // the one path that must never lose Eric's typed answer.
+    let mut answers: serde_json::Map<String, serde_json::Value> = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let now_iso = chrono_like_now_iso();
+    answers.insert(
+        question_id,
+        serde_json::json!({ "text": trimmed, "at": now_iso }),
+    );
+    let payload = serde_json::to_string_pretty(&serde_json::Value::Object(answers))
+        .map_err(|e| e.to_string())?;
+    let tmp = dir.join("answers.json.tmp");
+    std::fs::write(&tmp, payload).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &file).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// ISO-8601 UTC "now" without pulling the chrono crate in for one format:
+/// seconds precision is plenty for an answer stamp.
+fn chrono_like_now_iso() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Days-from-civil (Howard Hinnant's algorithm, inverted) — exact for the
+    // Gregorian calendar; no leap seconds, which JSON timestamps never carry.
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, d, h, m, s
+    )
+}
+
 // ── Views (SWIT-50) ──────────────────────────────────────────────────────────
 
 fn valid_view_id(id: &str) -> bool {
@@ -1112,6 +1196,7 @@ fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         list_thread_views,
         read_thread_view,
         read_view_data,
+        write_thread_answer,
         save_transcript,
         save_scrollback,
         load_scrollback,

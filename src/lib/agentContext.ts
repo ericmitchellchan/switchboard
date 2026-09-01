@@ -249,6 +249,10 @@ export function artifactRef(artifact: Artifact, opts: RefOptions = {}): string {
         REF_MAX
       );
     }
+    case "question":
+      // A question has no file worth pointing at (it lives on the page the
+      // agent already wrote) — the SPAWN arm below carries its sentence.
+      return "";
   }
 }
 
@@ -272,6 +276,16 @@ export function buildSpawnContext(
   opts: RefOptions = {}
 ): string | null {
   if (!artifact) return null;
+  // A QUESTION tab (SWIT-51) has its own sentence — Ky's, near-verbatim: the
+  // one thing a resumed agent must know is that asking again is wrong.
+  if (artifact.kind === "question") {
+    return sanitizeForTypedLine(
+      "Workstation context: a QUESTION you asked is open in front of the user. Wait for their " +
+        "answer — it arrives as their next message and is written under the question on the " +
+        "page. Do not ask it again.",
+      SPAWN_CONTEXT_MAX
+    );
+  }
   const ref = artifactRef(artifact, opts);
   if (ref.length === 0) return null;
   // A LIVE TERMINAL gets its own sentence. "panel shows terminal <path>" would

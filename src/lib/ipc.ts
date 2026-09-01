@@ -115,6 +115,17 @@ export async function readViewData(threadId: string, relPath: string): Promise<s
   return invoke("read_view_data", { threadId, relPath });
 }
 
+/** Record Eric's answer to a page question (SWIT-51). The APP is
+ *  answers.json's sole writer; the write is atomic server-side. Durability
+ *  first: callers write THIS before typing anything into a terminal. */
+export async function writeThreadAnswer(
+  threadId: string,
+  questionId: string,
+  text: string
+): Promise<void> {
+  return invoke("write_thread_answer", { threadId, questionId, text });
+}
+
 /** Prepare a thread's launch (SWIT-49): create its data dir + write the
  *  per-spawn mcp-config pointing claude at Switchboard's page-tool server.
  *  Resolves to the config file's absolute path; a rejection means the caller

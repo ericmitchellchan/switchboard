@@ -20,7 +20,7 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, listThreadViews, saveTranscript } from "./lib/ipc";
+import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, listThreadViews, readThreadFile, writeThreadAnswer, saveTranscript } from "./lib/ipc";
 import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty, isSessionDirty, serializeForPip, plainTextTerminal, setTerminalScreenVisible } from "./lib/terminal";
 import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing, sendPipHost } from "./lib/pipBridge";
 import { bumpSessionGeneration, addSessionInputListener, getSessionGeneration } from "./lib/terminalRegistry";
@@ -110,6 +110,7 @@ import {
   buildPageContractLine,
 } from "./lib/agentContext";
 import { runPromotionPass, promotionPassReason, PROMOTION_POLL_MS } from "./lib/threadPromotion";
+import { parsePageFile, parseAnswersFile } from "./lib/pageStore";
 import { explorerProjects, registerExplorerActions } from "./lib/explorer";
 import { parsePinsFile, pinsForDoc, pinTargetFor, surfacePinTargetFor } from "./lib/pins";
 import { configurePinsIO, getPinsFile } from "./lib/pinsStore";
@@ -134,7 +135,7 @@ import {
 } from "./lib/workspace";
 import { remapSessionIds, getMaxPaneIdNumber, setPaneIdCounter, closePane, getVisibleSessionIds } from "./lib/paneLayout";
 import type { PaneNode } from "./lib/paneLayout";
-import { toggleComposer } from "./lib/composer";
+import { toggleComposer, composeWrite } from "./lib/composer";
 import { initTaskDetector, destroyTaskDetector } from "./lib/taskDetector";
 import { startUpdater, registerPreRelaunchFlush } from "./lib/updater";
 import { log, initLogger } from "./lib/logger";
@@ -1172,6 +1173,11 @@ export default function App() {
   // instantly. Deliberate: a threadStore subscription here would re-render
   // App on every thread bump for a seconds-level win.
   const seenViewsRef = useRef(new Map<string, Set<string>>());
+  // Question intents (SWIT-51): OPEN questions get a tab. Unlike views there
+  // is NO baseline — an unanswered question from before this app session
+  // still needs Eric, so it opens once per session; closing it unanswered is
+  // respected (the seen set), and the app never types a question anywhere.
+  const seenQuestionsRef = useRef(new Map<string, Set<string>>());
   useEffect(() => {
     if (route.screen !== "terminal" || !activeSessionId) return;
     const thread = findThreadBySessionId(activeSessionId);
@@ -1190,13 +1196,31 @@ export default function App() {
         if (!seen) {
           // Baseline: everything already on disk is old news.
           seenViewsRef.current.set(threadId, new Set(ids));
-          return;
+        } else {
+          for (const viewId of ids) {
+            if (seen.has(viewId)) continue;
+            seen.add(viewId);
+            log.info(`View intent: thread=${threadId} view=${viewId} — opening in the panel`);
+            openInPanel(sessionId, { kind: "view", threadId, viewId });
+          }
         }
-        for (const viewId of ids) {
-          if (seen.has(viewId)) continue;
-          seen.add(viewId);
-          log.info(`View intent: thread=${threadId} view=${viewId} — opening in the panel`);
-          openInPanel(sessionId, { kind: "view", threadId, viewId });
+        // OPEN questions (SWIT-51) — same tick, same files the page reads.
+        const [pageRaw, answersRaw] = await Promise.all([
+          readThreadFile(threadId, "page.json"),
+          readThreadFile(threadId, "answers.json"),
+        ]);
+        if (cancelled) return;
+        const answers = parseAnswersFile(answersRaw);
+        let seenQ = seenQuestionsRef.current.get(threadId);
+        if (!seenQ) {
+          seenQ = new Set();
+          seenQuestionsRef.current.set(threadId, seenQ);
+        }
+        for (const q of parsePageFile(pageRaw).questions) {
+          if (q.id in answers || seenQ.has(q.id)) continue;
+          seenQ.add(q.id);
+          log.info(`Question intent: thread=${threadId} question=${q.id} — opening the tab`);
+          openInPanel(sessionId, { kind: "question", threadId, questionId: q.id });
         }
       } catch {
         // A failed listing is a quiet tick — the next one retries.
@@ -1786,6 +1810,45 @@ export default function App() {
     [closeConfirm, destroySession, handlePromotePanelTerminal]
   );
 
+  // ── ANSWER a page question (SWIT-51) — the function Home calls too (T8) ──
+  // Durability FIRST: the answer is written to answers.json before anything
+  // is typed, so a failed terminal write never loses what Eric typed (the
+  // gate on this ticket). "sent" = it also went into the live terminal as
+  // his message; "saved" = recorded on the page, the tab stays and says so.
+  const handleAnswerQuestion = useCallback(
+    async (
+      threadId: string,
+      questionId: string,
+      questionText: string,
+      answerText: string
+    ): Promise<"sent" | "saved"> => {
+      await writeThreadAnswer(threadId, questionId, answerText); // throws → the view keeps the text
+      const thread = getThreadById(threadId);
+      const sessionId = thread?.sessionId ?? null;
+      const live =
+        sessionId !== null &&
+        isThreadLaunched(threadId) &&
+        sessionsRef.current.some((s) => s.id === sessionId && s.status !== "exited");
+      if (!live || sessionId === null) return "saved";
+      // The composer's wire format (multi-line answers go as ONE paste) and
+      // the composer's chatStarted rule — this IS a composer send in spirit.
+      const wire = composeWrite(`Answer to your question "${questionText}": ${answerText}`);
+      if (wire.length === 0) return "saved";
+      try {
+        await writeToSession(sessionId, wire);
+        markChatStarted(threadId);
+        void saveThreadsToDisk();
+        log.info(`Question answered id=${questionId} thread=${threadId} — sent to the terminal`);
+        return "sent";
+      } catch (err) {
+        // The answer is already durable; only the delivery failed.
+        log.error(`Question answer typed-send failed thread=${threadId}: ${err}`);
+        return "saved";
+      }
+    },
+    []
+  );
+
   // THE ONE LIVE VIEW of a panel terminal. Handed to ArtifactPanel, which
   // renders it in exactly one place (the body of the active tab of the active
   // tab's panel) and nowhere else — ArtifactSurface deliberately refuses to
@@ -1877,6 +1940,7 @@ export default function App() {
   const panelActionsRef = useRef<PanelActions | null>(null);
   panelActionsRef.current = {
     sendToThread: handleSendToThread,
+    answerQuestion: handleAnswerQuestion,
     popOutArtifact: (artifact) => void handlePopOutArtifact(artifact),
     createPanelTerminal: handleCreatePanelTerminal,
     promotePanelTerminal: handlePromotePanelTerminal,
@@ -1886,6 +1950,9 @@ export default function App() {
   useEffect(() => {
     registerPanelActions({
       sendToThread: (text) => panelActionsRef.current?.sendToThread(text),
+      answerQuestion: (threadId, questionId, questionText, answerText) =>
+        panelActionsRef.current?.answerQuestion(threadId, questionId, questionText, answerText) ??
+        Promise.reject(new Error("the app is not ready to answer")),
       popOutArtifact: (artifact) => panelActionsRef.current?.popOutArtifact(artifact),
       createPanelTerminal: (tabSessionId, target) =>
         panelActionsRef.current?.createPanelTerminal(tabSessionId, target),

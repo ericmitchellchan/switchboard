@@ -197,7 +197,11 @@ export type Artifact =
   // A VIEW (SWIT-50) — a rendered dataset the agent declared (table, candles,
   // distribution), drawn by the shell's own chart components. STUB in SWIT-48:
   // the kind exists so strips can hold one, the renderer lands in SWIT-50.
-  | { kind: "view"; threadId: string; viewId: string };
+  | { kind: "view"; threadId: string; viewId: string }
+  // A QUESTION tab (SWIT-51, R3 rule 1) — the ONE write-back channel besides
+  // the composer: the agent's ask opens it, answering writes answers.json,
+  // types the answer into the terminal as Eric's message, and closes it.
+  | { kind: "question"; threadId: string; questionId: string };
 
 /** The artifact kinds that name a FILE on disk — the ones with a readable
  *  `path` and therefore a renderable BODY (docKind switch, pins sidecar,

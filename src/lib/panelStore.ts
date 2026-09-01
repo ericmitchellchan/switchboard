@@ -439,6 +439,15 @@ export function describeArtifact(artifact: Artifact): ArtifactDescription {
         ],
         title: `view / ${artifact.viewId}`,
       };
+    case "question":
+      return {
+        icon: FILE_ICON,
+        crumbs: [
+          { text: "thread", tone: "dim" },
+          { text: "? question", tone: "bright" },
+        ],
+        title: "a question from the agent",
+      };
   }
 }
 
@@ -549,6 +558,12 @@ export function sanitizeArtifact(raw: unknown): Artifact | null {
       return isNonEmptyString(raw.threadId) && isNonEmptyString(raw.viewId)
         ? { kind: "view", threadId: raw.threadId, viewId: raw.viewId }
         : null;
+    case "question":
+      // SWIT-51 — the write-back tab. Two ids; the question's text lives on
+      // the page (pageStore), read at render time.
+      return isNonEmptyString(raw.threadId) && isNonEmptyString(raw.questionId)
+        ? { kind: "question", threadId: raw.threadId, questionId: raw.questionId }
+        : null;
     default:
       return null;
   }
@@ -591,6 +606,8 @@ export function artifactIdentity(artifact: Artifact): string {
       return `page:${artifact.threadId}`;
     case "view":
       return `view:${artifact.threadId}:${artifact.viewId}`;
+    case "question":
+      return `question:${artifact.threadId}:${artifact.questionId}`;
   }
 }
 
@@ -624,6 +641,7 @@ export function artifactShortTitle(artifact: Artifact): string {
   // The ✦ page and views print their marks, not a path (they have none).
   if (artifact.kind === "page") return "✦ page";
   if (artifact.kind === "view") return artifact.viewId;
+  if (artifact.kind === "question") return "? question";
   // A surface's short title is its page LABEL (the same word the header's
   // last crumb prints), not a path — it has none.
   if (artifact.kind === "surface") return surfaceLabel(artifact.project, artifact.page);
@@ -1365,7 +1383,11 @@ export function openInPanel(
   }
   // Neither a session nor the ✦ page is ever a preview: a live shell is not a
   // glance, and the page is the strip's permanent first-class tab (SWIT-48).
-  const wantsPreview = opts.preview === true && clean.kind !== "session" && clean.kind !== "page";
+  const wantsPreview =
+    opts.preview === true &&
+    clean.kind !== "session" &&
+    clean.kind !== "page" &&
+    clean.kind !== "question";
   const live = panels.get(key) ?? null;
   const revived = live === null ? lastPanelStates.get(key) ?? null : null;
   const current = live ?? revived;
@@ -1577,10 +1599,13 @@ export function inheritPanel(artifact: Artifact | null, newSessionId: string): b
   // would MOVE Eric's dev server into a thread he just created. A new thread
   // launched beside a panel terminal simply starts with an empty panel.
   if (artifact.kind === "session") return false;
-  // A PAGE or VIEW is THREAD-SCOPED (SWIT-48): inheriting one would put the
-  // OLD thread's page into the new thread's strip — the wrong document with a
-  // confident face. The new thread gets its own ✦ page from ensurePageTab.
-  if (artifact.kind === "page" || artifact.kind === "view") return false;
+  // A PAGE, VIEW or QUESTION is THREAD-SCOPED (SWIT-48/51): inheriting one
+  // would put the OLD thread's document into the new thread's strip — the
+  // wrong content with a confident face. The new thread gets its own ✦ page
+  // from ensurePageTab.
+  if (artifact.kind === "page" || artifact.kind === "view" || artifact.kind === "question") {
+    return false;
+  }
   openInPanel(newSessionId, artifact);
   const now = artifactFor(newSessionId);
   return now !== null && sameArtifact(now, artifact);
@@ -2049,6 +2074,17 @@ export type PanelActions = {
   /** Close a panel terminal's tab. App asks first when the process is alive
    *  (keep running / promote / kill); the store never kills anything. */
   closePanelTerminal: (tabSessionId: string, sessionId: string) => void;
+  /** ANSWER a page question (SWIT-51): write answers.json (durability first),
+   *  then — when the thread has a live terminal — type the answer in as
+   *  Eric's message and resolve "sent"; with no live terminal resolve
+   *  "saved" (the tab stays and says so). Rejection = the WRITE failed and
+   *  nothing was typed; the view keeps the text in the box. */
+  answerQuestion: (
+    threadId: string,
+    questionId: string,
+    questionText: string,
+    answerText: string
+  ) => Promise<"sent" | "saved">;
   /** Write a session's CURRENT scrollback to its mirror file, right now.
    *
    *  The linkage that makes `→ thread` mean something for a live shell: the
@@ -2119,8 +2155,10 @@ export function setPoppedOutArtifact(sessionId: string, artifact: Artifact): voi
   // path resolve through the THREAD record (project = the thread's repo), and
   // the PiP webview never loads threads — a floated view would silently read
   // a different pins sidecar and file keeps under "unknown". The ✦ page is
-  // fine out there (its reads go through IPC).
-  if (clean.kind === "view") return;
+  // fine out there (its reads go through IPC). A QUESTION never floats: its
+  // answer path (composeWrite into the terminal, the close) runs through the
+  // MAIN window's action bridge, which the PiP webview does not register.
+  if (clean.kind === "view" || clean.kind === "question") return;
   poppedOut = { sessionId, artifact: clean };
   bump();
 }
@@ -2183,9 +2221,11 @@ export function isLocalhostUrlOpen(url: string): boolean {
  *  registered no handler (callers gate on `usePopOutAvailable` so the action is
  *  DISABLED rather than silently dead). */
 export function popOutArtifact(artifact: Artifact): void {
-  // session: one live view; view: thread-resolved pins/keep — see
-  // setPoppedOutArtifact for both rules.
-  if (artifact.kind === "session" || artifact.kind === "view") return;
+  // session: one live view; view: thread-resolved pins/keep; question: the
+  // main-window answer bridge — see setPoppedOutArtifact for the rules.
+  if (artifact.kind === "session" || artifact.kind === "view" || artifact.kind === "question") {
+    return;
+  }
   panelActions?.popOutArtifact(artifact);
 }
 
@@ -2220,6 +2260,33 @@ export function closePanelTerminal(tabSessionId: string, sessionId: string): voi
  *  older, not wrong. */
 export function flushTerminalTranscript(sessionId: string): Promise<void> {
   return panelActions?.flushTerminalTranscript(sessionId) ?? Promise.resolve();
+}
+
+/** Answer a question through the App bridge. Rejects when App is unwired —
+ *  the view surfaces that rather than pretending. */
+export function answerQuestion(
+  threadId: string,
+  questionId: string,
+  questionText: string,
+  answerText: string
+): Promise<"sent" | "saved"> {
+  const actions = panelActions;
+  if (!actions) return Promise.reject(new Error("the app is not ready to answer"));
+  return actions.answerQuestion(threadId, questionId, questionText, answerText);
+}
+
+/** Close the tab holding `identity` in a session's strip (SWIT-51 — the
+ *  answered question's self-close). No-op when it is not there. */
+export function closeArtifactByIdentity(
+  sessionId: string,
+  identity: string,
+  reason: PanelRemovalReason = "user-close"
+): void {
+  const state = panels.get(ownerKeyFor(sessionId));
+  if (!state) return;
+  const index = state.artifacts.findIndex((a) => artifactIdentity(a) === identity);
+  if (index < 0) return;
+  closeArtifactAt(sessionId, index, reason);
 }
 
 export function panelTerminalsAvailable(): boolean {

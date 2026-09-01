@@ -57,6 +57,7 @@ import {
   goPreviewBack,
   pinPreview,
   ensurePageTab,
+  closeArtifactByIdentity,
   DEFAULT_PANEL_WIDTH,
   MIN_PANEL_WIDTH,
   MAX_PANEL_WIDTH,
@@ -570,6 +571,23 @@ describe("ensurePageTab (the ✦ page)", () => {
     expect(previewIdentityFor("sess-1")).toBe("");
     expect(inheritPanel(PAGE_9, "sess-2")).toBe(false);
     expect(panelStateFor("sess-2")).toBeNull();
+  });
+
+  it("a QUESTION tab (SWIT-51): registered, pinned-only, thread-scoped, never floats", () => {
+    const Q: Artifact = { kind: "question", threadId: "th-9", questionId: "q1" };
+    expect(sanitizeArtifact({ kind: "question", threadId: "th-9", questionId: "q1" })).toEqual(Q);
+    expect(sanitizeArtifact({ kind: "question", threadId: "th-9" })).toBeNull();
+    expect(artifactIdentity(Q)).toBe("question:th-9:q1");
+    // Never a preview, never inherited, never popped out.
+    openInPanel("s1", Q, { preview: true });
+    expect(previewIdentityFor("s1")).toBe("");
+    expect(inheritPanel(Q, "s2")).toBe(false);
+    setPoppedOutArtifact("s1", Q);
+    expect(getPoppedOutArtifact()).toBeNull();
+    // closeArtifactByIdentity closes exactly the question's tab.
+    openInPanel("s1", KB_DOC);
+    closeArtifactByIdentity("s1", artifactIdentity(Q));
+    expect(panelStateFor("s1")).toEqual(one(KB_DOC));
   });
 
   it("the page persists with the thread's strip (workspace v6) and survives sanitize", () => {
@@ -2091,6 +2109,7 @@ describe("popped-out artifact", () => {
       popOutArtifact: (a) => calls.push(a),
       createPanelTerminal: () => {},
       flushTerminalTranscript: () => Promise.resolve(),
+      answerQuestion: () => Promise.resolve("sent" as const),
       promotePanelTerminal: () => {},
       closePanelTerminal: () => {},
     });
@@ -2341,6 +2360,7 @@ describe("session artifacts (increment H)", () => {
       popOutArtifact: (a) => calls.push(a),
       createPanelTerminal: () => {},
       flushTerminalTranscript: () => Promise.resolve(),
+      answerQuestion: () => Promise.resolve("sent" as const),
       promotePanelTerminal: () => {},
       closePanelTerminal: () => {},
     });
