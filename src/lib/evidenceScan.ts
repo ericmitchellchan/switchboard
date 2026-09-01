@@ -12,8 +12,12 @@
 //     segments, an extension, no `..`) — resolution to a real file is the
 //     render seam's job (evidenceModel.resolveDocTarget), and Rust's read
 //     guards stay the last line either way.
+//   · A ticket-shaped hit counts only when its PREFIX is a known project key
+//     (KNOWN_TICKET_PREFIXES) — the bare shape matches UTF-8 and SHA-256.
 //   · The scan runs on App's EXISTING 5s inbox pass for LIVE threads only —
-//     no new timer, and a thread with no live terminal keeps whatever was
+//     no new timer, gated on OUTPUT SINCE THE LAST SCAN (noteScanWriteCount
+//     against the registry's per-session write counter, so an idle terminal
+//     costs zero) — and a thread with no live terminal keeps whatever was
 //     already scanned (the store is runtime-only, like threadStore's
 //     `prepared` map: a restart starts empty, honestly, because the buffer
 //     it would re-scan restarts too).
@@ -30,8 +34,20 @@ import type { EvidenceKind, ScannedEvidence } from "./evidenceModel";
 // ── Pure: extraction ─────────────────────────────────────────────────────────
 
 /** Ticket keys — Linear/Jira-style, uppercase project word + number. Bare
- *  numbers and lowercase lookalikes deliberately do not match. */
+ *  numbers and lowercase lookalikes deliberately do not match — and a raw hit
+ *  only COUNTS when its prefix is a known project key, because the bare shape
+ *  also matches UTF-8, SHA-256, GPT-4, ISO-8601 and COVID-19. */
 const TICKET_RE = /\b[A-Z]{2,10}-\d{1,6}\b/g;
+
+/** The ticket prefixes the scan accepts, from the user's project registry
+ *  (the table in ~/.claude/CLAUDE.md — the Linear team keys + the Cadence
+ *  Jira keys). The registry.json the app reads carries no per-project ticket
+ *  key (its tracker entry is team + repo label), so the set is hardcoded
+ *  here; a prefix missing from it is a FILTER GAP — the row simply does not
+ *  appear — never a crash. Callers may inject their own set. */
+export const KNOWN_TICKET_PREFIXES: ReadonlySet<string> = new Set([
+  "SWIT", "CAD", "ORB", "SC", "CR", "LODE", "KU", "CC",
+]);
 
 /** GitHub PR URLs. The scheme is required IN THE SCAN (a transcript prints
  *  real URLs); the stored address keeps it verbatim. */
@@ -39,8 +55,11 @@ const PR_RE = /\bhttps?:\/\/(?:www\.)?github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+\b
 
 /** Path candidates: `/`- or `\`-separated segments in the tight charset, at
  *  least one separator, ending in an extension. Trailing sentence punctuation
- *  is not part of a path; `://` (URLs) and `..` never pass. */
-const PATH_RE = /(?<![\w:/\\.])[A-Za-z0-9._-]+(?:[/\\][A-Za-z0-9._-]+)+\.[A-Za-z0-9]{1,8}(?![\w/\\])/g;
+ *  is not part of a path; `://` (URLs) and `..` never pass. `-` and `.` sit
+ *  in the LOOKBEHIND class as well as the charset so a long dash/dot run has
+ *  ONE match start position instead of one per character — the 1MB-of-dashes
+ *  perf test is the regression guard. */
+const PATH_RE = /(?<![\w:/\\.-])[A-Za-z0-9._-]+(?:[/\\][A-Za-z0-9._-]+)+\.[A-Za-z0-9]{1,8}(?![\w/\\])/g;
 
 const scanKinds = new Set<EvidenceKind>(["doc", "file"]);
 
@@ -49,7 +68,10 @@ export type ScanHit = { address: string; kind: EvidenceKind };
 /** Every address the transcript mentions — tickets, PR URLs, doc/file paths —
  *  deduped, first-seen order. Pure; tolerant of ANSI leftovers (the plain
  *  buffer walk has none, but a saved transcript might). */
-export function scanTranscript(text: string): ScanHit[] {
+export function scanTranscript(
+  text: string,
+  knownTicketPrefixes: ReadonlySet<string> = KNOWN_TICKET_PREFIXES
+): ScanHit[] {
   const clean = stripAnsi(text);
   const out: ScanHit[] = [];
   const seen = new Set<string>();
@@ -58,7 +80,10 @@ export function scanTranscript(text: string): ScanHit[] {
     seen.add(address);
     out.push({ address, kind });
   };
-  for (const m of clean.match(TICKET_RE) ?? []) add(m, "ticket");
+  for (const m of clean.match(TICKET_RE) ?? []) {
+    if (!knownTicketPrefixes.has(m.slice(0, m.indexOf("-")))) continue;
+    add(m, "ticket");
+  }
   for (const m of clean.match(PR_RE) ?? []) add(m, "pr");
   for (const m of clean.match(PATH_RE) ?? []) {
     // Backslash transcripts (Windows tools print `src\lib\x.ts`) fold to the
@@ -113,7 +138,13 @@ export function recordScan(threadId: string, hits: readonly ScanHit[], now: Date
   }
   if (fresh.length === 0) return false;
   const prev = scannedByThread.get(threadId) ?? [];
-  scannedByThread.set(threadId, [...fresh, ...prev].slice(0, SCAN_CAP));
+  const merged = [...fresh, ...prev];
+  // An evicted address leaves the seen-set too, so a LATER re-mention can
+  // come back as a fresh (newest) row instead of being unrepresentable for
+  // the rest of the app run. Addresses are unique across rows (the seen-set
+  // gates every add), so deleting by evicted row is exact.
+  for (const dropped of merged.slice(SCAN_CAP)) seen.delete(dropped.address);
+  scannedByThread.set(threadId, merged.slice(0, SCAN_CAP));
   notify();
   return true;
 }
@@ -135,8 +166,31 @@ export function scanThreadTranscript(threadId: string, text: string, now: Date =
   recordScan(threadId, scanTranscript(text), now);
 }
 
+/** The 5s pass's dirty gate: the caller hands the session's monotonic output
+ *  counter (terminal.getSessionWriteCount) and scans only when it moved since
+ *  the last scan — an idle terminal costs zero buffer walks and zero regex
+ *  passes. Keyed by THREAD (the store's key); noting the count is the
+ *  commitment to scan, so call it only when about to scan. */
+const scannedAtWriteCount = new Map<string, number>();
+
+export function noteScanWriteCount(threadId: string, writeCount: number): boolean {
+  if (scannedAtWriteCount.get(threadId) === writeCount) return false;
+  scannedAtWriteCount.set(threadId, writeCount);
+  return true;
+}
+
+/** Drop a DELETED thread's scan state. The store is runtime-only, so this is
+ *  hygiene (memory + a recycled id starting clean), not persistence. */
+export function pruneThreadScan(threadId: string): void {
+  scannedByThread.delete(threadId);
+  seenByThread.delete(threadId);
+  scannedAtWriteCount.delete(threadId);
+  notify();
+}
+
 export function __resetEvidenceScanForTests(): void {
   scannedByThread = new Map();
   seenByThread.clear();
+  scannedAtWriteCount.clear();
   listeners.clear();
 }

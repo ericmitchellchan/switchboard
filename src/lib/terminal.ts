@@ -30,6 +30,7 @@ export {
   setTerminalConfig,
   isSessionDirty,
   clearSessionDirty,
+  getSessionWriteCount,
   disposeTerminal,
 } from "./terminalRegistry";
 
@@ -170,6 +171,14 @@ export function serializeTerminal(sessionId: string): string | null {
  * `translateToString(true)` right-trims each row, which also collapses the
  * grid's padding back to real lines. Trailing blank rows (the unused part of
  * the viewport) are dropped so the file ends where the output does.
+ *
+ * Soft-WRAPPED rows (`buffer.getLine(y).isWrapped` — the renderer split a
+ * logical line at the grid width, no real newline was ever printed) are joined
+ * to the previous row with NO separator, so a URL or path wrapped mid-token
+ * comes back whole. Fixes the evidence scan's fragment hits (SWIT-66 review;
+ * the wrapped-URL fixture in evidenceScan.test.ts is the rationale — a real
+ * xterm buffer is impractical under vitest) and the agent transcript seam,
+ * which had the same bug from day one.
  */
 export function plainTextTerminal(sessionId: string): string | null {
   const instance = getTerminal(sessionId);
@@ -178,7 +187,10 @@ export function plainTextTerminal(sessionId: string): string | null {
     const buf = instance.terminal.buffer.active;
     const lines: string[] = [];
     for (let y = 0; y < buf.length; y++) {
-      lines.push(buf.getLine(y)?.translateToString(true) ?? "");
+      const line = buf.getLine(y);
+      const text = line?.translateToString(true) ?? "";
+      if (line?.isWrapped && lines.length > 0) lines[lines.length - 1] += text;
+      else lines.push(text);
     }
     while (lines.length > 0 && lines[lines.length - 1].length === 0) lines.pop();
     return lines.join("\n");

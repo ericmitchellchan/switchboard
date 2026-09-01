@@ -195,6 +195,17 @@ export function clearSessionDirty(sessionId: string): void {
   dirtySessionIds.delete(sessionId);
 }
 
+// Monotonic per-session output counters, bumped on every PTY chunk. The
+// evidence scrollback scan (SWIT-66 review fix) compares this against the
+// count it last scanned at so an idle terminal costs zero; it cannot share
+// dirtySessionIds because workspace's serializer CLEARS that bit for its own
+// bookkeeping.
+const sessionWriteCounts = new Map<string, number>();
+
+export function getSessionWriteCount(sessionId: string): number {
+  return sessionWriteCounts.get(sessionId) ?? 0;
+}
+
 // Sessions whose onResize events should NOT be forwarded to the PTY — fences
 // the forceViewportRefresh cols-1 bounce (display-only scroll-area recalc)
 // from SIGWINCHing the shell. See terminal.ts#forceViewportRefresh.
@@ -335,6 +346,7 @@ export function disableWebGL(sessionId: string): void {
 function writeChunk(entry: Entry, sessionId: string, bytes: Uint8Array): void {
   entry.terminal.write(bytes);
   dirtySessionIds.add(sessionId);
+  sessionWriteCounts.set(sessionId, (sessionWriteCounts.get(sessionId) ?? 0) + 1);
   sessionHooks.get(sessionId)?.onOutput?.(bytes);
 }
 
@@ -643,6 +655,7 @@ function disposeEntry(sessionId: string, entry: Entry): void {
   }
   entry.container.remove();
   dirtySessionIds.delete(sessionId);
+  sessionWriteCounts.delete(sessionId);
   resizePropagationSuppressed.delete(sessionId);
   sessionInputListeners.delete(sessionId);
   sessionGenerations.delete(sessionId); // session closed — id never reused

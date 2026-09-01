@@ -5,6 +5,8 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  noteScanWriteCount,
+  pruneThreadScan,
   recordScan,
   scannedEvidenceFor,
   scanThreadTranscript,
@@ -51,6 +53,34 @@ describe("scanTranscript", () => {
     const hits = scanTranscript("\x1b[1mSWIT-64\x1b[22m done");
     expect(hits).toEqual([{ address: "SWIT-64", kind: "ticket" }]);
   });
+
+  it("a ticket-shaped hit counts only when its prefix is a known project key", () => {
+    const junk = "encoded UTF-8, hashed SHA-256, asked GPT-4, dated ISO-8601, since COVID-19";
+    expect(scanTranscript(junk)).toEqual([]);
+    expect(scanTranscript("shipped SWIT-64")).toEqual([{ address: "SWIT-64", kind: "ticket" }]);
+  });
+
+  it("accepts an injected prefix set", () => {
+    expect(scanTranscript("ABC-1 then SWIT-2", new Set(["ABC"]))).toEqual([
+      { address: "ABC-1", kind: "ticket" },
+    ]);
+  });
+
+  it("a soft-wrapped URL, joined back into one line, yields no path fragment", () => {
+    // plainTextTerminal joins rows whose isWrapped is true with NO separator;
+    // this fixture is that joined output. A real xterm buffer is impractical
+    // under vitest, so the terminal.ts change is exercised here at the scan
+    // layer: the unjoined form (a raw newline mid-URL) is the pre-fix bug.
+    const unjoined = "see https://github.com/e/x/blob/main/sr\nc/lib/deep/pageStore.ts now";
+    expect(scanTranscript(unjoined).some((h) => h.address === "c/lib/deep/pageStore.ts")).toBe(true);
+    expect(scanTranscript(unjoined.replace("\n", ""))).toEqual([]);
+  });
+
+  it("a 1MB dash run scans fast — one match start position, not one per char", () => {
+    const t0 = performance.now();
+    scanTranscript("-".repeat(1_000_000));
+    expect(performance.now() - t0).toBeLessThan(100);
+  });
 });
 
 describe("the union store", () => {
@@ -79,6 +109,34 @@ describe("the union store", () => {
     expect(rows.length).toBe(SCAN_CAP);
     expect(rows[0].address).toBe(`SWIT-${SCAN_CAP + 4}`);
     expect(rows.some((r) => r.address === "SWIT-0")).toBe(false);
+  });
+
+  it("an evicted address can return — eviction clears it from the seen-set", () => {
+    recordScan("t1", [{ address: "SWIT-0", kind: "ticket" }]);
+    for (let i = 1; i <= SCAN_CAP; i++) {
+      recordScan("t1", [{ address: `SWIT-${i}`, kind: "ticket" }]);
+    }
+    expect(scannedEvidenceFor("t1").some((r) => r.address === "SWIT-0")).toBe(false);
+    expect(recordScan("t1", [{ address: "SWIT-0", kind: "ticket" }])).toBe(true);
+    expect(scannedEvidenceFor("t1")[0].address).toBe("SWIT-0");
+  });
+
+  it("noteScanWriteCount gates: an unchanged counter says skip", () => {
+    expect(noteScanWriteCount("t1", 0)).toBe(true);
+    expect(noteScanWriteCount("t1", 0)).toBe(false);
+    expect(noteScanWriteCount("t1", 3)).toBe(true);
+    expect(noteScanWriteCount("t1", 3)).toBe(false);
+    expect(noteScanWriteCount("t2", 3)).toBe(true);
+  });
+
+  it("pruneThreadScan drops rows, seen-set and gate for one thread", () => {
+    scanThreadTranscript("t1", "SWIT-64");
+    noteScanWriteCount("t1", 5);
+    pruneThreadScan("t1");
+    expect(scannedEvidenceFor("t1")).toEqual([]);
+    expect(noteScanWriteCount("t1", 5)).toBe(true);
+    scanThreadTranscript("t1", "SWIT-64");
+    expect(scannedEvidenceFor("t1").map((r) => r.address)).toEqual(["SWIT-64"]);
   });
 
   it("threads are independent", () => {

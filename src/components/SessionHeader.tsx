@@ -207,7 +207,8 @@ export function DevServerOffer({
  *
  *  When `prepare_thread_launch` rejects (or the conversation was started
  *  outside Switchboard and discovered by the promotion pass), the session is a
- *  PLAIN SHELL: no `--mcp-config`, none of the four tools, no ✦ page tab. The
+ *  PLAIN SHELL: no `--mcp-config`, none of the four tools, an EMPTY ✦ page
+ *  tab (ensurePageTab has no prep gate, so the tab still renders). The
  *  absence used to be silent — an empty panel reads as "broken", not "never
  *  wired". This chip is the whole surface: threads only (a plain shell has no
  *  record and can never chip — unpreparedThreadReason is the pure rule), live

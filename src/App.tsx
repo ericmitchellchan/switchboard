@@ -21,7 +21,7 @@ import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
 import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, listThreadViews, readThreadFile, writeThreadAnswer, appendConvention, writeThreadPost, saveTranscript, readBacklog, writeBacklog, takeBacklogInbox } from "./lib/ipc";
-import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty, isSessionDirty, serializeForPip, plainTextTerminal, setTerminalScreenVisible } from "./lib/terminal";
+import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty, isSessionDirty, serializeForPip, plainTextTerminal, getSessionWriteCount, setTerminalScreenVisible } from "./lib/terminal";
 import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing, sendPipHost } from "./lib/pipBridge";
 import { bumpSessionGeneration, addSessionInputListener, getSessionGeneration } from "./lib/terminalRegistry";
 import {
@@ -135,7 +135,7 @@ import {
   backlogThreadTitle,
   getBacklogItems,
 } from "./lib/backlogStore";
-import { scanThreadTranscript } from "./lib/evidenceScan";
+import { noteScanWriteCount, pruneThreadScan, scanThreadTranscript } from "./lib/evidenceScan";
 import { consumeDropClaim, DROP_CLAIM_DEFER_MS, stagePastedBase64 } from "./lib/attachments";
 import { isBare } from "./lib/shellMode";
 import { parsePinsFile, pinsForDoc, pinTargetFor, surfacePinTargetFor } from "./lib/pins";
@@ -1217,7 +1217,7 @@ export default function App() {
           confirmLabel: "Restart claude",
           enterConfirms: false,
           message:
-            `This thread's claude launched without page tools (no ✦ page tab, no page/view/post/backlog).\n\n` +
+            `This thread's claude launched without page tools (an empty ✦ page tab, no page/view/post/backlog).\n\n` +
             `Restarting relaunches claude with them. The conversation resumes via --resume — nothing on disk is lost — but anything mid-flight in the terminal right now is interrupted.`,
           onConfirm: () => {
             closeConfirm();
@@ -1262,6 +1262,7 @@ export default function App() {
   const handleDeleteThread = useCallback((threadId: string) => {
     log.info(`Delete thread id=${threadId}`);
     deleteThread(threadId);
+    pruneThreadScan(threadId);
     void saveThreadsToDisk();
   }, []);
 
@@ -1412,8 +1413,10 @@ export default function App() {
           // live thread's terminal buffer, as plain text, scanned for ticket
           // keys / PR URLs / doc+file paths. Union, add-only, runtime-only;
           // no new timer, and a thread with no live terminal keeps what it
-          // already has (the scan never removes).
-          if (live && sessionId !== null) {
+          // already has (the scan never removes). Gated on OUTPUT since the
+          // last scan (the registry's per-session write counter) so an idle
+          // terminal costs zero buffer walks.
+          if (live && sessionId !== null && noteScanWriteCount(t.id, getSessionWriteCount(sessionId))) {
             const text = plainTextTerminal(sessionId);
             if (text !== null) scanThreadTranscript(t.id, text);
           }

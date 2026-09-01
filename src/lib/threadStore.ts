@@ -817,7 +817,7 @@ export const PREP_REASON_MAX = 200;
 export function prepFailureReason(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err ?? "");
   // eslint-disable-next-line no-control-regex
-  const clean = raw.replace(/[ -]+/g, " ").replace(/\s+/g, " ").trim();
+  const clean = raw.replace(/[\x00-\x1f\x7f]+/g, " ").replace(/\s+/g, " ").trim();
   const s = clean.length > 0 ? clean : "unknown error";
   return s.length > PREP_REASON_MAX ? `${s.slice(0, PREP_REASON_MAX - 1)}…` : s;
 }
