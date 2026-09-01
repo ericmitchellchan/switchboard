@@ -16,11 +16,18 @@
 //      Projects tree, unchanged inside.
 // Bands 1–2 share one scroll area; band 3 scrolls inside its own cap so an
 // expanded tree cannot push the destinations off screen.
+//
+// SHELL MODE (SWIT-55): in BARE mode (the default) the Research band and the
+// Explorer band do not render — the menu is `Home · Trading · Knowledge base
+// ▸` then THREADS. `?shell=full` / config `shell_mode` brings them back. The
+// gate is a render check here (`useShellMode`), never a code-path removal:
+// their routes still resolve and their code stays built and tested.
 
 import { useCallback, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import type { Route } from "../types";
 import { navigate, navigateToScreen } from "../lib/route";
+import { useShellMode } from "../lib/shellMode";
 import { projectsWithResearch, researchPages } from "../surfaces/registry";
 import { ThreadsSection } from "./ThreadsSection";
 import { KbTreeSection } from "./KbTreeSection";
@@ -119,6 +126,7 @@ export function SideMenu({ route }: { route: Route }) {
   const [researchOpen, toggleResearch] = useBandOpen("research", false);
   const [kbOpen, toggleKb] = useBandOpen("kb", false);
   const [explorerOpen, toggleExplorer] = useBandOpen("explorer", false);
+  const bare = useShellMode() === "bare";
 
   return (
     <div style={MENU_STYLE}>
@@ -140,13 +148,15 @@ export function SideMenu({ route }: { route: Route }) {
             active={route.screen === "project" && route.project === "lodestar" && route.page === "trading"}
             onClick={() => navigate({ screen: "project", project: "lodestar", page: "trading" })}
           />
-          <DestRow
-            label="Research"
-            glyph={researchOpen ? "▾" : "▸"}
-            active={false}
-            onClick={toggleResearch}
-          />
-          {researchOpen && <ResearchGroups route={route} />}
+          {!bare && (
+            <DestRow
+              label="Research"
+              glyph={researchOpen ? "▾" : "▸"}
+              active={false}
+              onClick={toggleResearch}
+            />
+          )}
+          {!bare && researchOpen && <ResearchGroups route={route} />}
           <DestRow
             label="Knowledge base"
             glyph={kbOpen ? "▾" : "▸"}
@@ -166,24 +176,26 @@ export function SideMenu({ route }: { route: Route }) {
       </div>
 
       {/* ── Band 3: Explorer, pinned at the bottom, folded by default ── */}
-      <div
-        style={{
-          flex: "none",
-          borderTop: "1px solid var(--border)",
-          display: "flex",
-          flexDirection: "column",
-          maxHeight: explorerOpen ? "45%" : undefined,
-        }}
-      >
-        <SectionLabel onClick={toggleExplorer}>
-          Explorer <span style={{ float: "right", letterSpacing: 0 }}>{explorerOpen ? "▾" : "▸"}</span>
-        </SectionLabel>
-        {explorerOpen && (
-          <div style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingBottom: 8 }}>
-            <ExplorerTreeSection route={route} />
-          </div>
-        )}
-      </div>
+      {!bare && (
+        <div
+          style={{
+            flex: "none",
+            borderTop: "1px solid var(--border)",
+            display: "flex",
+            flexDirection: "column",
+            maxHeight: explorerOpen ? "45%" : undefined,
+          }}
+        >
+          <SectionLabel onClick={toggleExplorer}>
+            Explorer <span style={{ float: "right", letterSpacing: 0 }}>{explorerOpen ? "▾" : "▸"}</span>
+          </SectionLabel>
+          {explorerOpen && (
+            <div style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingBottom: 8 }}>
+              <ExplorerTreeSection route={route} />
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

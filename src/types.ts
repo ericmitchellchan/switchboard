@@ -27,6 +27,11 @@ export interface Config {
   font_size: number;
   shell: string;
   repos: RepoConfig[];
+  /** Optional KB checkout override (T6). */
+  kb_path?: string | null;
+  /** Shell mode (SWIT-55): `"full"` restores the surfaces bare mode hides.
+   *  Absent = bare. Read ONCE via lib/shellMode; `?shell=` on the URL wins. */
+  shell_mode?: string | null;
 }
 
 export type SidebarState = "full" | "collapsed" | "hidden";

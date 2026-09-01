@@ -9,6 +9,11 @@
 // back through the registered ThreadActions bridge (App owns session
 // creation/revival). SideMenu itself only renders <ThreadsSection /> in its
 // threads section — no prop plumbing through it.
+//
+// SHELL MODE (SWIT-55): in BARE mode (the default) the `shells` group and the
+// `⟳ revive` chip do not render. The chip was only ever a label — clicking a
+// dead row revives it (`handleClick`) in both modes; the dot says it is dead.
+// `?shell=full` / config `shell_mode` brings both back. Render gates only.
 
 import { useState } from "react";
 import type { CSSProperties } from "react";
@@ -25,6 +30,7 @@ import type { MenuSession } from "../lib/threadStore";
 import { navigate } from "../lib/route";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
 import { getExplorerActions } from "../lib/explorer";
+import { useShellMode } from "../lib/shellMode";
 import { ThreadRowMenu, ThreadTitleEditor, threadMenuItems } from "./ThreadRowMenu";
 
 /** Dead rows use the EXITED status colour — read from statusConfig, the
@@ -71,6 +77,7 @@ const CHIP_STYLE: CSSProperties = {
 
 export function ThreadsSection() {
   const view = useThreadsView();
+  const bare = useShellMode() === "bare";
 
   // Threads are the long history; this rail is 218px wide. Show the most
   // recent handful — but never truncate a LIVE thread out of the list (you
@@ -92,7 +99,9 @@ export function ThreadsSection() {
   // The `shells` group: tab sessions no thread record claims (a plain Ctrl+T
   // shell — the promote-on-claude rule). Derived from the same view, so a
   // promotion moves the row between groups in one render.
-  const shells = selectShellSessions(view.threads, view.menuSessions);
+  // Hidden in bare mode (SWIT-55) — the shell has no thread record, and the
+  // bare set is threads.
+  const shells = bare ? [] : selectShellSessions(view.threads, view.menuSessions);
 
   return (
     <>
@@ -108,6 +117,7 @@ export function ThreadsSection() {
               status={t.sessionId ? view.sessionStatuses[t.sessionId] : undefined}
               active={t.sessionId !== null && t.sessionId === view.activeSessionId}
               unread={view.unreadPosts[t.id] ?? 0}
+              reviveChip={!bare}
             />
           ))}
         </div>
@@ -197,6 +207,7 @@ function ThreadRow({
   status,
   active,
   unread,
+  reviveChip,
 }: {
   thread: Thread;
   /** claude launched for this thread in THIS app run (create or revive). */
@@ -206,6 +217,9 @@ function ThreadRow({
   active: boolean;
   /** Unread cross-thread posts (`↓ N`). Always 0 until SWIT-52 publishes. */
   unread: number;
+  /** Draw the `⟳ revive` chip on a dead row (full mode). The CLICK revives
+   *  either way — the chip is a label, not the affordance. */
+  reviveChip: boolean;
 }) {
   const [hover, setHover] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -310,7 +324,7 @@ function ThreadRow({
       )}
       {booting ? (
         <span style={CHIP_STYLE}>⟳ booting…</span>
-      ) : dead ? (
+      ) : dead && reviveChip ? (
         <span
           style={{
             ...CHIP_STYLE,

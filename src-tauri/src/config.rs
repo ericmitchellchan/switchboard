@@ -25,6 +25,11 @@ pub struct Config {
     /// the built-in default. Absent from config.json = None.
     #[serde(default)]
     pub kb_path: Option<String>,
+    /// Shell mode (SWIT-55): `"full"` restores the surfaces bare mode hides;
+    /// absent = bare. Parsed by the frontend (lib/shellMode.ts), never here —
+    /// the backend only carries the string. `shellMode` accepted as an alias.
+    #[serde(default, alias = "shellMode")]
+    pub shell_mode: Option<String>,
 }
 
 fn default_font() -> String {
@@ -53,6 +58,7 @@ impl Default for Config {
             shell: default_shell(),
             repos: vec![],
             kb_path: None,
+            shell_mode: None,
         }
     }
 }
