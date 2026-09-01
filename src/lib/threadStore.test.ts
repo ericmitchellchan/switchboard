@@ -52,6 +52,8 @@ import {
   NEW_THREAD_TITLE,
   requestThreadRename,
   clearThreadRenameRequest,
+  renameEditorHoldsFocus,
+  RENAME_FOCUS_HOLD_MS,
   selectShellSessions,
   resolveThreadByQuery,
   type MenuSession,
@@ -1164,27 +1166,76 @@ describe("quickCreateWorkingDir (where the header `+` puts a thread)", () => {
 
 describe("rename request (the `+` opens the title box)", () => {
   beforeEach(() => __resetThreadStoreForTests());
+  const two = () => {
+    const a = createThreadRecord({ title: "New thread", workingDir: "C:/a" });
+    const b = createThreadRecord({ title: "New thread", workingDir: "C:/b" });
+    return [a.id, b.id] as const;
+  };
 
   it("is null until asked, set once asked, and cleared by the row that honoured it", () => {
+    const [t1] = two();
     expect(getThreadsView().renameRequest).toBeNull();
-    requestThreadRename("t1");
-    expect(getThreadsView().renameRequest).toBe("t1");
-    clearThreadRenameRequest("t1");
+    requestThreadRename(t1);
+    expect(getThreadsView().renameRequest).toBe(t1);
+    clearThreadRenameRequest(t1);
     expect(getThreadsView().renameRequest).toBeNull();
   });
 
   it("a stale clear does not cancel a newer request", () => {
-    requestThreadRename("t1");
-    requestThreadRename("t2");
-    expect(getThreadsView().renameRequest).toBe("t2");
-    clearThreadRenameRequest("t1");
-    expect(getThreadsView().renameRequest).toBe("t2");
+    const [t1, t2] = two();
+    requestThreadRename(t1);
+    requestThreadRename(t2);
+    expect(getThreadsView().renameRequest).toBe(t2);
+    clearThreadRenameRequest(t1);
+    expect(getThreadsView().renameRequest).toBe(t2);
   });
 
   it("re-asking the same id does not notify again (no re-render churn)", () => {
-    requestThreadRename("t1");
+    const [t1] = two();
+    requestThreadRename(t1);
     const before = getThreadsView();
-    requestThreadRename("t1");
+    requestThreadRename(t1);
     expect(getThreadsView()).toBe(before);
+  });
+
+  // Review fix (SWIT-55..57): a request never outlives its thread or its box.
+  it("a rename answers the request — even one that leaves the title unchanged", () => {
+    const [t1] = two();
+    requestThreadRename(t1);
+    renameThread(t1, "New thread"); // the box committed untouched
+    expect(getThreadsView().renameRequest).toBeNull();
+    requestThreadRename(t1);
+    renameThread(t1, "fix the fit queue");
+    expect(getThreadsView().renameRequest).toBeNull();
+    expect(getThreadById(t1)!.title).toBe("fix the fit queue");
+  });
+
+  it("archiving or deleting the thread drops its request", () => {
+    const [t1, t2] = two();
+    requestThreadRename(t1);
+    setThreadArchived(t1, true);
+    expect(getThreadsView().renameRequest).toBeNull();
+    requestThreadRename(t2);
+    deleteThread(t2);
+    expect(getThreadsView().renameRequest).toBeNull();
+  });
+
+  it("a request for a thread that is not in the list reads as null", () => {
+    const [t1] = two();
+    requestThreadRename("never-created");
+    expect(getThreadsView().renameRequest).toBeNull();
+    requestThreadRename(t1);
+    expect(getThreadsView().renameRequest).toBe(t1);
+  });
+
+  it("the box holds focus against a programmatic terminal focus only", () => {
+    const steal = { blurredToTerminal: true, pointerSinceOpen: false, ageMs: 300 };
+    expect(renameEditorHoldsFocus(steal)).toBe(true);
+    // A click on the terminal is a gesture: commit.
+    expect(renameEditorHoldsFocus({ ...steal, pointerSinceOpen: true })).toBe(false);
+    // Focus leaving for anywhere else: commit.
+    expect(renameEditorHoldsFocus({ ...steal, blurredToTerminal: false })).toBe(false);
+    // Past the settle window: commit (a bound, not a fight).
+    expect(renameEditorHoldsFocus({ ...steal, ageMs: RENAME_FOCUS_HOLD_MS })).toBe(false);
   });
 });

@@ -16,9 +16,10 @@
 // Rows are dense 11.5px: status dot + title + a DIM PROJECT SUFFIX in flat
 // mode (tabLabel.tabRepoSuffix's rule, so `switchboard · Sep 1` does not print
 // the project twice) + the `⋯` menu, which appears on HOVER/FOCUS only. No
-// chips except `↓ N` (unread posts) and `?` (agent waiting) — the status
-// dot's statusConfig color is the ONLY color allowed; a dead row is the
-// exited color and no chip: clicking it revives.
+// chips except `↓ N` (unread posts), `?` (agent waiting) and `⟳ booting…`
+// (the revive-boot window) — the status dot's statusConfig color is the ONLY
+// color allowed; a dead row is the exited color and no chip: clicking it
+// revives.
 //
 // FLAT in bare mode: live threads first, then most recent by last activity,
 // capped by selectMenuThreads' rule (a live thread is never truncated out —

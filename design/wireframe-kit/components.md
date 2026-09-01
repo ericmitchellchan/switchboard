@@ -170,8 +170,9 @@ answer goes (that is the spec's sentence, `requirements.md` R4).
   bordered pill, no radio. (3) Input: the kit textarea, 2 rows, placeholder `or type
   your own…` (`type your answer…` with no options); Enter sends. (4) Action: ONE quiet
   button `answer`, right-aligned under the input, disabled while the box is empty.
-  Outcome states are one plain line in `--text-muted` under the action — the failure
-  text, or `saved on the page — no live terminal` — never a bordered note.
+  Outcome states are one plain line in `--text-muted` on the SAME row, to the LEFT of
+  the button — the failure text, or `saved on the page — no live terminal` — never a
+  bordered note.
 - Resolved states (answered / gone) are the same voice centred: the question in
   `--text-secondary` and `you: <answer>` in `--text-primary`; or the one line `This
   question is no longer on the page.`

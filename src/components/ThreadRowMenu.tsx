@@ -29,9 +29,9 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { CSSProperties } from "react";
+import type { CSSProperties, FocusEvent } from "react";
 import type { Thread } from "../types";
-import { getThreadActions, isThreadArchived } from "../lib/threadStore";
+import { getThreadActions, isThreadArchived, renameEditorHoldsFocus } from "../lib/threadStore";
 import { Icon, type IconName } from "./icons";
 
 export type ThreadMenuItem = {
@@ -359,7 +359,14 @@ export function ThreadRowMenu({
  *
  *  The rename is LOCAL to Switchboard's record — claude's session has no title
  *  and is never touched — and rides the existing persistence, so it survives a
- *  restart like every other field. */
+ *  restart like every other field.
+ *
+ *  ONE blur is not a commit: the box a `+` opened (SWIT-56) is on screen while
+ *  the new pane's terminal focuses ITSELF — from the pane's visibility effect,
+ *  or from the show-fit's `shouldFocus` several frames later. That blur has
+ *  xterm's helper textarea as its `relatedTarget` and no pointer gesture
+ *  behind it; `threadStore.renameEditorHoldsFocus` calls it a steal and the
+ *  box takes focus back. A click on the terminal commits as before. */
 export function ThreadTitleEditor({
   thread,
   onDone,
@@ -371,12 +378,43 @@ export function ThreadTitleEditor({
 }) {
   const [value, setValue] = useState(thread.title);
   const committed = useRef(false);
+  const openedAt = useRef(Date.now());
+  const pointerSinceOpen = useRef(false);
+
+  useEffect(() => {
+    // Capture phase, document-wide: a pointer anywhere (the terminal above
+    // all) marks the next blur as the user's, whatever it lands on.
+    const mark = () => { pointerSinceOpen.current = true; };
+    document.addEventListener("pointerdown", mark, true);
+    return () => document.removeEventListener("pointerdown", mark, true);
+  }, []);
 
   const commit = () => {
     if (committed.current) return;
     committed.current = true;
     getThreadActions()?.renameThread(thread.id, value);
     onDone();
+  };
+
+  const handleBlur = (e: FocusEvent<HTMLInputElement>) => {
+    const to = e.relatedTarget;
+    const blurredToTerminal =
+      to instanceof HTMLElement && to.classList.contains("xterm-helper-textarea");
+    if (
+      renameEditorHoldsFocus({
+        blurredToTerminal,
+        pointerSinceOpen: pointerSinceOpen.current,
+        ageMs: Date.now() - openedAt.current,
+      })
+    ) {
+      const el = e.currentTarget;
+      // After the steal's own focus step has finished, not inside it.
+      window.requestAnimationFrame(() => {
+        if (!committed.current && document.body.contains(el)) el.focus();
+      });
+      return;
+    }
+    commit();
   };
 
   return (
@@ -391,7 +429,7 @@ export function ThreadTitleEditor({
       onClick={(e) => e.stopPropagation()}
       onDoubleClick={(e) => e.stopPropagation()}
       onMouseDown={(e) => e.stopPropagation()}
-      onBlur={commit}
+      onBlur={handleBlur}
       onKeyDown={(e) => {
         e.stopPropagation();
         if (e.key === "Enter") {

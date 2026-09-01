@@ -101,7 +101,9 @@
   .sb-surface button:disabled {
     cursor: default;
   }
-  .sb-surface input,
+  /* Text-like inputs only: a range/checkbox/radio/color/file input is not a
+     box to pad and border (PathCase's horizon slider sat in one). */
+  .sb-surface input:where(:not([type="checkbox"], [type="radio"], [type="range"], [type="color"], [type="file"])),
   .sb-surface select,
   .sb-surface textarea {
     background: transparent;

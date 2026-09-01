@@ -287,11 +287,6 @@ const CLOSED_CONFIRM: ConfirmState = {
   onConfirm: () => {},
 };
 
-/** How long after a `+`-created thread's session lands before its title box
- *  opens (SWIT-56) — past the new pane's show-fit focus (a few frames), well
- *  under the "open in under a second" bar. See handleCreateThread. */
-const RENAME_ON_CREATE_DELAY_MS = 250;
-
 export default function App() {
   const sessionCounterRef = useRef(0);
   const homeDirRef = useRef("");
@@ -895,15 +890,16 @@ export default function App() {
         void saveThreadsToDisk();
         void launchClaudeInSession(info.id, thread.id);
         if (opts?.renameOnCreate) {
-          // AFTER the new pane's show-fit has focused its terminal
-          // (fitQueue's `shouldFocus`, a few frames after mount) — the title
-          // box commits on blur, so focusing it FIRST would let the terminal
-          // steal focus back and close the box with the untouched default.
-          // The launch line itself needs no DOM focus (it is an IPC write),
-          // so typing a name here never races claude.
-          window.setTimeout(() => {
-            if (getThreadById(thread.id)) requestThreadRename(thread.id);
-          }, RENAME_ON_CREATE_DELAY_MS);
+          // NOW, not on a timer (review fix): the new pane's terminal focuses
+          // itself from more than one place (its visibility effect, the
+          // show-fit's `shouldFocus` a few frames later) and no delay is
+          // guaranteed to land after the last of them. The title box commits
+          // on blur, so it is the box that holds its ground — ThreadTitleEditor
+          // ignores a blur into xterm's helper textarea that no pointer
+          // gesture caused (threadStore.renameEditorHoldsFocus). The request
+          // is dropped by the store if the thread goes before a row honours
+          // it. The launch line is an IPC write and never needs DOM focus.
+          requestThreadRename(thread.id);
         }
       } catch (err) {
         log.error(`Failed to create thread session: ${err}`);
@@ -923,25 +919,37 @@ export default function App() {
   // registry does not know is filed as a no-repo thread, like the dialog's
   // quick row. Same primitive as the dialog — handleCreateThread — with the
   // rename-on-create flag.
+  //
+  // ONE create at a time (review fix): the body awaits explorerProjects()
+  // before anything is written, so a double-click used to mint two `New
+  // thread`s. The ref is set synchronously at entry and released only when
+  // the whole create — session spawn included — has settled.
+  const creatingThreadRef = useRef(false);
   const handleCreateThreadNow = useCallback(async () => {
-    let projects: Awaited<ReturnType<typeof explorerProjects>> | null = null;
+    if (creatingThreadRef.current) return;
+    creatingThreadRef.current = true;
     try {
-      projects = await explorerProjects();
-    } catch {
-      projects = null;
+      let projects: Awaited<ReturnType<typeof explorerProjects>> | null = null;
+      try {
+        projects = await explorerProjects();
+      } catch {
+        projects = null;
+      }
+      const known = quickCreateWorkingDir(getThreads(), activeIdRef.current);
+      const dir = known ?? quickThreadTarget(projects, sessionDirFor(getActiveTabSession()), homeDirRef.current);
+      const path = typeof dir === "string" ? dir : dir.path;
+      const option = sessionRepoOptions(projects, config.repos).find((o) => sameWorkingDir(o.path, path));
+      if (option) {
+        await handleCreateThread(option.name, option.path, option.color, option.group, "", { renameOnCreate: true });
+        return;
+      }
+      const project = typeof dir === "string"
+        ? quickThreadTarget(projects, dir, "").project
+        : dir.project;
+      await handleCreateThread(project, path, undefined, undefined, "", { renameOnCreate: true });
+    } finally {
+      creatingThreadRef.current = false;
     }
-    const known = quickCreateWorkingDir(getThreads(), activeIdRef.current);
-    const dir = known ?? quickThreadTarget(projects, sessionDirFor(getActiveTabSession()), homeDirRef.current);
-    const path = typeof dir === "string" ? dir : dir.path;
-    const option = sessionRepoOptions(projects, config.repos).find((o) => sameWorkingDir(o.path, path));
-    if (option) {
-      void handleCreateThread(option.name, option.path, option.color, option.group, "", { renameOnCreate: true });
-      return;
-    }
-    const project = typeof dir === "string"
-      ? quickThreadTarget(projects, dir, "").project
-      : dir.project;
-    void handleCreateThread(project, path, undefined, undefined, "", { renameOnCreate: true });
   }, [config.repos, handleCreateThread]);
 
   // Revive a dead thread: get a live shell (reuse the bound tab when one

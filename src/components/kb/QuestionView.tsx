@@ -80,6 +80,7 @@ export function QuestionView({ artifact, active }: { artifact: QuestionArtifact;
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const [fieldFocus, setFieldFocus] = useState(false);
+  const [answerHover, setAnswerHover] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
   const open = page.openQuestions.find((q) => q.id === questionId);
@@ -203,8 +204,18 @@ export function QuestionView({ artifact, active }: { artifact: QuestionArtifact;
         {note && <span style={{ fontSize: 10.5, color: "var(--text-muted)" }}>{note}</span>}
         <button
           type="button"
-          style={{ ...QUIET, marginLeft: "auto", opacity: canSend ? 1 : 0.4, cursor: canSend ? "pointer" : "default" }}
+          style={{
+            ...QUIET,
+            marginLeft: "auto",
+            opacity: canSend ? 1 : 0.4,
+            cursor: canSend ? "pointer" : "default",
+            // kit: quiet hover = text `--text-primary` + border `--text-secondary`.
+            color: answerHover && canSend ? "var(--text-primary)" : "var(--text-secondary)",
+            borderColor: answerHover && canSend ? "var(--text-secondary)" : "var(--border-subtle)",
+          }}
           disabled={!canSend}
+          onMouseEnter={() => setAnswerHover(true)}
+          onMouseLeave={() => setAnswerHover(false)}
           onClick={() => void submit(draft)}
         >
           answer

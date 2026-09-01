@@ -773,7 +773,10 @@ export type ThreadsView = {
   unreadPosts: Readonly<Record<string, number>>;
   /** A thread whose title should be in INLINE RENAME the moment its row
    *  renders (SWIT-56: the header `+` creates first and asks for the name
-   *  second). Consumed — cleared — by the row that honours it. Transient. */
+   *  second). Consumed — cleared — by the row that honours it; ALSO cleared
+   *  by a rename, an archive, a delete, and by the view itself when the
+   *  thread is no longer in `threads` (a request must never outlive its
+   *  thread and pop on some later row). Transient. */
   renameRequest: string | null;
 };
 
@@ -809,6 +812,11 @@ export const subscribeThreads = subscribe;
 
 export function getThreadsView(): ThreadsView {
   if (!cachedView) {
+    // A request whose thread is gone (deleted, or never made it into the
+    // list) is dropped here rather than left dangling for a future row.
+    if (renameRequest !== null && !threads.some((t) => t.id === renameRequest)) {
+      renameRequest = null;
+    }
     cachedView = {
       threads,
       launched: new Set(launched),
@@ -837,6 +845,30 @@ export function clearThreadRenameRequest(threadId: string): void {
   if (renameRequest !== threadId) return;
   renameRequest = null;
   bump();
+}
+
+/** The title box a `+` opened must not be closed by the new pane's terminal
+ *  taking focus (SWIT-56 review). The box commits on blur, and a terminal
+ *  focuses itself from several places (the pane's visibility effect, the
+ *  show-fit's `shouldFocus` a few frames after mount) — none of them a user
+ *  gesture, all of them after the box has opened. So a blur that lands in
+ *  xterm's helper textarea, with NO pointer gesture since the box opened and
+ *  inside the settle window, is a programmatic steal: the box holds focus
+ *  and stays open. A click on the terminal IS a pointer gesture and commits
+ *  as before; so does any blur landing anywhere else. The window is a bound,
+ *  not a timer the request waits on — it only stops a focus fight if
+ *  something ever focused the terminal in a loop. */
+export const RENAME_FOCUS_HOLD_MS = 1500;
+
+export function renameEditorHoldsFocus(input: {
+  /** The blur's `relatedTarget` is xterm's `.xterm-helper-textarea`. */
+  blurredToTerminal: boolean;
+  /** A pointerdown happened anywhere since the box opened. */
+  pointerSinceOpen: boolean;
+  /** Milliseconds since the box opened. */
+  ageMs: number;
+}): boolean {
+  return input.blurredToTerminal && !input.pointerSinceOpen && input.ageMs < RENAME_FOCUS_HOLD_MS;
 }
 
 /** React hook: the thread view, re-rendering on any store change. */
@@ -957,7 +989,14 @@ export function renameThread(threadId: string, title: string): void {
   const t = getThreadById(threadId);
   if (!t) return;
   const next = title.trim() || derivedThreadTitle(t);
-  if (next === t.title) return;
+  // A rename answers the request whether or not the title moved — the box
+  // that asked for it has done its job (an untouched `New thread` included).
+  const hadRequest = renameRequest === threadId;
+  if (hadRequest) renameRequest = null;
+  if (next === t.title) {
+    if (hadRequest) bump();
+    return;
+  }
   threads = threads.map((x) => (x.id === threadId ? { ...x, title: next } : x));
   bump();
 }
@@ -968,6 +1007,9 @@ export function renameThread(threadId: string, title: string): void {
 export function setThreadArchived(threadId: string, archived: boolean): void {
   const t = getThreadById(threadId);
   if (!t || isThreadArchived(t) === archived) return;
+  // An archived row is off the rail; a pending title box for it would pop
+  // the moment it came back.
+  if (archived && renameRequest === threadId) renameRequest = null;
   threads = threads.map((x) => {
     if (x.id !== threadId) return x;
     if (!archived) {
@@ -1084,6 +1126,7 @@ export function deleteThread(threadId: string): void {
   threads = threads.filter((t) => t.id !== threadId);
   launched.delete(threadId);
   booting.delete(threadId);
+  if (renameRequest === threadId) renameRequest = null;
   bump();
 }
 
