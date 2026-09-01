@@ -12,9 +12,27 @@
 // `view:<threadId>:<viewId>` in the project's surface-pins file) — a pin
 // survives `re-run` iff its anchor still exists, which is the anchors
 // contract doing its job, not new code.
+//
+// T6 (SWIT-60) — the view explains itself and opens downward:
+//   · `spec` (a quiet toolbar button) discloses kind · source · columns ·
+//     filters · definition as plain lines (viewStore.specLines).
+//   · FILTERS are selects in the toolbar over the spec's declared columns;
+//     values come from the LOADED rows and the slice is client-side
+//     (applyFilters) — nothing re-fetches. The active filter joins the pin
+//     doc scope (viewPinScope → viewPinTargetFor's suffix).
+//   · OPENING an anchor — click on a row / bin / bar, Enter on a focused row —
+//     resolves the parent's drill for that key and opens the CHILD (the same
+//     artifact kind with `drill.key`) in the preview slot via
+//     panelStore.openDrillInPanel, `back` returning here. With no drill
+//     declared the sentence `show me what is behind <title> › <label>` goes
+//     to the thread through the `→ thread` seam (typed, no CR), and the
+//     toolbar says `→ thread` while a row is hovered so the affordance is
+//     visible without copy. PIN MODE WINS: the capture-phase pin handler
+//     stops propagation while armed, and the bubble handler re-checks.
 
 import { Suspense, lazy, useCallback, useMemo, useRef, useState } from "react";
-import type { CSSProperties } from "react";
+import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
+
 import type { Artifact } from "../../types";
 import {
   useView,
@@ -23,13 +41,33 @@ import {
   rowAnchorId,
   toOhlcRows,
   toDistBins,
+  applyFilters,
+  filterValues,
+  viewPinScope,
+  drillKeyForAnchor,
+  resolveDrill,
+  drillFallbackSentence,
+  specLines,
 } from "../../lib/viewStore";
-import type { ViewRow, ViewSpec } from "../../lib/viewStore";
+import type { ActiveFilters, ViewRow, ViewSpec } from "../../lib/viewStore";
 import { viewPinTargetFor } from "../../lib/pins";
 import { getThreadById, threadRepoName } from "../../lib/threadStore";
-import { artifactIdentity } from "../../lib/panelStore";
+import {
+  artifactIdentity,
+  getActiveTabSession,
+  openDrillInPanel,
+  sendToThread,
+  useSendToThreadAvailable,
+} from "../../lib/panelStore";
+import { sanitizeForTypedLine, REF_MAX } from "../../lib/agentContext";
 import { kbWriteDoc } from "../../lib/ipc";
-import { SurfaceAnchorContext, composeAnchorProviders, domAnchorProvider, ANCHOR_ATTR } from "../../surfaces/anchors";
+import {
+  SurfaceAnchorContext,
+  composeAnchorProviders,
+  domAnchorProvider,
+  ANCHOR_ATTR,
+  ANCHOR_LABEL_ATTR,
+} from "../../surfaces/anchors";
 import type { SurfaceAnchorProvider, SurfaceAnchorRegistry } from "../../surfaces/anchors";
 import { useAnchoredPins } from "../../surfaces/SurfacePins";
 import type { AnchoredPinTarget } from "../../surfaces/SurfacePins";
@@ -67,11 +105,55 @@ const TOOL_BTN: CSSProperties = {
   cursor: "pointer",
 };
 
+/** The kit's quiet select, at toolbar size: transparent, hairline, mono. */
+const FILTER_SELECT: CSSProperties = {
+  background: "transparent",
+  border: "1px solid var(--border-subtle)",
+  borderRadius: 3,
+  color: "var(--text-secondary)",
+  fontFamily: MONO,
+  fontSize: 10,
+  lineHeight: "16px",
+  padding: "0 3px",
+  maxWidth: 140,
+  outline: "none",
+};
+
+const SPEC_STYLE: CSSProperties = {
+  flex: "none",
+  margin: 0,
+  padding: "6px 10px",
+  borderBottom: "1px solid var(--border)",
+  fontFamily: MONO,
+  fontSize: 10,
+  lineHeight: 1.6,
+  color: "var(--text-secondary)",
+  whiteSpace: "pre-wrap",
+  wordBreak: "break-word",
+  maxHeight: 180,
+  overflow: "auto",
+};
+
 type ViewArtifact = Extract<Artifact, { kind: "view" }>;
+
+/** What hovering an anchor means here — printed at the toolbar's right end. */
+type HoverHint = { label: string; verb: string } | null;
 
 export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; active: boolean }) {
   const { threadId, viewId } = artifact;
-  const { spec, error, rows, loading, rerun } = useView(threadId, viewId, active);
+  const drillKey = artifact.drill?.key ?? null;
+  const { spec, error, rows, loading, rerun } = useView(threadId, viewId, active, drillKey);
+
+  // ── Filters (T6): client-side slices, per view instance ───────────────────
+  const [activeFilters, setActiveFilters] = useState<ActiveFilters>({});
+  const filteredRows = useMemo(
+    () => (rows && spec ? applyFilters(rows, spec.filters, activeFilters) : rows),
+    [rows, spec, activeFilters]
+  );
+  const pinScope = useMemo(() => viewPinScope(activeFilters, drillKey), [activeFilters, drillKey]);
+  const [showSpec, setShowSpec] = useState(false);
+  const [hover, setHover] = useState<HoverHint>(null);
+  const canSend = useSendToThreadAvailable();
 
   // The project a view's pins + keeps file under: the thread's repo name.
   const project = useMemo(() => {
@@ -123,18 +205,86 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
     [flashNote]
   );
   const target = useMemo<AnchoredPinTarget>(() => {
-    const { sidecarPath, docKey } = viewPinTargetFor(project, threadId, viewId);
+    // The ACTIVE filter (and the drill key) scope the doc: a pin dropped on
+    // one date lives under that date and is not drawn on another (T6).
+    const { sidecarPath, docKey } = viewPinTargetFor(project, threadId, viewId, pinScope);
     return {
       artifact,
       sidecarPath,
       docKey,
-      identity: artifactIdentity(artifact),
+      identity: `${artifactIdentity(artifact)}${pinScope}`,
       scopeNote: `view ${docKey}`,
       emptyHint:
         "no pins yet — toggle \u{1F4CC} pin, then click a row, bar or bin. A view pin follows the THING and survives re-run as long as the data still holds it.",
     };
-  }, [artifact, project, threadId, viewId]);
+  }, [artifact, project, threadId, viewId, pinScope]);
   const pins = useAnchoredPins(target, provider, rootEl, pinMode, onPlaced, active);
+
+  // ── Open an anchor (T6): drill into the preview slot, else → thread ───────
+  const describeAnchor = useCallback(
+    (el: EventTarget | null): { key: string; label: string } | null => {
+      if (!spec || !filteredRows) return null;
+      const anchor = provider.getAnchor(el);
+      if (!anchor) return null;
+      return drillKeyForAnchor(anchor.key, { rows: filteredRows, spec });
+    },
+    [spec, filteredRows, provider]
+  );
+  const openAnchor = useCallback(
+    (el: EventTarget | null) => {
+      if (!spec) return;
+      const hit = describeAnchor(el);
+      if (!hit) return;
+      if (spec.drill) {
+        const resolved = resolveDrill(spec, hit.key);
+        if (resolved.error !== null) {
+          flashNote(resolved.error);
+          return;
+        }
+        const sessionId = getActiveTabSession();
+        if (!sessionId) {
+          flashNote("no thread to open it beside");
+          return;
+        }
+        openDrillInPanel(sessionId, artifact, { kind: "view", threadId, viewId, drill: { key: hit.key } });
+        return;
+      }
+      if (!canSend) {
+        flashNote("no live thread to ask");
+        return;
+      }
+      sendToThread(sanitizeForTypedLine(drillFallbackSentence(spec.title, hit.label), REF_MAX));
+    },
+    [spec, describeAnchor, flashNote, artifact, threadId, viewId, canSend]
+  );
+  const onBodyClick = useCallback(
+    (e: ReactMouseEvent) => {
+      // Pin mode took this click in the capture phase; the re-check is belt
+      // and braces for a host that renders the capture handler elsewhere.
+      if (pinMode) return;
+      if (e.defaultPrevented) return;
+      openAnchor(e.target);
+    },
+    [pinMode, openAnchor]
+  );
+  const onHoverAnchor = useCallback(
+    (el: EventTarget | null) => {
+      if (!spec || el === null) {
+        setHover(null);
+        return;
+      }
+      const hit = describeAnchor(el);
+      if (!hit) {
+        setHover(null);
+        return;
+      }
+      setHover({
+        label: hit.label,
+        verb: spec.drill ? `› ${spec.drill.title.split("{key}").join(hit.key)}` : "→ thread",
+      });
+    },
+    [spec, describeAnchor]
+  );
 
   // ── keep → the scratchpad (decided Q4) ─────────────────────────────────────
   const [keeping, setKeeping] = useState(false);
@@ -194,7 +344,8 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
     );
   }
 
-  const windowed = rows ? windowRows(rows) : { rows: [] as ViewRow[], total: 0, windowed: false };
+  const windowed = filteredRows ? windowRows(filteredRows) : { rows: [] as ViewRow[], total: 0, windowed: false };
+  const filtered = filteredRows !== null && rows !== null && filteredRows.length !== rows.length;
 
   return (
     <SurfaceAnchorContext.Provider value={registry}>
@@ -202,13 +353,53 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
         <div style={TOOLBAR_STYLE}>
           <span style={{ color: "var(--text-primary)", flex: "none" }}>{spec.kind}</span>
           <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{spec.title}</span>
+          {(spec.filters ?? []).map((f) => {
+            const values = filterValues(rows ?? [], f);
+            const current = activeFilters[f.column] ?? "";
+            return (
+              <select
+                key={f.column}
+                value={current}
+                onChange={(e) =>
+                  setActiveFilters((prev) => ({ ...prev, [f.column]: e.target.value }))
+                }
+                title={`${f.label ?? f.column} — ${f.kind}, ${values.length} values`}
+                style={{
+                  ...FILTER_SELECT,
+                  ...(current.length > 0 ? { color: "var(--text-primary)", borderColor: "var(--text-secondary)" } : {}),
+                }}
+              >
+                <option value="">{f.label ?? f.column}</option>
+                {values.map((v) => (
+                  <option key={v} value={v}>
+                    {v}
+                  </option>
+                ))}
+              </select>
+            );
+          })}
           <span style={{ flex: 1 }} />
           <span style={{ color: "var(--text-faint)", overflow: "hidden", textOverflow: "ellipsis" }}>
             {flash ??
-              `${spec.source.type === "file" ? spec.source.path : spec.source.url} · ${
-                spec.builtAt ? spec.builtAt.slice(0, 16).replace("T", " ") : ""
-              } · ${spec.builtBy}${windowed.windowed ? ` · showing ${windowed.rows.length} of ${windowed.total} rows` : ""}`}
+              (hover
+                ? `${hover.label} ${hover.verb}`
+                : `${spec.source.type === "file" ? spec.source.path : spec.source.url} · ${
+                    spec.builtAt ? spec.builtAt.slice(0, 16).replace("T", " ") : ""
+                  } · ${spec.builtBy}${
+                    filtered ? ` · ${filteredRows?.length ?? 0} of ${rows?.length ?? 0} rows` : ""
+                  }${windowed.windowed ? ` · showing ${windowed.rows.length} of ${windowed.total} rows` : ""}`)}
           </span>
+          <button
+            type="button"
+            style={{
+              ...TOOL_BTN,
+              ...(showSpec ? { color: "var(--text-primary)", borderColor: "var(--text-secondary)" } : {}),
+            }}
+            onClick={() => setShowSpec((v) => !v)}
+            title="What this view is: kind, source, columns, filters, the rule that defines its rows"
+          >
+            spec
+          </button>
           <button
             type="button"
             style={{
@@ -243,10 +434,13 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
             keep
           </button>
         </div>
+        {showSpec && <pre style={SPEC_STYLE}>{specLines(spec).join("\n")}</pre>}
         <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
           <div
             ref={setRoot}
             onClickCapture={pins.onCapture}
+            onClick={onBodyClick}
+            onMouseLeave={() => setHover(null)}
             style={{
               position: "relative",
               minHeight: "100%",
@@ -254,7 +448,7 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
               background: pinMode ? "rgba(228, 228, 231, 0.04)" : "transparent",
             }}
           >
-            <ViewBody spec={spec} rows={windowed.rows} />
+            <ViewBody spec={spec} rows={windowed.rows} onActivate={openAnchor} onHover={onHoverAnchor} />
             {pins.marks}
           </div>
         </div>
@@ -266,10 +460,18 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
 
 // ── Renderers (ours; the agent's data never executes) ────────────────────────
 
-function ViewBody({ spec, rows }: { spec: ViewSpec; rows: ViewRow[] }) {
+type RendererProps = {
+  spec: ViewSpec;
+  rows: ViewRow[];
+  /** Enter on a focused anchor (T6) — the click path goes through the wrapper. */
+  onActivate: (el: EventTarget | null) => void;
+  onHover: (el: EventTarget | null) => void;
+};
+
+function ViewBody({ spec, rows, onActivate, onHover }: RendererProps) {
   switch (spec.kind) {
     case "table":
-      return <TableView spec={spec} rows={rows} />;
+      return <TableView spec={spec} rows={rows} onActivate={onActivate} onHover={onHover} />;
     case "candles":
       return (
         <Suspense
@@ -290,12 +492,13 @@ function ViewBody({ spec, rows }: { spec: ViewSpec; rows: ViewRow[] }) {
         </Suspense>
       );
     case "dist":
-      return <DistView spec={spec} rows={rows} />;
+      return <DistView spec={spec} rows={rows} onActivate={onActivate} onHover={onHover} />;
   }
 }
 
-/** The table renderer: kit tokens, click-to-sort, `row:<key>` anchors. */
-function TableView({ spec, rows }: { spec: ViewSpec; rows: ViewRow[] }) {
+/** The table renderer: kit tokens, click-to-sort, `row:<key>` anchors.
+ *  Rows are focusable (T6): Enter opens the focused row the way a click does. */
+function TableView({ spec, rows, onActivate, onHover }: RendererProps) {
   const columns = tableColumns(rows, spec);
   const [sort, setSort] = useState<{ column: string; dir: 1 | -1 } | null>(null);
   const sorted = useMemo(() => {
@@ -374,8 +577,20 @@ function TableView({ spec, rows }: { spec: ViewSpec; rows: ViewRow[] }) {
             return (
             <tr
               key={anchor ?? `dup-${rawAnchor ?? "row"}-${i}`}
-              {...(anchor ? { [ANCHOR_ATTR]: `row:${anchor}` } : {})}
-              style={{ borderBottom: "1px solid var(--border)" }}
+              {...(anchor ? { [ANCHOR_ATTR]: `row:${anchor}`, [ANCHOR_LABEL_ATTR]: anchor, tabIndex: 0 } : {})}
+              onKeyDown={
+                anchor
+                  ? (e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        onActivate(e.currentTarget);
+                      }
+                    }
+                  : undefined
+              }
+              onMouseEnter={anchor ? (e) => onHover(e.currentTarget) : undefined}
+              onMouseLeave={anchor ? () => onHover(null) : undefined}
+              style={{ borderBottom: "1px solid var(--border)", cursor: anchor ? "pointer" : undefined, outline: "none" }}
             >
               {columns.map((c) => {
                 const v = row[c];
@@ -407,7 +622,7 @@ function TableView({ spec, rows }: { spec: ViewSpec; rows: ViewRow[] }) {
 /** The distribution renderer: a plain SVG bar chart with `bin:<n>` anchors —
  *  40 honest lines instead of bending uPlot into a histogram. Soft palette;
  *  no new colour. */
-function DistView({ spec, rows }: { spec: ViewSpec; rows: ViewRow[] }) {
+function DistView({ spec, rows, onActivate, onHover }: RendererProps) {
   const bins = toDistBins(rows, spec);
   if (bins.length === 0) {
     return (
@@ -424,9 +639,27 @@ function DistView({ spec, rows }: { spec: ViewSpec; rows: ViewRow[] }) {
         return (
           <div
             key={`${bin.label}-${i}`}
-            {...{ [ANCHOR_ATTR]: `bin:${i}` }}
+            {...{ [ANCHOR_ATTR]: `bin:${i}`, [ANCHOR_LABEL_ATTR]: bin.label }}
+            tabIndex={0}
             title={`${bin.label}: ${bin.count}`}
-            style={{ flex: 1, minWidth: 4, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                onActivate(e.currentTarget);
+              }
+            }}
+            onMouseEnter={(e) => onHover(e.currentTarget)}
+            onMouseLeave={() => onHover(null)}
+            style={{
+              flex: 1,
+              minWidth: 4,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 4,
+              cursor: "pointer",
+              outline: "none",
+            }}
           >
             <span style={{ fontFamily: MONO, fontSize: 8.5, color: "var(--text-faint)" }}>
               {bin.count}

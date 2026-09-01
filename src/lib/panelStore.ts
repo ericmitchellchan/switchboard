@@ -436,9 +436,12 @@ export function describeArtifact(artifact: Artifact): ArtifactDescription {
         icon: FILE_ICON,
         crumbs: [
           { text: "view", tone: "dim" },
-          { text: artifact.viewId, tone: "bright" },
+          { text: artifact.viewId, tone: artifact.drill ? "dim" : "bright" },
+          ...(artifact.drill ? [{ text: artifact.drill.key, tone: "bright" as const }] : []),
         ],
-        title: `view / ${artifact.viewId}`,
+        title: artifact.drill
+          ? `view / ${artifact.viewId} / ${artifact.drill.key}`
+          : `view / ${artifact.viewId}`,
       };
     case "question":
       return {
@@ -553,12 +556,21 @@ export function sanitizeArtifact(raw: unknown): Artifact | null {
       // SWIT-48 — the ✦ page. The thread id is the whole record; the content
       // is the per-thread files (pageStore), read at render time.
       return isNonEmptyString(raw.threadId) ? { kind: "page", threadId: raw.threadId } : null;
-    case "view":
+    case "view": {
       // SWIT-48 stub (rendered in SWIT-50) — two ids, tolerated on load so a
-      // strip never loses a tab to a version skew.
-      return isNonEmptyString(raw.threadId) && isNonEmptyString(raw.viewId)
-        ? { kind: "view", threadId: raw.threadId, viewId: raw.viewId }
-        : null;
+      // strip never loses a tab to a version skew. T6: an optional drill key
+      // (a drilled child); a malformed one is dropped and the record is the
+      // parent — a stale key must never make a tab unrenderable.
+      if (!isNonEmptyString(raw.threadId) || !isNonEmptyString(raw.viewId)) return null;
+      const drill = raw.drill;
+      const key =
+        typeof drill === "object" && drill !== null && isNonEmptyString((drill as Record<string, unknown>).key)
+          ? String((drill as Record<string, unknown>).key).slice(0, 120)
+          : null;
+      return key !== null
+        ? { kind: "view", threadId: raw.threadId, viewId: raw.viewId, drill: { key } }
+        : { kind: "view", threadId: raw.threadId, viewId: raw.viewId };
+    }
     case "question":
       // SWIT-51 — the write-back tab. Two ids; the question's text lives on
       // the page (pageStore), read at render time.
@@ -606,7 +618,8 @@ export function artifactIdentity(artifact: Artifact): string {
     case "page":
       return `page:${artifact.threadId}`;
     case "view":
-      return `view:${artifact.threadId}:${artifact.viewId}`;
+      // A drilled child is its OWN tab (T6): one parent, many children.
+      return `view:${artifact.threadId}:${artifact.viewId}${artifact.drill ? `/${artifact.drill.key}` : ""}`;
     case "question":
       return `question:${artifact.threadId}:${artifact.questionId}`;
   }
@@ -641,7 +654,9 @@ export function artifactShortTitle(artifact: Artifact): string {
   if (artifact.kind === "session") return sessionLabelFor(artifact.sessionId)?.name ?? "terminal";
   // The ✦ page and views print their marks, not a path (they have none).
   if (artifact.kind === "page") return "✦ page";
-  if (artifact.kind === "view") return artifact.viewId;
+  if (artifact.kind === "view") {
+    return artifact.drill ? `${artifact.viewId} › ${artifact.drill.key}` : artifact.viewId;
+  }
   if (artifact.kind === "question") return "? question";
   // A surface's short title is its page LABEL (the same word the header's
   // last crumb prints), not a path — it has none.
@@ -1487,7 +1502,13 @@ export function usePreviewBackAvailable(sessionId: string | null): boolean {
 
 /** Step the preview tab back to the artifact it replaced. The current preview
  *  is discarded (that is what a preview is); the restored one is the preview
- *  again, so forward-going plain clicks keep replacing. */
+ *  again, so forward-going plain clicks keep replacing.
+ *
+ *  T6: the back target may ALREADY BE A TAB — `openDrillInPanel` stacks a
+ *  PINNED parent under its child. Restoring it in place would list one
+ *  artifact twice (the dedupe rule is senior), so that case CLOSES the
+ *  preview tab and activates the existing one; the strip then has no
+ *  preview, exactly as if the parent had been clicked. */
 export function goPreviewBack(sessionId: string): void {
   const key = ownerKeyFor(sessionId);
   const stack = previewBacks.get(key);
@@ -1499,6 +1520,21 @@ export function goPreviewBack(sessionId: string): void {
   if (index < 0) return;
   const target = stack[stack.length - 1];
   audit("preview-replace", key, state.artifacts[index], `back-to=${auditName(target)}`);
+  const existing = indexOfArtifact(state.artifacts, target);
+  if (existing >= 0 && existing !== index) {
+    const artifacts = state.artifacts.filter((_, i) => i !== index);
+    // The lineage ended in a pinned tab (as pinPreview's does): the rest of
+    // the stack would only be reachable by a NEW preview that never replaced
+    // any of it, so it goes too.
+    previewBacks = new Map(previewBacks);
+    previewBacks.delete(key);
+    previews = new Map(previews);
+    previews.delete(key);
+    panels = new Map(panels);
+    panels.set(key, { artifacts, activeIndex: existing > index ? existing - 1 : existing });
+    bump();
+    return;
+  }
   previewBacks = new Map(previewBacks);
   previewBacks.set(key, stack.slice(0, -1));
   previews = new Map(previews);
@@ -1508,6 +1544,28 @@ export function goPreviewBack(sessionId: string): void {
     artifacts: state.artifacts.map((a, i) => (i === index ? target : a)),
     activeIndex: index,
   });
+  bump();
+}
+
+/** DRILL (T6, R6): open a view's CHILD in the preview slot with `back`
+ *  returning to the PARENT. When the parent IS the preview, the ordinary
+ *  replace-with-back does exactly that. When the parent is a pinned tab, the
+ *  child still takes the preview slot (replacing whatever preview there was,
+ *  which stays reachable one step further back) and the parent is stacked on
+ *  top so the header's `←` lands on it — `goPreviewBack` closes the child and
+ *  activates the parent's tab. A child already open as a tab is activated,
+ *  never duplicated, and nothing is stacked. */
+export function openDrillInPanel(sessionId: string, parent: Artifact, child: Artifact): void {
+  openInPanel(sessionId, child, { preview: true });
+  const key = ownerKeyFor(sessionId);
+  if (previewIdentityFor(sessionId) !== artifactIdentity(child)) return;
+  const stack = previewBacks.get(key) ?? [];
+  const top = stack[stack.length - 1];
+  if (top && artifactIdentity(top) === artifactIdentity(parent)) return;
+  const cleanParent = sanitizeArtifact(parent);
+  if (!cleanParent) return;
+  previewBacks = new Map(previewBacks);
+  previewBacks.set(key, [...stack, cleanParent].slice(-PREVIEW_BACK_CAP));
   bump();
 }
 

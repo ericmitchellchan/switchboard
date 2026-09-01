@@ -13,6 +13,22 @@
 //
 // Same import-graph guarantee as pageStore: nothing here can reach the
 // terminal machinery, so a view arriving mid-RUN repaints the panel only.
+//
+// T6 (SWIT-60) — a view EXPLAINS itself and OPENS DOWNWARD:
+//   · `definition` is the rule that defines the rows, in the agent's words;
+//     the toolbar's `spec` disclosure prints it beside kind/source/columns.
+//   · `filters` are selectors over the view's OWN columns; values come from
+//     the loaded rows (`filterValues`) and the slice is CLIENT-side
+//     (`applyFilters`) — no re-fetch, the agent cannot make a view poll. The
+//     active filter is part of the PIN SCOPE (`viewPinScope`): a pin dropped
+//     on one date is filed under that date and is not drawn on another.
+//   · `drill` declares what is BEHIND an anchor: a child source template whose
+//     `{key}` is the anchor's key value. `resolveDrill` is pure and REFUSES a
+//     key that could leave the thread cwd (`drillPathKey` — one path
+//     component, closed alphabet); the Rust `read_view_data` guard stays the
+//     last line. A drilled child is the SAME artifact kind with a `drill.key`
+//     — its spec is derived from the parent's at render time, never written
+//     to disk, so `useView` takes the key and resolves in place.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { readThreadView, readViewData } from "./ipc";
@@ -26,6 +42,25 @@ export type ViewSource =
 
 export type ViewMarker = { ts: string; label: string; id?: string };
 
+export const VIEW_FILTER_KINDS = ["select", "date"] as const;
+export type ViewFilterKind = (typeof VIEW_FILTER_KINDS)[number];
+
+/** A selector over one of the view's own columns (T6). `select` offers the
+ *  column's distinct values; `date` offers the distinct DAYS of a date-ish
+ *  column (ISO strings, epoch seconds). */
+export type ViewFilter = { column: string; kind: ViewFilterKind; label?: string };
+
+/** What is behind an anchor (T6): a child view whose source strings carry
+ *  `{key}` — replaced by the anchor's key value at resolve time. */
+export type ViewDrill = {
+  kind: ViewKind;
+  title: string;
+  source: ViewSource;
+  columns?: string[];
+  keyColumn?: string;
+  definition?: string;
+};
+
 export type ViewSpec = {
   id: string;
   kind: ViewKind;
@@ -36,7 +71,19 @@ export type ViewSpec = {
   markers?: ViewMarker[];
   builtAt: string;
   builtBy: string;
+  /** The rule that defines the rows, in plain words (<= VIEW_DEFINITION_CAP). */
+  definition?: string;
+  filters?: ViewFilter[];
+  drill?: ViewDrill;
 };
+
+/** Caps, mirrored from the MCP server (the writer) — the reader trims to the
+ *  same numbers so a hand-written spec cannot render more than the tool
+ *  would have accepted. */
+export const VIEW_DEFINITION_CAP = 600;
+export const VIEW_FILTER_CAP = 4;
+/** Longest anchor key value a drill accepts (rowAnchorId's own cap). */
+export const DRILL_KEY_CAP = 120;
 
 /** Display window: past this many rows the renderer shows the first slice
  *  and SAYS so (the Rust byte cap guards the read; this guards the DOM). */
@@ -46,6 +93,74 @@ export type ViewRow = Record<string, unknown>;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** LOOPBACK-ONLY, re-checked at the READER (review): the MCP server validates
+ *  on the write side, but the spec is a plain file an agent could write with
+ *  its own tools — the reader enforcing the same rule makes it structural
+ *  rather than one-sided. Same regex the server uses. */
+export function isLocalBackendUrl(url: string): boolean {
+  return /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|\/)/.test(url);
+}
+
+function parseViewSource(src: unknown): { source: ViewSource } | { error: string } {
+  if (isRecord(src) && src.type === "file" && typeof src.path === "string" && src.path.length > 0) {
+    return { source: { type: "file", path: src.path } };
+  }
+  if (isRecord(src) && src.type === "query" && typeof src.url === "string" && src.url.length > 0) {
+    if (!isLocalBackendUrl(src.url)) {
+      return { error: "the view spec's query url is not a local backend" };
+    }
+    const source: ViewSource = { type: "query", url: src.url };
+    if (typeof src.body === "string" && src.body.length > 0) source.body = src.body;
+    return { source };
+  }
+  return { error: "the view spec's source is malformed" };
+}
+
+/** Tolerant filters parse: malformed entries drop alone; capped. Pure. */
+export function parseViewFilters(raw: unknown): ViewFilter[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ViewFilter[] = [];
+  const seen = new Set<string>();
+  for (const f of raw) {
+    if (!isRecord(f)) continue;
+    const column = typeof f.column === "string" ? f.column.trim() : "";
+    const kind = f.kind;
+    if (column.length === 0 || (kind !== "select" && kind !== "date") || seen.has(column)) continue;
+    seen.add(column);
+    const filter: ViewFilter = { column, kind };
+    if (typeof f.label === "string" && f.label.trim().length > 0) filter.label = f.label.trim().slice(0, 40);
+    out.push(filter);
+    if (out.length >= VIEW_FILTER_CAP) break;
+  }
+  return out;
+}
+
+/** Tolerant drill parse: null = no drill (a malformed one is ABSENT, never a
+ *  broken parent). The child's source TEMPLATE must already be a valid
+ *  source with `{key}` standing in — a query whose host is not a literal
+ *  loopback address is refused here, before any key exists. Pure. */
+export function parseViewDrill(raw: unknown): ViewDrill | null {
+  if (!isRecord(raw)) return null;
+  const kind = raw.kind;
+  if (kind !== "table" && kind !== "candles" && kind !== "dist") return null;
+  const src = parseViewSource(raw.source);
+  if ("error" in src) return null;
+  const drill: ViewDrill = {
+    kind,
+    title: typeof raw.title === "string" && raw.title.trim().length > 0 ? raw.title.trim() : "{key}",
+    source: src.source,
+  };
+  if (Array.isArray(raw.columns)) {
+    const columns = raw.columns.filter((c): c is string => typeof c === "string" && c.length > 0);
+    if (columns.length > 0) drill.columns = columns;
+  }
+  if (typeof raw.keyColumn === "string" && raw.keyColumn.length > 0) drill.keyColumn = raw.keyColumn;
+  if (typeof raw.definition === "string" && raw.definition.trim().length > 0) {
+    drill.definition = raw.definition.trim().slice(0, VIEW_DEFINITION_CAP);
+  }
+  return drill;
 }
 
 /** Tolerant spec parse: null = nothing renderable (the cannot-render card's
@@ -67,22 +182,9 @@ export function parseViewSpec(raw: string): { spec: ViewSpec | null; specError: 
   }
   const id = typeof data.id === "string" && data.id.length > 0 ? data.id : null;
   if (!id) return { spec: null, specError: "the view spec has no id" };
-  const src = data.source;
-  let source: ViewSource | null = null;
-  if (isRecord(src) && src.type === "file" && typeof src.path === "string" && src.path.length > 0) {
-    source = { type: "file", path: src.path };
-  } else if (isRecord(src) && src.type === "query" && typeof src.url === "string" && src.url.length > 0) {
-    // LOOPBACK-ONLY, re-checked HERE (review): the MCP server validates on
-    // the write side, but the spec is a plain file an agent could write with
-    // its own tools — the READER enforcing the same rule makes it structural
-    // rather than one-sided. Same pattern the server uses.
-    if (!/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|\/)/.test(src.url)) {
-      return { spec: null, specError: "the view spec's query url is not a local backend" };
-    }
-    source = { type: "query", url: src.url };
-    if (typeof src.body === "string" && src.body.length > 0) source.body = src.body;
-  }
-  if (!source) return { spec: null, specError: "the view spec's source is malformed" };
+  const parsedSource = parseViewSource(data.source);
+  if ("error" in parsedSource) return { spec: null, specError: parsedSource.error };
+  const source = parsedSource.source;
   const spec: ViewSpec = {
     id,
     kind,
@@ -95,6 +197,16 @@ export function parseViewSpec(raw: string): { spec: ViewSpec | null; specError: 
     spec.columns = data.columns.filter((c): c is string => typeof c === "string" && c.length > 0);
   }
   if (typeof data.keyColumn === "string" && data.keyColumn.length > 0) spec.keyColumn = data.keyColumn;
+  // T6 — the three optional fields, each tolerated as ABSENT when malformed
+  // (a bad drill must not take the parent view with it; the spec is still a
+  // renderable declaration without them).
+  if (typeof data.definition === "string" && data.definition.trim().length > 0) {
+    spec.definition = data.definition.trim().slice(0, VIEW_DEFINITION_CAP);
+  }
+  const filters = parseViewFilters(data.filters);
+  if (filters.length > 0) spec.filters = filters;
+  const drill = parseViewDrill(data.drill);
+  if (drill) spec.drill = drill;
   if (Array.isArray(data.markers)) {
     spec.markers = data.markers
       .filter((m): m is Record<string, unknown> => isRecord(m) && typeof m.ts === "string")
@@ -218,6 +330,214 @@ export function toDistBins(rows: ViewRow[], spec: ViewSpec): DistBin[] {
   return out;
 }
 
+// ── Filters (T6): client-side slices over the loaded rows ────────────────────
+
+/** Active filter values by column; a column absent or "" means "all". */
+export type ActiveFilters = Record<string, string>;
+
+/** A date-ish cell → its DAY (`YYYY-MM-DD`), or null when it is not one.
+ *  ISO strings and epoch seconds (the same two forms toOhlcRows takes);
+ *  a bare `YYYY-MM-DD` passes through. Pure. */
+export function dateKeyOf(v: unknown): string | null {
+  if (typeof v === "number" && Number.isFinite(v)) {
+    const ms = v > 1e12 ? v : v * 1000;
+    const d = new Date(ms);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+  }
+  if (typeof v !== "string") return null;
+  const s = v.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  if (!/^\d{4}-\d{2}-\d{2}[T ]/.test(s)) return null;
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? null : s.slice(0, 10);
+}
+
+/** The value a row shows a filter: the cell as a string for `select`, its
+ *  day for `date`; null when the row has nothing there. Pure. */
+export function filterValueOf(row: ViewRow, filter: ViewFilter): string | null {
+  const v = row[filter.column];
+  if (v === null || v === undefined) return null;
+  if (filter.kind === "date") return dateKeyOf(v);
+  const s = String(v).trim();
+  return s.length > 0 ? s : null;
+}
+
+/** DISTINCT values a filter offers, from the loaded rows, sorted. Pure. */
+export function filterValues(rows: ViewRow[], filter: ViewFilter): string[] {
+  const set = new Set<string>();
+  for (const row of rows) {
+    const v = filterValueOf(row, filter);
+    if (v !== null) set.add(v);
+  }
+  return Array.from(set).sort((a, b) => a.localeCompare(b));
+}
+
+/** Slice rows by every active filter (AND across filters). A filter that
+ *  names a column the rows do not have matches nothing — an honest empty
+ *  rather than a silent "all". Pure; returns the SAME array when nothing is
+ *  active so React bails out. */
+export function applyFilters(rows: ViewRow[], filters: ViewFilter[] | undefined, active: ActiveFilters): ViewRow[] {
+  if (!filters || filters.length === 0) return rows;
+  const live = filters.filter((f) => (active[f.column] ?? "").length > 0);
+  if (live.length === 0) return rows;
+  return rows.filter((row) => live.every((f) => filterValueOf(row, f) === active[f.column]));
+}
+
+/** The pin-scope suffix for a view: the drill key when this is a child, then
+ *  the active filters as a stable query string. `""` for a bare parent with
+ *  nothing active — so every pin filed before T6 keeps its doc key. Pure.
+ *  Sorted by column so the same slice always yields the same scope. */
+export function viewPinScope(active: ActiveFilters, drillKey: string | null = null): string {
+  const parts = Object.keys(active)
+    .filter((k) => (active[k] ?? "").length > 0)
+    .sort()
+    .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(active[k])}`);
+  const drill = drillKey !== null && drillKey.length > 0 ? `/${encodeURIComponent(drillKey)}` : "";
+  return `${drill}${parts.length > 0 ? `?${parts.join("&")}` : ""}`;
+}
+
+// ── Drill (T6): what is behind an anchor ─────────────────────────────────────
+
+/** The key value as ONE path component: every character outside
+ *  `[A-Za-z0-9._-]` becomes `_` (spaces included — the agent can predict the
+ *  file name), then `.`/`..`/empty are refused. A key can therefore never
+ *  add a separator, a drive or a parent hop to the template. Pure. */
+export function drillPathKey(key: string): string | null {
+  const cleaned = key.trim().slice(0, DRILL_KEY_CAP).replace(/[^A-Za-z0-9._-]/g, "_");
+  if (cleaned.length === 0 || /^\.+$/.test(cleaned)) return null;
+  return cleaned;
+}
+
+/** The anchor's key VALUE + label for the drill / the `→ thread` sentence,
+ *  from an anchor key the renderers stamp: `row:<value>`, `bin:<n>` (the bin's
+ *  label), `bar:<iso>` (the marker sitting on that bar — its id, else its
+ *  ts — or the bar's own ts when no marker does). Pure; null when the anchor
+ *  is not one of ours. */
+export function drillKeyForAnchor(
+  anchorKey: string,
+  ctx: { rows: ViewRow[]; spec: ViewSpec }
+): { key: string; label: string } | null {
+  if (anchorKey.startsWith("row:")) {
+    const key = anchorKey.slice(4);
+    return key.length > 0 ? { key, label: key } : null;
+  }
+  if (anchorKey.startsWith("bin:")) {
+    const n = Number(anchorKey.slice(4));
+    if (!Number.isInteger(n) || n < 0) return null;
+    const bin = toDistBins(ctx.rows, ctx.spec)[n];
+    return bin ? { key: bin.label, label: bin.label } : null;
+  }
+  if (anchorKey.startsWith("bar:")) {
+    const iso = anchorKey.slice(4);
+    if (iso.length === 0) return null;
+    const marker = markerAtBar(toOhlcRows(ctx.rows), ctx.spec.markers ?? [], iso);
+    if (marker) return { key: marker.id ?? marker.ts, label: marker.label || marker.ts };
+    return { key: iso, label: iso };
+  }
+  return null;
+}
+
+/** The marker whose NEAREST bar is the given bar — the same nearest rule the
+ *  chart draws with, re-derived from the bars so a click on a bar names the
+ *  marker drawn on it. Pure; null when none sits there. */
+export function markerAtBar(
+  bars: readonly { ts: string }[],
+  markers: readonly ViewMarker[],
+  barTs: string
+): ViewMarker | null {
+  const target = Date.parse(barTs);
+  if (!Number.isFinite(target) || bars.length === 0) return null;
+  const times = bars.map((b) => Date.parse(b.ts)).filter(Number.isFinite);
+  for (const m of markers) {
+    const t = Date.parse(m.ts);
+    if (!Number.isFinite(t)) continue;
+    let best = Number.POSITIVE_INFINITY;
+    let bestAt = Number.NaN;
+    for (const bt of times) {
+      const d = Math.abs(bt - t);
+      if (d < best) {
+        best = d;
+        bestAt = bt;
+      }
+    }
+    if (bestAt === target) return m;
+  }
+  return null;
+}
+
+/** Resolve the parent's drill for a key into the CHILD spec. Pure. `{key}`
+ *  in a file path takes the path-component form (refused when it cannot be
+ *  made one); in a query url/body it is URL-encoded; in the title it is the
+ *  raw key. The child's query url is re-checked against the loopback rule
+ *  after substitution — belt and braces, the encoding already makes a host
+ *  change impossible. */
+export function resolveDrill(
+  parent: ViewSpec,
+  key: string
+): { spec: ViewSpec; error: null } | { spec: null; error: string } {
+  const drill = parent.drill;
+  if (!drill) return { spec: null, error: `${parent.title} declares no drill` };
+  const raw = key.trim();
+  if (raw.length === 0 || raw.length > DRILL_KEY_CAP) return { spec: null, error: "the drill key is empty or too long" };
+  const fill = (s: string, v: string) => s.split("{key}").join(v);
+  let source: ViewSource;
+  if (drill.source.type === "file") {
+    const component = drillPathKey(raw);
+    if (component === null) {
+      return { spec: null, error: `the key "${raw}" cannot name a file inside the thread's working directory` };
+    }
+    source = { type: "file", path: fill(drill.source.path, component) };
+  } else {
+    const url = fill(drill.source.url, encodeURIComponent(raw));
+    if (!isLocalBackendUrl(url)) return { spec: null, error: "the drill's query url is not a local backend" };
+    source = { type: "query", url };
+    if (drill.source.body) source.body = fill(drill.source.body, encodeURIComponent(raw));
+  }
+  const spec: ViewSpec = {
+    id: `${parent.id}~${drillPathKey(raw) ?? "key"}`,
+    kind: drill.kind,
+    title: fill(drill.title, raw),
+    source,
+    builtAt: parent.builtAt,
+    builtBy: parent.builtBy,
+  };
+  if (drill.columns) spec.columns = drill.columns;
+  if (drill.keyColumn) spec.keyColumn = drill.keyColumn;
+  if (drill.definition) spec.definition = drill.definition;
+  return { spec, error: null };
+}
+
+/** The `→ thread` sentence when a view declares NO drill (R6). Pure. */
+export function drillFallbackSentence(viewTitle: string, anchorLabel: string): string {
+  return `show me what is behind ${viewTitle} › ${anchorLabel}`;
+}
+
+/** The lines the toolbar's `spec` disclosure prints — plain text, no
+ *  narration. Pure. */
+export function specLines(spec: ViewSpec): string[] {
+  const lines: string[] = [`kind      ${spec.kind}`];
+  lines.push(
+    `source    ${spec.source.type === "file" ? `file ${spec.source.path}` : `query ${spec.source.url}`}`
+  );
+  if (spec.source.type === "query" && spec.source.body) lines.push(`body      ${spec.source.body}`);
+  if (spec.columns && spec.columns.length > 0) lines.push(`columns   ${spec.columns.join(" · ")}`);
+  if (spec.keyColumn) lines.push(`key       ${spec.keyColumn}`);
+  if (spec.markers && spec.markers.length > 0) lines.push(`markers   ${spec.markers.length}`);
+  if (spec.filters && spec.filters.length > 0) {
+    lines.push(`filters   ${spec.filters.map((f) => `${f.label ?? f.column} (${f.kind})`).join(" · ")}`);
+  }
+  if (spec.drill) {
+    lines.push(
+      `drill     ${spec.drill.kind} ${spec.drill.title} ← ${
+        spec.drill.source.type === "file" ? spec.drill.source.path : spec.drill.source.url
+      }`
+    );
+  }
+  if (spec.definition) lines.push(`defines   ${spec.definition}`);
+  if (spec.builtAt) lines.push(`built     ${spec.builtAt.slice(0, 16).replace("T", " ")} · ${spec.builtBy}`);
+  return lines;
+}
+
 // ── The hook ─────────────────────────────────────────────────────────────────
 
 export const VIEW_SPEC_POLL_MS = 2_500;
@@ -233,7 +553,13 @@ export type ViewRead = {
   rerun: () => void;
 };
 
-export function useView(threadId: string, viewId: string, active: boolean): ViewRead {
+export function useView(
+  threadId: string,
+  viewId: string,
+  active: boolean,
+  /** T6: a drilled CHILD — the parent's drill resolved for this key. */
+  drillKey: string | null = null
+): ViewRead {
   const [spec, setSpec] = useState<ViewSpec | null>(null);
   const [specError, setSpecError] = useState<string | null>(null);
   const [rows, setRows] = useState<ViewRow[] | null>(null);
@@ -253,7 +579,7 @@ export function useView(threadId: string, viewId: string, active: boolean): View
     setSpecError(null);
     setRows(null);
     setDataError(null);
-  }, [threadId, viewId]);
+  }, [threadId, viewId, drillKey]);
 
   useEffect(() => {
     if (!active || threadId.length === 0 || viewId.length === 0) return;
@@ -264,6 +590,15 @@ export function useView(threadId: string, viewId: string, active: boolean): View
         if (cancelled || raw === lastSpecRawRef.current) return;
         lastSpecRawRef.current = raw;
         const parsed = parseViewSpec(raw);
+        // A DRILLED child (T6): the file holds the PARENT; the child is the
+        // parent's drill resolved for this key, re-derived on every spec
+        // change so an agent `update` of the parent re-shapes the child too.
+        if (parsed.spec && drillKey !== null) {
+          const child = resolveDrill(parsed.spec, drillKey);
+          setSpec(child.spec);
+          setSpecError(child.error);
+          return;
+        }
         setSpec(parsed.spec);
         setSpecError(parsed.specError);
       } catch (err) {
@@ -278,7 +613,7 @@ export function useView(threadId: string, viewId: string, active: boolean): View
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [threadId, viewId, active]);
+  }, [threadId, viewId, active, drillKey]);
 
   const load = useCallback(
     async (target: ViewSpec) => {

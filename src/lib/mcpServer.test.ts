@@ -298,6 +298,111 @@ describe("the view tool (SWIT-50)", () => {
     expect(server.VIEW_TOOL.description).toContain("NEVER runs your code");
     expect(server.VIEW_TOOL.description).toContain("you cannot make a view poll");
   });
+
+  // ── T6 (SWIT-60): definition · filters · drill ─────────────────────────────
+  describe("T6 — definition, filters, drill", () => {
+    const srv = server as unknown as { VIEW_DEFINITION_CAP: number; VIEW_FILTER_CAP: number };
+    const table = {
+      op: "show",
+      kind: "table",
+      title: "Setup table",
+      source: { type: "file", path: "out/setups.json" },
+      keyColumn: "situation",
+    };
+
+    it("accepts the three fields and writes them lean; the reader round-trips them", () => {
+      const spec = server.buildViewSpec(
+        {
+          ...table,
+          definition: "  a setup is a 1m close outside the prior 20-bar range  ",
+          filters: [
+            { column: "sym", kind: "select", label: "instrument" },
+            { column: "day", kind: "date" },
+          ],
+          drill: {
+            kind: "table",
+            title: "{key} instances",
+            source: { type: "file", path: "out/setups/{key}.json" },
+            columns: ["ts", "ret"],
+            keyColumn: "ts",
+            definition: "one row per matched window",
+            junk: 1,
+          },
+        },
+        [],
+        NOW
+      );
+      expect(spec.definition).toBe("a setup is a 1m close outside the prior 20-bar range");
+      expect(spec.filters).toEqual([
+        { column: "sym", kind: "select", label: "instrument" },
+        { column: "day", kind: "date" },
+      ]);
+      expect(spec.drill).toEqual({
+        kind: "table",
+        title: "{key} instances",
+        source: { type: "file", path: "out/setups/{key}.json" },
+        columns: ["ts", "ret"],
+        keyColumn: "ts",
+        definition: "one row per matched window",
+      });
+      const { spec: parsed, specError } = parseViewSpec(JSON.stringify(spec));
+      expect(specError).toBeNull();
+      expect(parsed?.drill).toEqual(spec.drill);
+      expect(parsed?.filters).toEqual(spec.filters);
+      expect(parsed?.definition).toBe(spec.definition);
+      // Absent = absent, not null.
+      const bare = server.buildViewSpec(table, [], NOW);
+      expect("definition" in bare).toBe(false);
+      expect("filters" in bare).toBe(false);
+      expect("drill" in bare).toBe(false);
+    });
+
+    it("caps are visible errors that name the cap", () => {
+      expect(() => server.buildViewSpec({ ...table, definition: "x".repeat(srv.VIEW_DEFINITION_CAP + 1) }, [], NOW)).toThrow(
+        new RegExp(`cap is ${srv.VIEW_DEFINITION_CAP}`)
+      );
+      expect(() => server.buildViewSpec({ ...table, definition: "   " }, [], NOW)).toThrow(/non-empty/);
+      const five = Array.from({ length: srv.VIEW_FILTER_CAP + 1 }, (_, i) => ({ column: `c${i}`, kind: "select" }));
+      expect(() => server.buildViewSpec({ ...table, filters: five }, [], NOW)).toThrow(new RegExp(`cap is ${srv.VIEW_FILTER_CAP}`));
+    });
+
+    it("shape errors read like the `default`-style ones: which field, what it must be", () => {
+      expect(() => server.buildViewSpec({ ...table, filters: "sym" }, [], NOW)).toThrow(/filters must be an array/);
+      expect(() => server.buildViewSpec({ ...table, filters: [{ column: "sym", kind: "range" }] }, [], NOW)).toThrow(
+        /filters\[0\]\.kind must be one of select, date/
+      );
+      expect(() => server.buildViewSpec({ ...table, filters: [{ kind: "select" }] }, [], NOW)).toThrow(/filters\[0\]\.column/);
+      expect(() =>
+        server.buildViewSpec({ ...table, filters: [{ column: "a", kind: "select" }, { column: "a", kind: "date" }] }, [], NOW)
+      ).toThrow(/repeats column a/);
+      expect(() => server.buildViewSpec({ ...table, drill: { kind: "pie", title: "t", source: { type: "file", path: "x/{key}.json" } } }, [], NOW)).toThrow(
+        /drill\.kind must be one of/
+      );
+      expect(() => server.buildViewSpec({ ...table, drill: { kind: "table", source: { type: "file", path: "x/{key}.json" } } }, [], NOW)).toThrow(
+        /drill\.title/
+      );
+      expect(() => server.buildViewSpec({ ...table, drill: { kind: "table", title: "t", source: { type: "file", path: "x/all.json" } } }, [], NOW)).toThrow(
+        /must contain \{key\}/
+      );
+    });
+
+    it("a drill template is guarded like a source: no escapes, no absolute paths, loopback only", () => {
+      const drill = (source: Record<string, unknown>) => ({ ...table, drill: { kind: "table", title: "t", source } });
+      expect(() => server.buildViewSpec(drill({ type: "file", path: "../{key}.json" }), [], NOW)).toThrow(/drill\.source\.path/);
+      expect(() => server.buildViewSpec(drill({ type: "file", path: "C:/x/{key}.json" }), [], NOW)).toThrow(/drill\.source\.path/);
+      expect(() => server.buildViewSpec(drill({ type: "query", url: "http://{key}/rows" }), [], NOW)).toThrow(/local backend/);
+      expect(() => server.buildViewSpec(drill({ type: "query", url: "https://evil.example/{key}" }), [], NOW)).toThrow(/local backend/);
+      const ok = server.buildViewSpec(drill({ type: "query", url: "http://127.0.0.1:8799/setups?k={key}", body: '{"k":"{key}"}' }), [], NOW);
+      expect(ok.drill).toMatchObject({ source: { type: "query", url: "http://127.0.0.1:8799/setups?k={key}", body: '{"k":"{key}"}' } });
+    });
+
+    it("the description tells the agent when to declare a drill and give a definition", () => {
+      expect(server.VIEW_TOOL.description).toMatch(/Declare a `drill` when the rows have instances behind them/);
+      expect(server.VIEW_TOOL.description).toMatch(/Give a `definition`[^.]*whenever the view encodes a rule/);
+      const props = (server.VIEW_TOOL.inputSchema as { properties: Record<string, unknown> }).properties;
+      expect(Object.keys(props)).toEqual(expect.arrayContaining(["definition", "filters", "drill"]));
+    });
+  });
 });
 
 describe("the post tool (SWIT-52)", () => {

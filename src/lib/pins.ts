@@ -229,13 +229,22 @@ export function surfacePinTargetFor(artifact: Extract<Artifact, { kind: "surface
  *  surface-pins file — one sidecar, one shared record, one writer — with a
  *  namespaced doc key (`view:<threadId>:<viewId>`) that cannot collide with a
  *  page id. A pin on a view row/bar/bin therefore rides the whole existing
- *  anchored-pins machinery unchanged. */
-export function viewPinTargetFor(project: string, threadId: string, viewId: string): PinTarget {
+ *  anchored-pins machinery unchanged.
+ *
+ *  T6 (SWIT-60): `scope` is appended to the doc key VERBATIM — the drill key
+ *  and/or the active filter, built by `viewStore.viewPinScope`
+ *  (`/<key>?date=2026-06-05`). A pin scoped to one date is filed under that
+ *  date's doc and is not drawn on another; a drilled child's pins never mix
+ *  with the parent's. Empty scope = the pre-T6 key, so nothing already filed
+ *  moves. The DOC SCOPE was chosen over the anchor id because `pinsForDoc`
+ *  already partitions the sidecar by doc — an anchor-id suffix would have
+ *  needed every provider to understand it. */
+export function viewPinTargetFor(project: string, threadId: string, viewId: string, scope = ""): PinTarget {
   const segments = mirrorSegments(project);
   const dir = segments.join("/");
   return {
     sidecarPath: dir.length > 0 ? `${dir}/${SURFACE_PINS_NAME}` : SURFACE_PINS_NAME,
-    docKey: `view:${threadId}:${viewId}`,
+    docKey: `view:${threadId}:${viewId}${scope}`,
   };
 }
 

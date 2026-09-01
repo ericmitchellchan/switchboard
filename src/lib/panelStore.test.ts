@@ -53,6 +53,7 @@ import {
   setPanelThreadResolver,
   notePanelThreadBinding,
   previewIdentityFor,
+  openDrillInPanel,
   previewBackAvailableFor,
   goPreviewBack,
   pinPreview,
@@ -2592,5 +2593,84 @@ describe("auditName / formatPanelRemoval", () => {
     expect(line).toContain("tab=-");
     expect(line).toContain("artifact=-");
     expect(line).not.toContain("note=");
+  });
+});
+
+// ── T6 (SWIT-60): a drill opens the CHILD in the preview slot, back = parent ──
+
+describe("openDrillInPanel (T6) — the child takes the preview slot; back lands on the parent", () => {
+  const PARENT: Artifact = { kind: "view", threadId: "t1", viewId: "setups" };
+  const CHILD: Artifact = { kind: "view", threadId: "t1", viewId: "setups", drill: { key: "MNQ short flat" } };
+  const CHILD_2: Artifact = { kind: "view", threadId: "t1", viewId: "setups", drill: { key: "ES long" } };
+
+  it("a drilled child is its own artifact: identity, short title, sanitize keep the key", () => {
+    expect(artifactIdentity(CHILD)).toBe("view:t1:setups/MNQ short flat");
+    expect(artifactIdentity(CHILD)).not.toBe(artifactIdentity(PARENT));
+    expect(sanitizeArtifact({ ...CHILD, extra: 1 })).toEqual(CHILD);
+    expect(sanitizeArtifact({ kind: "view", threadId: "t1", viewId: "setups", drill: { key: "" } })).toEqual(PARENT);
+    expect(sanitizeArtifact({ kind: "view", threadId: "t1", viewId: "setups", drill: "nope" })).toEqual(PARENT);
+  });
+
+  it("parent IS the preview: the ordinary replace-with-back (one step returns to it)", () => {
+    openInPanel("s1", PARENT, { preview: true });
+    openDrillInPanel("s1", PARENT, CHILD);
+    expect(artifactFor("s1")).toEqual(CHILD);
+    expect(panelStateFor("s1")?.artifacts).toEqual([CHILD]);
+    expect(previewIdentityFor("s1")).toBe(artifactIdentity(CHILD));
+    expect(previewBackAvailableFor("s1")).toBe(true);
+    goPreviewBack("s1");
+    expect(artifactFor("s1")).toEqual(PARENT);
+    expect(panelStateFor("s1")?.artifacts).toEqual([PARENT]);
+    expect(previewBackAvailableFor("s1")).toBe(false);
+  });
+
+  it("parent is a PINNED tab: the child becomes the preview beside it and back CLOSES the child, activating the parent", () => {
+    openInPanel("s1", PARENT); // pinned
+    openDrillInPanel("s1", PARENT, CHILD);
+    expect(panelStateFor("s1")?.artifacts).toEqual([PARENT, CHILD]);
+    expect(artifactFor("s1")).toEqual(CHILD);
+    expect(previewIdentityFor("s1")).toBe(artifactIdentity(CHILD));
+    expect(previewBackAvailableFor("s1")).toBe(true);
+    goPreviewBack("s1");
+    // Never two tabs for one artifact: the parent's existing tab is activated.
+    expect(panelStateFor("s1")?.artifacts).toEqual([PARENT]);
+    expect(artifactFor("s1")).toEqual(PARENT);
+    expect(previewIdentityFor("s1")).toBe("");
+    expect(previewBackAvailableFor("s1")).toBe(false);
+  });
+
+  it("a second drill from the same pinned parent replaces the first child; back still lands on the parent", () => {
+    openInPanel("s1", PARENT);
+    openDrillInPanel("s1", PARENT, CHILD);
+    openDrillInPanel("s1", PARENT, CHILD_2);
+    expect(panelStateFor("s1")?.artifacts).toEqual([PARENT, CHILD_2]);
+    goPreviewBack("s1");
+    expect(artifactFor("s1")).toEqual(PARENT);
+    expect(panelStateFor("s1")?.artifacts).toEqual([PARENT]);
+  });
+
+  it("a child that is already a pinned tab is activated, not duplicated, and nothing is stacked", () => {
+    openInPanel("s1", PARENT);
+    openInPanel("s1", CHILD);
+    activateArtifact("s1", 0);
+    openDrillInPanel("s1", PARENT, CHILD);
+    expect(panelStateFor("s1")?.artifacts).toEqual([PARENT, CHILD]);
+    expect(artifactFor("s1")).toEqual(CHILD);
+    expect(previewIdentityFor("s1")).toBe("");
+    expect(previewBackAvailableFor("s1")).toBe(false);
+  });
+
+  it("with an unrelated preview open, the child replaces it and back goes parent, then the replaced one", () => {
+    openInPanel("s1", PARENT);
+    openInPanel("s1", KB_DOC, { preview: true });
+    openDrillInPanel("s1", PARENT, CHILD);
+    expect(panelStateFor("s1")?.artifacts).toEqual([PARENT, CHILD]);
+    goPreviewBack("s1");
+    expect(artifactFor("s1")).toEqual(PARENT);
+    expect(panelStateFor("s1")?.artifacts).toEqual([PARENT]);
+    // The strip has no preview now, so the older entry is unreachable by
+    // design — the header's back renders only while the active tab IS the
+    // preview. Stated here so the truncation is a decision, not a surprise.
+    expect(previewBackAvailableFor("s1")).toBe(false);
   });
 });

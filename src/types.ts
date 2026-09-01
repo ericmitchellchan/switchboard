@@ -202,7 +202,12 @@ export type Artifact =
   // A VIEW (SWIT-50) — a rendered dataset the agent declared (table, candles,
   // distribution), drawn by the shell's own chart components. STUB in SWIT-48:
   // the kind exists so strips can hold one, the renderer lands in SWIT-50.
-  | { kind: "view"; threadId: string; viewId: string }
+  //
+  // T6 (SWIT-60): `drill` marks a DRILLED CHILD — the parent view's declared
+  // drill resolved for one anchor key. The child's spec is derived from the
+  // parent's file at render time (viewStore.resolveDrill), never written to
+  // disk, so the record is the parent's two ids plus the key.
+  | { kind: "view"; threadId: string; viewId: string; drill?: { key: string } }
   // A QUESTION tab (SWIT-51, R3 rule 1) — the ONE write-back channel besides
   // the composer: the agent's ask opens it, answering writes answers.json,
   // types the answer into the terminal as Eric's message, and closes it.

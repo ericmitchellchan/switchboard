@@ -248,6 +248,12 @@ function applyOp(page, args, now, answeredIds = new Set()) {
 const VIEW_KINDS = ["table", "candles", "dist"];
 const VIEW_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const VIEW_MARKER_CAP = 200;
+// T6 (SWIT-60): the three optional fields' caps — mirrored in viewStore.ts
+// (the reader trims to the same numbers).
+const VIEW_DEFINITION_CAP = 600;
+const VIEW_FILTER_CAP = 4;
+const VIEW_FILTER_KINDS = ["select", "date"];
+const VIEW_DRILL_TITLE_CAP = 120;
 
 function validViewSourcePath(p) {
   if (typeof p !== "string" || p.trim().length === 0) return false;
@@ -258,6 +264,97 @@ function validViewSourcePath(p) {
   return true;
 }
 
+/** Validate a view SOURCE — the top-level one or a drill's TEMPLATE (`field`
+ *  names which, for the error). A template is checked with `{key}` replaced
+ *  by a placeholder component, so `{key}` may sit in a path or a query
+ *  string but a host that is not a literal loopback address is refused
+ *  before any key exists. Pure; throws OpError. */
+function buildViewSource(source, field) {
+  if (typeof source !== "object" || source === null) {
+    throw new OpError(`${field} is required: {type:'file', path} or {type:'query', url}`);
+  }
+  const fill = (v) => (typeof v === "string" ? v.split("{key}").join("k") : v);
+  if (source.type === "file") {
+    if (!validViewSourcePath(fill(source.path))) {
+      throw new OpError(`${field}.path must be a relative path inside this thread's working directory (no .., no absolute paths)`);
+    }
+    return { type: "file", path: source.path.trim() };
+  }
+  if (source.type === "query") {
+    const url = text(source.url, `${field}.url`);
+    if (!/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|\/)/.test(fill(url))) {
+      throw new OpError(`${field}.url must be a local backend (127.0.0.1 / localhost)`);
+    }
+    const clean = { type: "query", url };
+    if (typeof source.body === "string" && source.body.length > 0) {
+      clean.body = source.body.slice(0, 4000);
+    }
+    return clean;
+  }
+  throw new OpError(`${field}.type must be "file" or "query"`);
+}
+
+/** `definition` (T6): the rule that defines the rows, in plain words. Pure. */
+function buildDefinition(v, field) {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "string" || v.trim().length === 0) {
+    throw new OpError(`${field} must be a non-empty string when given`);
+  }
+  if (v.trim().length > VIEW_DEFINITION_CAP) {
+    throw new OpError(`${field} is ${v.trim().length} chars; the cap is ${VIEW_DEFINITION_CAP} — say the rule, not the analysis`);
+  }
+  return v.trim();
+}
+
+/** `filters` (T6): selectors over the view's own columns. Pure. */
+function buildFilters(raw) {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) throw new OpError("filters must be an array of {column, kind, label?}");
+  if (raw.length > VIEW_FILTER_CAP) {
+    throw new OpError(`filters has ${raw.length} entries; the cap is ${VIEW_FILTER_CAP}`);
+  }
+  const out = [];
+  const seen = new Set();
+  raw.forEach((f, i) => {
+    if (typeof f !== "object" || f === null) throw new OpError(`filters[${i}] must be {column, kind, label?}`);
+    const column = text(f.column, `filters[${i}].column`).trim();
+    if (!VIEW_FILTER_KINDS.includes(f.kind)) {
+      throw new OpError(`filters[${i}].kind must be one of ${VIEW_FILTER_KINDS.join(", ")}`);
+    }
+    if (seen.has(column)) throw new OpError(`filters[${i}] repeats column ${column}`);
+    seen.add(column);
+    const filter = { column, kind: f.kind };
+    if (typeof f.label === "string" && f.label.trim().length > 0) filter.label = f.label.trim().slice(0, 40);
+    out.push(filter);
+  });
+  return out.length > 0 ? out : undefined;
+}
+
+/** `drill` (T6): what is behind an anchor — a child view whose source strings
+ *  carry `{key}`. Pure. */
+function buildDrill(raw) {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object") throw new OpError("drill must be {kind, title, source, columns?, keyColumn?, definition?}");
+  if (!VIEW_KINDS.includes(raw.kind)) {
+    throw new OpError(`drill.kind must be one of ${VIEW_KINDS.join(", ")}`);
+  }
+  const title = text(raw.title, "drill.title").trim().slice(0, VIEW_DRILL_TITLE_CAP);
+  const source = buildViewSource(raw.source, "drill.source");
+  const template = source.type === "file" ? source.path : `${source.url}${source.body || ""}`;
+  if (!template.includes("{key}")) {
+    throw new OpError("drill.source must contain {key} somewhere (the anchor's key value is substituted there)");
+  }
+  const drill = { kind: raw.kind, title, source };
+  if (Array.isArray(raw.columns)) {
+    const columns = raw.columns.filter((c) => typeof c === "string" && c.trim().length > 0).slice(0, 24);
+    if (columns.length > 0) drill.columns = columns;
+  }
+  if (typeof raw.keyColumn === "string" && raw.keyColumn.trim().length > 0) drill.keyColumn = raw.keyColumn.trim();
+  const definition = buildDefinition(raw.definition, "drill.definition");
+  if (definition !== undefined) drill.definition = definition;
+  return drill;
+}
+
 /** Validate + normalize a view op into the spec the shell renders. Pure;
  *  throws OpError with agent-readable messages. */
 function buildViewSpec(args, existingIds, now) {
@@ -266,28 +363,7 @@ function buildViewSpec(args, existingIds, now) {
     throw new OpError(`kind must be one of ${VIEW_KINDS.join(", ")}`);
   }
   const title = text(args.title, "title");
-  const source = args.source;
-  if (typeof source !== "object" || source === null) {
-    throw new OpError("source is required: {type:'file', path} or {type:'query', url}");
-  }
-  let cleanSource;
-  if (source.type === "file") {
-    if (!validViewSourcePath(source.path)) {
-      throw new OpError("source.path must be a relative path inside this thread's working directory (no .., no absolute paths)");
-    }
-    cleanSource = { type: "file", path: source.path.trim() };
-  } else if (source.type === "query") {
-    const url = text(source.url, "source.url");
-    if (!/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|\/)/.test(url)) {
-      throw new OpError("source.url must be a local backend (127.0.0.1 / localhost)");
-    }
-    cleanSource = { type: "query", url };
-    if (typeof source.body === "string" && source.body.length > 0) {
-      cleanSource.body = source.body.slice(0, 4000);
-    }
-  } else {
-    throw new OpError('source.type must be "file" or "query"');
-  }
+  const cleanSource = buildViewSource(args.source, "source");
   let id;
   if (typeof args.id === "string" && args.id.trim().length > 0) {
     id = args.id.trim();
@@ -326,6 +402,13 @@ function buildViewSpec(args, existingIds, now) {
       }))
       .slice(0, VIEW_MARKER_CAP);
   }
+  // T6 (SWIT-60): the view explains itself and opens downward.
+  const definition = buildDefinition(args.definition, "definition");
+  if (definition !== undefined) spec.definition = definition;
+  const filters = buildFilters(args.filters);
+  if (filters !== undefined) spec.filters = filters;
+  const drill = buildDrill(args.drill);
+  if (drill !== undefined) spec.drill = drill;
   return spec;
 }
 
@@ -381,7 +464,14 @@ const VIEW_TOOL = {
     "For tables pass columns (display order) and keyColumn (the column whose value names a " +
     "row for pins). For candles pass markers [{ts, label, id?}] for entries/exits. The user " +
     "can pin rows/bars/bins and keep the view; you cannot make a view poll — re-running a " +
-    "query is their gesture.",
+    "query is their gesture. Give a `definition` (the rule that defines the rows, in plain " +
+    "words) whenever the view encodes a rule — the user reads it under `spec`. Declare a " +
+    "`drill` when the rows have instances behind them: {kind, title, source} where the " +
+    "source strings carry {key} (the opened row's key-column value / bin label / marker id; " +
+    "in a file path it is reduced to one component, [A-Za-z0-9._-] with everything else " +
+    "as _; in a query url it is URL-encoded) — opening a row then shows the child beside " +
+    "the terminal with back. Declare `filters` [{column, kind:'select'|'date'}] so the " +
+    "user can slice the loaded rows themselves without asking you.",
   inputSchema: {
     type: "object",
     properties: {
@@ -399,6 +489,21 @@ const VIEW_TOOL = {
         type: "array",
         items: { type: "object" },
         description: "candles: [{ts: ISO time, label, id?}] — entry/exit marks on the nearest bar.",
+      },
+      definition: {
+        type: "string",
+        description: "The rule that defines the rows, in plain words (<= 600 chars). Shown under `spec`.",
+      },
+      filters: {
+        type: "array",
+        items: { type: "object" },
+        description:
+          "Up to 4 selectors over the view's own columns: [{column, kind:'select'|'date', label?}]. Values come from the loaded rows; the slice is client-side.",
+      },
+      drill: {
+        type: "object",
+        description:
+          "What is behind an opened row/bin/marker: {kind, title, source:{type:'file', path:'per/{key}.json'} | {type:'query', url:'http://127.0.0.1:…?k={key}', body?}, columns?, keyColumn?, definition?}. {key} = the anchor's key value (file: one path component, [A-Za-z0-9._-], else _; query: URL-encoded).",
       },
     },
     required: ["op", "kind", "title", "source"],
@@ -762,6 +867,9 @@ if (require.main === module) {
 }
 
 module.exports = {
+  VIEW_DEFINITION_CAP,
+  VIEW_FILTER_CAP,
+  VIEW_FILTER_KINDS,
   parsePage,
   applyOp,
   performOp,
