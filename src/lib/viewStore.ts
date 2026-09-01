@@ -45,11 +45,30 @@
 //   · The hover tooltip prints EVERY field of the hovered row, so the
 //     bin/bar mappings carry the SOURCE ROW (`row`) and `rowFields` is the one
 //     formatter (key · value, in the row's own order).
+//
+// T8 (SWIT-62) — `timeline`, the first real drill target (a tennis match):
+//   · rows `{ts, price, <sizeColumn>, backs_player?, sets_p1?, sets_p2?,
+//     games_p1?, games_p2?}` — ONE row per moment. `toTimelinePoints` keeps
+//     every row as a MARK at its own millisecond (x = fractional seconds, so
+//     two trades a second apart stay two marks; the same millisecond
+//     collapses last-wins like every other kind), the price as the line,
+//     the radius from `sizeColumn` (default `size_z`) through `markRadius` —
+//     sqrt of the value's share of the column's max, clamped to a readable
+//     range — and the score as STEPS (`steps`: null when the rows carry no
+//     score columns; the renderer draws them stepped, never interpolated).
+//     The anchor is `trade:<iso>` — by time, like `pt:`/`bar:` — and
+//     `rowForAnchor` answers it, so the T7 tooltip prints the trade's fields.
+//   · The data file may carry a `meta` object beside `rows`
+//     (`parseViewPayload`); `timelineNote` turns `meta.coverage` +
+//     `meta.n_trades` into the toolbar's honesty line — `flagged moments only
+//     · N of M trades` — because a drilled child's spec is a TEMPLATE and
+//     cannot know a per-match total. No meta → `N moments`, which claims
+//     nothing about the tape.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { readThreadView, readViewData } from "./ipc";
 
-export const VIEW_KINDS = ["table", "candles", "dist", "line", "bar"] as const;
+export const VIEW_KINDS = ["table", "candles", "dist", "line", "bar", "timeline"] as const;
 export type ViewKind = (typeof VIEW_KINDS)[number];
 
 export function isViewKind(v: unknown): v is ViewKind {
@@ -81,6 +100,8 @@ export type ViewDrill = {
   /** line: the series columns; bar: the value column (T7). */
   series?: string[];
   valueColumn?: string;
+  /** timeline: the column a mark's radius comes from (T8). */
+  sizeColumn?: string;
   definition?: string;
 };
 
@@ -97,6 +118,9 @@ export type ViewSpec = {
   /** bar (T7): the column holding the bar's value; absent = the dist rule
    *  (`count`/`n`/`value` by name, else the first numeric non-key column). */
   valueColumn?: string;
+  /** timeline (T8): the column a mark's radius comes from; absent =
+   *  `size_z` (`TIMELINE_SIZE_DEFAULT`). */
+  sizeColumn?: string;
   markers?: ViewMarker[];
   builtAt: string;
   builtBy: string;
@@ -119,6 +143,8 @@ export const DRILL_KEY_CAP = 120;
 export const VIEW_ROW_WINDOW = 500;
 
 export type ViewRow = Record<string, unknown>;
+/** The optional `meta` object a data file carries beside its rows (T8). */
+export type ViewMeta = Record<string, unknown>;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -218,6 +244,7 @@ export function parseViewDrill(raw: unknown): ViewDrill | null {
   const series = parseColumnList(raw.series);
   if (series) drill.series = series;
   if (typeof raw.valueColumn === "string" && raw.valueColumn.length > 0) drill.valueColumn = raw.valueColumn;
+  if (typeof raw.sizeColumn === "string" && raw.sizeColumn.length > 0) drill.sizeColumn = raw.sizeColumn;
   if (typeof raw.definition === "string" && raw.definition.trim().length > 0) {
     drill.definition = raw.definition.trim().slice(0, VIEW_DEFINITION_CAP);
   }
@@ -262,6 +289,8 @@ export function parseViewSpec(raw: string): { spec: ViewSpec | null; specError: 
   const series = parseColumnList(data.series);
   if (series) spec.series = series;
   if (typeof data.valueColumn === "string" && data.valueColumn.length > 0) spec.valueColumn = data.valueColumn;
+  // T8 — the timeline's size column, tolerated as ABSENT (the default).
+  if (typeof data.sizeColumn === "string" && data.sizeColumn.length > 0) spec.sizeColumn = data.sizeColumn;
   // T6 — the three optional fields, each tolerated as ABSENT when malformed
   // (a bad drill must not take the parent view with it; the spec is still a
   // renderable declaration without them).
@@ -284,9 +313,11 @@ export function parseViewSpec(raw: string): { spec: ViewSpec | null; specError: 
   return { spec, specError: null };
 }
 
-/** Rows out of a data payload: a JSON array of flat objects (non-objects
- *  drop alone). null = not rows at all — the card's case. */
-export function parseViewRows(raw: string): ViewRow[] | null {
+/** Rows AND the optional `meta` object out of a data payload (T8): a JSON
+ *  array of flat objects, or `{rows | data, meta?}` (non-object rows drop
+ *  alone; a non-object meta is absent). null = not rows at all — the card's
+ *  case. Pure. */
+export function parseViewPayload(raw: string): { rows: ViewRow[]; meta: ViewMeta | null } | null {
   if (typeof raw !== "string" || raw.trim().length === 0) return null;
   let data: unknown;
   try {
@@ -303,7 +334,13 @@ export function parseViewRows(raw: string): ViewRow[] | null {
         ? data.data
         : null;
   if (!list) return null;
-  return list.filter(isRecord);
+  const meta = isRecord(data) && isRecord(data.meta) ? (data.meta as ViewMeta) : null;
+  return { rows: list.filter(isRecord), meta };
+}
+
+/** Rows out of a data payload — `parseViewPayload` without the meta. */
+export function parseViewRows(raw: string): ViewRow[] | null {
+  return parseViewPayload(raw)?.rows ?? null;
 }
 
 /** Window rows for display. Pure. */
@@ -525,6 +562,136 @@ export function rowFields(row: ViewRow, cap = 80): [string, string][] {
   });
 }
 
+// ── Timeline (T8): price over a match, sized marks, score steps ──────────────
+
+/** The column a mark's radius comes from when the spec names none. */
+export const TIMELINE_SIZE_DEFAULT = "size_z";
+/** The readable range a mark's radius is clamped to (CSS px). */
+export const MARK_RADIUS_MIN = 3;
+export const MARK_RADIUS_MAX = 12;
+/** The four score columns a timeline draws as steps, when present. */
+export const SCORE_COLUMNS = ["sets_p1", "sets_p2", "games_p1", "games_p2"] as const;
+
+/** The anchor key for a timeline mark (T8): by time, like `pt:`/`bar:`. */
+export function tradeKey(ts: string): string {
+  return `trade:${ts}`;
+}
+
+/** A mark's radius from its size value and the column's max: the sqrt of
+ *  its SHARE of the max (area reads as size, and it flattens a heavy tail
+ *  like `count`), scaled onto [MIN, MAX] and clamped there — a null or
+ *  non-positive value draws the smallest mark, never no mark. Pure. */
+export function markRadius(value: number | null, max: number): number {
+  if (value === null || !Number.isFinite(value) || value <= 0 || !Number.isFinite(max) || max <= 0) {
+    return MARK_RADIUS_MIN;
+  }
+  const share = Math.min(1, value / max);
+  const r = MARK_RADIUS_MIN + (MARK_RADIUS_MAX - MARK_RADIUS_MIN) * Math.sqrt(share);
+  return Math.min(MARK_RADIUS_MAX, Math.max(MARK_RADIUS_MIN, r));
+}
+
+/** Which player a moment backs — `backs_player` 1 | 2 (number or string),
+ *  else null: the renderer tones a mark `--up` for 1 (pushes player 1's
+ *  price up), `--dn` for 2, accent otherwise. Pure. */
+export function timelineSide(row: ViewRow): 1 | 2 | null {
+  const n = numericCell(row.backs_player);
+  return n === 1 ? 1 : n === 2 ? 2 : null;
+}
+
+export type TimelineSteps = {
+  setsP1: (number | null)[];
+  setsP2: (number | null)[];
+  gamesP1: (number | null)[];
+  gamesP2: (number | null)[];
+  /** The largest games count seen — the band's scale. */
+  gamesMax: number;
+};
+
+export type TimelinePoints = {
+  /** UTC seconds, FRACTIONAL (millisecond precision), ascending, unique. */
+  xs: number[];
+  /** The source ISO per x — the `trade:<iso>` anchor is built from it. */
+  ts: string[];
+  /** The source row per x (the hover tooltip's fields). */
+  rows: ViewRow[];
+  /** The price per x; a row without a parseable price is a GAP. */
+  price: (number | null)[];
+  /** The size value per x (null when absent) and the column's max. */
+  size: (number | null)[];
+  sizeMax: number;
+  /** The mark radius per x — `markRadius` applied, already clamped. */
+  radius: number[];
+  side: (1 | 2 | null)[];
+  /** The score as steps; null when the rows carry none of the four columns. */
+  steps: TimelineSteps | null;
+};
+
+/** ISO → UTC MILLISECONDS with the candle rule (naive = UTC); null when
+ *  unparseable. The timeline keys on this rather than seconds because two
+ *  flagged trades a second apart are two moments, not one. Pure. */
+export function isoToMillis(ts: string): number | null {
+  const t = ts.trim().replace(" ", "T");
+  const zoned = /(Z|[+-]\d\d:?\d\d)$/i.test(t) ? t : `${t}Z`;
+  const ms = Date.parse(zoned);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/** Rows → the timeline's aligned arrays (T8). A row without a parseable
+ *  time drops alone; the same millisecond collapses last-wins; a
+ *  non-numeric price is a gap; the size column is the spec's `sizeColumn`
+ *  else `size_z`; the score arrays exist only when at least one row carries
+ *  one of the four score columns. Pure. */
+export function toTimelinePoints(rows: ViewRow[], spec: ViewSpec): TimelinePoints {
+  const sizeColumn = spec.sizeColumn ?? TIMELINE_SIZE_DEFAULT;
+  const byMs = new Map<number, { ts: string; row: ViewRow }>();
+  for (const row of rows) {
+    const iso = rowTimeIso(row);
+    if (iso === null) continue;
+    const ms = isoToMillis(iso);
+    if (ms === null) continue;
+    byMs.set(ms, { ts: iso, row });
+  }
+  const times = [...byMs.keys()].sort((a, b) => a - b);
+  const at = (t: number) => byMs.get(t) as { ts: string; row: ViewRow };
+  const ordered = times.map((t) => at(t).row);
+  const size = ordered.map((r) => numericCell(r[sizeColumn]));
+  const sizeMax = size.reduce<number>((m, v) => (v !== null && v > m ? v : m), 0);
+  const hasScore = ordered.some((r) => SCORE_COLUMNS.some((c) => numericCell(r[c]) !== null));
+  let steps: TimelineSteps | null = null;
+  if (hasScore) {
+    const col = (c: (typeof SCORE_COLUMNS)[number]) => ordered.map((r) => numericCell(r[c]));
+    const gamesP1 = col("games_p1");
+    const gamesP2 = col("games_p2");
+    const gamesMax = [...gamesP1, ...gamesP2].reduce<number>((m, v) => (v !== null && v > m ? v : m), 0);
+    steps = { setsP1: col("sets_p1"), setsP2: col("sets_p2"), gamesP1, gamesP2, gamesMax };
+  }
+  return {
+    xs: times.map((t) => t / 1000),
+    ts: times.map((t) => at(t).ts),
+    rows: ordered,
+    price: ordered.map((r) => numericCell(r.price)),
+    size,
+    sizeMax,
+    radius: size.map((v) => markRadius(v, sizeMax)),
+    side: ordered.map(timelineSide),
+    steps,
+  };
+}
+
+/** The toolbar's coverage line for a timeline (T8): `meta.coverage` (the
+ *  exporter's words for what the rows ARE — "flagged moments only") with
+ *  `N of M trades` when `meta.n_trades` is a number; coverage alone with
+ *  the shown count when it is not; `N moments` with no meta at all, which
+ *  claims nothing about the tape. Pure. */
+export function timelineNote(meta: ViewMeta | null, shown: number): string {
+  const coverage =
+    meta && typeof meta.coverage === "string" && meta.coverage.trim().length > 0 ? meta.coverage.trim() : null;
+  const total = meta ? numericCell(meta.n_trades) : null;
+  if (coverage && total !== null) return `${coverage} · ${shown} of ${total} trades`;
+  if (coverage) return `${coverage} · ${shown} moments`;
+  return `${shown} moments`;
+}
+
 // ── Filters (T6): client-side slices over the loaded rows ────────────────────
 
 /** Active filter values by column; a column absent or "" means "all". */
@@ -628,6 +795,12 @@ export function drillKeyForAnchor(
     const key = anchorKey.slice(4);
     return key.length > 0 && toBarRows(ctx.rows, ctx.spec).some((b) => b.key === key) ? { key, label: key } : null;
   }
+  if (anchorKey.startsWith("trade:")) {
+    // T8: the moment's own stamp is the key — a timeline has no markers of
+    // its own (every mark IS a moment).
+    const iso = anchorKey.slice(6);
+    return iso.length > 0 ? { key: iso, label: iso } : null;
+  }
   if (anchorKey.startsWith("bar:") || anchorKey.startsWith("pt:")) {
     const iso = anchorKey.slice(anchorKey.indexOf(":") + 1);
     if (iso.length === 0) return null;
@@ -660,6 +833,21 @@ export function rowForAnchor(anchorKey: string, ctx: { rows: ViewRow[]; spec: Vi
   if (anchorKey.startsWith("bar:") && ctx.spec.kind === "bar") {
     const key = anchorKey.slice(4);
     return toBarRows(ctx.rows, ctx.spec).find((b) => b.key === key)?.row ?? null;
+  }
+  if (anchorKey.startsWith("trade:")) {
+    // T8: the timeline's marks are canvas anchors that DO answer — a mark is
+    // a row, and the tooltip is the point of hovering one. The same
+    // millisecond collapses last-wins in toTimelinePoints, so the LAST row
+    // with that stamp is the one drawn.
+    const iso = anchorKey.slice(6);
+    const want = isoToMillis(iso);
+    if (want === null) return null;
+    let found: ViewRow | null = null;
+    for (const r of ctx.rows) {
+      const t = rowTimeIso(r);
+      if (t !== null && isoToMillis(t) === want) found = r;
+    }
+    return found;
   }
   return null;
 }
@@ -733,6 +921,7 @@ export function resolveDrill(
   if (drill.keyColumn) spec.keyColumn = drill.keyColumn;
   if (drill.series) spec.series = drill.series;
   if (drill.valueColumn) spec.valueColumn = drill.valueColumn;
+  if (drill.sizeColumn) spec.sizeColumn = drill.sizeColumn;
   if (drill.definition) spec.definition = drill.definition;
   return { spec, error: null };
 }
@@ -754,6 +943,7 @@ export function specLines(spec: ViewSpec): string[] {
   if (spec.keyColumn) lines.push(`key       ${spec.keyColumn}`);
   if (spec.series && spec.series.length > 0) lines.push(`series    ${spec.series.join(" · ")}`);
   if (spec.valueColumn) lines.push(`value     ${spec.valueColumn}`);
+  if (spec.kind === "timeline") lines.push(`size      ${spec.sizeColumn ?? TIMELINE_SIZE_DEFAULT}`);
   if (spec.markers && spec.markers.length > 0) lines.push(`markers   ${spec.markers.length}`);
   if (spec.filters && spec.filters.length > 0) {
     lines.push(`filters   ${spec.filters.map((f) => `${f.label ?? f.column} (${f.kind})`).join(" · ")}`);
@@ -779,6 +969,8 @@ export type ViewRead = {
   /** Why there is no spec / no rows — the cannot-render card's copy. */
   error: string | null;
   rows: ViewRow[] | null;
+  /** The data file's `meta` object, when it carries one (T8). */
+  meta: ViewMeta | null;
   /** Rows are loading right now (first load or a re-run). */
   loading: boolean;
   /** Eric's re-run (query sources; a file source re-reads the file). */
@@ -795,6 +987,7 @@ export function useView(
   const [spec, setSpec] = useState<ViewSpec | null>(null);
   const [specError, setSpecError] = useState<string | null>(null);
   const [rows, setRows] = useState<ViewRow[] | null>(null);
+  const [meta, setMeta] = useState<ViewMeta | null>(null);
   const [dataError, setDataError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const lastSpecRawRef = useRef<string | null>(null);
@@ -810,6 +1003,7 @@ export function useView(
     setSpec(null);
     setSpecError(null);
     setRows(null);
+    setMeta(null);
     setDataError(null);
   }, [threadId, viewId, drillKey]);
 
@@ -869,12 +1063,14 @@ export function useView(
           raw = await res.text();
         }
         if (seq !== loadSeqRef.current) return;
-        const parsed = parseViewRows(raw);
+        const parsed = parseViewPayload(raw);
         if (parsed === null) {
           setDataError("the source did not contain rows (expected a JSON array of objects)");
           setRows(null);
+          setMeta(null);
         } else {
-          setRows(parsed);
+          setRows(parsed.rows);
+          setMeta(parsed.meta);
         }
       } catch (err) {
         if (seq !== loadSeqRef.current) return;
@@ -908,6 +1104,7 @@ export function useView(
     spec,
     error: specError ?? dataError,
     rows,
+    meta,
     loading,
     rerun,
   };

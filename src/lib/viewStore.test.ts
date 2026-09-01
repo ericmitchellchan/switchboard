@@ -417,7 +417,8 @@ describe("T6 — drill resolution", () => {
       label: "2026-08-31T10:34:00Z",
     });
     expect(markerAtBar(bars, candleSpec.markers!, "2026-08-31T10:36:00Z")).toBeNull();
-    expect(drillKeyForAnchor("trade:9", { rows: T6_ROWS, spec: T6_SPEC })).toBeNull();
+    // A prefix none of the renderers stamp (`trade:` became the timeline's in T8).
+    expect(drillKeyForAnchor("nope:9", { rows: T6_ROWS, spec: T6_SPEC })).toBeNull();
   });
 
   it("the no-drill fallback sentence and the spec lines are plain text", () => {
@@ -522,6 +523,17 @@ import {
   rowFields,
   isoToSeconds,
   VIEW_KINDS,
+  // T8 (SWIT-62)
+  parseViewPayload,
+  toTimelinePoints,
+  markRadius,
+  tradeKey,
+  timelineNote,
+  timelineSide,
+  isoToMillis,
+  MARK_RADIUS_MIN,
+  MARK_RADIUS_MAX,
+  TIMELINE_SIZE_DEFAULT,
 } from "./viewStore";
 
 const T7_LINE_SPEC: ViewSpec = {
@@ -563,7 +575,7 @@ const T7_BAR_ROWS = [
 
 describe("T7 — kinds + spec round-trip", () => {
   it("line and bar are kinds; unknown is not; the parse round-trips series / valueColumn on spec AND drill", () => {
-    expect(VIEW_KINDS).toEqual(["table", "candles", "dist", "line", "bar"]);
+    expect(VIEW_KINDS).toEqual(["table", "candles", "dist", "line", "bar", "timeline"]);
     expect(isViewKind("line") && isViewKind("bar")).toBe(true);
     expect(isViewKind("pie")).toBe(false);
     const raw = JSON.stringify({
@@ -810,6 +822,405 @@ describe("T7 smoke — NQ daily close as a line, windows by setup as bars, from 
       // Ground truth of the checkout's data: NQ 1h bars span Dec 2022 → Jul 2026.
       expect(points.ts[0].startsWith("2022-12-14")).toBe(true);
       expect(bars.map((b) => b.key)).toContain("@NQ 1m");
+    }
+  });
+});
+
+// ── T8 (SWIT-62): the tennis match timeline ──────────────────────────────────
+
+const T8_SPEC: ViewSpec = {
+  id: "match",
+  kind: "timeline",
+  title: "KXATPCHALLENGERMATCH-26MAR03DIASAI",
+  source: { type: "file", path: ".sb-views/tennis/KXATPCHALLENGERMATCH-26MAR03DIASAI.json" },
+  builtAt: "2026-09-01T10:00:00Z",
+  builtBy: "agent",
+};
+
+const T8_ROWS = [
+  { ts: "2026-03-03T13:26:17.103", price: 3, size_z: 3.649, count: 1560, backs_player: 2, sets_p1: 1, sets_p2: 0, games_p1: 2, games_p2: 0 },
+  { ts: "2026-03-03T13:26:17.503", price: 4, size_z: 1.0, count: 200, backs_player: 1, sets_p1: 1, sets_p2: 0, games_p1: 2, games_p2: 0 },
+  { ts: "2026-03-03T13:48:13.467", price: "6", size_z: null, count: 1610, backs_player: "2", sets_p1: 1, sets_p2: 0, games_p1: 2, games_p2: 1 },
+  { ts: "2026-03-03T14:07:22.039", price: "n/a", size_z: 4.324, count: 3333, backs_player: 3, sets_p1: 1, sets_p2: 1, games_p1: 0, games_p2: 0 },
+  { ts: "2026-03-03T14:07:22.039", price: 1, size_z: 4.324, count: 3333, backs_player: 3, sets_p1: 1, sets_p2: 1, games_p1: 0, games_p2: 0 }, // same ms — last wins
+  { ts: "not a time", price: 50, size_z: 9, count: 9 },
+];
+
+describe("T8 — timeline: the kind, sizeColumn, the spec lines", () => {
+  it("timeline is a kind; sizeColumn parses on spec AND drill, the child inherits it, specLines prints the default", () => {
+    expect(isViewKind("timeline")).toBe(true);
+    const raw = JSON.stringify({
+      ...JSON.parse(SPEC_RAW),
+      kind: "table",
+      keyColumn: "match_id",
+      drill: {
+        kind: "timeline",
+        title: "{key}",
+        source: { type: "file", path: ".sb-views/tennis/{key}.json" },
+        sizeColumn: "count",
+      },
+    });
+    const { spec, specError } = parseViewSpec(raw);
+    expect(specError).toBeNull();
+    expect(spec!.drill).toMatchObject({ kind: "timeline", sizeColumn: "count" });
+    const child = resolveDrill(spec!, "KXATPMATCH-26MAR03LANSHI");
+    expect(child.spec).toMatchObject({
+      kind: "timeline",
+      sizeColumn: "count",
+      source: { type: "file", path: ".sb-views/tennis/KXATPMATCH-26MAR03LANSHI.json" },
+      title: "KXATPMATCH-26MAR03LANSHI",
+    });
+    expect(specLines(child.spec!)).toContainEqual(expect.stringMatching(/^size {6}count$/));
+    // No sizeColumn → the default is printed (the reader's rule is visible).
+    expect(specLines(T8_SPEC)).toContainEqual(expect.stringMatching(new RegExp(`^size {6}${TIMELINE_SIZE_DEFAULT}$`)));
+    // Not a timeline → no size line at all.
+    expect(specLines(spec!).some((l) => l.startsWith("size"))).toBe(false);
+    // Malformed sizeColumn = absent.
+    const loose = parseViewSpec(JSON.stringify({ ...JSON.parse(SPEC_RAW), kind: "timeline", sizeColumn: 4 }));
+    expect(loose.spec!.kind).toBe("timeline");
+    expect("sizeColumn" in loose.spec!).toBe(false);
+  });
+
+  it("parseViewPayload keeps a meta object beside the rows; a bare array or a non-object meta is meta null", () => {
+    const withMeta = parseViewPayload(JSON.stringify({ meta: { coverage: "flagged moments only", n_trades: 6117 }, rows: T8_ROWS }))!;
+    expect(withMeta.meta).toEqual({ coverage: "flagged moments only", n_trades: 6117 });
+    expect(withMeta.rows.length).toBe(T8_ROWS.length);
+    expect(parseViewPayload(JSON.stringify(T8_ROWS))!.meta).toBeNull();
+    expect(parseViewPayload(JSON.stringify({ rows: T8_ROWS, meta: "x" }))!.meta).toBeNull();
+    expect(parseViewPayload(JSON.stringify({ data: T8_ROWS, meta: { a: 1 } }))!.meta).toEqual({ a: 1 });
+    expect(parseViewPayload("{}")).toBeNull();
+    // The old entry point is the same parse without the meta.
+    expect(parseViewRows(JSON.stringify({ meta: {}, rows: T8_ROWS }))!.length).toBe(T8_ROWS.length);
+  });
+
+  it("timelineNote: coverage + total → `N of M trades`; coverage alone → moments; nothing → a bare count that claims nothing", () => {
+    expect(timelineNote({ coverage: "flagged moments only", n_trades: 6117 }, 12)).toBe("flagged moments only · 12 of 6117 trades");
+    expect(timelineNote({ coverage: " flagged moments only ", n_trades: "6117" }, 12)).toBe("flagged moments only · 12 of 6117 trades");
+    expect(timelineNote({ coverage: "flagged moments only" }, 12)).toBe("flagged moments only · 12 moments");
+    expect(timelineNote({ n_trades: 6117 }, 12)).toBe("12 moments");
+    expect(timelineNote(null, 0)).toBe("0 moments");
+  });
+});
+
+describe("T8 — timeline: rows → marks, radii, steps, anchors", () => {
+  it("toTimelinePoints keeps MILLISECONDS (two trades 400ms apart are two marks), sorts, collapses the same ms last-wins, drops no-time rows", () => {
+    const pts = toTimelinePoints(T8_ROWS, T8_SPEC);
+    expect(pts.xs.length).toBe(4);
+    for (let i = 1; i < pts.xs.length; i++) expect(pts.xs[i]).toBeGreaterThan(pts.xs[i - 1]);
+    expect(pts.xs[1] - pts.xs[0]).toBeCloseTo(0.4, 6);
+    expect(pts.ts).toEqual([
+      "2026-03-03T13:26:17.103",
+      "2026-03-03T13:26:17.503",
+      "2026-03-03T13:48:13.467",
+      "2026-03-03T14:07:22.039",
+    ]);
+    // A naive stamp is UTC (the candle rule), at millisecond precision.
+    expect(isoToMillis("2026-03-03T13:26:17.103")).toBe(Date.parse("2026-03-03T13:26:17.103Z"));
+    expect(isoToMillis("garbage")).toBeNull();
+    // Price: numeric or numeric string; the same-ms duplicate's LAST row won (price 1, not "n/a").
+    expect(pts.price).toEqual([3, 4, 6, 1]);
+    expect(pts.rows[3]).toBe(T8_ROWS[4]);
+    // Side: 1 → 1, "2" → 2, anything else → null.
+    expect(pts.side).toEqual([2, 1, 2, null]);
+    expect(timelineSide({ backs_player: "1" })).toBe(1);
+    expect(timelineSide({})).toBeNull();
+  });
+
+  it("the size column defaults to size_z and follows the spec; radii are clamped to [MIN, MAX] and grow with the value", () => {
+    const pts = toTimelinePoints(T8_ROWS, T8_SPEC);
+    expect(pts.size).toEqual([3.649, 1.0, null, 4.324]);
+    expect(pts.sizeMax).toBe(4.324);
+    expect(pts.radius[3]).toBe(MARK_RADIUS_MAX); // the max value draws the largest mark
+    expect(pts.radius[2]).toBe(MARK_RADIUS_MIN); // null draws the smallest, never no mark
+    expect(pts.radius[1]).toBeLessThan(pts.radius[0]);
+    expect(pts.radius[0]).toBeLessThan(pts.radius[3]);
+    for (const r of pts.radius) {
+      expect(r).toBeGreaterThanOrEqual(MARK_RADIUS_MIN);
+      expect(r).toBeLessThanOrEqual(MARK_RADIUS_MAX);
+    }
+    const byCount = toTimelinePoints(T8_ROWS, { ...T8_SPEC, sizeColumn: "count" });
+    expect(byCount.size).toEqual([1560, 200, 1610, 3333]);
+    expect(byCount.sizeMax).toBe(3333);
+    // markRadius alone: the clamp holds for garbage and for values past the max.
+    expect(markRadius(null, 10)).toBe(MARK_RADIUS_MIN);
+    expect(markRadius(0, 10)).toBe(MARK_RADIUS_MIN);
+    expect(markRadius(-3, 10)).toBe(MARK_RADIUS_MIN);
+    expect(markRadius(5, 0)).toBe(MARK_RADIUS_MIN);
+    expect(markRadius(10, 10)).toBe(MARK_RADIUS_MAX);
+    expect(markRadius(1e9, 10)).toBe(MARK_RADIUS_MAX);
+    // sqrt of the share: a quarter of the max sits halfway up the range.
+    expect(markRadius(2.5, 10)).toBeCloseTo(MARK_RADIUS_MIN + (MARK_RADIUS_MAX - MARK_RADIUS_MIN) / 2, 9);
+  });
+
+  it("the score is STEPS: the four columns per x, gamesMax for the band; absent columns → steps null", () => {
+    const pts = toTimelinePoints(T8_ROWS, T8_SPEC);
+    expect(pts.steps).not.toBeNull();
+    expect(pts.steps!.setsP1).toEqual([1, 1, 1, 1]);
+    expect(pts.steps!.setsP2).toEqual([0, 0, 0, 1]);
+    expect(pts.steps!.gamesP1).toEqual([2, 2, 2, 0]);
+    expect(pts.steps!.gamesP2).toEqual([0, 0, 1, 0]);
+    expect(pts.steps!.gamesMax).toBe(2);
+    const bare = toTimelinePoints(
+      T8_ROWS.map(({ ts, price, size_z }) => ({ ts, price, size_z })),
+      T8_SPEC
+    );
+    expect(bare.steps).toBeNull();
+    expect(bare.xs.length).toBe(4);
+  });
+
+  it("trade:<iso> anchors: the key is the stamp, the row behind it is the LAST with that ms, and its fields print", () => {
+    const iso = "2026-03-03T14:07:22.039";
+    expect(tradeKey(iso)).toBe(`trade:${iso}`);
+    expect(drillKeyForAnchor(tradeKey(iso), { rows: T8_ROWS, spec: T8_SPEC })).toEqual({ key: iso, label: iso });
+    expect(drillKeyForAnchor("trade:", { rows: T8_ROWS, spec: T8_SPEC })).toBeNull();
+    const row = rowForAnchor(tradeKey(iso), { rows: T8_ROWS, spec: T8_SPEC });
+    expect(row).toBe(T8_ROWS[4]);
+    expect(rowFields(row!).map(([k]) => k)).toEqual([
+      "ts",
+      "price",
+      "size_z",
+      "count",
+      "backs_player",
+      "sets_p1",
+      "sets_p2",
+      "games_p1",
+      "games_p2",
+    ]);
+    // A stamp spelled differently but naming the same ms still resolves (by time, not by string).
+    expect(rowForAnchor("trade:2026-03-03T14:07:22.039Z", { rows: T8_ROWS, spec: T8_SPEC })).toBe(T8_ROWS[4]);
+    expect(rowForAnchor("trade:2026-01-01T00:00:00Z", { rows: T8_ROWS, spec: T8_SPEC })).toBeNull();
+    expect(rowForAnchor("trade:garbage", { rows: T8_ROWS, spec: T8_SPEC })).toBeNull();
+    // The pin scope is kind-agnostic: a drilled timeline's pins file under its key.
+    expect(viewPinScope({}, "KXATPMATCH-26MAR03LANSHI")).toBe("/KXATPMATCH-26MAR03LANSHI");
+  });
+});
+
+// ── T8: the exporter's Python port of drillPathKey must agree with the JS ────
+describe("T8 — drillPathKey parity: scripts/export-tennis-match.py --path-key", () => {
+  const nodeRequire = createRequire(import.meta.url);
+  const cp = nodeRequire("node:child_process") as {
+    execFileSync: (f: string, a: string[], o: { encoding: string; timeout: number; stdio: unknown }) => string;
+  };
+  const KEYS = [
+    "KXATPMATCH-26MAR03LANSHI",
+    "Diaz Acosta / Sanchez Izquierdo",
+    "  spaced  ",
+    "..\\x",
+    "../../etc",
+    "café ☕",
+    "😀x", // astral: TWO utf-16 units → two underscores
+    ".",
+    "..",
+    "...",
+    "",
+    "\u00a0nb\u00a0", // JS trim() strips NBSP
+    "\ufeffbom", // and the BOM (Python's strip() would not)
+    "\x1fctl", // JS trim() does NOT strip U+001F (Python's strip() would)
+    "a".repeat(130), // the cap
+    `${"b".repeat(119)}😀`, // the cut lands on a surrogate pair
+    "C:\\Users\\x.json",
+    "match id with tab\tinside",
+  ];
+
+  it("agrees with drillPathKey on every awkward key (skips with a note when python is unavailable)", () => {
+    let out: string;
+    try {
+      out = cp.execFileSync("python", ["scripts/export-tennis-match.py", "--path-key", ...KEYS], {
+        encoding: "utf8",
+        timeout: 30_000,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+    } catch {
+      console.info("[t8 parity] python unavailable — the JS↔Python drillPathKey parity check was SKIPPED");
+      return;
+    }
+    const py = JSON.parse(out) as (string | null)[];
+    expect(py.length).toBe(KEYS.length);
+    KEYS.forEach((k, i) => {
+      expect({ key: k, py: py[i] }).toEqual({ key: k, py: drillPathKey(k) });
+    });
+    // Sanity on the values themselves, so the test is not two agreeing bugs.
+    expect(py[0]).toBe("KXATPMATCH-26MAR03LANSHI");
+    expect(py[1]).toBe("Diaz_Acosta___Sanchez_Izquierdo");
+    expect(py[6]).toBe("__x");
+    expect(py[7]).toBeNull();
+    expect(py[12]).toBe("bom");
+    expect(py[13]).toBe("_ctl");
+    expect(py[14]).toBe("a".repeat(120));
+    expect(py[15]).toBe(`${"b".repeat(119)}_`);
+  });
+});
+
+// ── T8 smoke: the REAL tennis drill — table → exporter's file → timeline ─────
+// Runs the exporter against research.duckdb for the top match by anomaly
+// score with n_trades > 500, into `.sb-views/tennis/` (the path the canonical
+// drill template names), then proves the pure path: the parent table's drill
+// resolves to EXACTLY the file the exporter wrote, and that file parses into
+// a timeline with marks, radii inside the clamp, steps and trade: anchors.
+// Without python / duckdb / the db the file is SYNTHESISED in the exporter's
+// shape and the test says so. Cleanup removes only what this test wrote.
+describe("T8 smoke — the tennis table's drill opens the exporter's timeline file", () => {
+  const nodeRequire = createRequire(import.meta.url);
+  const fs = nodeRequire("node:fs") as {
+    mkdirSync: (p: string, o: { recursive: boolean }) => void;
+    writeFileSync: (p: string, c: string) => void;
+    readFileSync: (p: string, e: string) => string;
+    rmSync: (p: string, o: { recursive?: boolean; force: boolean }) => void;
+    existsSync: (p: string) => boolean;
+    readdirSync: (p: string) => string[];
+    rmdirSync: (p: string) => void;
+  };
+  const pathMod = nodeRequire("node:path") as {
+    join: (...p: string[]) => string;
+    resolve: (...p: string[]) => string;
+    basename: (p: string) => string;
+  };
+  const cp = nodeRequire("node:child_process") as {
+    execFileSync: (f: string, a: string[], o: { encoding: string; timeout: number; stdio: unknown }) => string;
+  };
+  const DB = "C:/Users/ericm/projects/lodestar/data/research.duckdb";
+  const dir = pathMod.resolve(".sb-views", "tennis");
+  const written: string[] = [];
+  afterEach(() => {
+    for (const f of written) fs.rmSync(f, { force: true });
+    written.length = 0;
+    try {
+      if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
+    } catch {
+      // another writer's files stay
+    }
+  });
+
+  const runExporter = (): { path: string; rows: number; trades: number } | null => {
+    if (!fs.existsSync(DB)) return null;
+    try {
+      const out = cp.execFileSync(
+        "python",
+        ["scripts/export-tennis-match.py", "--top", "--min-trades", "500", dir],
+        { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "ignore"] }
+      );
+      const m = out.match(/^wrote (.+) \((\d+) rows, (\d+) trades\)\s*$/m);
+      if (!m) return null;
+      return { path: m[1], rows: Number(m[2]), trades: Number(m[3]) };
+    } catch {
+      return null;
+    }
+  };
+  const synthesize = (): { path: string; rows: number; trades: number } => {
+    const matchId = "KXSYNTH-26SEP01AAABBB";
+    const rows = Array.from({ length: 12 }, (_, i) => ({
+      ts: `2026-09-01T12:${String(i * 4).padStart(2, "0")}:00.${String(i * 37).padStart(3, "0")}`,
+      price: 40 + i * 3,
+      price_raw: i % 2 ? 60 - i * 3 : 40 + i * 3,
+      ticker: i % 2 ? `${matchId}-BBB` : `${matchId}-AAA`,
+      count: 100 * (i + 1),
+      size_z: 0.5 + i * 0.3,
+      backs_player: (i % 2) + 1,
+      side_inferred: false,
+      tilt: 0,
+      disagreement: 0,
+      score: 1,
+      sets_p1: i < 8 ? 0 : 1,
+      sets_p2: 0,
+      games_p1: i < 8 ? Math.min(6, i) : i - 8,
+      games_p2: i < 8 ? Math.floor(i / 2) : 0,
+    }));
+    const payload = {
+      meta: { coverage: "flagged moments only", match_id: matchId, player1: "Aaa", player2: "Bbb", price_of: "Aaa", n_trades: 900, n_flagged: 40 },
+      rows,
+    };
+    fs.mkdirSync(dir, { recursive: true });
+    const p = pathMod.join(dir, `${drillPathKey(matchId)}.json`);
+    fs.writeFileSync(p, JSON.stringify(payload));
+    return { path: p, rows: rows.length, trades: 900 };
+  };
+
+  it("the parent's drill resolves to the exporter's file, which parses into marks + steps + trade: anchors", () => {
+    const real = runExporter();
+    const exported = real ?? synthesize();
+    written.push(exported.path);
+    console.info(
+      `[t8 smoke] ${real ? "research.duckdb via scripts/export-tennis-match.py" : "SYNTHETIC file (python/duckdb/db unavailable)"}: ${pathMod.basename(exported.path)} — ${exported.rows} rows of ${exported.trades} trades`
+    );
+    const payload = parseViewPayload(fs.readFileSync(exported.path, "utf8"))!;
+    expect(payload).not.toBeNull();
+    const meta = payload.meta!;
+    expect(meta).not.toBeNull();
+    expect(meta.coverage).toBe("flagged moments only");
+    const matchId = String(meta.match_id);
+
+    // The tennis TABLE's spec, as the tool description's canonical example has it.
+    const parent = parseViewSpec(
+      JSON.stringify({
+        id: "tennis",
+        kind: "table",
+        title: "Tennis flow anomalies",
+        source: { type: "file", path: ".sb-views/tennis/matches.json" },
+        columns: ["match_id", "player1_name", "player2_name", "score", "n_trades", "n_flagged"],
+        keyColumn: "match_id",
+        builtAt: "2026-09-01T10:00:00Z",
+        builtBy: "agent",
+        drill: {
+          kind: "timeline",
+          title: "{key}",
+          source: { type: "file", path: ".sb-views/tennis/{key}.json" },
+          sizeColumn: "size_z",
+        },
+      })
+    );
+    expect(parent.specError).toBeNull();
+    // Opening the row: its key is the match_id, the drill resolves to the file the exporter named.
+    const hit = drillKeyForAnchor(`row:${matchId}`, { rows: [{ match_id: matchId }], spec: parent.spec! });
+    expect(hit).toEqual({ key: matchId, label: matchId });
+    const child = resolveDrill(parent.spec!, matchId);
+    expect(child.error).toBeNull();
+    expect(child.spec!.kind).toBe("timeline");
+    expect(child.spec!.sizeColumn).toBe("size_z");
+    const childPath = child.spec!.source.type === "file" ? child.spec!.source.path : "";
+    expect(pathMod.resolve(childPath)).toBe(pathMod.resolve(exported.path));
+    expect(fs.existsSync(pathMod.resolve(childPath))).toBe(true);
+
+    // The timeline itself.
+    const pts = toTimelinePoints(payload.rows, child.spec!);
+    expect(pts.xs.length).toBe(exported.rows);
+    expect(pts.xs.length).toBeGreaterThan(0);
+    for (let i = 1; i < pts.xs.length; i++) expect(pts.xs[i]).toBeGreaterThan(pts.xs[i - 1]);
+    expect(pts.price.every((p) => p !== null && p >= 0 && p <= 100)).toBe(true);
+    expect(pts.radius.every((r) => r >= MARK_RADIUS_MIN && r <= MARK_RADIUS_MAX)).toBe(true);
+    expect(pts.radius).toContain(MARK_RADIUS_MAX); // the biggest moment draws the biggest mark
+    expect(pts.side.every((s) => s === 1 || s === 2)).toBe(true);
+    expect(pts.steps).not.toBeNull();
+    expect(pts.steps!.gamesMax).toBeGreaterThan(0);
+    expect(pts.steps!.gamesP1.every((g) => g !== null)).toBe(true);
+    // Every mark is an anchor whose row comes back with its fields.
+    for (const ts of pts.ts) {
+      const key = tradeKey(ts);
+      expect(drillKeyForAnchor(key, { rows: payload.rows, spec: child.spec! })).toEqual({ key: ts, label: ts });
+      const row = rowForAnchor(key, { rows: payload.rows, spec: child.spec! })!;
+      expect(row).not.toBeNull();
+      expect(rowFields(row).map(([k]) => k)).toContain("price");
+      expect(rowFields(row).map(([k]) => k)).toContain("games_p1");
+    }
+    // The toolbar's honesty line.
+    expect(timelineNote(meta, pts.xs.length)).toBe(`flagged moments only · ${exported.rows} of ${exported.trades} trades`);
+    if (real) {
+      // Ground truth of the checkout's data: the moment table holds 12 per match;
+      // the top match by score with > 500 trades is Diaz Acosta v Sanchez Izquierdo.
+      expect(exported.rows).toBe(12);
+      expect(matchId).toBe("KXATPCHALLENGERMATCH-26MAR03DIASAI");
+      expect(meta.price_of).toBe("Diaz Acosta");
+      expect(exported.trades).toBe(6117);
+      // Folded to player 1's yes-price: player 1 is the match id's FIRST code (DIA — the
+      // match row's own `ticker` column is -SAI here, which is why the exporter does not
+      // trust it). A moment on the p2 ticker carries 100 - price_raw; on p1's, price_raw.
+      expect(meta.ticker_p1).toBe("KXATPCHALLENGERMATCH-26MAR03DIASAI-DIA");
+      expect(meta.unfolded).toBe(0);
+      const p2 = payload.rows.find((r) => String(r.ticker).endsWith("-SAI"))!;
+      expect(Number(p2.price)).toBe(100 - Number(p2.price_raw));
+      const p1 = payload.rows.find((r) => String(r.ticker).endsWith("-DIA"))!;
+      expect(Number(p1.price)).toBe(Number(p1.price_raw));
+      // Every fold lands inside 0..100 and the line reads as ONE player's odds.
+      expect(payload.rows.every((r) => Number(r.price) >= 0 && Number(r.price) <= 100)).toBe(true);
     }
   });
 });

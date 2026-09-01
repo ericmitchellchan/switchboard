@@ -248,7 +248,11 @@ function applyOp(page, args, now, answeredIds = new Set()) {
 // T7 (SWIT-61): `line` (series over one time axis) and `bar` (by category)
 // join the renderer registry; `series` / `valueColumn` are their two extra
 // fields (both optional — the reader infers when absent).
-const VIEW_KINDS = ["table", "candles", "dist", "line", "bar"];
+// T8 (SWIT-62): `timeline` (price over a match, sized marks per moment, the
+// score as steps) — `sizeColumn` names the mark-radius column (default
+// `size_z` at the reader). The data file may carry `{meta, rows}`; the
+// toolbar prints meta.coverage + meta.n_trades as the coverage line.
+const VIEW_KINDS = ["table", "candles", "dist", "line", "bar", "timeline"];
 const VIEW_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const VIEW_MARKER_CAP = 200;
 // T6 (SWIT-60): the three optional fields' caps — mirrored in viewStore.ts
@@ -363,7 +367,7 @@ function columnList(raw) {
 function buildDrill(raw) {
   if (raw === undefined || raw === null) return undefined;
   if (typeof raw !== "object") {
-    throw new OpError("drill must be {kind, title, source, columns?, keyColumn?, series?, valueColumn?, definition?}");
+    throw new OpError("drill must be {kind, title, source, columns?, keyColumn?, series?, valueColumn?, sizeColumn?, definition?}");
   }
   if (!VIEW_KINDS.includes(raw.kind)) {
     throw new OpError(`drill.kind must be one of ${VIEW_KINDS.join(", ")}`);
@@ -383,9 +387,21 @@ function buildDrill(raw) {
   const series = columnList(raw.series);
   if (series !== undefined) drill.series = series;
   if (typeof raw.valueColumn === "string" && raw.valueColumn.trim().length > 0) drill.valueColumn = raw.valueColumn.trim();
+  const sizeColumn = buildSizeColumn(raw.sizeColumn, "drill.sizeColumn");
+  if (sizeColumn !== undefined) drill.sizeColumn = sizeColumn;
   const definition = buildDefinition(raw.definition, "drill.definition");
   if (definition !== undefined) drill.definition = definition;
   return drill;
+}
+
+/** `sizeColumn` (T8): the timeline's mark-radius column. Absent = the
+ *  reader's default; given, it must be a non-empty column name. Pure. */
+function buildSizeColumn(v, field) {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "string" || v.trim().length === 0) {
+    throw new OpError(`${field} must be a non-empty column name when given (e.g. "size_z" or "count")`);
+  }
+  return v.trim();
 }
 
 /** Validate + normalize a view op into the spec the shell renders. Pure;
@@ -431,6 +447,9 @@ function buildViewSpec(args, existingIds, now) {
   if (typeof args.valueColumn === "string" && args.valueColumn.trim().length > 0) {
     spec.valueColumn = args.valueColumn.trim();
   }
+  // T8 (SWIT-62): the timeline's size column.
+  const sizeColumn = buildSizeColumn(args.sizeColumn, "sizeColumn");
+  if (sizeColumn !== undefined) spec.sizeColumn = sizeColumn;
   if (Array.isArray(args.markers)) {
     spec.markers = args.markers
       .filter((m) => m && typeof m === "object" && typeof m.ts === "string" && m.ts.length > 0)
@@ -492,7 +511,7 @@ const VIEW_TOOL = {
   name: "view",
   description:
     "SHOW the user rendered data in the panel — a table, a candle chart with markers, a " +
-    "distribution, a line chart, or bars by category — drawn by Switchboard's own chart " +
+    "distribution, a line chart, bars by category, or a match timeline — drawn by Switchboard's own chart " +
     "components from data YOU supply. Use it " +
     "when the user asks to see something, or as the direct output of an analysis they asked " +
     "for — never as a side effect of a turn. Two sources: write rows to a JSON file in this " +
@@ -506,8 +525,20 @@ const VIEW_TOOL = {
     "line: rows {time|ts, <series>…} over one time axis — pass `series` (column names) or every " +
     "numeric non-time column is drawn; markers apply as on candles. bar: one row per category " +
     "{<keyColumn>, <valueColumn>} — pass keyColumn and valueColumn (else count/n/value by name). " +
-    "dist is the same shape, pre-binned. The user " +
-    "can pin rows/bars/bins and keep the view; you cannot make a view poll — re-running a " +
+    "dist is the same shape, pre-binned. timeline: one row per moment {ts, price (0-100, the " +
+    "yes-price), <sizeColumn>, backs_player? (1|2), sets_p1?, sets_p2?, games_p1?, games_p2?} — " +
+    "the price is drawn as a line, every row as a mark sized by `sizeColumn` (default size_z) " +
+    "and toned by backs_player, the score as discrete steps under the price; anchors are " +
+    "trade:<ts>. The file may be {meta:{coverage, n_trades, player1, player2, price_of}, rows} " +
+    "and the toolbar then states `<coverage> · N of M trades` — write what the rows ARE " +
+    "(e.g. 'flagged moments only'), never imply the full tape. CANONICAL EXAMPLE, the tennis " +
+    "anomalies: `scripts/export-tennis-match.py --all .sb-views/tennis` writes one " +
+    ".sb-views/tennis/<match_id>.json per match (price folded to player 1's yes-price), then show " +
+    "kind:'table', keyColumn:'match_id', columns:[match_id, player1_name, player2_name, score, " +
+    "n_trades, n_flagged], drill:{kind:'timeline', title:'{key}', source:{type:'file', " +
+    "path:'.sb-views/tennis/{key}.json'}, sizeColumn:'size_z'} — a click on a match then opens " +
+    "its timeline beside the terminal. The user " +
+    "can pin rows/bars/bins/marks and keep the view; you cannot make a view poll — re-running a " +
     "query is their gesture. Give a `definition` (the rule that defines the rows, in plain " +
     "words) whenever the view encodes a rule — the user reads it under `spec`. Declare a " +
     "`drill` when the rows have instances behind them: {kind, title, source} where the " +
@@ -523,9 +554,9 @@ const VIEW_TOOL = {
       id: { type: "string", description: "View id ([A-Za-z0-9_-]). Omit on show to mint one; required on update." },
       kind: {
         type: "string",
-        enum: ["table", "candles", "dist", "line", "bar"],
+        enum: ["table", "candles", "dist", "line", "bar", "timeline"],
         description:
-          "How the data renders: table (rows), candles (OHLC + markers), dist (pre-binned counts), line (series over time), bar (one value per category).",
+          "How the data renders: table (rows), candles (OHLC + markers), dist (pre-binned counts), line (series over time), bar (one value per category), timeline (price over a match + sized marks per moment + score steps).",
       },
       title: { type: "string", description: "A few plain words — the tab and toolbar name." },
       source: {
@@ -548,6 +579,10 @@ const VIEW_TOOL = {
         type: "string",
         description: "bar / dist: the column holding each bar's value. Omit for count/n/value by name, else the first numeric column.",
       },
+      sizeColumn: {
+        type: "string",
+        description: "timeline: the column a mark's radius comes from (size_z or count). Default size_z. Radii are clamped to a readable range.",
+      },
       definition: {
         type: "string",
         description: "The rule that defines the rows, in plain words (<= 600 chars). Shown under `spec`.",
@@ -561,7 +596,7 @@ const VIEW_TOOL = {
       drill: {
         type: "object",
         description:
-          "What is behind an opened row/bin/bar/marker: {kind, title, source:{type:'file', path:'per/{key}.json'} | {type:'query', url:'http://127.0.0.1:…?k={key}', body?}, columns?, keyColumn?, series?, valueColumn?, definition?}. {key} = the anchor's key value (file: one path component, [A-Za-z0-9._-], else _; query: URL-encoded).",
+          "What is behind an opened row/bin/bar/marker: {kind, title, source:{type:'file', path:'per/{key}.json'} | {type:'query', url:'http://127.0.0.1:…?k={key}', body?}, columns?, keyColumn?, series?, valueColumn?, sizeColumn?, definition?}. {key} = the anchor's key value (file: one path component, [A-Za-z0-9._-], else _; query: URL-encoded).",
       },
     },
     required: ["op", "kind", "title", "source"],

@@ -53,6 +53,18 @@
 //     `bar` is the dist renderer under `bar:<key>` anchors (by category, the
 //     spec's key column) with the same hover tooltip — one `BarsView` draws
 //     both, differing only in the anchor each bar stamps.
+//
+// T8 (SWIT-62) — `timeline`, the tennis table's drill:
+//   · `TimelineView` (its own lazy chunk, uPlot) draws the price line, one
+//     SIZED mark per moment toned by the side it backs, and the score as a
+//     step band under the price; it publishes `trade:<iso>` anchors the way
+//     LinePanel publishes `pt:<iso>` AND calls `onHover` from uPlot's cursor
+//     hook, so the T7 tooltip prints the trade's fields (viewStore.
+//     rowForAnchor answers `trade:`, unlike the other canvas anchors).
+//   · The toolbar states the COVERAGE beside the title from the data file's
+//     `meta` (`timelineNote`: `flagged moments only · N of M trades`) — the
+//     rows are the flagged moments on disk, and the full tape is a backend
+//     upgrade the view must not imply.
 
 import { Suspense, lazy, memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent as ReactMouseEvent, MutableRefObject } from "react";
@@ -77,8 +89,9 @@ import {
   resolveDrill,
   drillFallbackSentence,
   specLines,
+  timelineNote,
 } from "../../lib/viewStore";
-import type { ActiveFilters, ViewRow, ViewSpec } from "../../lib/viewStore";
+import type { ActiveFilters, ViewMeta, ViewRow, ViewSpec } from "../../lib/viewStore";
 import { viewPinTargetFor } from "../../lib/pins";
 import { getThreadById, threadRepoName } from "../../lib/threadStore";
 import {
@@ -105,6 +118,7 @@ import type { AnchoredPinTarget } from "../../surfaces/SurfacePins";
 // — the standing preview-dependency rule; a table or dist view loads neither.
 const CandleChart = lazy(() => import("../../surfaces/charts/CandleChart"));
 const LinePanel = lazy(() => import("../../surfaces/charts/LinePanel"));
+const TimelineView = lazy(() => import("./TimelineView"));
 
 const MONO = "var(--font-mono)";
 
@@ -204,7 +218,7 @@ type PriceMode = "points" | "percent";
 export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; active: boolean }) {
   const { threadId, viewId } = artifact;
   const drillKey = artifact.drill?.key ?? null;
-  const { spec, error, rows, loading, rerun } = useView(threadId, viewId, active, drillKey);
+  const { spec, error, rows, meta, loading, rerun } = useView(threadId, viewId, active, drillKey);
 
   // ── Filters (T6): client-side slices, per view instance ───────────────────
   const [activeFilters, setActiveFilters] = useState<ActiveFilters>({});
@@ -275,7 +289,7 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
   const onPlaced = useCallback(
     (outcome: "pinned" | "nothing-here") => {
       setPinMode(false);
-      if (outcome === "nothing-here") flashNote("nothing pinnable there — click a row, bar or bin");
+      if (outcome === "nothing-here") flashNote("nothing pinnable there — click a row, bar, bin or mark");
     },
     [flashNote]
   );
@@ -290,7 +304,7 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
       identity: `${artifactIdentity(artifact)}${pinScope}`,
       scopeNote: `view ${docKey}`,
       emptyHint:
-        "no pins yet — toggle \u{1F4CC} pin, then click a row, bar or bin. A view pin follows the THING and survives re-run as long as the data still holds it.",
+        "no pins yet — toggle \u{1F4CC} pin, then click a row, bar, bin or mark. A view pin follows the THING and survives re-run as long as the data still holds it.",
     };
   }, [artifact, project, threadId, viewId, pinScope]);
   const pins = useAnchoredPins(target, provider, rootEl, pinMode, onPlaced, active);
@@ -440,6 +454,9 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
         <div style={TOOLBAR_STYLE}>
           <span style={{ color: "var(--text-primary)", flex: "none" }}>{spec.kind}</span>
           <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{spec.title}</span>
+          {spec.kind === "timeline" && (
+            <span style={{ color: "var(--text-dim)", flex: "none" }}>{timelineNote(meta, windowed.total)}</span>
+          )}
           {filterOptions.map(({ filter: f, values }) => {
             const current = activeFilters[f.column] ?? "";
             return (
@@ -507,7 +524,7 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
               ...(pinMode ? { color: "var(--text-primary)", borderColor: "var(--text-secondary)" } : {}),
             }}
             onClick={() => setPinMode((m) => !m)}
-            title="Pin mode: click a row, bar or bin to drop a numbered pin"
+            title="Pin mode: click a row, bar, bin or mark to drop a numbered pin"
           >
             {"\u{1F4CC}"} pin{pins.count > 0 ? ` ${pins.count}` : ""}
           </button>
@@ -555,6 +572,7 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
             <ViewBody
               spec={spec}
               rows={windowed.rows}
+              meta={meta}
               hoverKey={hover?.key ?? null}
               priceMode={priceMode}
               onActivate={openAnchor}
@@ -654,12 +672,21 @@ type RendererProps = {
 const ViewBody = memo(function ViewBody({
   spec,
   rows,
+  meta,
   hoverKey,
   priceMode,
   onActivate,
   onHover,
-}: RendererProps & { priceMode: PriceMode }) {
+}: RendererProps & { priceMode: PriceMode; meta: ViewMeta | null }) {
   switch (spec.kind) {
+    case "timeline":
+      return (
+        <Suspense fallback={<ChartFallback />}>
+          <div style={{ padding: "8px 10px" }}>
+            <TimelineView spec={spec} rows={rows} meta={meta} hoverKey={hoverKey} onHover={onHover} />
+          </div>
+        </Suspense>
+      );
     case "table":
       return <TableView spec={spec} rows={rows} hoverKey={hoverKey} onActivate={onActivate} onHover={onHover} />;
     case "candles":

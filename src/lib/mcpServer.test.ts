@@ -286,7 +286,7 @@ describe("the view tool (SWIT-50)", () => {
 
   it("T7 (SWIT-61): the enum lists line + bar; series / valueColumn normalise and ROUND-TRIP; the drill takes them too", () => {
     const props = (server.VIEW_TOOL.inputSchema as { properties: Record<string, { enum?: string[] }> }).properties;
-    expect(props.kind.enum).toEqual(["table", "candles", "dist", "line", "bar"]);
+    expect(props.kind.enum).toEqual(["table", "candles", "dist", "line", "bar", "timeline"]);
     expect(props.series).toBeDefined();
     expect(props.valueColumn).toBeDefined();
     const line = server.buildViewSpec({ ...base, kind: "line", series: [" close ", "", 3, "rsi"] }, [], NOW);
@@ -315,6 +315,58 @@ describe("the view tool (SWIT-50)", () => {
     expect(parseViewSpec(JSON.stringify(line)).spec!.series).toEqual(["close", "rsi"]);
     expect(server.VIEW_TOOL.description).toMatch(/line: rows \{time\|ts/);
     expect(server.VIEW_TOOL.description).toMatch(/bar: one row per category/);
+  });
+
+  it("T8 (SWIT-62): timeline is in the enum; sizeColumn normalises, validates and ROUND-TRIPS on spec AND drill; the description carries the tennis example", () => {
+    const props = (server.VIEW_TOOL.inputSchema as { properties: Record<string, { enum?: string[]; description?: string }> }).properties;
+    expect(props.kind.enum).toContain("timeline");
+    expect(props.sizeColumn).toBeDefined();
+    expect(props.sizeColumn.description).toMatch(/size_z/);
+    expect(() => server.buildViewSpec({ ...base, kind: "timeline" }, [], NOW)).not.toThrow();
+    const tl = server.buildViewSpec({ ...base, kind: "timeline", sizeColumn: " count " }, [], NOW);
+    expect(tl.sizeColumn).toBe("count");
+    // Absent when not given — the reader defaults to size_z.
+    expect("sizeColumn" in server.buildViewSpec({ ...base, kind: "timeline" }, [], NOW)).toBe(false);
+    // Given but empty / not a string is a VISIBLE error naming the field.
+    expect(() => server.buildViewSpec({ ...base, kind: "timeline", sizeColumn: "" }, [], NOW)).toThrow(/sizeColumn must be a non-empty column name/);
+    expect(() => server.buildViewSpec({ ...base, kind: "timeline", sizeColumn: 3 }, [], NOW)).toThrow(/sizeColumn must be/);
+    // The tennis table, as the description's canonical example wires it.
+    const table = server.buildViewSpec(
+      {
+        op: "show",
+        kind: "table",
+        title: "Tennis flow anomalies",
+        source: { type: "file", path: ".sb-views/tennis/matches.json" },
+        keyColumn: "match_id",
+        columns: ["match_id", "player1_name", "player2_name", "score", "n_trades", "n_flagged"],
+        drill: {
+          kind: "timeline",
+          title: "{key}",
+          source: { type: "file", path: ".sb-views/tennis/{key}.json" },
+          sizeColumn: "size_z",
+        },
+      },
+      [],
+      NOW
+    );
+    expect(table.drill).toMatchObject({ kind: "timeline", sizeColumn: "size_z" });
+    expect(() =>
+      server.buildViewSpec({ ...base, drill: { kind: "timeline", title: "{key}", source: { type: "file", path: "t/{key}.json" }, sizeColumn: " " } }, [], NOW)
+    ).toThrow(/drill\.sizeColumn must be/);
+    for (const spec of [tl, table]) {
+      const { spec: parsed, specError } = parseViewSpec(JSON.stringify(spec));
+      expect(specError).toBeNull();
+      expect(parsed!.kind).toBe(spec.kind);
+    }
+    expect(parseViewSpec(JSON.stringify(tl)).spec!.sizeColumn).toBe("count");
+    expect(parseViewSpec(JSON.stringify(table)).spec!.drill).toMatchObject({ kind: "timeline", sizeColumn: "size_z" });
+    // The contract sentence + the canonical example, so the next agent wires the drill by default.
+    const d = server.VIEW_TOOL.description;
+    expect(d).toMatch(/timeline: one row per moment \{ts, price/);
+    expect(d).toMatch(/flagged moments only/);
+    expect(d).toMatch(/never imply the full tape/);
+    expect(d).toMatch(/scripts\/export-tennis-match\.py/);
+    expect(d).toMatch(/drill:\{kind:'timeline', title:'\{key\}', source:\{type:'file', path:'\.sb-views\/tennis\/\{key\}\.json'\}, sizeColumn:'size_z'\}/);
   });
 
   it("a local query url passes", () => {
