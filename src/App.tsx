@@ -1165,6 +1165,12 @@ export default function App() {
   // scratch surfaces that were gone by design, and re-opening them all on
   // revive would be the billion-tabs failure wearing a new hat. Per-thread
   // seen sets live for the app session only, in a ref.
+  //
+  // KNOWN SOFT EDGE (review): the deps don't subscribe to threadStore, so a
+  // promotion binding a thread to the ALREADY-ACTIVE tab starts polling on
+  // the next `sessions` churn (status flips land within seconds) rather than
+  // instantly. Deliberate: a threadStore subscription here would re-render
+  // App on every thread bump for a seconds-level win.
   const seenViewsRef = useRef(new Map<string, Set<string>>());
   useEffect(() => {
     if (route.screen !== "terminal" || !activeSessionId) return;

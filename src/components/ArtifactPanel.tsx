@@ -827,12 +827,14 @@ export function ArtifactPanel({
             → thread
           </button>
           )}
-          {!isSession && (
+          {!isSession && artifact.kind !== "view" && (
           <>
           {/* POP OUT (increment F, Decision 2) — hand this artifact to the
               floating PiP window. The same window the Ctrl+Shift+O terminal
               mirror uses: one window lifecycle, and it finally has a
-              discoverable entry point (this button and the status bar's). */}
+              discoverable entry point (this button and the status bar's).
+              A VIEW never floats (SWIT-50 review): its pins + keep resolve
+              through the thread record, which the PiP webview does not load. */}
           <button
             type="button"
             onClick={() => (isPoppedOut ? clearPoppedOutArtifact() : popOutArtifact(artifact))}
@@ -859,7 +861,8 @@ export function ArtifactPanel({
           >
             {isPoppedOut ? "↙ back" : "↗ float"}
           </button>
-          {artifact.kind !== "localhost" && artifact.kind !== "page" && artifact.kind !== "view" && (
+          {/* "view" is already excluded by the float gate above. */}
+          {artifact.kind !== "localhost" && artifact.kind !== "page" && (
             // OPEN FULL is an ICON now (increment G, Decision 5) — the `open`
             // mark from the shared module, which already means "go to it" in
             // the thread row menu. The words were the widest thing in a 36px

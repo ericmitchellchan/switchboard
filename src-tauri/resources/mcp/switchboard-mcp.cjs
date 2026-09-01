@@ -75,7 +75,11 @@ function text(v, field) {
 function nextId(list, prefix) {
   let n = 0;
   for (const entry of list) {
-    const m = typeof entry.id === "string" && entry.id.match(new RegExp(`^${prefix}(\\d+)$`));
+    // Null-guarded (review): parsePage passes these arrays through
+    // unvalidated, so a hand-corrupted page.json can hold nulls — minting an
+    // id must survive them or `ask`/`item add` break for the whole session.
+    const m =
+      entry && typeof entry.id === "string" && entry.id.match(new RegExp(`^${prefix}(\\d+)$`));
     if (m) n = Math.max(n, Number(m[1]));
   }
   return `${prefix}${n + 1}`;
@@ -83,8 +87,12 @@ function nextId(list, prefix) {
 
 /** Apply ONE page op. Returns { page, message } (message = what to tell the
  *  agent, including enforced-cap notes); throws OpError on invalid input —
- *  visible to the agent, never a silent drop. Pure: `now` injected. */
-function applyOp(page, args, now) {
+ *  visible to the agent, never a silent drop. Pure: `now` injected;
+ *  `answeredIds` = question ids the app has recorded answers for (read from
+ *  answers.json — READ-only, so one-writer-per-file holds), so the question
+ *  cap counts OPEN questions rather than every question ever asked (review:
+ *  a lifetime cap would refuse forever with advice that cannot unblock it). */
+function applyOp(page, args, now, answeredIds = new Set()) {
   const at = new Date(now).toISOString();
   const op = args && args.op;
   switch (op) {
@@ -133,9 +141,9 @@ function applyOp(page, args, now) {
     }
     case "ask": {
       const t = text(args.text, "text");
-      const open = page.questions.length;
+      const open = page.questions.filter((q) => q && !answeredIds.has(q.id)).length;
       if (open >= QUESTION_CAP) {
-        throw new OpError(`the page already holds ${QUESTION_CAP} questions — wait for answers before asking more`);
+        throw new OpError(`${QUESTION_CAP} questions are already OPEN on the page — wait for answers before asking more`);
       }
       const options = Array.isArray(args.options)
         ? args.options
@@ -447,7 +455,18 @@ function performOp(threadDir, args, now) {
   } catch {
     // no page yet — the ordinary first-write state
   }
-  const { page, message } = applyOp(parsePage(raw), args, now);
+  // Answered question ids (READ-only — the app writes answers.json): what
+  // makes the ask cap an OPEN-question cap.
+  const answeredIds = new Set();
+  try {
+    const answers = JSON.parse(fs.readFileSync(path.join(threadDir, "answers.json"), "utf-8"));
+    if (answers && typeof answers === "object" && !Array.isArray(answers)) {
+      for (const k of Object.keys(answers)) answeredIds.add(k);
+    }
+  } catch {
+    // no answers yet, or junk — every question counts as open
+  }
+  const { page, message } = applyOp(parsePage(raw), args, now, answeredIds);
   fs.mkdirSync(threadDir, { recursive: true });
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(page, null, 2));
@@ -538,7 +557,7 @@ function serve(threadDir) {
             jsonrpc: "2.0",
             id,
             result: {
-              content: [{ type: "text", text: `page write refused: ${err.message}` }],
+              content: [{ type: "text", text: `${name} write refused: ${err.message}` }],
               isError: true,
             },
           });

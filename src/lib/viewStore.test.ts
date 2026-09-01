@@ -45,6 +45,19 @@ describe("parseViewSpec", () => {
     );
   });
 
+  it("a NON-loopback query url is refused at the READER too (review — the spec is a plain file)", () => {
+    const { spec, specError } = parseViewSpec(
+      JSON.stringify({
+        id: "v9",
+        kind: "table",
+        title: "t",
+        source: { type: "query", url: "https://evil.example/rows" },
+      })
+    );
+    expect(spec).toBeNull();
+    expect(specError).toMatch(/not a local backend/);
+  });
+
   it("query sources carry url + optional body", () => {
     const { spec } = parseViewSpec(
       JSON.stringify({

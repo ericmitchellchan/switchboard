@@ -72,6 +72,13 @@ export function parseViewSpec(raw: string): { spec: ViewSpec | null; specError: 
   if (isRecord(src) && src.type === "file" && typeof src.path === "string" && src.path.length > 0) {
     source = { type: "file", path: src.path };
   } else if (isRecord(src) && src.type === "query" && typeof src.url === "string" && src.url.length > 0) {
+    // LOOPBACK-ONLY, re-checked HERE (review): the MCP server validates on
+    // the write side, but the spec is a plain file an agent could write with
+    // its own tools — the READER enforcing the same rule makes it structural
+    // rather than one-sided. Same pattern the server uses.
+    if (!/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|\/)/.test(src.url)) {
+      return { spec: null, specError: "the view spec's query url is not a local backend" };
+    }
     source = { type: "query", url: src.url };
     if (typeof src.body === "string" && src.body.length > 0) source.body = src.body;
   }
@@ -313,9 +320,11 @@ export function useView(threadId: string, viewId: string, active: boolean): View
     [threadId]
   );
 
-  // Load data when the spec's BUILD changes: always for a fresh spec; for a
-  // file source also on every builtAt move (the agent re-showed); a query
-  // source loads once per build and then waits for re-run.
+  // Load data once per BUILD (id + builtAt + source): an agent `update`
+  // moves builtAt (millisecond ISO), so the open tab reloads — file and
+  // query alike, since the update IS a fresh declaration. Between builds a
+  // query never refetches (re-run is Eric's); a file re-reads only through
+  // re-run too.
   useEffect(() => {
     if (!spec) return;
     const buildKey = `${spec.id}:${spec.builtAt}:${spec.source.type === "file" ? spec.source.path : spec.source.url}`;

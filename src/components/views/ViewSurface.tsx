@@ -361,11 +361,19 @@ function TableView({ spec, rows }: { spec: ViewSpec; rows: ViewRow[] }) {
         </tr>
       </thead>
       <tbody>
-        {sorted.map((row, i) => {
-          const anchor = rowAnchorId(row, spec);
-          return (
+        {(() => {
+          // Duplicate key-column values happen in real data (review): the
+          // FIRST occurrence keeps the bare anchor (a pin resolves to it);
+          // later duplicates get suffixed React keys and NO anchor — two rows
+          // sharing one pin anchor would be a mark pointing at the wrong row.
+          const seenAnchors = new Set<string>();
+          return sorted.map((row, i) => {
+            const rawAnchor = rowAnchorId(row, spec);
+            const anchor = rawAnchor !== null && !seenAnchors.has(rawAnchor) ? rawAnchor : null;
+            if (anchor !== null) seenAnchors.add(anchor);
+            return (
             <tr
-              key={anchor ?? i}
+              key={anchor ?? `dup-${rawAnchor ?? "row"}-${i}`}
               {...(anchor ? { [ANCHOR_ATTR]: `row:${anchor}` } : {})}
               style={{ borderBottom: "1px solid var(--border)" }}
             >
@@ -388,8 +396,9 @@ function TableView({ spec, rows }: { spec: ViewSpec; rows: ViewRow[] }) {
                 );
               })}
             </tr>
-          );
-        })}
+            );
+          });
+        })()}
       </tbody>
     </table>
   );

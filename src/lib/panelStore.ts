@@ -2115,6 +2115,12 @@ export function setPoppedOutArtifact(sessionId: string, artifact: Artifact): voi
   // The panel header hides the `float` action for a session artifact; this is
   // the store-side half, so no future caller can route around it.
   if (clean.kind === "session") return;
+  // A VIEW never floats either (SWIT-50 review): its pins file and its `keep`
+  // path resolve through the THREAD record (project = the thread's repo), and
+  // the PiP webview never loads threads — a floated view would silently read
+  // a different pins sidecar and file keeps under "unknown". The ✦ page is
+  // fine out there (its reads go through IPC).
+  if (clean.kind === "view") return;
   poppedOut = { sessionId, artifact: clean };
   bump();
 }
@@ -2177,7 +2183,9 @@ export function isLocalhostUrlOpen(url: string): boolean {
  *  registered no handler (callers gate on `usePopOutAvailable` so the action is
  *  DISABLED rather than silently dead). */
 export function popOutArtifact(artifact: Artifact): void {
-  if (artifact.kind === "session") return; // one live view — see setPoppedOutArtifact
+  // session: one live view; view: thread-resolved pins/keep — see
+  // setPoppedOutArtifact for both rules.
+  if (artifact.kind === "session" || artifact.kind === "view") return;
   panelActions?.popOutArtifact(artifact);
 }
 

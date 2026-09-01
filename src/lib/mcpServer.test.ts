@@ -18,7 +18,8 @@ const server = require("../../src-tauri/resources/mcp/switchboard-mcp.cjs") as {
   applyOp: (
     page: Record<string, unknown>,
     args: Record<string, unknown>,
-    now: number
+    now: number,
+    answeredIds?: Set<string>
   ) => { page: Record<string, unknown>; message: string };
   buildViewSpec: (
     args: Record<string, unknown>,
@@ -97,7 +98,11 @@ describe("applyOp semantics", () => {
     for (let i = 0; i < server.QUESTION_CAP; i++) {
       page = server.applyOp(page, { op: "ask", text: `q ${i}` }, NOW).page;
     }
-    expect(() => server.applyOp(page, { op: "ask", text: "one more" }, NOW)).toThrow(/already holds/);
+    expect(() => server.applyOp(page, { op: "ask", text: "one more" }, NOW)).toThrow(/already OPEN/);
+    // The cap counts OPEN questions (review): answered ids unblock asking.
+    const answered = new Set(["q1", "q2", "q3"]);
+    const unblocked = server.applyOp(page, { op: "ask", text: "one more" }, NOW, answered);
+    expect((unblocked.page.questions as unknown[]).length).toBe(server.QUESTION_CAP + 1);
     expect(() =>
       server.applyOp(
         server.applyOp(empty(), { op: "ask", id: "q1", text: "t" }, NOW).page,
@@ -120,6 +125,16 @@ describe("applyOp semantics", () => {
     expect(items[0].state).toBe("in_progress");
     expect(items[1].state).toBe("done");
     expect(() => server.applyOp(page, { op: "item", itemOp: "close", id: "i9" }, NOW)).toThrow(/no item/);
+  });
+
+  it("a hand-corrupted page (nulls in the arrays) does not break ask / item add (review)", () => {
+    const corrupted = server.parsePage(
+      JSON.stringify({ questions: [null, { id: "q2", text: "t" }], items: [null] })
+    );
+    const asked = server.applyOp(corrupted, { op: "ask", text: "still works?" }, NOW);
+    expect((asked.page.questions as Array<{ id?: string } | null>)[0]?.id).toBe("q3");
+    const added = server.applyOp(corrupted, { op: "item", itemOp: "add", title: "t" }, NOW);
+    expect((added.page.items as Array<{ id?: string } | null>).some((i) => i?.id === "i1")).toBe(true);
   });
 
   it("malformed input is a visible error, never a silent no-op", () => {
