@@ -245,7 +245,10 @@ function applyOp(page, args, now, answeredIds = new Set()) {
 
 // ── Views (SWIT-50) — a rendered dataset the shell draws ─────────────────────
 
-const VIEW_KINDS = ["table", "candles", "dist"];
+// T7 (SWIT-61): `line` (series over one time axis) and `bar` (by category)
+// join the renderer registry; `series` / `valueColumn` are their two extra
+// fields (both optional — the reader infers when absent).
+const VIEW_KINDS = ["table", "candles", "dist", "line", "bar"];
 const VIEW_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const VIEW_MARKER_CAP = 200;
 // T6 (SWIT-60): the three optional fields' caps — mirrored in viewStore.ts
@@ -348,11 +351,20 @@ function buildFilters(raw) {
   return out.length > 0 ? out : undefined;
 }
 
+/** A list of column names (T7: `series`); undefined when absent/empty. */
+function columnList(raw) {
+  if (!Array.isArray(raw)) return undefined;
+  const list = raw.filter((c) => typeof c === "string" && c.trim().length > 0).map((c) => c.trim()).slice(0, 24);
+  return list.length > 0 ? list : undefined;
+}
+
 /** `drill` (T6): what is behind an anchor — a child view whose source strings
  *  carry `{key}`. Pure. */
 function buildDrill(raw) {
   if (raw === undefined || raw === null) return undefined;
-  if (typeof raw !== "object") throw new OpError("drill must be {kind, title, source, columns?, keyColumn?, definition?}");
+  if (typeof raw !== "object") {
+    throw new OpError("drill must be {kind, title, source, columns?, keyColumn?, series?, valueColumn?, definition?}");
+  }
   if (!VIEW_KINDS.includes(raw.kind)) {
     throw new OpError(`drill.kind must be one of ${VIEW_KINDS.join(", ")}`);
   }
@@ -368,6 +380,9 @@ function buildDrill(raw) {
     if (columns.length > 0) drill.columns = columns;
   }
   if (typeof raw.keyColumn === "string" && raw.keyColumn.trim().length > 0) drill.keyColumn = raw.keyColumn.trim();
+  const series = columnList(raw.series);
+  if (series !== undefined) drill.series = series;
+  if (typeof raw.valueColumn === "string" && raw.valueColumn.trim().length > 0) drill.valueColumn = raw.valueColumn.trim();
   const definition = buildDefinition(raw.definition, "drill.definition");
   if (definition !== undefined) drill.definition = definition;
   return drill;
@@ -409,6 +424,12 @@ function buildViewSpec(args, existingIds, now) {
   }
   if (typeof args.keyColumn === "string" && args.keyColumn.trim().length > 0) {
     spec.keyColumn = args.keyColumn.trim();
+  }
+  // T7 (SWIT-61): line series / bar value column.
+  const series = columnList(args.series);
+  if (series !== undefined) spec.series = series;
+  if (typeof args.valueColumn === "string" && args.valueColumn.trim().length > 0) {
+    spec.valueColumn = args.valueColumn.trim();
   }
   if (Array.isArray(args.markers)) {
     spec.markers = args.markers
@@ -470,8 +491,9 @@ function performViewOp(threadDir, args, now) {
 const VIEW_TOOL = {
   name: "view",
   description:
-    "SHOW the user rendered data in the panel — a table, a candle chart with markers, or a " +
-    "distribution — drawn by Switchboard's own chart components from data YOU supply. Use it " +
+    "SHOW the user rendered data in the panel — a table, a candle chart with markers, a " +
+    "distribution, a line chart, or bars by category — drawn by Switchboard's own chart " +
+    "components from data YOU supply. Use it " +
     "when the user asks to see something, or as the direct output of an analysis they asked " +
     "for — never as a side effect of a turn. Two sources: write rows to a JSON file in this " +
     "thread's working directory (an ARRAY of flat objects; for candles each row needs " +
@@ -480,7 +502,11 @@ const VIEW_TOOL = {
     "{type:'query', url}. The view NEVER runs your code — it renders your data. op 'show' " +
     "opens it (id minted if omitted); op 'update' with the same id refreshes the open tab. " +
     "For tables pass columns (display order) and keyColumn (the column whose value names a " +
-    "row for pins). For candles pass markers [{ts, label, id?}] for entries/exits. The user " +
+    "row for pins). For candles pass markers [{ts, label, id?}] for entries/exits. " +
+    "line: rows {time|ts, <series>…} over one time axis — pass `series` (column names) or every " +
+    "numeric non-time column is drawn; markers apply as on candles. bar: one row per category " +
+    "{<keyColumn>, <valueColumn>} — pass keyColumn and valueColumn (else count/n/value by name). " +
+    "dist is the same shape, pre-binned. The user " +
     "can pin rows/bars/bins and keep the view; you cannot make a view poll — re-running a " +
     "query is their gesture. Give a `definition` (the rule that defines the rows, in plain " +
     "words) whenever the view encodes a rule — the user reads it under `spec`. Declare a " +
@@ -495,7 +521,12 @@ const VIEW_TOOL = {
     properties: {
       op: { type: "string", enum: ["show", "update"], description: "show = create/open; update = refresh an existing id." },
       id: { type: "string", description: "View id ([A-Za-z0-9_-]). Omit on show to mint one; required on update." },
-      kind: { type: "string", enum: ["table", "candles", "dist"], description: "How the data renders." },
+      kind: {
+        type: "string",
+        enum: ["table", "candles", "dist", "line", "bar"],
+        description:
+          "How the data renders: table (rows), candles (OHLC + markers), dist (pre-binned counts), line (series over time), bar (one value per category).",
+      },
       title: { type: "string", description: "A few plain words — the tab and toolbar name." },
       source: {
         type: "object",
@@ -506,7 +537,16 @@ const VIEW_TOOL = {
       markers: {
         type: "array",
         items: { type: "object" },
-        description: "candles: [{ts: ISO time, label, id?}] — entry/exit marks on the nearest bar.",
+        description: "candles / line: [{ts: ISO time, label, id?}] — entry/exit marks on the nearest bar or point.",
+      },
+      series: {
+        type: "array",
+        items: { type: "string" },
+        description: "line: the columns drawn as series (each numeric). Omit to draw every numeric non-time column.",
+      },
+      valueColumn: {
+        type: "string",
+        description: "bar / dist: the column holding each bar's value. Omit for count/n/value by name, else the first numeric column.",
       },
       definition: {
         type: "string",
@@ -521,7 +561,7 @@ const VIEW_TOOL = {
       drill: {
         type: "object",
         description:
-          "What is behind an opened row/bin/marker: {kind, title, source:{type:'file', path:'per/{key}.json'} | {type:'query', url:'http://127.0.0.1:…?k={key}', body?}, columns?, keyColumn?, definition?}. {key} = the anchor's key value (file: one path component, [A-Za-z0-9._-], else _; query: URL-encoded).",
+          "What is behind an opened row/bin/bar/marker: {kind, title, source:{type:'file', path:'per/{key}.json'} | {type:'query', url:'http://127.0.0.1:…?k={key}', body?}, columns?, keyColumn?, series?, valueColumn?, definition?}. {key} = the anchor's key value (file: one path component, [A-Za-z0-9._-], else _; query: URL-encoded).",
       },
     },
     required: ["op", "kind", "title", "source"],

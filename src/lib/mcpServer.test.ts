@@ -279,7 +279,42 @@ describe("the view tool (SWIT-50)", () => {
     expect(() => server.buildViewSpec(withSource({ type: "query", url: "http://[::1]:8799/rows" }), [], NOW)).not.toThrow();
     expect(() => server.buildViewSpec(withSource({ type: "query", url: "http://localhost/rows" }), [], NOW)).not.toThrow();
     expect(() => server.buildViewSpec({ ...base, kind: "pie" }, [], NOW)).toThrow(/kind must be/);
+    expect(() => server.buildViewSpec({ ...base, kind: "line" }, [], NOW)).not.toThrow();
+    expect(() => server.buildViewSpec({ ...base, kind: "bar" }, [], NOW)).not.toThrow();
     expect(() => server.buildViewSpec({ ...base, id: "no spaces!" }, [], NOW)).toThrow(/must match/);
+  });
+
+  it("T7 (SWIT-61): the enum lists line + bar; series / valueColumn normalise and ROUND-TRIP; the drill takes them too", () => {
+    const props = (server.VIEW_TOOL.inputSchema as { properties: Record<string, { enum?: string[] }> }).properties;
+    expect(props.kind.enum).toEqual(["table", "candles", "dist", "line", "bar"]);
+    expect(props.series).toBeDefined();
+    expect(props.valueColumn).toBeDefined();
+    const line = server.buildViewSpec({ ...base, kind: "line", series: [" close ", "", 3, "rsi"] }, [], NOW);
+    expect(line.series).toEqual(["close", "rsi"]);
+    const bar = server.buildViewSpec(
+      {
+        ...base,
+        kind: "bar",
+        keyColumn: "setup",
+        valueColumn: " n ",
+        drill: { kind: "line", title: "{key}", source: { type: "file", path: "per/{key}.json" }, series: ["close"] },
+      },
+      [],
+      NOW
+    );
+    expect(bar.valueColumn).toBe("n");
+    expect(bar.drill).toMatchObject({ kind: "line", series: ["close"] });
+    // Absent when not given — the reader infers.
+    expect("series" in server.buildViewSpec({ ...base, kind: "line" }, [], NOW)).toBe(false);
+    for (const spec of [line, bar]) {
+      const { spec: parsed, specError } = parseViewSpec(JSON.stringify(spec));
+      expect(specError).toBeNull();
+      expect(parsed!.kind).toBe(spec.kind);
+    }
+    expect(parseViewSpec(JSON.stringify(bar)).spec!.drill).toMatchObject({ kind: "line", series: ["close"] });
+    expect(parseViewSpec(JSON.stringify(line)).spec!.series).toEqual(["close", "rsi"]);
+    expect(server.VIEW_TOOL.description).toMatch(/line: rows \{time\|ts/);
+    expect(server.VIEW_TOOL.description).toMatch(/bar: one row per category/);
   });
 
   it("a local query url passes", () => {

@@ -200,7 +200,8 @@ questions · done. Every section is a band header + list rows; no section is a b
 
 ## Tooltip
 
-Native `title`. The shell has no tooltip component and does not want one.
+Native `title` for HINTS. The shell has no hint-tooltip component and does not want one.
+The ONE styled tooltip is the DATA tooltip below — it prints a row, not a sentence.
 
 - **Ky:** every hint is a `title=` attribute — `ky/main/Topbar.tsx` `"Ask Ky — ambient
   chat (Ctrl/⌘+I)"`, `ky/main/Sidebar.tsx` `"Thread actions"`, `"New thread"`,
@@ -209,3 +210,20 @@ Native `title`. The shell has no tooltip component and does not want one.
   parentheses at the end when there is one (`Toggle the artifact panel (Ctrl+Shift+P)`).
   A tooltip is where a mechanism sentence goes when it must exist in the app at all;
   it never appears as resting text beside the control.
+
+### Data tooltip (views — T7, SWIT-61)
+
+Hovering or focusing a row / bin / bar in a view shows EVERY field of the row behind
+it. Not `title`: that one is late, single-line and unstyled, and the point is reading
+metrics while the pointer moves.
+
+- Card: `--bg-panel`, 1px `--border-subtle`, 4px radius, `5px 8px` padding, mono 10px /
+  15px lines, max 340px wide. Two-column grid: key `--text-dim` · value `--text-primary`,
+  values ellipsised, one line per field in the row's own order. No title, no arrow.
+- Placement: `position: fixed`, `pointer-events: none`, 12/14px off the pointer, flipped
+  to the other side when it would leave the scroller's box; from keyboard focus it sits
+  under the focused element instead. Hidden while pin mode is armed.
+- The hovered mark highlights at the same time: rows take `--bg-active` (the kit hover
+  fill), bars take the brighter `--text-secondary` fill with their label in
+  `--text-primary`.
+- Canvas charts (candles, line) keep their own readout / legend and get no card.

@@ -29,9 +29,33 @@
 //     toolbar says `→ thread` while a row is hovered so the affordance is
 //     visible without copy. PIN MODE WINS: the capture-phase pin handler
 //     stops propagation while armed, and the bubble handler re-checks.
+//
+// T7 (SWIT-61) — hover metrics, points ⇄ percent, `line` and `bar`:
+//   · HOVER is ONE state (T6's `hover`, widened): entering a row / bin / bar
+//     — or FOCUSING one — records the anchor, its key, and EVERY field of the
+//     row behind it (viewStore.rowForAnchor → rowFields). The renderers read
+//     `hoverKey` back to paint the highlight (rows: the kit hover fill
+//     `--bg-active`; bars: the brighter `--text-secondary` fill), and
+//     `FieldsTooltip` prints the fields near the pointer — `position: fixed`,
+//     `pointer-events: none`, clamped to the scroller's box, placed from the
+//     last pointer position when the pointer is over the anchor and from the
+//     anchor's own rect otherwise (keyboard focus). The pointer is tracked in
+//     a REF on the root and applied to the tooltip's style directly, so a
+//     mouse move never re-renders the table. Not the browser `title`: that
+//     one is late, single-line and unstyled.
+//   · CANDLES take a points ⇄ percent toggle in the toolbar: a quiet button
+//     that names the OTHER mode (`%` while in points, `pts` while in percent)
+//     → CandleChart's `priceMode` prop (the right scale's PriceScaleMode).
+//     Anchors and markers are by TIME, so nothing moves but the axis.
+//   · `line` renders on LinePanel (uPlot, its own lazy chunk) with `pt:<iso>`
+//     anchors published the way candles publish `bar:<iso>`, the spec's
+//     `markers` drawn on the canvas, and uPlot's legend as the hover readout.
+//     `bar` is the dist renderer under `bar:<key>` anchors (by category, the
+//     spec's key column) with the same hover tooltip — one `BarsView` draws
+//     both, differing only in the anchor each bar stamps.
 
-import { Suspense, lazy, useCallback, useMemo, useRef, useState } from "react";
-import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
+import { Suspense, lazy, memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, MouseEvent as ReactMouseEvent, MutableRefObject } from "react";
 
 import type { Artifact } from "../../types";
 import {
@@ -41,6 +65,11 @@ import {
   rowAnchorId,
   toOhlcRows,
   toDistBins,
+  toBarRows,
+  toLinePoints,
+  barKey,
+  rowForAnchor,
+  rowFields,
   applyFilters,
   filterValues,
   viewPinScope,
@@ -72,9 +101,10 @@ import type { SurfaceAnchorProvider, SurfaceAnchorRegistry } from "../../surface
 import { useAnchoredPins } from "../../surfaces/SurfacePins";
 import type { AnchoredPinTarget } from "../../surfaces/SurfacePins";
 
-// The candle renderer is a LAZY chunk (lightweight-charts) — the standing
-// preview-dependency rule; a table or dist view never loads it.
+// The candle and line renderers are LAZY chunks (lightweight-charts, uPlot)
+// — the standing preview-dependency rule; a table or dist view loads neither.
 const CandleChart = lazy(() => import("../../surfaces/charts/CandleChart"));
+const LinePanel = lazy(() => import("../../surfaces/charts/LinePanel"));
 
 const MONO = "var(--font-mono)";
 
@@ -134,10 +164,42 @@ const SPEC_STYLE: CSSProperties = {
   overflow: "auto",
 };
 
+/** The hover tooltip (T7): the kit's panel surface at tooltip size. */
+const TOOLTIP_STYLE: CSSProperties = {
+  position: "fixed",
+  left: 0,
+  top: 0,
+  zIndex: 40,
+  pointerEvents: "none",
+  display: "grid",
+  gridTemplateColumns: "auto minmax(0, 1fr)",
+  columnGap: 10,
+  rowGap: 1,
+  maxWidth: 340,
+  padding: "5px 8px",
+  background: "var(--bg-panel)",
+  border: "1px solid var(--border-subtle)",
+  borderRadius: 4,
+  fontFamily: MONO,
+  fontSize: 10,
+  lineHeight: "15px",
+  color: "var(--text-secondary)",
+  whiteSpace: "nowrap",
+};
+
 type ViewArtifact = Extract<Artifact, { kind: "view" }>;
 
-/** What hovering an anchor means here — printed at the toolbar's right end. */
-type HoverHint = { label: string; verb: string } | null;
+/** What hovering an anchor means here — printed at the toolbar's right end,
+ *  and (T7) the anchor's key + the row's fields for the highlight + tooltip. */
+type HoverHint = {
+  key: string;
+  label: string;
+  verb: string;
+  fields: [string, string][];
+  el: Element;
+} | null;
+
+type PriceMode = "points" | "percent";
 
 export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; active: boolean }) {
   const { threadId, viewId } = artifact;
@@ -153,6 +215,11 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
   const pinScope = useMemo(() => viewPinScope(activeFilters, drillKey), [activeFilters, drillKey]);
   const [showSpec, setShowSpec] = useState(false);
   const [hover, setHover] = useState<HoverHint>(null);
+  const [priceMode, setPriceMode] = useState<PriceMode>("points");
+  // The last pointer position over the body — a ref, read by the tooltip,
+  // never state (a mouse move must not re-render the table).
+  const pointerRef = useRef<{ x: number; y: number } | null>(null);
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
   // Per-filter value lists are a scan of every row; a hover re-render must
   // not redo it (review, T4-T6). Keyed on the loaded rows + the declared
   // filters only — the ACTIVE selection does not change the option set.
@@ -277,22 +344,34 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
   );
   const onHoverAnchor = useCallback(
     (el: EventTarget | null) => {
-      if (!spec || el === null) {
+      if (!spec || !filteredRows || el === null || !(el instanceof Element)) {
         setHover(null);
         return;
       }
-      const hit = describeAnchor(el);
-      if (!hit) {
+      const anchor = provider.getAnchor(el);
+      const hit = anchor ? drillKeyForAnchor(anchor.key, { rows: filteredRows, spec }) : null;
+      if (!anchor || !hit) {
         setHover(null);
         return;
       }
-      setHover({
-        label: hit.label,
-        verb: spec.drill ? `› ${spec.drill.title.split("{key}").join(hit.key)}` : "→ thread",
-      });
+      const row = rowForAnchor(anchor.key, { rows: filteredRows, spec });
+      setHover((prev) =>
+        prev && prev.key === anchor.key && prev.el === el
+          ? prev
+          : {
+              key: anchor.key,
+              label: hit.label,
+              verb: spec.drill ? `› ${spec.drill.title.split("{key}").join(hit.key)}` : "→ thread",
+              fields: row ? rowFields(row) : [],
+              el,
+            }
+      );
     },
-    [spec, describeAnchor]
+    [spec, filteredRows, provider]
   );
+  const onPointerMove = useCallback((e: ReactMouseEvent) => {
+    pointerRef.current = { x: e.clientX, y: e.clientY };
+  }, []);
 
   // ── keep → the scratchpad (decided Q4) ─────────────────────────────────────
   const [keeping, setKeeping] = useState(false);
@@ -396,6 +475,20 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
                     filtered ? ` · ${filteredRows?.length ?? 0} of ${rows?.length ?? 0} rows` : ""
                   }${windowed.windowed ? ` · showing ${windowed.rows.length} of ${windowed.total} rows` : ""}`)}
           </span>
+          {spec.kind === "candles" && (
+            <button
+              type="button"
+              style={TOOL_BTN}
+              onClick={() => setPriceMode((m) => (m === "points" ? "percent" : "points"))}
+              title={
+                priceMode === "points"
+                  ? "Price scale as percent change from the first visible bar"
+                  : "Price scale in points"
+              }
+            >
+              {priceMode === "points" ? "%" : "pts"}
+            </button>
+          )}
           <button
             type="button"
             style={{
@@ -442,12 +535,16 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
           </button>
         </div>
         {showSpec && <pre style={SPEC_STYLE}>{specLines(spec).join("\n")}</pre>}
-        <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
+        <div ref={scrollerRef} style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
           <div
             ref={setRoot}
             onClickCapture={pins.onCapture}
             onClick={onBodyClick}
-            onMouseLeave={() => setHover(null)}
+            onMouseMove={onPointerMove}
+            onMouseLeave={() => {
+              pointerRef.current = null;
+              setHover(null);
+            }}
             style={{
               position: "relative",
               minHeight: "100%",
@@ -455,8 +552,23 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
               background: pinMode ? "rgba(228, 228, 231, 0.04)" : "transparent",
             }}
           >
-            <ViewBody spec={spec} rows={windowed.rows} onActivate={openAnchor} onHover={onHoverAnchor} />
+            <ViewBody
+              spec={spec}
+              rows={windowed.rows}
+              hoverKey={hover?.key ?? null}
+              priceMode={priceMode}
+              onActivate={openAnchor}
+              onHover={onHoverAnchor}
+            />
             {pins.marks}
+            {hover && hover.fields.length > 0 && !pinMode && (
+              <FieldsTooltip
+                fields={hover.fields}
+                anchorEl={hover.el}
+                pointerRef={pointerRef}
+                boundsRef={scrollerRef}
+              />
+            )}
           </div>
         </div>
         {pins.rail}
@@ -465,47 +577,127 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
   );
 }
 
+// ── The hover tooltip (T7) ───────────────────────────────────────────────────
+
+/** Every field of the hovered row, near the pointer, clamped to the
+ *  scroller's box. Placement is written to the element's style directly from
+ *  a mousemove listener on the bounds — no React state per move. When the
+ *  pointer is not over the anchor (keyboard focus, or the first paint before
+ *  any move) it sits under the anchor's own box. */
+function FieldsTooltip({
+  fields,
+  anchorEl,
+  pointerRef,
+  boundsRef,
+}: {
+  fields: [string, string][];
+  anchorEl: Element;
+  pointerRef: MutableRefObject<{ x: number; y: number } | null>;
+  boundsRef: MutableRefObject<HTMLDivElement | null>;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    const bounds = boundsRef.current;
+    if (!el) return;
+    const place = (x: number, y: number) => {
+      const b = bounds?.getBoundingClientRect() ?? new DOMRect(0, 0, window.innerWidth, window.innerHeight);
+      const w = el.offsetWidth;
+      const h = el.offsetHeight;
+      let left = x + 12;
+      let top = y + 14;
+      if (left + w > b.right - 4) left = Math.max(b.left + 4, x - 12 - w);
+      if (top + h > b.bottom - 4) top = Math.max(b.top + 4, y - 14 - h);
+      el.style.left = `${Math.round(left)}px`;
+      el.style.top = `${Math.round(top)}px`;
+    };
+    const rect = anchorEl.getBoundingClientRect();
+    const p = pointerRef.current;
+    const overAnchor =
+      p !== null && p.x >= rect.left && p.x <= rect.right && p.y >= rect.top && p.y <= rect.bottom;
+    if (overAnchor && p) place(p.x, p.y);
+    else place(rect.left + Math.min(rect.width / 2, 120), rect.bottom - 8);
+    const onMove = (e: MouseEvent) => place(e.clientX, e.clientY);
+    bounds?.addEventListener("mousemove", onMove);
+    return () => bounds?.removeEventListener("mousemove", onMove);
+  }, [fields, anchorEl, pointerRef, boundsRef]);
+  return (
+    <div ref={ref} style={TOOLTIP_STYLE} role="tooltip">
+      {fields.map(([k, v]) => (
+        <FieldLine key={k} k={k} v={v} />
+      ))}
+    </div>
+  );
+}
+
+function FieldLine({ k, v }: { k: string; v: string }) {
+  return (
+    <>
+      <span style={{ color: "var(--text-dim)" }}>{k}</span>
+      <span style={{ color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis" }}>{v}</span>
+    </>
+  );
+}
+
 // ── Renderers (ours; the agent's data never executes) ────────────────────────
 
 type RendererProps = {
   spec: ViewSpec;
   rows: ViewRow[];
+  /** The hovered/focused anchor key (T7) — the renderer paints its highlight. */
+  hoverKey: string | null;
   /** Enter on a focused anchor (T6) — the click path goes through the wrapper. */
   onActivate: (el: EventTarget | null) => void;
   onHover: (el: EventTarget | null) => void;
 };
 
-function ViewBody({ spec, rows, onActivate, onHover }: RendererProps) {
+const ViewBody = memo(function ViewBody({
+  spec,
+  rows,
+  hoverKey,
+  priceMode,
+  onActivate,
+  onHover,
+}: RendererProps & { priceMode: PriceMode }) {
   switch (spec.kind) {
     case "table":
-      return <TableView spec={spec} rows={rows} onActivate={onActivate} onHover={onHover} />;
+      return <TableView spec={spec} rows={rows} hoverKey={hoverKey} onActivate={onActivate} onHover={onHover} />;
     case "candles":
       return (
-        <Suspense
-          fallback={
-            <div style={{ padding: 24, fontFamily: MONO, fontSize: 11, color: "var(--text-dim)" }}>
-              loading chart…
-            </div>
-          }
-        >
+        <Suspense fallback={<ChartFallback />}>
           <div style={{ padding: "8px 10px" }}>
             <CandleChart
               bars={toOhlcRows(rows)}
               markers={(spec.markers ?? []).map((m) => ({ ts: m.ts, label: m.label }))}
               height={360}
               intraday
+              priceMode={priceMode}
             />
           </div>
         </Suspense>
       );
+    case "line":
+      return (
+        <Suspense fallback={<ChartFallback />}>
+          <LineView spec={spec} rows={rows} />
+        </Suspense>
+      );
     case "dist":
-      return <DistView spec={spec} rows={rows} onActivate={onActivate} onHover={onHover} />;
+    case "bar":
+      return <BarsView spec={spec} rows={rows} hoverKey={hoverKey} onActivate={onActivate} onHover={onHover} />;
   }
+});
+
+function ChartFallback() {
+  return (
+    <div style={{ padding: 24, fontFamily: MONO, fontSize: 11, color: "var(--text-dim)" }}>loading chart…</div>
+  );
 }
 
 /** The table renderer: kit tokens, click-to-sort, `row:<key>` anchors.
- *  Rows are focusable (T6): Enter opens the focused row the way a click does. */
-function TableView({ spec, rows, onActivate, onHover }: RendererProps) {
+ *  Rows are focusable (T6): Enter opens the focused row the way a click does;
+ *  focus shows the same tooltip hover does (T7). */
+function TableView({ spec, rows, hoverKey, onActivate, onHover }: RendererProps) {
   const columns = tableColumns(rows, spec);
   const [sort, setSort] = useState<{ column: string; dir: 1 | -1 } | null>(null);
   const sorted = useMemo(() => {
@@ -597,7 +789,14 @@ function TableView({ spec, rows, onActivate, onHover }: RendererProps) {
               }
               onMouseEnter={anchor ? (e) => onHover(e.currentTarget) : undefined}
               onMouseLeave={anchor ? () => onHover(null) : undefined}
-              style={{ borderBottom: "1px solid var(--border)", cursor: anchor ? "pointer" : undefined, outline: "none" }}
+              onFocus={anchor ? (e) => onHover(e.currentTarget) : undefined}
+              onBlur={anchor ? () => onHover(null) : undefined}
+              style={{
+                borderBottom: "1px solid var(--border)",
+                cursor: anchor ? "pointer" : undefined,
+                outline: "none",
+                background: anchor !== null && hoverKey === `row:${anchor}` ? "var(--bg-active)" : undefined,
+              }}
             >
               {columns.map((c) => {
                 const v = row[c];
@@ -626,39 +825,58 @@ function TableView({ spec, rows, onActivate, onHover }: RendererProps) {
   );
 }
 
-/** The distribution renderer: a plain SVG bar chart with `bin:<n>` anchors —
- *  40 honest lines instead of bending uPlot into a histogram. Soft palette;
- *  no new colour. */
-function DistView({ spec, rows, onActivate, onHover }: RendererProps) {
+/** The distribution AND category-bar renderer: plain flex bars with
+ *  `bin:<n>` (dist) or `bar:<key>` (bar) anchors — 40 honest lines instead of
+ *  bending uPlot into a histogram. Soft palette; the hovered bar takes the
+ *  brighter `--text-secondary` fill (T7). Duplicate categories on a bar view
+ *  follow the table's rule: the FIRST keeps the anchor, later ones get none. */
+function BarsView({ spec, rows, hoverKey, onActivate, onHover }: RendererProps) {
   // Binning is a full pass over the rows; the parent's hover state re-renders
   // this component with the same props, so the bins are memoised on them.
-  const bins = useMemo(() => toDistBins(rows, spec), [rows, spec]);
-  if (bins.length === 0) {
+  const bars = useMemo(() => {
+    if (spec.kind === "bar") {
+      const seen = new Set<string>();
+      return toBarRows(rows, spec).map((b) => {
+        const anchor = seen.has(b.key) ? null : barKey(b.key);
+        seen.add(b.key);
+        return { label: b.key, count: b.value, anchor };
+      });
+    }
+    return toDistBins(rows, spec).map((b, i) => ({ label: b.label, count: b.count, anchor: `bin:${i}` as string | null }));
+  }, [rows, spec]);
+  if (bars.length === 0) {
     return (
       <div style={{ padding: 24, fontFamily: MONO, fontSize: 11, color: "var(--text-dim)" }}>
-        no bins — a dist view expects pre-binned rows (label + count)
+        {spec.kind === "bar"
+          ? "no bars — a bar view expects one row per category (key + value)"
+          : "no bins — a dist view expects pre-binned rows (label + count)"}
       </div>
     );
   }
-  const max = Math.max(...bins.map((b) => Math.abs(b.count)), 1);
+  const max = Math.max(...bars.map((b) => Math.abs(b.count)), 1);
   return (
     <div style={{ display: "flex", alignItems: "flex-end", gap: 3, padding: "18px 14px 4px", height: 260 }}>
-      {bins.map((bin, i) => {
-        const h = Math.max(2, Math.round((Math.abs(bin.count) / max) * 200));
+      {bars.map((bar, i) => {
+        const h = Math.max(2, Math.round((Math.abs(bar.count) / max) * 200));
+        const hovered = bar.anchor !== null && hoverKey === bar.anchor;
         return (
           <div
-            key={`${bin.label}-${i}`}
-            {...{ [ANCHOR_ATTR]: `bin:${i}`, [ANCHOR_LABEL_ATTR]: bin.label }}
-            tabIndex={0}
-            title={`${bin.label}: ${bin.count}`}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                onActivate(e.currentTarget);
-              }
-            }}
-            onMouseEnter={(e) => onHover(e.currentTarget)}
-            onMouseLeave={() => onHover(null)}
+            key={`${bar.label}-${i}`}
+            {...(bar.anchor ? { [ANCHOR_ATTR]: bar.anchor, [ANCHOR_LABEL_ATTR]: bar.label, tabIndex: 0 } : {})}
+            onKeyDown={
+              bar.anchor
+                ? (e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      onActivate(e.currentTarget);
+                    }
+                  }
+                : undefined
+            }
+            onMouseEnter={bar.anchor ? (e) => onHover(e.currentTarget) : undefined}
+            onMouseLeave={bar.anchor ? () => onHover(null) : undefined}
+            onFocus={bar.anchor ? (e) => onHover(e.currentTarget) : undefined}
+            onBlur={bar.anchor ? () => onHover(null) : undefined}
             style={{
               flex: 1,
               minWidth: 4,
@@ -666,18 +884,22 @@ function DistView({ spec, rows, onActivate, onHover }: RendererProps) {
               flexDirection: "column",
               alignItems: "center",
               gap: 4,
-              cursor: "pointer",
+              cursor: bar.anchor ? "pointer" : undefined,
               outline: "none",
             }}
           >
-            <span style={{ fontFamily: MONO, fontSize: 8.5, color: "var(--text-faint)" }}>
-              {bin.count}
+            <span style={{ fontFamily: MONO, fontSize: 8.5, color: hovered ? "var(--text-secondary)" : "var(--text-faint)" }}>
+              {bar.count}
             </span>
             <div
               style={{
                 width: "100%",
                 height: h,
-                background: bin.count >= 0 ? "var(--text-muted)" : "var(--text-faint)",
+                background: hovered
+                  ? "var(--text-secondary)"
+                  : bar.count >= 0
+                    ? "var(--text-muted)"
+                    : "var(--text-faint)",
                 borderRadius: "2px 2px 0 0",
               }}
             />
@@ -685,18 +907,43 @@ function DistView({ spec, rows, onActivate, onHover }: RendererProps) {
               style={{
                 fontFamily: MONO,
                 fontSize: 8.5,
-                color: "var(--text-dim)",
+                color: hovered ? "var(--text-primary)" : "var(--text-dim)",
                 maxWidth: "100%",
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
               }}
             >
-              {bin.label}
+              {bar.label}
             </span>
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/** Three days or less of data reads as a session (time-of-day ticks). */
+const INTRADAY_SPAN_S = 3 * 24 * 3600;
+
+/** The line renderer (T7): the spec's series (or every numeric column) over
+ *  one time axis on LinePanel, `pt:<iso>` anchors, the spec's markers on the
+ *  canvas. uPlot's legend is the hover readout. */
+function LineView({ spec, rows }: { spec: ViewSpec; rows: ViewRow[] }) {
+  const points = useMemo(() => toLinePoints(rows, spec), [rows, spec]);
+  const series = useMemo(() => points.series.map((s) => ({ label: s.label, values: s.values })), [points]);
+  const markers = useMemo(() => (spec.markers ?? []).map((m) => ({ ts: m.ts, label: m.label })), [spec.markers]);
+  if (points.xs.length === 0 || points.series.length === 0) {
+    return (
+      <div style={{ padding: 24, fontFamily: MONO, fontSize: 11, color: "var(--text-dim)" }}>
+        no series — a line view expects rows with a time column and at least one numeric column
+      </div>
+    );
+  }
+  const intraday = points.xs[points.xs.length - 1] - points.xs[0] <= INTRADAY_SPAN_S;
+  return (
+    <div style={{ padding: "8px 10px" }}>
+      <LinePanel xs={points.xs} series={series} points={points.ts} markers={markers} height={300} intraday={intraday} />
     </div>
   );
 }

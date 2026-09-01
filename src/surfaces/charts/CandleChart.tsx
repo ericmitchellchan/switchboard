@@ -17,6 +17,14 @@
 //
 // PALETTE: soft ramp for chrome (grid/axis/text from the surface tokens),
 // functional colours only for data (up/down candles, level tones).
+//
+// PRICE MODE (T7 — SWIT-61): `priceMode` = "points" | "percent" is applied to
+// the right price scale (`PriceScaleMode.Normal` / `.Percentage`) through
+// applyOptions like every other option — a prop, not an imperative handle,
+// because the chart instance never leaves this file. Anchors are BY TIME and
+// `series.priceToCoordinate` converts through the scale's mode (the library
+// re-bases to percent before mapping), so a pin on a bar and a marker on a
+// bar stay on that bar in either mode; only the axis labels change.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
@@ -25,6 +33,7 @@ import {
   ColorType,
   CrosshairMode,
   LineStyle,
+  PriceScaleMode,
   createChart,
   createSeriesMarkers,
 } from "lightweight-charts";
@@ -74,6 +83,9 @@ export type CandleChartProps = {
   /** Fit all bars on (re)load. Default true; a page that keeps the user's
    *  zoom across refreshes passes false. */
   fitOnLoad?: boolean;
+  /** The right price scale's mode: absolute points (default) or percent
+   *  change from the first visible bar (T7). */
+  priceMode?: "points" | "percent";
 };
 
 const CHROME = {
@@ -105,6 +117,7 @@ export default function CandleChart({
   highlightTs = null,
   markers,
   fitOnLoad = true,
+  priceMode = "points",
 }: CandleChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -188,6 +201,12 @@ export default function CandleChart({
       timeScale: { timeVisible: intraday, tickMarkFormatter: (t: Time) => fmtStamp(timeToIso(t), intraday) },
     });
   }, [intraday]);
+
+  useEffect(() => {
+    chartRef.current
+      ?.priceScale("right")
+      .applyOptions({ mode: priceMode === "percent" ? PriceScaleMode.Percentage : PriceScaleMode.Normal });
+  }, [priceMode]);
 
   // ── Data ─────────────────────────────────────────────────────────────────
   useEffect(() => {

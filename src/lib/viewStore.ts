@@ -29,12 +29,32 @@
 //     last line. A drilled child is the SAME artifact kind with a `drill.key`
 //     — its spec is derived from the parent's at render time, never written
 //     to disk, so `useView` takes the key and resolves in place.
+//
+// T7 (SWIT-61) — two more kinds and the hover's data:
+//   · `line` — rows `{time|ts, <series>…}` over one time axis; `series` is the
+//     spec's list or, inferred, every numeric non-time column
+//     (`lineSeriesColumns`). `toLinePoints` aligns them for uPlot (UTC seconds,
+//     ascending, duplicate seconds collapse last-wins like candles) and keeps
+//     the source ISO per point so the anchor is `pt:<iso>` — by time, like
+//     `bar:<iso>`, so markers and pins do not move when the axis re-scales.
+//   · `bar` — rows `{<keyColumn>, <valueColumn>}` by CATEGORY; `toBarRows` is
+//     the dist mapping under another name (label + one number), the anchor is
+//     `bar:<key>`. That prefix collides with the candle `bar:<iso>` on purpose
+//     — an anchor key is scoped to its view — and `drillKeyForAnchor` reads
+//     the SPEC's kind to tell them apart.
+//   · The hover tooltip prints EVERY field of the hovered row, so the
+//     bin/bar mappings carry the SOURCE ROW (`row`) and `rowFields` is the one
+//     formatter (key · value, in the row's own order).
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { readThreadView, readViewData } from "./ipc";
 
-export const VIEW_KINDS = ["table", "candles", "dist"] as const;
+export const VIEW_KINDS = ["table", "candles", "dist", "line", "bar"] as const;
 export type ViewKind = (typeof VIEW_KINDS)[number];
+
+export function isViewKind(v: unknown): v is ViewKind {
+  return typeof v === "string" && (VIEW_KINDS as readonly string[]).includes(v);
+}
 
 export type ViewSource =
   | { type: "file"; path: string }
@@ -58,6 +78,9 @@ export type ViewDrill = {
   source: ViewSource;
   columns?: string[];
   keyColumn?: string;
+  /** line: the series columns; bar: the value column (T7). */
+  series?: string[];
+  valueColumn?: string;
   definition?: string;
 };
 
@@ -68,6 +91,12 @@ export type ViewSpec = {
   source: ViewSource;
   columns?: string[];
   keyColumn?: string;
+  /** line (T7): the columns drawn as series; absent = inferred (every
+   *  numeric non-time column, `lineSeriesColumns`). */
+  series?: string[];
+  /** bar (T7): the column holding the bar's value; absent = the dist rule
+   *  (`count`/`n`/`value` by name, else the first numeric non-key column). */
+  valueColumn?: string;
   markers?: ViewMarker[];
   builtAt: string;
   builtBy: string;
@@ -159,6 +188,13 @@ export function parseViewFilters(raw: unknown): ViewFilter[] {
   return out;
 }
 
+/** A list of column names, or null when absent/empty (non-strings drop). */
+function parseColumnList(raw: unknown): string[] | null {
+  if (!Array.isArray(raw)) return null;
+  const list = raw.filter((c): c is string => typeof c === "string" && c.length > 0);
+  return list.length > 0 ? list : null;
+}
+
 /** Tolerant drill parse: null = no drill (a malformed one is ABSENT, never a
  *  broken parent). The child's source TEMPLATE must already be a valid
  *  source with `{key}` standing in — a query whose host is not a literal
@@ -166,7 +202,7 @@ export function parseViewFilters(raw: unknown): ViewFilter[] {
 export function parseViewDrill(raw: unknown): ViewDrill | null {
   if (!isRecord(raw)) return null;
   const kind = raw.kind;
-  if (kind !== "table" && kind !== "candles" && kind !== "dist") return null;
+  if (!isViewKind(kind)) return null;
   const src = parseViewSource(raw.source);
   if ("error" in src) return null;
   const drill: ViewDrill = {
@@ -179,6 +215,9 @@ export function parseViewDrill(raw: unknown): ViewDrill | null {
     if (columns.length > 0) drill.columns = columns;
   }
   if (typeof raw.keyColumn === "string" && raw.keyColumn.length > 0) drill.keyColumn = raw.keyColumn;
+  const series = parseColumnList(raw.series);
+  if (series) drill.series = series;
+  if (typeof raw.valueColumn === "string" && raw.valueColumn.length > 0) drill.valueColumn = raw.valueColumn;
   if (typeof raw.definition === "string" && raw.definition.trim().length > 0) {
     drill.definition = raw.definition.trim().slice(0, VIEW_DEFINITION_CAP);
   }
@@ -199,7 +238,7 @@ export function parseViewSpec(raw: string): { spec: ViewSpec | null; specError: 
   }
   if (!isRecord(data)) return { spec: null, specError: "the view spec is not an object" };
   const kind = data.kind;
-  if (kind !== "table" && kind !== "candles" && kind !== "dist") {
+  if (!isViewKind(kind)) {
     return { spec: null, specError: `unknown view kind: ${String(data.kind)}` };
   }
   const id = typeof data.id === "string" && data.id.length > 0 ? data.id : null;
@@ -219,6 +258,10 @@ export function parseViewSpec(raw: string): { spec: ViewSpec | null; specError: 
     spec.columns = data.columns.filter((c): c is string => typeof c === "string" && c.length > 0);
   }
   if (typeof data.keyColumn === "string" && data.keyColumn.length > 0) spec.keyColumn = data.keyColumn;
+  // T7 — line series / bar value column, tolerated as ABSENT (inferred).
+  const series = parseColumnList(data.series);
+  if (series) spec.series = series;
+  if (typeof data.valueColumn === "string" && data.valueColumn.length > 0) spec.valueColumn = data.valueColumn;
   // T6 — the three optional fields, each tolerated as ABSENT when malformed
   // (a bad drill must not take the parent view with it; the spec is still a
   // renderable declaration without them).
@@ -324,32 +367,162 @@ export function toOhlcRows(
   return out;
 }
 
-export type DistBin = { label: string; count: number };
+export type DistBin = { label: string; count: number; row: ViewRow };
 
 /** Rows → PRE-BINNED distribution bars: the agent aggregates (that is its
- *  job); the renderer draws. Label = the key column; count = the first
- *  numeric column that is not the label (or `count`/`n`/`value` by name). */
+ *  job); the renderer draws. Label = the key column; count = the spec's
+ *  `valueColumn` when declared, else the first numeric column that is not
+ *  the label (or `count`/`n`/`value` by name). Each bin keeps its SOURCE ROW
+ *  for the hover tooltip (T7). */
 export function toDistBins(rows: ViewRow[], spec: ViewSpec): DistBin[] {
   const out: DistBin[] = [];
   for (const row of rows) {
     const label = rowAnchorId(row, spec);
     if (label === null) continue;
-    const named = ["count", "n", "value"].find((k) => Number.isFinite(Number(row[k])));
-    let count: number | null = named !== undefined ? Number(row[named]) : null;
-    if (count === null) {
-      for (const [k, v] of Object.entries(row)) {
-        if (String(row[spec.keyColumn ?? ""] ?? "") === String(v) && k === (spec.keyColumn ?? "")) continue;
-        const n = Number(v);
-        if (Number.isFinite(n) && String(v).trim() !== label) {
-          count = n;
-          break;
+    let count: number | null = null;
+    if (spec.valueColumn) {
+      const raw = row[spec.valueColumn];
+      const n = Number(raw);
+      count = raw !== null && raw !== undefined && raw !== "" && Number.isFinite(n) ? n : null;
+    } else {
+      const named = ["count", "n", "value"].find((k) => Number.isFinite(Number(row[k])));
+      count = named !== undefined ? Number(row[named]) : null;
+      if (count === null) {
+        for (const [k, v] of Object.entries(row)) {
+          if (String(row[spec.keyColumn ?? ""] ?? "") === String(v) && k === (spec.keyColumn ?? "")) continue;
+          const n = Number(v);
+          if (Number.isFinite(n) && String(v).trim() !== label) {
+            count = n;
+            break;
+          }
         }
       }
     }
     if (count === null || !Number.isFinite(count)) continue;
-    out.push({ label, count });
+    out.push({ label, count, row });
   }
   return out;
+}
+
+export type BarRow = { key: string; value: number; row: ViewRow };
+
+/** Rows → CATEGORY bars (T7): the dist mapping under the bar kind's names —
+ *  `key` = the key column's value (the anchor, `bar:<key>`), `value` = the
+ *  spec's `valueColumn` else the dist rule. Pure. */
+export function toBarRows(rows: ViewRow[], spec: ViewSpec): BarRow[] {
+  return toDistBins(rows, spec).map((b) => ({ key: b.label, value: b.count, row: b.row }));
+}
+
+/** The anchor key for a category bar (T7). */
+export function barKey(key: string): string {
+  return `bar:${key}`;
+}
+
+/** The anchor key for a line point (T7): by time, like a candle's. */
+export function pointKey(ts: string): string {
+  return `pt:${ts}`;
+}
+
+const TIME_COLUMNS: readonly string[] = ["time", "ts"];
+
+/** The time cell of a row as an ISO string: `ts` or `time`, ISO or epoch
+ *  seconds (the same two forms toOhlcRows takes). Pure; null when absent. */
+export function rowTimeIso(row: ViewRow): string | null {
+  const raw = row.ts ?? row.time;
+  if (typeof raw === "string") return raw.trim().length > 0 ? raw : null;
+  if (typeof raw === "number" && Number.isFinite(raw)) return new Date(raw * 1000).toISOString();
+  return null;
+}
+
+/** ISO → UTC seconds with the candle rule (a stamp with NO zone is UTC —
+ *  Lodestar serialises naive `ts_utc` columns exactly like that); null when
+ *  unparseable. Same body as surfaces/charts/candles.ts's `isoToUtcSeconds`,
+ *  kept here so this module's import graph stays its own. */
+export function isoToSeconds(ts: string): number | null {
+  const t = ts.trim().replace(" ", "T");
+  const zoned = /(Z|[+-]\d\d:?\d\d)$/i.test(t) ? t : `${t}Z`;
+  const ms = Date.parse(zoned);
+  if (!Number.isFinite(ms)) return null;
+  return Math.floor(ms / 1000);
+}
+
+function numericCell(v: unknown): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v !== "string" || v.trim() === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** The line kind's series columns (T7): the spec's `series` when declared,
+ *  else every non-time column whose FIRST non-empty cell is numeric, in
+ *  first-seen order. Pure; [] when nothing qualifies. */
+export function lineSeriesColumns(rows: ViewRow[], spec: ViewSpec): string[] {
+  if (spec.series && spec.series.length > 0) return spec.series;
+  const out: string[] = [];
+  const decided = new Set<string>();
+  for (const row of rows) {
+    for (const [k, v] of Object.entries(row)) {
+      if (decided.has(k) || TIME_COLUMNS.includes(k)) continue;
+      if (v === null || v === undefined || v === "") continue;
+      decided.add(k);
+      if (numericCell(v) !== null) out.push(k);
+    }
+  }
+  return out;
+}
+
+export type LinePoints = {
+  /** UTC seconds, ascending, unique. */
+  xs: number[];
+  /** The source ISO per x — the `pt:<iso>` anchor is built from it. */
+  ts: string[];
+  series: { label: string; values: (number | null)[] }[];
+  /** The source row per x (the hover tooltip's fields). */
+  rows: ViewRow[];
+};
+
+/** Rows → aligned line series (T7): a row missing a parseable time drops
+ *  alone; a non-numeric cell is a GAP (null), not a dropped row; duplicate
+ *  seconds collapse last-wins (uPlot wants a strictly ascending x, and a
+ *  duplicate is a data bug we render past). Pure. */
+export function toLinePoints(rows: ViewRow[], spec: ViewSpec): LinePoints {
+  const columns = lineSeriesColumns(rows, spec);
+  const byTime = new Map<number, { ts: string; row: ViewRow }>();
+  for (const row of rows) {
+    const iso = rowTimeIso(row);
+    if (iso === null) continue;
+    const t = isoToSeconds(iso);
+    if (t === null) continue;
+    byTime.set(t, { ts: iso, row });
+  }
+  const times = [...byTime.keys()].sort((a, b) => a - b);
+  const at = (t: number) => byTime.get(t) as { ts: string; row: ViewRow };
+  return {
+    xs: times,
+    ts: times.map((t) => at(t).ts),
+    rows: times.map((t) => at(t).row),
+    series: columns.map((label) => ({ label, values: times.map((t) => numericCell(at(t).row[label])) })),
+  };
+}
+
+/** Every field of a row as `[key, printed value]` in the row's own order —
+ *  the hover tooltip's lines (T7). Objects print as compact JSON, null/
+ *  undefined as an empty string; long values are cut so the tooltip stays a
+ *  card. Pure. */
+export function rowFields(row: ViewRow, cap = 80): [string, string][] {
+  return Object.entries(row).map(([k, v]) => {
+    let s: string;
+    if (v === null || v === undefined) s = "";
+    else if (typeof v === "object") {
+      try {
+        s = JSON.stringify(v);
+      } catch {
+        s = String(v);
+      }
+    } else s = String(v);
+    return [k, s.length > cap ? `${s.slice(0, cap - 1)}…` : s];
+  });
 }
 
 // ── Filters (T6): client-side slices over the loaded rows ────────────────────
@@ -432,9 +605,11 @@ export function drillPathKey(key: string): string | null {
 
 /** The anchor's key VALUE + label for the drill / the `→ thread` sentence,
  *  from an anchor key the renderers stamp: `row:<value>`, `bin:<n>` (the bin's
- *  label), `bar:<iso>` (the marker sitting on that bar — its id, else its
- *  ts — or the bar's own ts when no marker does). Pure; null when the anchor
- *  is not one of ours. */
+ *  label), `bar:<iso>` on candles / `pt:<iso>` on a line (the marker sitting
+ *  on that bar or point — its id, else its ts — or the bar's own ts when no
+ *  marker does), `bar:<key>` on a BAR view (the category — the spec's kind
+ *  decides which `bar:` this is). Pure; null when the anchor is not one of
+ *  ours. */
 export function drillKeyForAnchor(
   anchorKey: string,
   ctx: { rows: ViewRow[]; spec: ViewSpec }
@@ -449,12 +624,42 @@ export function drillKeyForAnchor(
     const bin = toDistBins(ctx.rows, ctx.spec)[n];
     return bin ? { key: bin.label, label: bin.label } : null;
   }
-  if (anchorKey.startsWith("bar:")) {
-    const iso = anchorKey.slice(4);
+  if (anchorKey.startsWith("bar:") && ctx.spec.kind === "bar") {
+    const key = anchorKey.slice(4);
+    return key.length > 0 && toBarRows(ctx.rows, ctx.spec).some((b) => b.key === key) ? { key, label: key } : null;
+  }
+  if (anchorKey.startsWith("bar:") || anchorKey.startsWith("pt:")) {
+    const iso = anchorKey.slice(anchorKey.indexOf(":") + 1);
     if (iso.length === 0) return null;
-    const marker = markerAtBar(toOhlcRows(ctx.rows), ctx.spec.markers ?? [], iso);
+    const bars: { ts: string }[] = anchorKey.startsWith("pt:")
+      ? toLinePoints(ctx.rows, ctx.spec).ts.map((ts) => ({ ts }))
+      : toOhlcRows(ctx.rows);
+    const marker = markerAtBar(bars, ctx.spec.markers ?? [], iso);
     if (marker) return { key: marker.id ?? marker.ts, label: marker.label || marker.ts };
     return { key: iso, label: iso };
+  }
+  return null;
+}
+
+/** The SOURCE ROW behind an anchor the DOM renderers stamp — what the hover
+ *  tooltip prints (T7): `row:<key>` → the first row whose key value is that
+ *  key (the table's own dedupe rule), `bin:<n>` → that bin's row, `bar:<key>`
+ *  on a bar view → that category's row. Canvas anchors (`bar:<iso>` on
+ *  candles, `pt:<iso>`) answer null — those charts carry their own readout.
+ *  Pure. */
+export function rowForAnchor(anchorKey: string, ctx: { rows: ViewRow[]; spec: ViewSpec }): ViewRow | null {
+  if (anchorKey.startsWith("row:")) {
+    const key = anchorKey.slice(4);
+    return ctx.rows.find((r) => rowAnchorId(r, ctx.spec) === key) ?? null;
+  }
+  if (anchorKey.startsWith("bin:")) {
+    const n = Number(anchorKey.slice(4));
+    if (!Number.isInteger(n) || n < 0) return null;
+    return toDistBins(ctx.rows, ctx.spec)[n]?.row ?? null;
+  }
+  if (anchorKey.startsWith("bar:") && ctx.spec.kind === "bar") {
+    const key = anchorKey.slice(4);
+    return toBarRows(ctx.rows, ctx.spec).find((b) => b.key === key)?.row ?? null;
   }
   return null;
 }
@@ -526,6 +731,8 @@ export function resolveDrill(
   };
   if (drill.columns) spec.columns = drill.columns;
   if (drill.keyColumn) spec.keyColumn = drill.keyColumn;
+  if (drill.series) spec.series = drill.series;
+  if (drill.valueColumn) spec.valueColumn = drill.valueColumn;
   if (drill.definition) spec.definition = drill.definition;
   return { spec, error: null };
 }
@@ -545,6 +752,8 @@ export function specLines(spec: ViewSpec): string[] {
   if (spec.source.type === "query" && spec.source.body) lines.push(`body      ${spec.source.body}`);
   if (spec.columns && spec.columns.length > 0) lines.push(`columns   ${spec.columns.join(" · ")}`);
   if (spec.keyColumn) lines.push(`key       ${spec.keyColumn}`);
+  if (spec.series && spec.series.length > 0) lines.push(`series    ${spec.series.join(" · ")}`);
+  if (spec.valueColumn) lines.push(`value     ${spec.valueColumn}`);
   if (spec.markers && spec.markers.length > 0) lines.push(`markers   ${spec.markers.length}`);
   if (spec.filters && spec.filters.length > 0) {
     lines.push(`filters   ${spec.filters.map((f) => `${f.label ?? f.column} (${f.kind})`).join(" · ")}`);

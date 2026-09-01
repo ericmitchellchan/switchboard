@@ -157,7 +157,9 @@ describe("toOhlcRows / toDistBins", () => {
       ],
       spec
     );
-    expect(bins).toEqual([
+    // T7: each bin also carries its source `row` (the hover tooltip); the
+    // label/count rule is what this asserts.
+    expect(bins).toMatchObject([
       { label: "09", count: 4 },
       { label: "10", count: 7 },
       { label: "11", count: 250.5 },
@@ -504,5 +506,310 @@ describe("T6 smoke — setup table → per-setup instances, from files in .sb-vi
     const second = resolveDrill(parent, rowAnchorId(rows[1], parent)!);
     expect(parseViewRows(fs.readFileSync(pathMod.join(cwd, (second.spec!.source as { path: string }).path), "utf8"))).toHaveLength(1);
     expect(viewPinScope({}, hit.key)).toBe("/MNQ%20short%20flat");
+  });
+});
+
+// ── T7 (SWIT-61): line + bar kinds, the hover's row, the anchors ─────────────
+
+import {
+  isViewKind,
+  lineSeriesColumns,
+  toLinePoints,
+  toBarRows,
+  barKey,
+  pointKey,
+  rowForAnchor,
+  rowFields,
+  isoToSeconds,
+  VIEW_KINDS,
+} from "./viewStore";
+
+const T7_LINE_SPEC: ViewSpec = {
+  id: "nq",
+  kind: "line",
+  title: "NQ daily close",
+  source: { type: "file", path: "out/nq.json" },
+  builtAt: "2026-09-01T10:00:00Z",
+  builtBy: "agent",
+  markers: [{ ts: "2026-06-02T00:00:10Z", label: "fomc", id: "m-1" }],
+};
+
+const T7_LINE_ROWS = [
+  { time: "2026-06-03T00:00:00Z", close: 20100, rsi: "55.5", note: "b" },
+  { time: "2026-06-01T00:00:00Z", close: 20000, rsi: 50, note: "a" },
+  { time: "2026-06-02T00:00:00Z", close: null, rsi: 52, note: "gap" },
+  { time: "2026-06-02T00:00:00Z", close: 20050, rsi: 51, note: "dup wins" },
+  { time: 1780704000, close: 20200, rsi: 60 }, // 2026-06-06 epoch seconds
+  { close: 1, rsi: 2 }, // no time — drops alone
+];
+
+const T7_BAR_SPEC: ViewSpec = {
+  id: "setups",
+  kind: "bar",
+  title: "Windows by setup",
+  source: { type: "file", path: "out/setups.json" },
+  keyColumn: "setup",
+  valueColumn: "n",
+  builtAt: "2026-09-01T10:00:00Z",
+  builtBy: "agent",
+};
+
+const T7_BAR_ROWS = [
+  { setup: "@NQ 1m", n: 25733, avg_fwd: 0.01 },
+  { setup: "@ES 1m", n: 26074, avg_fwd: -0.02 },
+  { setup: "@NQ 1m", n: 1, avg_fwd: 9 }, // duplicate category
+  { setup: "bad", n: "not a number" },
+];
+
+describe("T7 — kinds + spec round-trip", () => {
+  it("line and bar are kinds; unknown is not; the parse round-trips series / valueColumn on spec AND drill", () => {
+    expect(VIEW_KINDS).toEqual(["table", "candles", "dist", "line", "bar"]);
+    expect(isViewKind("line") && isViewKind("bar")).toBe(true);
+    expect(isViewKind("pie")).toBe(false);
+    const raw = JSON.stringify({
+      ...JSON.parse(SPEC_RAW),
+      kind: "line",
+      series: ["close", 7, ""],
+      valueColumn: "n",
+      drill: { kind: "bar", title: "{key}", source: { type: "file", path: "per/{key}.json" }, series: ["x"], valueColumn: "v" },
+    });
+    const { spec, specError } = parseViewSpec(raw);
+    expect(specError).toBeNull();
+    expect(spec!.kind).toBe("line");
+    expect(spec!.series).toEqual(["close"]);
+    expect(spec!.valueColumn).toBe("n");
+    expect(spec!.drill).toMatchObject({ kind: "bar", series: ["x"], valueColumn: "v" });
+    // The child inherits both; specLines prints both.
+    const child = resolveDrill(spec!, "k");
+    expect(child.spec).toMatchObject({ kind: "bar", series: ["x"], valueColumn: "v" });
+    expect(specLines(spec!)).toContainEqual(expect.stringMatching(/^series {4}close$/));
+    expect(specLines(spec!)).toContainEqual(expect.stringMatching(/^value {5}n$/));
+    // Malformed = absent, never a broken spec.
+    const loose = parseViewSpec(JSON.stringify({ ...JSON.parse(SPEC_RAW), kind: "bar", series: "close", valueColumn: 3 }));
+    expect(loose.spec!.kind).toBe("bar");
+    expect("series" in loose.spec!).toBe(false);
+    expect("valueColumn" in loose.spec!).toBe(false);
+    expect(parseViewSpec(JSON.stringify({ ...JSON.parse(SPEC_RAW), kind: "pie" })).specError).toMatch(/unknown view kind/);
+  });
+});
+
+describe("T7 — line: series inference + aligned points", () => {
+  it("infers every numeric non-time column (first non-empty cell decides); the spec's list wins", () => {
+    expect(lineSeriesColumns(T7_LINE_ROWS, T7_LINE_SPEC)).toEqual(["close", "rsi"]);
+    expect(lineSeriesColumns(T7_LINE_ROWS, { ...T7_LINE_SPEC, series: ["rsi"] })).toEqual(["rsi"]);
+    expect(lineSeriesColumns([{ ts: "2026-01-01T00:00:00Z", label: "x" }], T7_LINE_SPEC)).toEqual([]);
+  });
+
+  it("toLinePoints: ascending unique seconds, ISO kept per point, gaps as null, duplicates last-wins, no-time rows drop", () => {
+    const p = toLinePoints(T7_LINE_ROWS, T7_LINE_SPEC);
+    expect(p.xs).toEqual([
+      isoToSeconds("2026-06-01T00:00:00Z"),
+      isoToSeconds("2026-06-02T00:00:00Z"),
+      isoToSeconds("2026-06-03T00:00:00Z"),
+      1780704000,
+    ]);
+    expect(p.ts[1]).toBe("2026-06-02T00:00:00Z");
+    expect(p.ts[3]).toBe("2026-06-06T00:00:00.000Z");
+    expect(p.series.map((s) => s.label)).toEqual(["close", "rsi"]);
+    expect(p.series[0].values).toEqual([20000, 20050, 20100, 20200]);
+    expect(p.series[1].values).toEqual([50, 51, 55.5, 60]);
+    expect(p.rows[1].note).toBe("dup wins");
+    // A gap stays a gap when the last row for that second has none.
+    const gapped = toLinePoints([T7_LINE_ROWS[1], T7_LINE_ROWS[2]], T7_LINE_SPEC);
+    expect(gapped.series[0].values).toEqual([20000, null]);
+    // A naive stamp (DuckDB's TIMESTAMP → "YYYY-MM-DD HH:MM:SS") is UTC, like candles.
+    expect(isoToSeconds("2026-06-01 00:00:00")).toBe(isoToSeconds("2026-06-01T00:00:00Z"));
+    expect(isoToSeconds("nope")).toBeNull();
+  });
+
+  it("pt:<iso> resolves like bar:<iso>: the marker on the point, else the point; pointKey builds it", () => {
+    expect(pointKey("2026-06-02T00:00:00Z")).toBe("pt:2026-06-02T00:00:00Z");
+    const ctx = { rows: T7_LINE_ROWS, spec: T7_LINE_SPEC };
+    expect(drillKeyForAnchor("pt:2026-06-02T00:00:00Z", ctx)).toEqual({ key: "m-1", label: "fomc" });
+    expect(drillKeyForAnchor("pt:2026-06-03T00:00:00Z", ctx)).toEqual({
+      key: "2026-06-03T00:00:00Z",
+      label: "2026-06-03T00:00:00Z",
+    });
+    expect(drillKeyForAnchor("pt:", ctx)).toBeNull();
+    // Canvas anchors carry their own readout — no tooltip row.
+    expect(rowForAnchor("pt:2026-06-02T00:00:00Z", ctx)).toBeNull();
+  });
+});
+
+describe("T7 — bar: rows → category bars → anchors", () => {
+  it("toBarRows keys on the key column, reads valueColumn, keeps the source row; bad values drop", () => {
+    const bars = toBarRows(T7_BAR_ROWS, T7_BAR_SPEC);
+    expect(bars.map((b) => [b.key, b.value])).toEqual([
+      ["@NQ 1m", 25733],
+      ["@ES 1m", 26074],
+      ["@NQ 1m", 1],
+    ]);
+    expect(bars[0].row).toBe(T7_BAR_ROWS[0]);
+    expect(barKey("@NQ 1m")).toBe("bar:@NQ 1m");
+    // Without valueColumn the dist rule applies (count/n/value by name).
+    expect(toBarRows(T7_BAR_ROWS, { ...T7_BAR_SPEC, valueColumn: undefined })[0].value).toBe(25733);
+    // valueColumn also steers dist bins now.
+    expect(toDistBins(T7_BAR_ROWS, { ...T7_BAR_SPEC, kind: "dist", valueColumn: "avg_fwd" })[0]).toMatchObject({
+      label: "@NQ 1m",
+      count: 0.01,
+    });
+  });
+
+  it("bar:<key> is the CATEGORY on a bar view and the CANDLE on candles — the spec's kind decides", () => {
+    const ctx = { rows: T7_BAR_ROWS, spec: T7_BAR_SPEC };
+    expect(drillKeyForAnchor("bar:@ES 1m", ctx)).toEqual({ key: "@ES 1m", label: "@ES 1m" });
+    expect(drillKeyForAnchor("bar:nope", ctx)).toBeNull();
+    expect(rowForAnchor("bar:@ES 1m", ctx)).toBe(T7_BAR_ROWS[1]);
+    // The FIRST duplicate is the row behind the anchor (the renderer's rule).
+    expect(rowForAnchor("bar:@NQ 1m", ctx)).toBe(T7_BAR_ROWS[0]);
+    const candleCtx = {
+      rows: [{ ts: "2026-08-31T10:34:00Z", open: 1, high: 2, low: 1, close: 2 }],
+      spec: { ...T7_BAR_SPEC, kind: "candles" as const },
+    };
+    expect(drillKeyForAnchor("bar:2026-08-31T10:34:00Z", candleCtx)).toEqual({
+      key: "2026-08-31T10:34:00Z",
+      label: "2026-08-31T10:34:00Z",
+    });
+    // The pin scope is kind-agnostic: a bar view's scope is the same string.
+    expect(viewPinScope({ setup: "@ES 1m" }, null)).toBe("?setup=%40ES%201m");
+  });
+});
+
+describe("T7 — the hover tooltip's data", () => {
+  it("rowForAnchor finds the row behind row:/bin: anchors; rowFields prints every field in order", () => {
+    expect(rowForAnchor("row:MNQ long", { rows: T6_ROWS, spec: T6_SPEC })).toBe(T6_ROWS[1]);
+    expect(rowForAnchor("row:nope", { rows: T6_ROWS, spec: T6_SPEC })).toBeNull();
+    const distSpec = { ...T6_SPEC, kind: "dist" as const, keyColumn: "hour", columns: undefined };
+    const distRows = [
+      { hour: "09", count: 4, pct: 0.3 },
+      { hour: "10", count: 7, pct: 0.7 },
+    ];
+    expect(rowForAnchor("bin:1", { rows: distRows, spec: distSpec })).toBe(distRows[1]);
+    expect(rowForAnchor("bin:x", { rows: distRows, spec: distSpec })).toBeNull();
+    expect(rowFields({ a: 1, b: null, c: "x", d: { k: [1, 2] } })).toEqual([
+      ["a", "1"],
+      ["b", ""],
+      ["c", "x"],
+      ["d", '{"k":[1,2]}'],
+    ]);
+    expect(rowFields({ long: "y".repeat(100) }, 10)[0][1]).toBe("yyyyyyyyy…");
+  });
+});
+
+// ── T7 smoke: a REAL line + bar from research.duckdb, through the pure path ──
+// NQ daily close (from the 1h bars) as a line, pattern-window count by
+// symbol·timeframe as bars, written into the gitignored .sb-views/ exactly as
+// an agent would write them and read back through parseViewRows + the new
+// helpers. DuckDB is reached through python; when python or duckdb or the
+// file is missing the rows are SYNTHESISED and the test says so.
+describe("T7 smoke — NQ daily close as a line, windows by setup as bars, from research.duckdb", () => {
+  const nodeRequire = createRequire(import.meta.url);
+  const fs = nodeRequire("node:fs") as {
+    mkdirSync: (p: string, o: { recursive: boolean }) => void;
+    writeFileSync: (p: string, c: string) => void;
+    readFileSync: (p: string, e: string) => string;
+    rmSync: (p: string, o: { recursive: boolean; force: boolean }) => void;
+    existsSync: (p: string) => boolean;
+  };
+  const pathMod = nodeRequire("node:path") as { join: (...p: string[]) => string; resolve: (...p: string[]) => string };
+  const cp = nodeRequire("node:child_process") as {
+    execFileSync: (f: string, a: string[], o: { encoding: string; timeout: number; stdio: unknown }) => string;
+  };
+  const cwd = pathMod.resolve(".sb-views", "t7-smoke");
+  const DB = "C:/Users/ericm/projects/lodestar/data/research.duckdb";
+  afterEach(() => fs.rmSync(cwd, { recursive: true, force: true }));
+
+  type Payload = { line: Record<string, unknown>[]; bar: Record<string, unknown>[] };
+  const fromDuckdb = (): Payload | null => {
+    if (!fs.existsSync(DB)) return null;
+    const script = [
+      "import duckdb, json",
+      `c = duckdb.connect(${JSON.stringify(DB)}, read_only=True)`,
+      "line = c.execute(\"select strftime(cast(date_trunc('day', ts) as timestamp), '%Y-%m-%d %H:%M:%S') as ts, last(close order by ts) as close, coalesce(avg(rsi), 0) as rsi from bar_features where symbol='@NQ' and timeframe='1h' group by 1 order by 1\").fetchall()",
+      "bar = c.execute(\"select symbol || ' ' || timeframe as setup, count(*) as n, coalesce(round(avg(fwd_ret_pct), 4), 0) as avg_fwd from pattern_windows group by 1 order by 1\").fetchall()",
+      "print(json.dumps({'line': [{'ts': r[0], 'close': float(r[1]), 'rsi': float(r[2])} for r in line], 'bar': [{'setup': r[0], 'n': int(r[1]), 'avg_fwd': float(r[2])} for r in bar]}))",
+    ].join("\n");
+    try {
+      const out = cp.execFileSync("python", ["-c", script], { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "ignore"] });
+      const parsed = JSON.parse(out) as Payload;
+      return parsed.line.length > 0 && parsed.bar.length > 0 ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+  const synthetic = (): Payload => ({
+    line: Array.from({ length: 30 }, (_, i) => ({
+      ts: `2026-06-${String(i + 1).padStart(2, "0")} 00:00:00`,
+      close: 20000 + i * 12.5,
+      rsi: 50 + (i % 7),
+    })),
+    bar: ["@ES 15m", "@ES 1h", "@NQ 15m", "@NQ 1h"].map((setup, i) => ({ setup, n: 1000 + i * 137, avg_fwd: 0.01 * i })),
+  });
+
+  it("the files an agent would write parse as rows and map to points / bars with anchors", () => {
+    const real = fromDuckdb();
+    const payload = real ?? synthetic();
+    console.info(
+      `[t7 smoke] rows from ${real ? "research.duckdb" : "SYNTHETIC data (python/duckdb/db unavailable)"}: line ${payload.line.length}, bar ${payload.bar.length}`
+    );
+    fs.rmSync(cwd, { recursive: true, force: true });
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.writeFileSync(pathMod.join(cwd, "nq-daily.json"), JSON.stringify(payload.line));
+    fs.writeFileSync(pathMod.join(cwd, "windows-by-setup.json"), JSON.stringify(payload.bar));
+    const lineSpecRaw = JSON.stringify({
+      id: "nq-daily",
+      kind: "line",
+      title: "NQ daily close",
+      source: { type: "file", path: "nq-daily.json" },
+      series: ["close"],
+      builtAt: "2026-09-01T10:00:00Z",
+      builtBy: "agent",
+    });
+    const barSpecRaw = JSON.stringify({
+      id: "windows",
+      kind: "bar",
+      title: "Pattern windows by setup",
+      source: { type: "file", path: "windows-by-setup.json" },
+      keyColumn: "setup",
+      valueColumn: "n",
+      builtAt: "2026-09-01T10:00:00Z",
+      builtBy: "agent",
+    });
+    fs.writeFileSync(pathMod.join(cwd, "views-nq-daily.json"), lineSpecRaw);
+    fs.writeFileSync(pathMod.join(cwd, "views-windows.json"), barSpecRaw);
+
+    const line = parseViewSpec(fs.readFileSync(pathMod.join(cwd, "views-nq-daily.json"), "utf8"));
+    expect(line.specError).toBeNull();
+    const lineRows = parseViewRows(fs.readFileSync(pathMod.join(cwd, "nq-daily.json"), "utf8"))!;
+    expect(lineRows.length).toBe(payload.line.length);
+    const points = toLinePoints(lineRows, line.spec!);
+    expect(points.xs.length).toBe(lineRows.length);
+    for (let i = 1; i < points.xs.length; i++) expect(points.xs[i]).toBeGreaterThan(points.xs[i - 1]);
+    expect(points.series.map((s) => s.label)).toEqual(["close"]);
+    expect(points.series[0].values.every((v) => typeof v === "number")).toBe(true);
+    // Inference without `series` picks close + rsi and nothing else.
+    expect(lineSeriesColumns(lineRows, { ...line.spec!, series: undefined })).toEqual(["close", "rsi"]);
+    // A point's anchor resolves back to its own day (no markers declared).
+    const anchor = pointKey(points.ts[0]);
+    expect(drillKeyForAnchor(anchor, { rows: lineRows, spec: line.spec! })).toEqual({ key: points.ts[0], label: points.ts[0] });
+
+    const bar = parseViewSpec(fs.readFileSync(pathMod.join(cwd, "views-windows.json"), "utf8"));
+    expect(bar.specError).toBeNull();
+    const barRows = parseViewRows(fs.readFileSync(pathMod.join(cwd, "windows-by-setup.json"), "utf8"))!;
+    const bars = toBarRows(barRows, bar.spec!);
+    expect(bars.length).toBe(payload.bar.length);
+    expect(bars.every((b) => Number.isInteger(b.value) && b.value > 0)).toBe(true);
+    const first = bars[0];
+    expect(drillKeyForAnchor(barKey(first.key), { rows: barRows, spec: bar.spec! })).toEqual({ key: first.key, label: first.key });
+    expect(rowFields(rowForAnchor(barKey(first.key), { rows: barRows, spec: bar.spec! })!).map(([k]) => k)).toEqual([
+      "setup",
+      "n",
+      "avg_fwd",
+    ]);
+    if (real) {
+      // Ground truth of the checkout's data: NQ 1h bars span Dec 2022 → Jul 2026.
+      expect(points.ts[0].startsWith("2022-12-14")).toBe(true);
+      expect(bars.map((b) => b.key)).toContain("@NQ 1m");
+    }
   });
 });
