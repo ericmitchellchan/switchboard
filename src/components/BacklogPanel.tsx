@@ -498,7 +498,7 @@ export function BacklogListing({
 }) {
   if (items.length === 0) return <>{empty}</>;
   return (
-    <div style={{ margin: "0 -8px" }}>
+    <div>
       {items.slice(0, limit).map((i) => (
         <BacklogRow key={i.id} item={i} projectOptions={projectOptions} />
       ))}

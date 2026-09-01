@@ -10,6 +10,14 @@
 //   Between threads  → the last hour of cross-thread posts.
 //   Listening        → announced dev servers, probed (never "healthy").
 //   Kept views       → the scratchpad listing (_scratch/*.view.json).
+//
+// SKIN (post-0.5.0, SWIT-54 — Eric: "home screen is still this weird boxy
+// format"): ONE left-aligned column (max 720px, 18px padding) of kit BAND
+// sections; every item is a kit LIST ROW (no border, no elevated fill, hover
+// `--bg-active`, focus draws the inset bar, dim meta on the right); an empty
+// section is one dim line, never a dashed box; the question controls are the
+// same OptionRow list the question tab draws. Skin only — every click and
+// every write goes through the same bridge it did.
 import { useCallback, useEffect, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { PulsingDot } from "./PulsingDot";
@@ -27,6 +35,7 @@ import {
   parseAnswersFile,
   parseInboxFile,
   mergePage,
+  orderedOptions,
 } from "../lib/pageStore";
 import type { InboxPost, PageItem, PageQuestion, RenderedPage } from "../lib/pageStore";
 import { answerQuestion } from "../lib/panelStore";
@@ -35,6 +44,7 @@ import { navigate } from "../lib/route";
 import { useAllKnownServers, serverKey } from "../lib/devServer";
 import { useBacklog, openItems, HOME_BACKLOG_LIMIT } from "../lib/backlogStore";
 import { BacklogListing } from "./BacklogPanel";
+import { OptionRow } from "./kb/OptionRow";
 
 const MONO = "var(--font-mono)";
 
@@ -56,27 +66,97 @@ const BLOCK_TITLE_RIGHT: CSSProperties = {
   color: "var(--text-faint)",
 };
 
-const RESERVED_BOX: CSSProperties = {
-  border: "1px dashed var(--border-subtle)",
-  padding: 14,
-  fontFamily: MONO,
-  fontSize: 10.5,
-  color: "var(--text-dim)",
-  lineHeight: 1.6,
-};
-
-const CARD: CSSProperties = {
-  border: "1px solid var(--border)",
-  background: "var(--bg-elevated)",
-  padding: "8px 10px",
+/** kit: the empty-section line — one dim line, no box. */
+const EMPTY_LINE: CSSProperties = {
+  padding: "5px 8px",
   fontFamily: MONO,
   fontSize: 11,
-  color: "var(--text-secondary)",
-  display: "flex",
-  gap: 8,
-  alignItems: "flex-start",
-  marginBottom: 5,
+  color: "var(--text-dim)",
+  lineHeight: 1.5,
 };
+
+/** kit: list row (content-body variant, `5px 8px`). The row IS the target. */
+const ROW: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  width: "100%",
+  padding: "5px 8px",
+  background: "none",
+  border: "none",
+  boxShadow: "none",
+  fontFamily: MONO,
+  fontSize: 11.5,
+  lineHeight: 1.5,
+  color: "var(--text-secondary)",
+  textAlign: "left",
+  outline: "none",
+};
+
+/** kit: the row's leading glyph column — fixed, so titles align. */
+const GLYPH: CSSProperties = {
+  flex: "none",
+  width: 14,
+  color: "var(--text-dim)",
+};
+
+/** kit: trailing meta on a row. */
+const ROW_META: CSSProperties = {
+  marginLeft: "auto",
+  flex: "none",
+  fontSize: 9.5,
+  color: "var(--text-dim)",
+  whiteSpace: "nowrap",
+};
+
+/** kit: input. Transparent — the field takes the screen's surface. */
+const FIELD: CSSProperties = {
+  width: "100%",
+  background: "transparent",
+  border: "1px solid var(--border-subtle)",
+  borderRadius: 3,
+  color: "var(--text-primary)",
+  fontFamily: MONO,
+  fontSize: 11.5,
+  lineHeight: 1.5,
+  padding: "5px 8px",
+  outline: "none",
+};
+
+/** A clickable kit row: hover `--bg-active` + `--text-primary`, keyboard
+ *  focus draws the inset bar. Children lay out as the row's flex items. */
+function Row({
+  onClick,
+  title,
+  children,
+}: {
+  onClick: () => void;
+  title?: string;
+  children: ReactNode;
+}) {
+  const [hover, setHover] = useState(false);
+  const [focus, setFocus] = useState(false);
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      onFocus={() => setFocus(true)}
+      onBlur={() => setFocus(false)}
+      style={{
+        ...ROW,
+        cursor: "pointer",
+        background: hover || focus ? "var(--bg-active)" : "none",
+        boxShadow: focus ? "inset 2px 0 0 var(--text-primary)" : "none",
+        color: hover || focus ? "var(--text-primary)" : "var(--text-secondary)",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
 
 /** How often Home re-reads the thread files while on screen. */
 const HOME_POLL_MS = 5_000;
@@ -167,23 +247,19 @@ export function Home({
       >
         Home
       </div>
-      <div
-        style={{
-          flex: 1,
-          minHeight: 0,
-          display: "grid",
-          gridTemplateColumns: "3fr 2fr",
-          gap: 1,
-          background: "var(--border)",
-          overflow: "hidden",
-        }}
-      >
-        <div style={{ background: "var(--bg-primary)", padding: "14px 18px", display: "flex", flexDirection: "column", gap: 16, minHeight: 0, overflowY: "auto" }}>
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+        <div
+          style={{
+            maxWidth: 720,
+            padding: 18,
+            display: "flex",
+            flexDirection: "column",
+            gap: 18,
+          }}
+        >
           <NeedsYou digests={digests} />
-          <LiveNow digests={digests} />
-        </div>
-        <div style={{ background: "var(--bg-primary)", padding: "14px 18px", display: "flex", flexDirection: "column", gap: 16, minHeight: 0, overflowY: "auto" }}>
           <BacklogBlock projectOptions={backlogProjects} />
+          <LiveNow digests={digests} />
           <BetweenThreads digests={digests} />
           <Listening active={active} />
           <KeptViews kept={kept} />
@@ -206,13 +282,13 @@ function BacklogBlock({ projectOptions }: { projectOptions: readonly string[] })
     <div>
       <div style={BLOCK_TITLE}>
         Backlog{" "}
-        <span style={BLOCK_TITLE_RIGHT}>{open.length === 0 ? "empty" : String(open.length)}</span>
+        <span style={BLOCK_TITLE_RIGHT}>{open.length === 0 ? "" : String(open.length)}</span>
       </div>
       <BacklogListing
         items={open}
         limit={HOME_BACKLOG_LIMIT}
         projectOptions={projectOptions}
-        empty={<div style={RESERVED_BOX}>Nothing in the backlog. Add a thought from To-dos in the top bar.</div>}
+        empty={<div style={EMPTY_LINE}>nothing in the backlog</div>}
       />
     </div>
   );
@@ -238,17 +314,10 @@ function NeedsYou({ digests }: { digests: ThreadDigest[] }) {
       <div style={BLOCK_TITLE}>
         Needs you{" "}
         <span style={BLOCK_TITLE_RIGHT}>
-          {entries.length === 0 ? "nothing right now" : String(entries.length)}
+          {entries.length === 0 ? "" : String(entries.length)}
         </span>
       </div>
-      {entries.length === 0 ? (
-        <div style={RESERVED_BOX}>
-          Nothing needs you. Open questions, requests from other threads and to-dos the agent
-          assigned to you collect here.
-        </div>
-      ) : (
-        entries
-      )}
+      {entries.length === 0 ? <div style={EMPTY_LINE}>nothing needs you</div> : entries}
     </div>
   );
 }
@@ -258,12 +327,15 @@ function NeedsYou({ digests }: { digests: ThreadDigest[] }) {
 function QuestionCard({ digest, question }: { digest: ThreadDigest; question: PageQuestion }) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [chosen, setChosen] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const [fieldFocus, setFieldFocus] = useState(false);
   const submit = useCallback(
     async (text: string) => {
       const clean = text.trim();
       if (clean.length === 0 || busy) return;
       setBusy(true);
+      setChosen(text);
       setNote(null);
       try {
         const outcome = await answerQuestion(digest.thread.id, question.id, question.text, clean, question.kind);
@@ -272,14 +344,16 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
         setNote(`could not save: ${err instanceof Error ? err.message : String(err)}`);
       } finally {
         setBusy(false);
+        setChosen(null);
       }
     },
     [busy, digest.thread.id, question.id, question.text, question.kind]
   );
+  const options = orderedOptions(question);
   return (
-    <div style={{ ...CARD, flexDirection: "column", gap: 6 }}>
-      <div style={{ display: "flex", gap: 8, width: "100%" }}>
-        <span style={{ flex: "none", color: "var(--text-primary)" }}>?</span>
+    <div style={{ display: "flex", flexDirection: "column" }}>
+      <div style={ROW}>
+        <span style={{ ...GLYPH, color: "var(--text-primary)" }}>?</span>
         <span style={{ color: "var(--text-primary)", minWidth: 0 }}>
           {question.text}{" "}
           <span style={{ color: "var(--text-dim)", fontSize: 10 }}>
@@ -288,50 +362,56 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
         </span>
       </div>
       {note ? (
-        <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{note}</span>
+        <div style={{ ...EMPTY_LINE, color: "var(--text-muted)", paddingLeft: 30 }}>{note}</div>
       ) : (
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-          {question.options.map((o) => (
-            <button
-              key={o}
-              type="button"
-              disabled={busy}
-              onClick={() => void submit(o)}
+        <div style={{ paddingLeft: 22, display: "flex", flexDirection: "column", gap: 6 }}>
+          {options.length > 0 && (
+            <div
+              role="listbox"
+              aria-label="Options"
               style={{
-                background: "var(--bg-primary)",
-                border: "1px solid var(--border-subtle)",
-                borderRadius: 3,
-                color: "var(--text-secondary)",
-                fontFamily: MONO,
-                fontSize: 10,
-                padding: "2px 8px",
-                cursor: "pointer",
+                display: "flex",
+                flexDirection: "column",
+                borderTop: "1px solid var(--border)",
+                borderBottom: "1px solid var(--border)",
+                padding: "4px 0",
+              }}
+              onKeyDown={(e) => {
+                // ↑/↓ walk the rows — the question tab's rule, scoped to this list.
+                if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+                const nodes = Array.from(e.currentTarget.querySelectorAll<HTMLElement>("[data-kit-row]"));
+                const i = nodes.indexOf(document.activeElement as HTMLElement);
+                const next = nodes[i + (e.key === "ArrowDown" ? 1 : -1)];
+                if (!next) return;
+                e.preventDefault();
+                next.focus();
               }}
             >
-              {o}
-            </button>
-          ))}
+              {options.map((o) => (
+                <OptionRow
+                  key={o}
+                  label={o}
+                  isDefault={o === question.defaultOption}
+                  disabled={busy}
+                  chosen={chosen === o}
+                  onPick={() => void submit(o)}
+                />
+              ))}
+            </div>
+          )}
+          {options.length > 0 && <div style={{ fontSize: 10, color: "var(--text-dim)" }}>or</div>}
           <input
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
+            onFocus={() => setFieldFocus(true)}
+            onBlur={() => setFieldFocus(false)}
             onKeyDown={(e) => {
               if (e.key === "Enter") void submit(draft);
               e.stopPropagation();
             }}
-            placeholder="type…"
+            placeholder={options.length > 0 ? "type your own…" : "type your answer…"}
             disabled={busy}
-            style={{
-              flex: 1,
-              minWidth: 90,
-              background: "var(--bg-primary)",
-              border: "1px solid var(--border-subtle)",
-              borderRadius: 3,
-              color: "var(--text-primary)",
-              fontFamily: MONO,
-              fontSize: 10.5,
-              padding: "2px 6px",
-              outline: "none",
-            }}
+            style={{ ...FIELD, borderColor: fieldFocus ? "var(--text-dim)" : "var(--border-subtle)" }}
           />
         </div>
       )}
@@ -341,32 +421,32 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
 
 function RequestCard({ digest, post }: { digest: ThreadDigest; post: InboxPost }) {
   return (
-    <button type="button" style={{ ...CARD, width: "100%", textAlign: "left", cursor: "pointer" }} onClick={() => getThreadActions()?.openThread(digest.thread.id)}>
-      <span style={{ flex: "none", color: "var(--text-muted)" }}>→</span>
-      <span style={{ minWidth: 0, flex: 1 }}>
-        <span style={{ color: "var(--text-primary)" }}>{post.text}</span>
-        <span style={{ display: "block", color: "var(--text-dim)", fontSize: 10, marginTop: 2 }}>
-          request from {post.from} · to {digest.thread.title}
+    <Row onClick={() => getThreadActions()?.openThread(digest.thread.id)}>
+      <span style={GLYPH}>→</span>
+      <span style={{ minWidth: 0, flex: 1, color: "var(--text-primary)" }}>
+        {post.text}{" "}
+        <span style={{ color: "var(--text-dim)", fontSize: 10 }}>
+          from {post.from} · {digest.thread.title}
         </span>
       </span>
-      <span style={{ flex: "none", color: "var(--text-dim)", fontSize: 9.5 }}>open →</span>
-    </button>
+      <span style={ROW_META}>open →</span>
+    </Row>
   );
 }
 
 function UserItemCard({ digest, item }: { digest: ThreadDigest; item: PageItem }) {
   return (
-    <button type="button" style={{ ...CARD, width: "100%", textAlign: "left", cursor: "pointer" }} onClick={() => getThreadActions()?.openThread(digest.thread.id)}>
-      <span style={{ flex: "none", color: "var(--text-muted)" }}>☐</span>
-      <span style={{ minWidth: 0, flex: 1 }}>
-        <span style={{ color: "var(--text-primary)" }}>{item.title}</span>
-        <span style={{ display: "block", color: "var(--text-dim)", fontSize: 10, marginTop: 2 }}>
-          to-do · owner: you · {digest.thread.title}
+    <Row onClick={() => getThreadActions()?.openThread(digest.thread.id)}>
+      <span style={GLYPH}>○</span>
+      <span style={{ minWidth: 0, flex: 1, color: "var(--text-primary)" }}>
+        {item.title}{" "}
+        <span style={{ color: "var(--text-dim)", fontSize: 10 }}>
+          {digest.thread.title}
           {item.note ? ` · ${item.note}` : ""}
         </span>
       </span>
-      <span style={{ flex: "none", color: "var(--text-dim)", fontSize: 9.5 }}>open →</span>
-    </button>
+      <span style={ROW_META}>open →</span>
+    </Row>
   );
 }
 
@@ -382,53 +462,36 @@ function LiveNow({ digests }: { digests: ThreadDigest[] }) {
       <div style={BLOCK_TITLE}>
         Live now{" "}
         <span style={BLOCK_TITLE_RIGHT}>
-          {rows.length === 0 ? "no live threads" : `${rows.length} thread${rows.length === 1 ? "" : "s"}`}
+          {rows.length === 0 ? "" : `${rows.length} thread${rows.length === 1 ? "" : "s"}`}
         </span>
       </div>
       {rows.length === 0 ? (
-        <div style={RESERVED_BOX}>
-          Nothing is running. Open a thread from the side menu (Ctrl+Shift+B), or Ctrl+T for a new
-          one.
-        </div>
+        <div style={EMPTY_LINE}>no live threads</div>
       ) : (
         rows.map((t) => {
           const status = t.sessionId ? view.sessionStatuses[t.sessionId] : undefined;
           const cfg = STATUS_CONFIGS[status ?? "idle"] ?? STATUS_CONFIGS.idle;
           const lastLine = pageFor(t.id)?.latestTurn?.lines[0] ?? null;
           return (
-            <button
-              key={t.id}
-              type="button"
-              onClick={() => getThreadActions()?.openThread(t.id)}
-              style={{ ...CARD, width: "100%", textAlign: "left", cursor: "pointer", alignItems: "center" }}
-            >
-              <PulsingDot color={cfg.color} pulse={cfg.pulse} size={7} />
-              <span style={{ minWidth: 0, flex: 1 }}>
+            <Row key={t.id} onClick={() => getThreadActions()?.openThread(t.id)}>
+              <span style={{ ...GLYPH, display: "flex", alignItems: "center" }}>
+                <PulsingDot color={cfg.color} pulse={cfg.pulse} size={7} />
+              </span>
+              <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 <span style={{ color: "var(--text-primary)" }}>{t.title}</span>
                 <span style={{ color: "var(--text-dim)", fontSize: 10 }}>
                   {" "}
                   {threadRepoName(t.workingDir)}
                 </span>
                 {lastLine && (
-                  <span
-                    style={{
-                      display: "block",
-                      color: "var(--text-muted)",
-                      fontSize: 10.5,
-                      marginTop: 2,
-                      whiteSpace: "nowrap",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                    }}
-                  >
+                  <span style={{ color: "var(--text-muted)", fontSize: 10.5 }}>
+                    {"  "}
                     {lastLine}
                   </span>
                 )}
               </span>
-              <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 9.5, flex: "none" }}>
-                open →
-              </span>
-            </button>
+              <span style={ROW_META}>open →</span>
+            </Row>
           );
         })
       )}
@@ -454,24 +517,18 @@ function BetweenThreads({ digests }: { digests: ThreadDigest[] }) {
         Between threads <span style={BLOCK_TITLE_RIGHT}>last hour</span>
       </div>
       {recent.length === 0 ? (
-        <div style={RESERVED_BOX}>
-          No cross-thread traffic in the last hour. Threads post here with the agent's post tool, or
-          your composer's <span style={{ color: "var(--text-muted)" }}>@thread …</span> form.
-        </div>
+        <div style={EMPTY_LINE}>nothing in the last hour</div>
       ) : (
         recent.map(({ post, to, t }) => (
-          <div key={`${to.id}-${post.id}`} style={CARD}>
+          <div key={`${to.id}-${post.id}`} style={ROW}>
+            <span style={GLYPH}>↓</span>
             <span style={{ minWidth: 0, flex: 1 }}>
               <span style={{ color: "var(--text-dim)", fontSize: 10 }}>
                 {post.from} → {to.title}
-              </span>
-              <span style={{ display: "block", color: "var(--text-secondary)", marginTop: 2 }}>
-                “{post.text}”
-              </span>
+              </span>{" "}
+              <span style={{ color: "var(--text-secondary)" }}>{post.text}</span>
             </span>
-            <span style={{ flex: "none", color: "var(--text-faint)", fontSize: 9.5 }}>
-              {new Date(t).toTimeString().slice(0, 5)}
-            </span>
+            <span style={ROW_META}>{new Date(t).toTimeString().slice(0, 5)}</span>
           </div>
         ))
       )}
@@ -485,44 +542,25 @@ function KeptViews({ kept }: { kept: string[] }) {
   return (
     <div>
       <div style={BLOCK_TITLE}>
-        Kept views <span style={BLOCK_TITLE_RIGHT}>{kept.length === 0 ? "none yet" : String(kept.length)}</span>
+        Kept views <span style={BLOCK_TITLE_RIGHT}>{kept.length === 0 ? "" : String(kept.length)}</span>
       </div>
       {kept.length === 0 ? (
-        <div style={RESERVED_BOX}>
-          A view the agent showed and you kept lands in the project's scratchpad and is listed here.
-        </div>
+        <div style={EMPTY_LINE}>no kept views</div>
       ) : (
         kept.map((relPath) => {
           const parts = relPath.split("/");
           const project = parts[1] ?? "";
           const name = (parts[parts.length - 1] ?? relPath).replace(/\.view\.json$/, "");
           return (
-            <button
+            <Row
               key={relPath}
-              type="button"
               title={`${relPath} — opens the raw snapshot for now; rendered reopen is a follow-up`}
               onClick={() => navigate({ screen: "kb", doc: relPath })}
-              style={{
-                display: "flex",
-                gap: 8,
-                alignItems: "center",
-                width: "100%",
-                textAlign: "left",
-                background: "none",
-                border: "none",
-                padding: "3px 0",
-                fontFamily: MONO,
-                fontSize: 10.5,
-                color: "var(--text-secondary)",
-                cursor: "pointer",
-                whiteSpace: "nowrap",
-              }}
             >
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{name}</span>
-              <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 9.5, flex: "none" }}>
-                {project}
-              </span>
-            </button>
+              <span style={GLYPH}>◫</span>
+              <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
+              <span style={ROW_META}>{project}</span>
+            </Row>
           );
         })
       )}
@@ -530,7 +568,7 @@ function KeptViews({ kept }: { kept: string[] }) {
   );
 }
 
-// ── Listening (unchanged from T1) ────────────────────────────────────────────
+// ── Listening ────────────────────────────────────────────
 
 const PROBE_MS = 5_000;
 
@@ -567,9 +605,7 @@ function Listening({ active }: { active: boolean }) {
         Listening <span style={BLOCK_TITLE_RIGHT}>probed, not health-checked</span>
       </div>
       {servers.length === 0 ? (
-        <div style={RESERVED_BOX}>
-          No dev servers announced yet. When a shell prints a local URL it is listed here, probed.
-        </div>
+        <div style={EMPTY_LINE}>nothing listening</div>
       ) : (
         servers.map((hit) => {
           const key = serverKey(hit.url);
@@ -587,22 +623,14 @@ function Listening({ active }: { active: boolean }) {
                     ? "not answering — nothing is listening on that port"
                     : "probing"
               }
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                padding: "3px 0",
-                fontFamily: MONO,
-                fontSize: 10.5,
-                color: "var(--text-secondary)",
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-              }}
+              style={{ ...ROW, whiteSpace: "nowrap", overflow: "hidden" }}
             >
-              <span style={{ width: 7, height: 7, borderRadius: "50%", background: dotColor, flex: "none" }} />
-              <span style={{ color: "var(--text-dim)", fontSize: 9.5 }}>{hit.source}</span>
-              <span style={{ color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis" }}>{hit.url}</span>
-              <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 9.5, flex: "none" }}>{label}</span>
+              <span style={{ ...GLYPH, display: "flex", alignItems: "center" }}>
+                <span style={{ width: 7, height: 7, borderRadius: "50%", background: dotColor }} />
+              </span>
+              <span style={{ color: "var(--text-dim)", fontSize: 9.5, flex: "none" }}>{hit.source}</span>
+              <span style={{ color: "var(--text-secondary)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{hit.url}</span>
+              <span style={ROW_META}>{label}</span>
             </div>
           );
         })

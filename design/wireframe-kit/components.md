@@ -164,15 +164,23 @@ answer goes (that is the spec's sentence, `requirements.md` R4).
   prompt as one line, `✓ Approve ↵` / `✕ Deny esc` as two buttons in a row, the
   textarea below; `ky/todos/TodoPanel.tsx` for the list-of-rows + one input shape.
 - **Ours:** body padding `14px`, `gap: 12px`, column. (1) Question: 12.5px
-  `--text-primary`, `line-height: 1.5`. (2) Options: one LIST ROW per option, 11.5px,
-  padding `5px 8px`, hover `--bg-active`, keyboard-selectable — Tab/↑/↓ move, Enter or
-  click picks; the focused row draws the active bar. The row IS the target: no
-  bordered pill, no radio. (3) Input: the kit textarea, 2 rows, placeholder `or type
-  your own…` (`type your answer…` with no options); Enter sends. (4) Action: ONE quiet
-  button `answer`, right-aligned under the input, disabled while the box is empty.
-  Outcome states are one plain line in `--text-muted` on the SAME row, to the LEFT of
-  the button — the failure text, or `saved on the page — no live terminal` — never a
-  bordered note.
+  `--text-primary`, `line-height: 1.5`. (2) Options: the OPTION ROW
+  (`components/kb/OptionRow.tsx`, shared with Home's Needs-you block) — one LIST ROW per
+  option, 11.5px, padding `5px 8px`, with the 14px leading glyph column drawing a text
+  RADIO: `○` in `--text-dim` resting, `●` in `--text-primary` on hover / focus and on
+  the option being sent; the option text itself `--text-primary`; `default` after the
+  agent's proposal in 9.5px `--text-dim`. The list sits between two 1px `--border`
+  hairlines (`padding: 4px 0`) so the choice reads as one block. Keyboard: Tab/↑/↓
+  move, Enter, Space or click picks; the focused row draws the active bar + `--bg-active`.
+  The row IS the target: no bordered pill, no `<input type=radio>` — the glyph is what
+  says "multiple choice" (post-0.5.0: rows with no glyph read as a paragraph).
+  (3) A dim `or` line (10px `--text-dim`) then the input: the kit textarea, 2 rows,
+  placeholder `type your own…` (`type your answer…` with no options); Enter sends.
+  (4) Action: ONE quiet button `answer`, right-aligned under the input, drawn at full
+  strength while the box is empty (an empty submit is a no-op; `opacity: .4` made it
+  read as absent) and dimmed only while a send is in flight. Outcome states are one
+  plain line in `--text-muted` on the SAME row, to the LEFT of the button — the failure
+  text, or `saved on the page — no live terminal` — never a bordered note.
 - Resolved states (answered / gone) are the same voice centred: the question in
   `--text-secondary` and `you: <answer>` in `--text-primary`; or the one line `This
   question is no longer on the page.`
@@ -197,6 +205,18 @@ questions · done. Every section is a band header + list rows; no section is a b
   hairline under each. NEW dot: 6px `--text-primary` circle after the item or title.
 - Empty page: the `✦` glyph 14px `--text-muted` over ONE line, `No page yet.` Nothing
   about who writes it or when.
+- **Home (`Home.tsx`, post-0.5.0)** is the same shape at screen scale: ONE left-aligned
+  column, `max-width: 720px`, padding `18px`, `gap: 18px` between band sections (Needs
+  you · Backlog · Live now · Between threads · Listening · Kept views). Section title =
+  the band header with its right-end count. Every item is the content-body list row
+  (`5px 8px`, 14px glyph column, hover `--bg-active` + `--text-primary`, focus bar,
+  9.5px `--text-dim` meta at the right: `open →`, a time, a project). No 2-column grid,
+  no card (border + elevated fill), no dashed reserved box: an EMPTY section is one
+  dim line in the row's own padding — `nothing needs you`, `no live threads`,
+  `nothing in the last hour`, `nothing listening`, `no kept views`, `nothing in the
+  backlog`. A question in Needs you is the `?` row followed, indented to the text
+  column, by the question block above (option rows between hairlines · `or` · one
+  kit input).
 
 ## Tooltip
 

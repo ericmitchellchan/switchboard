@@ -10,12 +10,17 @@
 // ids only, so a restored tab whose question was answered meanwhile renders
 // the answered state instead of re-asking.
 //
-// SKIN (SWIT-57): the kit's QUESTION BLOCK — the question · options as a
-// plain LIST (one row per option, the row IS the target, ↑/↓/Tab move, Enter
-// picks) · one input · one quiet action. No glyph box, no bordered pills, no
-// sentence about where the answer goes: that sentence is requirements.md R4's,
-// not the tab's. Outcome states are one plain line. Everything here traces to
-// design/wireframe-kit/components.md (list row, textarea, quiet button).
+// SKIN (SWIT-57, re-cut post-0.5.0): the kit's QUESTION BLOCK — the question ·
+// options as a MULTIPLE-CHOICE list (OptionRow: radio glyph `○`/`●` + the
+// option in `--text-primary`, the row IS the target, ↑/↓/Tab move, Enter or
+// Space picks) between two `--border` hairlines · a dim `or` · one textarea ·
+// one quiet `answer` button right-aligned under it. Eric on the first cut:
+// "I couldn't even tell. I thought this was just a list" — the rows were
+// secondary-toned text with no affordance. No bordered pills, no sentence
+// about where the answer goes: that sentence is requirements.md R4's, not the
+// tab's. Outcome states are one plain line. Everything here traces to
+// design/wireframe-kit/components.md (question block, list row, textarea,
+// quiet button).
 //
 // THE DEFAULT (SWIT-58): the agent's proposal is listed FIRST (pageStore's
 // orderedOptions — the file keeps the asked order) with one dim `default`
@@ -28,27 +33,9 @@ import type { CSSProperties, KeyboardEvent } from "react";
 import type { Artifact } from "../../types";
 import { usePage, orderedOptions } from "../../lib/pageStore";
 import { answerQuestion, closeArtifactByIdentity, artifactIdentity, getActiveTabSession } from "../../lib/panelStore";
+import { OptionRow } from "./OptionRow";
 
 const MONO = "var(--font-mono)";
-
-/** kit: list row (content-body variant, `5px 8px`). */
-const OPTION_ROW: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  width: "100%",
-  padding: "5px 8px",
-  background: "none",
-  border: "none",
-  boxShadow: "none",
-  color: "var(--text-secondary)",
-  fontFamily: MONO,
-  fontSize: 11.5,
-  lineHeight: 1.5,
-  textAlign: "left",
-  cursor: "pointer",
-  outline: "none",
-};
 
 /** kit: textarea. Transparent — the field takes the panel's surface. */
 const FIELD: CSSProperties = {
@@ -84,6 +71,7 @@ export function QuestionView({ artifact, active }: { artifact: QuestionArtifact;
   const { page } = usePage(threadId, active);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [chosen, setChosen] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [fieldFocus, setFieldFocus] = useState(false);
   const [answerHover, setAnswerHover] = useState(false);
@@ -96,6 +84,7 @@ export function QuestionView({ artifact, active }: { artifact: QuestionArtifact;
     const clean = text.trim();
     if (clean.length === 0 || busy || !open) return;
     setBusy(true);
+    setChosen(text);
     setNote(null);
     try {
       const outcome = await answerQuestion(threadId, questionId, open.text, clean, open.kind);
@@ -112,6 +101,7 @@ export function QuestionView({ artifact, active }: { artifact: QuestionArtifact;
       setNote(`could not save: ${String(err)}`);
     } finally {
       setBusy(false);
+      setChosen(null);
     }
   };
 
@@ -175,7 +165,14 @@ export function QuestionView({ artifact, active }: { artifact: QuestionArtifact;
         <div
           role="listbox"
           aria-label="Options"
-          style={{ display: "flex", flexDirection: "column" }}
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            // The choice block is visibly a block: one hairline above, one below.
+            borderTop: "1px solid var(--border)",
+            borderBottom: "1px solid var(--border)",
+            padding: "4px 0",
+          }}
           onKeyDown={(e) => {
             if (e.key === "ArrowDown") moveFocus(e, 1);
             else if (e.key === "ArrowUp") moveFocus(e, -1);
@@ -187,10 +184,15 @@ export function QuestionView({ artifact, active }: { artifact: QuestionArtifact;
               label={o}
               isDefault={o === open!.defaultOption}
               disabled={busy}
+              chosen={chosen === o}
               onPick={() => void submit(o)}
             />
           ))}
         </div>
+      )}
+
+      {open!.options.length > 0 && (
+        <div style={{ fontSize: 10, color: "var(--text-dim)", marginBottom: -6 }}>or</div>
       )}
 
       <textarea
@@ -206,7 +208,7 @@ export function QuestionView({ artifact, active }: { artifact: QuestionArtifact;
           }
           e.stopPropagation();
         }}
-        placeholder={open!.options.length > 0 ? "or type your own…" : "type your answer…"}
+        placeholder={open!.options.length > 0 ? "type your own…" : "type your answer…"}
         rows={2}
         disabled={busy}
         style={{ ...FIELD, borderColor: fieldFocus ? "var(--text-dim)" : "var(--border-subtle)" }}
@@ -214,18 +216,21 @@ export function QuestionView({ artifact, active }: { artifact: QuestionArtifact;
 
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         {note && <span style={{ fontSize: 10.5, color: "var(--text-muted)" }}>{note}</span>}
+        {/* Always drawn at full strength: at 0.4 while the box was empty it
+            read as absent (0.5.0). An empty submit is a no-op, so the button
+            only dims while a send is in flight. */}
         <button
           type="button"
           style={{
             ...QUIET,
             marginLeft: "auto",
-            opacity: canSend ? 1 : 0.4,
-            cursor: canSend ? "pointer" : "default",
+            opacity: busy ? 0.4 : 1,
+            cursor: busy ? "default" : "pointer",
             // kit: quiet hover = text `--text-primary` + border `--text-secondary`.
             color: answerHover && canSend ? "var(--text-primary)" : "var(--text-secondary)",
             borderColor: answerHover && canSend ? "var(--text-secondary)" : "var(--border-subtle)",
           }}
-          disabled={!canSend}
+          disabled={busy}
           onMouseEnter={() => setAnswerHover(true)}
           onMouseLeave={() => setAnswerHover(false)}
           onClick={() => void submit(draft)}
@@ -234,49 +239,6 @@ export function QuestionView({ artifact, active }: { artifact: QuestionArtifact;
         </button>
       </div>
     </div>
-  );
-}
-
-/** One option = one list row. Hover fills `--bg-active`; keyboard focus draws
- *  the active bar (the kit's selected-row mark), so ↑/↓ shows where you are. */
-function OptionRow({
-  label,
-  isDefault,
-  disabled,
-  onPick,
-}: {
-  label: string;
-  isDefault: boolean;
-  disabled: boolean;
-  onPick: () => void;
-}) {
-  const [hover, setHover] = useState(false);
-  const [focus, setFocus] = useState(false);
-  return (
-    <button
-      type="button"
-      role="option"
-      aria-selected={focus}
-      data-kit-row=""
-      disabled={disabled}
-      onClick={onPick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      onFocus={() => setFocus(true)}
-      onBlur={() => setFocus(false)}
-      style={{
-        ...OPTION_ROW,
-        background: hover || focus ? "var(--bg-active)" : "none",
-        boxShadow: focus ? "inset 2px 0 0 var(--text-primary)" : "none",
-        color: hover || focus ? "var(--text-primary)" : "var(--text-secondary)",
-        opacity: disabled ? 0.4 : 1,
-      }}
-    >
-      <span style={{ flex: 1, minWidth: 0 }}>{label}</span>
-      {isDefault && (
-        <span style={{ flex: "none", fontSize: 9.5, color: "var(--text-dim)" }}>default</span>
-      )}
-    </button>
   );
 }
 

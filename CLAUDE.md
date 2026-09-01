@@ -12,6 +12,7 @@ src/
 ├── components/
 │   ├── TerminalPane.tsx         → xterm.js wrapper, PTY data flow, status/task wiring
 │   ├── TabBar.tsx               → Tab bar with scroll, rename, close, group dividers + the right-end artifact-panel button
+│   ├── Home.tsx                 → HOME (SWIT-52): the roll-up screen — Needs you · Backlog · Live now · Between threads · Listening · Kept views, every block a view over another record (one 5s poll while on screen). SKIN post-0.5.0: ONE column (max 720px) of kit band sections, every item a kit LIST ROW, an empty section ONE dim line (no grid, no cards, no dashed boxes); a question's options are the shared `kb/OptionRow`
 │   ├── BacklogPanel.tsx         → THE BACKLOG (SWIT-64): `TodosButton` (the top bar's `To-dos · N`) + the portalled dropdown under it (quick-add with a cycling project-tag chip, `all · none · <projects>` filter chips, open items newest first, `Done (N)` folded) + `BacklogRow` (stage glyph · text · dim project · link glyphs · `⋯` via ThreadRowMenu's primitive: open in thread / open thread, mark ticket…, mark spec… (inline ref inputs, no modal), tag, done, delete) + `BacklogListing` (Home's block body, 8 + `See all` → opens the dropdown). Draws `lib/backlogStore.ts`; creates no ticket and no KB file
 │   ├── PaneContainer.tsx        → Recursive binary tree pane renderer
 │   ├── PaneDivider.tsx          → Drag-to-resize between panes
@@ -38,6 +39,8 @@ src/
 │   ├── UpdateChip.tsx           → In-app updater chip (consent-based install flow)
 │   ├── ConfirmDialog.tsx        → Modal confirm (close/destructive actions); `enterConfirms={false}` unbinds Enter for thread delete and for the panel-terminal close guard, whose `extraActions` add the two non-destructive outcomes (keep running / promote to tab)
 │   ├── kb/                      → Knowledge Base screen views
+│   │   ├── OptionRow.tsx          → THE OPTION ROW (post-0.5.0): a question's choice drawn as MULTIPLE CHOICE — kit list row + a text radio glyph (`○` dim resting, `●` primary on hover/focus/while sending), option text `--text-primary`, `default` marker; Enter/Space/click pick. Shared by QuestionView and Home's Needs-you
+│   │   ├── QuestionView.tsx       → THE `? question` TAB (SWIT-51/57/58): question · OptionRow list between two `--border` hairlines · dim `or` · one textarea · a quiet `answer` button always drawn at full strength (dims only while sending); answers.json first, then typed into the thread, tab closes itself
 │   │   ├── ArtifactSurface.tsx    → THE artifact → host+loading-policy switch (kb-doc→DocView, repo-file→FileViewer, localhost→LocalhostView, surface→SurfaceHost, session→a NOTE and never a terminal), shared by the panel AND the PiP window
 │   │   ├── ArtifactBody.tsx       → THE kind switch (docKind → renderer) shared by DocView and the Explorer's FileViewer; hosts differ only in the fallback
 │   │   ├── LocalhostView.tsx      → LIVE localhost preview (phase B): cross-origin iframe (`allow-scripts allow-forms allow-same-origin` — read its header) + no-cors health poll + "server gone" card + the POSITIONAL pin overlay + the SIBLING-SERVER liveness dots (the shell's other announced servers, probed not framed)
