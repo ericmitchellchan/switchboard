@@ -41,11 +41,16 @@ const HEAD_STYLE: CSSProperties = {
 export function ProjectView({
   project,
   page,
+  params,
   active,
   menuHidden,
 }: {
   project: string;
   page: string;
+  /** The page STATE the route names (T9 — `p.*` params). The host stays
+   *  mounted across a params change (same key) and the page reads the new
+   *  set through `useSurfaceParams()`. */
+  params?: Record<string, string>;
   /** The screen is on display — gates the surface's backend probe exactly as
    *  the panel's `active` does. */
   active: boolean;
@@ -75,7 +80,7 @@ export function ProjectView({
       <div style={{ flex: 1, minHeight: 0, display: "flex", background: "var(--bg-primary)" }}>
         <SurfaceHost
           key={`${project}:${page}`}
-          artifact={{ kind: "surface", project, page }}
+          artifact={params ? { kind: "surface", project, page, params } : { kind: "surface", project, page }}
           active={active}
         />
       </div>

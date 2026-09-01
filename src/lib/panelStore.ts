@@ -58,6 +58,7 @@ import type { IconName } from "../components/icons";
 import { log } from "./logger";
 import type { PageQuestionKind } from "./pageStore";
 import { surfaceLabel } from "../surfaces/registry";
+import { encodeSurfaceParams, sanitizeSurfaceParams, surfaceParamsSuffix } from "./surfaceParams";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // REMOVAL AUDIT (2026-08-02)
@@ -397,7 +398,9 @@ export function describeArtifact(artifact: Artifact): ArtifactDescription {
       // (wireframe shell-v0, screen 1). The page LABEL comes from the surface
       // registry; an unregistered page prints its id so the strip still
       // names something honest.
-      const label = surfaceLabel(artifact.project, artifact.page);
+      // T9: a params set appends its VALUES (` · NQ 2026-06-05`) — the state
+      // the tab shows, without the key names the page alone cares about.
+      const label = surfaceLabel(artifact.project, artifact.page) + surfaceParamsSuffix(artifact.params);
       return {
         icon: "surface",
         crumbs: [
@@ -548,9 +551,17 @@ export function sanitizeArtifact(raw: unknown): Artifact | null {
       // SWIT-30. Two ids and nothing else — whether the pair still names a
       // registered page is the HOST's question at render time, not a load
       // gate: a strip must not lose a tab because a project renamed a page.
-      return isNonEmptyString(raw.project) && isNonEmptyString(raw.page)
-        ? { kind: "surface", project: raw.project, page: raw.page }
-        : null;
+      //
+      // T9 (SWIT-63): an optional params map, kept LEAN through
+      // sanitizeSurfaceParams (valid keys only, capped) — an invalid key drops
+      // alone, and an empty result drops the field rather than storing `{}`.
+      if (!isNonEmptyString(raw.project) || !isNonEmptyString(raw.page)) return null;
+      {
+        const params = sanitizeSurfaceParams(raw.params);
+        return params
+          ? { kind: "surface", project: raw.project, page: raw.page, params }
+          : { kind: "surface", project: raw.project, page: raw.page };
+      }
     case "session":
       // Increment H. The id is the WHOLE record — everything else about the
       // session (name, cwd, status, scrollback) lives where sessions live, so
@@ -612,8 +623,13 @@ export function artifactIdentity(artifact: Artifact): string {
       // artifacts (which is what the positional-pin scoping requires).
       // The artifact keeps its own `url` — only the comparison folds.
       return `localhost:${artifact.project}:${serverKey(artifact.url)}`;
-    case "surface":
-      return `surface:${artifact.project}:${artifact.page}`;
+    case "surface": {
+      // T9: the params are part of the identity — `Trading · NQ 2026-06-05`
+      // and `Trading · NQ 2026-06-04` are two tabs. Sorted + encoded, so the
+      // same set in another insertion order is still ONE artifact.
+      const query = encodeSurfaceParams(artifact.params);
+      return `surface:${artifact.project}:${artifact.page}${query ? `?${query}` : ""}`;
+    }
     case "session":
       // The session id IS the identity. Two references to one session are one
       // artifact, which is what makes the dedupe rule enforce the one-live-view
@@ -664,7 +680,9 @@ export function artifactShortTitle(artifact: Artifact): string {
   if (artifact.kind === "question") return "? question";
   // A surface's short title is its page LABEL (the same word the header's
   // last crumb prints), not a path — it has none.
-  if (artifact.kind === "surface") return surfaceLabel(artifact.project, artifact.page);
+  if (artifact.kind === "surface") {
+    return surfaceLabel(artifact.project, artifact.page) + surfaceParamsSuffix(artifact.params);
+  }
   const raw = artifact.kind === "localhost" ? artifact.url : artifact.path;
   const segments = raw.split("/").filter((s) => s.length > 0);
   return segments[segments.length - 1] ?? raw;
@@ -2527,7 +2545,9 @@ export function fullWidthRoute(target: OpenableArtifact): Route {
     case "repo-file":
       return { screen: "explorer", project: target.project, path: target.path };
     case "surface":
-      return { screen: "project", project: target.project, page: target.page };
+      return target.params
+        ? { screen: "project", project: target.project, page: target.page, params: target.params }
+        : { screen: "project", project: target.project, page: target.page };
   }
 }
 
@@ -2545,9 +2565,25 @@ export function fullWidthRoute(target: OpenableArtifact): Route {
  *  In words: the terminal screen opens in the panel (the co-present common
  *  case), the reading screens navigate full-width (today's behavior), the
  *  modifier inverts either one, and NO active session always means navigate —
- *  a panel with no tab to host it is impossible, not a silent no-op. */
+ *  a panel with no tab to host it is impossible, not a silent no-op.
+ *
+ *  A SURFACE is the exception, on EVERY screen (T9 — SWIT-63, R8): Trading is
+ *  a snapshot Eric reads BESIDE the thread he is talking to about it — "the
+ *  dashboard can be a starting point where I can pin or click it or add to a
+ *  thread and then it would be in the panel, side by side" — so a plain click
+ *  opens it in the active thread's preview slot from Home, KB or the project
+ *  screen alike (revealing the terminal), and Ctrl+click is the escape to
+ *  full width, as is the panel header's `open full`. NO active thread still
+ *  means full width: a preview slot needs a thread to sit beside.
+ *
+ *  | surface         | modifier | active session | result            |
+ *  |-----------------|----------|----------------|-------------------|
+ *  | any screen      | off      | yes            | panel (+ reveal)  |
+ *  | any screen      | on       | yes            | navigate          |
+ *  | any screen      | either   | no             | navigate          | */
 export function decideOpen(target: OpenableArtifact, ctx: OpenContext): OpenDecision {
-  const wantsPanel = ctx.screen === "terminal" ? !ctx.modifier : ctx.modifier;
+  const wantsPanel =
+    target.kind === "surface" ? !ctx.modifier : ctx.screen === "terminal" ? !ctx.modifier : ctx.modifier;
   if (wantsPanel && ctx.sessionId) {
     return {
       action: "panel",

@@ -44,8 +44,15 @@ import type { SurfaceArtifact, SurfaceBackend } from "./registry";
 import { SurfaceAnchorContext, composeAnchorProviders, domAnchorProvider } from "./anchors";
 import type { SurfaceAnchorProvider, SurfaceAnchorRegistry } from "./anchors";
 import { useSurfacePins } from "./SurfacePins";
-import { SurfaceActiveContext, SurfaceAgentContext, SurfaceNavContext, SurfaceRootContext } from "./page-api";
-import type { SurfaceAgent, SurfaceNav } from "./page-api";
+import {
+  SurfaceActiveContext,
+  SurfaceAgentContext,
+  SurfaceNavContext,
+  SurfaceParamsContext,
+  SurfaceRootContext,
+} from "./page-api";
+import type { SurfaceAgent, SurfaceNav, SurfaceParams } from "./page-api";
+import { NO_SURFACE_PARAMS, encodeSurfaceParams, sanitizeSurfaceParams } from "../lib/surfaceParams";
 import { openArtifact, sendToThread, useSendToThreadAvailable } from "../lib/panelStore";
 import { sanitizeForTypedLine, SEND_REFERENCE_MAX } from "../lib/agentContext";
 import { log } from "../lib/logger";
@@ -118,7 +125,14 @@ export function SurfaceHost({
   // shell's decision — the same open rule a tree click follows.
   const nav = useMemo<SurfaceNav>(
     () => ({
-      openPage: (page) => openArtifact({ kind: "surface", project: artifact.project, page }),
+      openPage: (page, params) => {
+        const clean = sanitizeSurfaceParams(params);
+        openArtifact(
+          clean
+            ? { kind: "surface", project: artifact.project, page, params: clean }
+            : { kind: "surface", project: artifact.project, page }
+        );
+      },
       openWindow: (page) => {
         const target = findSurface(artifact.project, page);
         const win = target?.window;
@@ -134,6 +148,15 @@ export function SurfaceHost({
       notify: (title, body) => void notify(title, body),
     }),
     [artifact.project, onCloseHost]
+  );
+  // The params (T9): the artifact's own set, or THE frozen empty object. Keyed
+  // on the encoded form so a re-render with an equal map hands the page the
+  // same reference and its `useEffect([params])` stays quiet.
+  const paramsKey = encodeSurfaceParams(artifact.params);
+  const params = useMemo<SurfaceParams>(
+    () => (paramsKey ? Object.freeze({ ...(artifact.params ?? {}) }) : NO_SURFACE_PARAMS),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- paramsKey is the map's identity
+    [paramsKey]
   );
   // The agent = the thread beside this surface (page-api §The agent). The
   // page's text goes through the same sanitizer a pin reference does — one
@@ -252,9 +275,11 @@ export function SurfaceHost({
                 <SurfaceActiveContext.Provider value={active}>
                   <SurfaceNavContext.Provider value={nav}>
                     <SurfaceAgentContext.Provider value={agent}>
-                      <Suspense fallback={<div style={NOTE_STYLE}>loading {title}…</div>}>
-                        <Page />
-                      </Suspense>
+                      <SurfaceParamsContext.Provider value={params}>
+                        <Suspense fallback={<div style={NOTE_STYLE}>loading {title}…</div>}>
+                          <Page />
+                        </Suspense>
+                      </SurfaceParamsContext.Provider>
                     </SurfaceAgentContext.Provider>
                   </SurfaceNavContext.Provider>
                 </SurfaceActiveContext.Provider>

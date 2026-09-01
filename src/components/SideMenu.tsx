@@ -25,9 +25,10 @@
 // their routes still resolve and their code stays built and tested.
 
 import { useCallback, useState } from "react";
-import type { CSSProperties, ReactNode } from "react";
-import type { Route } from "../types";
-import { navigate, navigateToScreen } from "../lib/route";
+import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from "react";
+import type { Artifact, Route } from "../types";
+import { navigateToScreen } from "../lib/route";
+import { openArtifact, useActiveTabArtifact } from "../lib/panelStore";
 import { useShellMode } from "../lib/shellMode";
 import { projectsWithResearch, researchPages } from "../surfaces/registry";
 import { ThreadsSection } from "./ThreadsSection";
@@ -128,6 +129,7 @@ export function SideMenu({ route }: { route: Route }) {
   const [kbOpen, toggleKb] = useBandOpen("kb", false);
   const [explorerOpen, toggleExplorer] = useBandOpen("explorer", false);
   const bare = useShellMode() === "bare";
+  const shown = useActiveTabArtifact();
 
   return (
     <div style={MENU_STYLE}>
@@ -140,14 +142,22 @@ export function SideMenu({ route }: { route: Route }) {
             active={route.screen === "home"}
             onClick={() => navigateToScreen("home")}
           />
-          {/* Trading is lodestar's cockpit as a first-class destination (the
-              2026-08-30 decision: full-width, and "Lodestar" is not a nav
-              word — the row says what it IS). */}
+          {/* Trading is lodestar's cockpit as a first-class destination ("Lodestar"
+              is not a nav word — the row says what it IS). T9 (SWIT-63, R8): it
+              opens BESIDE the active thread, in its preview slot — the 2026-08-30
+              full-width rule is dropped; `decideOpen` owns the rule (Ctrl+click
+              = full width; no thread = full width), so the row cannot drift from
+              the tree's pages. Lit when the page is on screen EITHER way. */}
           <DestRow
             label="Trading"
             glyph="▦"
-            active={route.screen === "project" && route.project === "lodestar" && route.page === "trading"}
-            onClick={() => navigate({ screen: "project", project: "lodestar", page: "trading" })}
+            active={isSurfaceShown(route, shown, "lodestar", "trading")}
+            onClick={(e) =>
+              openArtifact(
+                { kind: "surface", project: "lodestar", page: "trading" },
+                { modifier: e.ctrlKey || e.metaKey }
+              )
+            }
           />
           {!bare && (
             <DestRow
@@ -157,7 +167,7 @@ export function SideMenu({ route }: { route: Route }) {
               onClick={toggleResearch}
             />
           )}
-          {!bare && researchOpen && <ResearchGroups route={route} />}
+          {!bare && researchOpen && <ResearchGroups route={route} shown={shown} />}
           <DestRow
             label="Knowledge base"
             glyph={kbOpen ? "▾" : "▸"}
@@ -198,10 +208,18 @@ export function SideMenu({ route }: { route: Route }) {
   );
 }
 
+/** Is this page what Eric is looking at — full width (the project route) OR
+ *  in the active thread's panel (the shown artifact)? One predicate for every
+ *  destination row, so the two homes light the same row. */
+function isSurfaceShown(route: Route, shown: Artifact | null, project: string, page: string): boolean {
+  if (route.screen === "project") return route.project === project && route.page === page;
+  return shown?.kind === "surface" && shown.project === project && shown.page === page;
+}
+
 /** The Research band's inline groups: one per project WITH research pages
- *  (registry-driven; empty groups never render), each page a click to its
- *  full-width project route. */
-function ResearchGroups({ route }: { route: Route }) {
+ *  (registry-driven; empty groups never render), each page a click through
+ *  the same open rule as Trading (preview slot; Ctrl+click full width). */
+function ResearchGroups({ route, shown }: { route: Route; shown: Artifact | null }) {
   const projects = projectsWithResearch();
   if (projects.length === 0) {
     return (
@@ -224,19 +242,20 @@ function ResearchGroups({ route }: { route: Route }) {
           >
             {project}
           </div>
-          {researchPages(project).map((page) => {
-            const isActive =
-              route.screen === "project" && route.project === project && route.page === page.id;
-            return (
-              <DestRow
-                key={page.id}
-                label={page.label}
-                indent={41}
-                active={isActive}
-                onClick={() => navigate({ screen: "project", project, page: page.id })}
-              />
-            );
-          })}
+          {researchPages(project).map((page) => (
+            <DestRow
+              key={page.id}
+              label={page.label}
+              indent={41}
+              active={isSurfaceShown(route, shown, project, page.id)}
+              onClick={(e) =>
+                openArtifact(
+                  { kind: "surface", project, page: page.id },
+                  { modifier: e.ctrlKey || e.metaKey }
+                )
+              }
+            />
+          ))}
         </div>
       ))}
     </>
@@ -253,7 +272,7 @@ function DestRow({
   label: string;
   glyph?: string;
   active: boolean;
-  onClick: () => void;
+  onClick: (e: ReactMouseEvent<HTMLButtonElement>) => void;
   indent?: number;
 }) {
   const [hover, setHover] = useState(false);

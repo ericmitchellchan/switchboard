@@ -739,7 +739,10 @@ const PAGE_TOOL = {
     "non-engineer follows — no file paths, code names or hashes; a list is NEVER inside a " +
     "line, N things are N evidence rows). Keep Evidence current (op evidence: one row per " +
     "PR / ticket / doc / file with a plain label and a status; writing the same address " +
-    "again UPDATES its row — omit status to keep the previous one). Track the plan with op " +
+    "again UPDATES its row — omit status to keep the previous one; to point Eric at a page " +
+    "state, write the address as surface:<project>/<page>?key=value, e.g. " +
+    "surface:lodestar/trading?instrument=NQ&date=2026-06-05 — the row opens that page in that " +
+    "state beside the thread). Track the plan with op " +
     "item (owner agent|user|team, state todo|in_progress|waiting|done; status changes go in " +
     "the item's note or state, never a new turn). Something only the user can answer: op " +
     "ask (prefer 2–4 short options) — it lands under Needs You on the page; the answer " +
@@ -768,7 +771,7 @@ const PAGE_TOOL = {
       },
       address: {
         type: "string",
-        description: "evidence: the row's address — a ticket key, `repo #pr`, a doc or file path. The same address updates its row.",
+        description: "evidence: the row's address — a ticket key, `repo #pr`, a doc or file path, or a page state `surface:<project>/<page>?key=value`. The same address updates its row.",
       },
       label: { type: "string", description: "evidence: a plain few-word label." },
       status: {

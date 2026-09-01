@@ -12,7 +12,11 @@ import { useEffect, useMemo, useState } from "react";
 // SWITCHBOARD: no router. The market to chart arrives through the project's
 // own store (`pendingMarket`, the same intent a case's "view on chart" sets)
 // and "back" is the shell's business — the page offers `→ markets` instead.
-import { useSurfaceNav } from "../../../surfaces/page-api";
+// T9 (SWIT-63): a DEEP LINK's params (`instrument`, `date`, `caseId`, via
+// `useSurfaceParams`) take precedence over the store intent for those keys,
+// and are re-read whenever they change; the store intent still serves
+// in-project navigation (a case's "→ chart").
+import { useSurfaceNav, useSurfaceParams } from "../../../surfaces/page-api";
 import FlowDeepDive from "../components/research/FlowDeepDive";
 import WorkbenchGrid from "../components/research/WorkbenchGrid";
 import Spinner from "../components/Spinner";
@@ -25,6 +29,22 @@ import {
   type TennisMatchContext,
 } from "../api/client";
 
+/** The chart target a deep link names, or null when the link carries none of
+ *  the three keys. `instrument` is the ticker; `date` joins the label (the
+ *  historical series is what the backend has — the date is context for the
+ *  reader, not a query); `caseId` alone anchors the current market to a case. */
+function targetFromParams(
+  instrument: string | undefined,
+  date: string | undefined,
+  caseId: string | undefined
+): { ticker: string; label: string; caseId: string | null } | null {
+  if (!instrument && !caseId) return null;
+  const s = useUiStore.getState();
+  const ticker = instrument ?? s.activeTicker ?? "";
+  const label = `${instrument ?? s.activeTicker ?? ""}${date ? ` · ${date}` : ""}`;
+  return { ticker, label, caseId: caseId ?? null };
+}
+
 function fmtTs(ts: string): string {
   return new Date(ts).toLocaleString("en-US", {
     month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
@@ -34,16 +54,33 @@ function fmtTs(ts: string): string {
 export default function ChartPage() {
   const nav = useSurfaceNav();
   const setPendingMarket = useUiStore((s) => s.setPendingMarket);
-  // The market is captured ONCE, on mount: an explicit "view on chart" intent
-  // (`pendingMarket`, consumed and cleared exactly as Markets consumes it),
-  // else whatever Markets last selected. Live-deriving it would let a Markets
-  // unmount beside this page blank it, and a stale intent re-fire later.
-  const [target] = useState(() => {
+  const params = useSurfaceParams();
+  const paramInstrument = params.instrument;
+  const paramDate = params.date;
+  const paramCaseId = params.caseId;
+  // The market is captured ONCE, on mount: the deep link's params when it
+  // has any, else an explicit "view on chart" intent (`pendingMarket`,
+  // consumed and cleared exactly as Markets consumes it), else whatever
+  // Markets last selected. Live-deriving the STORE half would let a Markets
+  // unmount beside this page blank it, and a stale intent re-fire later; the
+  // PARAMS half is re-applied below whenever the link changes.
+  const [target, setTarget] = useState(() => {
+    const fromParams = targetFromParams(paramInstrument, paramDate, paramCaseId);
+    if (fromParams) return fromParams;
     const s = useUiStore.getState();
     return s.pendingMarket
       ? { ticker: s.pendingMarket.ticker, label: s.pendingMarket.label, caseId: s.pendingMarket.caseId ?? null }
       : { ticker: s.activeTicker ?? "", label: s.activeTicker ?? "", caseId: null as string | null };
   });
+  useEffect(() => {
+    const fromParams = targetFromParams(paramInstrument, paramDate, paramCaseId);
+    if (!fromParams) return;
+    setTarget((cur) =>
+      cur.ticker === fromParams.ticker && cur.label === fromParams.label && cur.caseId === fromParams.caseId
+        ? cur
+        : fromParams
+    );
+  }, [paramInstrument, paramDate, paramCaseId]);
   useEffect(() => {
     if (useUiStore.getState().pendingMarket) setPendingMarket(null);
   }, [setPendingMarket]);

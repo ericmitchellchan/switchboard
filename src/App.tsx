@@ -3444,6 +3444,7 @@ function ProjectScreen({ menuHidden }: { menuHidden: boolean }) {
     <ProjectView
       project={effective.project}
       page={effective.page}
+      params={effective.params}
       active={active}
       menuHidden={menuHidden}
     />

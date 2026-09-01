@@ -29,6 +29,8 @@ import {
   orderedOptions,
 } from "../../lib/pageStore";
 import type { InboxPost, PageItem, PageQuestion } from "../../lib/pageStore";
+import { parseSurfaceAddress } from "../../lib/surfaceParams";
+import { openArtifact } from "../../lib/panelStore";
 
 const MONO = "var(--font-mono)";
 
@@ -217,7 +219,7 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
               }}
             >
               {isNewSince(e.updatedAt, seenAt) && <span style={NEW_DOT} />}
-              <span style={{ color: "var(--text-primary)", flex: "none" }}>{e.address}</span>
+              <EvidenceAddress address={e.address} />
               <span style={{ color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis" }}>
                 {e.label}
               </span>
@@ -335,6 +337,37 @@ function ItemRow({ item }: { item: PageItem }) {
       </span>
       <span style={ROW_META}>{item.owner === "user" ? "you" : item.owner}</span>
     </div>
+  );
+}
+
+/** An Evidence row's address (T9 — SWIT-63): a `surface:<project>/<page>?k=v`
+ *  address is a LINK that opens that page in that state through the same open
+ *  rule as a destination click (the preview slot beside this thread; Ctrl =
+ *  full width). Anything else — a ticket key, a PR, a path, or a surface
+ *  address with a malformed query — prints as plain text, no link. */
+function EvidenceAddress({ address }: { address: string }) {
+  const target = parseSurfaceAddress(address);
+  if (!target) return <span style={{ color: "var(--text-primary)", flex: "none" }}>{address}</span>;
+  return (
+    <button
+      type="button"
+      onClick={(e) => openArtifact(target, { modifier: e.ctrlKey || e.metaKey })}
+      title={`open ${target.project} / ${target.page}${target.params ? " in that state" : ""} beside this thread (Ctrl+click: full width)`}
+      style={{
+        flex: "none",
+        background: "none",
+        border: "none",
+        padding: 0,
+        margin: 0,
+        font: "inherit",
+        color: "var(--text-primary)",
+        textDecoration: "underline",
+        textUnderlineOffset: 2,
+        cursor: "pointer",
+      }}
+    >
+      {address}
+    </button>
   );
 }
 

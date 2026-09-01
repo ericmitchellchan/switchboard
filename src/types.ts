@@ -135,8 +135,10 @@ export type Route =
   // A project PAGE full width (SWIT-30) — the "open full" of a surface
   // artifact. Both params are IDENTITY (which page), hence required: a
   // project screen with no page is not a location, and parseRoute falls back
-  // to the terminal when either is missing.
-  | { screen: "project"; project: string; page: string };
+  // to the terminal when either is missing. T9 (SWIT-63): optional `params`
+  // — the page STATE (surface artifact params), carried as `p.<key>` query
+  // params so a deep link into `Trading · NQ 2026-06-05` survives an F5.
+  | { screen: "project"; project: string; page: string; params?: Record<string, string> };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Threads (T5) — an agent session that survives app/machine restarts.
@@ -192,7 +194,14 @@ export type Artifact =
   // This is what the localhost kind could never be: same-document content,
   // so pins hit real DOM, the agent sees real screen context, and one page
   // can sit in the panel, full width, or popped out without a second origin.
-  | { kind: "surface"; project: string; page: string }
+  //
+  // T9 (SWIT-63): optional `params` — a flat string map naming a page STATE
+  // (`{instrument, date, caseId}`), validated by lib/surfaceParams.ts (≤ 8
+  // keys, `[a-z][a-zA-Z0-9_]*`, values ≤ 120). Part of the IDENTITY: two
+  // params sets are two artifacts. A page reads its own set through
+  // page-api's `useSurfaceParams()`; the agent writes one as an Evidence
+  // address `surface:<project>/<page>?k=v`.
+  | { kind: "surface"; project: string; page: string; params?: Record<string, string> }
   // THE ✦ PAGE (SWIT-48) — a thread's one living page: theme · needs you ·
   // to do · what happened · evidence · questions, written by the agent
   // through fixed operations (the MCP server, SWIT-49) and merge-rendered by

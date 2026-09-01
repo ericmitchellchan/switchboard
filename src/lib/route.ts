@@ -17,6 +17,7 @@
 
 import { useSyncExternalStore } from "react";
 import type { Route, ScreenId } from "../types";
+import { isValidSurfaceParamKey, sanitizeSurfaceParams } from "./surfaceParams";
 
 /** History stack cap — bounds memory for navigateBack(). */
 export const HISTORY_CAP = 50;
@@ -41,8 +42,38 @@ export const DEFAULT_ROUTE: Route = { screen: "home" };
  *  New screens append their param keys here (must stay in sync with the
  *  Route union in src/types.ts — currently screen + kb's doc + explorer's
  *  project/path). A PARAM-LESS screen (terminal, threads) adds nothing: it is
- *  already covered by the shared `screen` key. */
+ *  already covered by the shared `screen` key.
+ *
+ *  T9 (SWIT-63): the project screen's page STATE rides as `p.<key>` params
+ *  (`?screen=project&project=lodestar&page=trading&p.instrument=NQ`). A prefix,
+ *  not a list — the keys are the page's own — so ownership is a predicate
+ *  (`isRouteParamKey`), and every `p.*` key is cleared like the fixed ones. */
 export const ROUTE_PARAM_KEYS = ["screen", "doc", "project", "path", "page"] as const;
+
+/** The prefix under which a project route's surface params travel. */
+export const ROUTE_SURFACE_PARAM_PREFIX = "p.";
+
+/** Does the router own this query key? The fixed keys plus every `p.*`. */
+export function isRouteParamKey(key: string): boolean {
+  return (
+    (ROUTE_PARAM_KEYS as readonly string[]).includes(key) ||
+    key.startsWith(ROUTE_SURFACE_PARAM_PREFIX)
+  );
+}
+
+/** The `p.*` params of a query as a validated surface-params map — a
+ *  malformed key (`p.Bad-Key`) or an empty value is DROPPED, not fatal: the
+ *  page still opens, without that one param. Undefined when none survive. */
+export function parseSurfaceRouteParams(params: URLSearchParams): Record<string, string> | undefined {
+  const raw: Record<string, string> = {};
+  for (const [key, value] of params) {
+    if (!key.startsWith(ROUTE_SURFACE_PARAM_PREFIX)) continue;
+    const name = key.slice(ROUTE_SURFACE_PARAM_PREFIX.length);
+    if (!isValidSurfaceParamKey(name) || value.length === 0) continue;
+    if (!(name in raw)) raw[name] = value;
+  }
+  return sanitizeSurfaceParams(raw);
+}
 
 /** Parse a route from query params. Pure: unknown screens and malformed or
  *  cross-screen params fall back to Home / undefined — never throws. */
@@ -78,7 +109,10 @@ export function parseRoute(params: URLSearchParams): Route {
       const project = params.get("project");
       const page = params.get("page");
       if (!project || !page) return DEFAULT_ROUTE;
-      return { screen: "project", project, page };
+      const surfaceParams = parseSurfaceRouteParams(params);
+      return surfaceParams
+        ? { screen: "project", project, page, params: surfaceParams }
+        : { screen: "project", project, page };
     }
   }
 }
@@ -109,10 +143,19 @@ export function routeToParams(route: Route): URLSearchParams {
         if (route.path) params.set("path", route.path);
       }
       break;
-    case "project":
+    case "project": {
       params.set("project", route.project);
       params.set("page", route.page);
+      // Sorted, and only the valid keys: the URL is a canonical spelling of
+      // the state (routeKey compares these strings), not an echo of the map.
+      const clean = sanitizeSurfaceParams(route.params);
+      if (clean) {
+        for (const key of Object.keys(clean).sort()) {
+          params.set(`${ROUTE_SURFACE_PARAM_PREFIX}${key}`, clean[key]);
+        }
+      }
       break;
+    }
   }
   return params;
 }
@@ -124,7 +167,9 @@ export function applyRouteToParams(
   route: Route
 ): URLSearchParams {
   const params = new URLSearchParams(existing);
-  for (const key of ROUTE_PARAM_KEYS) params.delete(key);
+  for (const key of Array.from(new Set(existing.keys()))) {
+    if (isRouteParamKey(key)) params.delete(key);
+  }
   for (const [key, value] of routeToParams(route)) params.set(key, value);
   return params;
 }

@@ -14,6 +14,8 @@ import {
   readRouteFromUrl,
   writeRouteToUrl,
   ROUTE_PARAM_KEYS,
+  isRouteParamKey,
+  parseSurfaceRouteParams,
   HISTORY_CAP,
   navigate,
   navigateToScreen,
@@ -186,21 +188,94 @@ describe("applyRouteToParams (router-owned key clearing)", () => {
   });
 
   it("owns every key any route variant can emit", () => {
-    // Guard: if a routeToParams case emits a key missing from
-    // ROUTE_PARAM_KEYS, stale values of it would leak between routes.
+    // Guard: if a routeToParams case emits a key the router does not own
+    // (ROUTE_PARAM_KEYS, or the `p.` prefix), stale values of it would leak
+    // between routes.
     const variants: Route[] = [
       { screen: "terminal" },
       { screen: "kb", doc: "d.md" },
       { screen: "explorer", project: "p" },
       { screen: "explorer", project: "p", path: "src/a.ts" },
       { screen: "threads" },
+      { screen: "project", project: "lodestar", page: "trading" },
+      { screen: "project", project: "lodestar", page: "trading", params: { instrument: "NQ", date: "2026-06-05" } },
     ];
-    const owned = new Set<string>(ROUTE_PARAM_KEYS);
     for (const route of variants) {
       for (const key of routeToParams(route).keys()) {
-        expect(owned.has(key)).toBe(true);
+        expect(isRouteParamKey(key)).toBe(true);
       }
     }
+    for (const key of ROUTE_PARAM_KEYS) expect(isRouteParamKey(key)).toBe(true);
+    expect(isRouteParamKey("zoom")).toBe(false);
+    expect(isRouteParamKey("p")).toBe(false);
+  });
+});
+
+describe("project route params — `p.*` (T9, SWIT-63)", () => {
+  const nq: Route = {
+    screen: "project",
+    project: "lodestar",
+    page: "trading",
+    params: { instrument: "NQ", date: "2026-06-05" },
+  };
+
+  it("serializes the state as sorted `p.<key>` params", () => {
+    expect(routeToParams(nq).toString()).toBe(
+      "screen=project&project=lodestar&page=trading&p.date=2026-06-05&p.instrument=NQ"
+    );
+    expect(routeToParams({ screen: "project", project: "lodestar", page: "trading" }).toString()).toBe(
+      "screen=project&project=lodestar&page=trading"
+    );
+  });
+
+  it("round-trips with and without params (no empty `params` on the bare route)", () => {
+    expect(roundTrip(nq)).toEqual(nq);
+    const bare = roundTrip({ screen: "project", project: "lodestar", page: "trading" });
+    expect(bare).toEqual({ screen: "project", project: "lodestar", page: "trading" });
+    expect(bare).not.toHaveProperty("params");
+  });
+
+  it("drops a malformed `p.` key alone and keeps the page", () => {
+    const parsed = parseRoute(
+      new URLSearchParams("screen=project&project=lodestar&page=trading&p.instrument=NQ&p.Bad-Key=1&p.=x&p.empty=")
+    );
+    expect(parsed).toEqual({ screen: "project", project: "lodestar", page: "trading", params: { instrument: "NQ" } });
+    expect(parseSurfaceRouteParams(new URLSearchParams("p.Bad-Key=1"))).toBeUndefined();
+  });
+
+  it("`p.*` keys belong to the project screen only — on another screen they are cleared, not carried", () => {
+    expect(parseRoute(new URLSearchParams("screen=kb&doc=a.md&p.instrument=NQ"))).toEqual({ screen: "kb", doc: "a.md" });
+    const next = applyRouteToParams(new URLSearchParams("screen=project&project=lodestar&page=trading&p.instrument=NQ&zoom=2"), {
+      screen: "kb",
+      doc: "a.md",
+    });
+    expect(next.get("p.instrument")).toBeNull();
+    expect(next.get("zoom")).toBe("2"); // a foreign param still survives
+    expect(next.toString()).toBe("zoom=2&screen=kb&doc=a.md");
+  });
+
+  it("stale `p.*` params from a previous state never leak into the next", () => {
+    const next = applyRouteToParams(
+      new URLSearchParams("screen=project&project=lodestar&page=trading&p.instrument=NQ&p.date=2026-06-05"),
+      { screen: "project", project: "lodestar", page: "trading", params: { instrument: "ES" } }
+    );
+    expect(next.get("p.instrument")).toBe("ES");
+    expect(next.get("p.date")).toBeNull();
+  });
+
+  it("two states are two LOCATIONS (routeKey), regardless of key order", () => {
+    const bare: Route = { screen: "project", project: "lodestar", page: "trading" };
+    expect(sameRoute(nq, bare)).toBe(false);
+    expect(
+      sameRoute(nq, { screen: "project", project: "lodestar", page: "trading", params: { date: "2026-06-05", instrument: "NQ" } })
+    ).toBe(true);
+    expect(routeKey(nq)).not.toBe(routeKey(bare));
+  });
+
+  it("backTargetLabel is unchanged by params", () => {
+    __resetNavForTests(nq);
+    navigate({ screen: "terminal" });
+    expect(backTargetLabel()).toBe("lodestar / trading");
   });
 });
 

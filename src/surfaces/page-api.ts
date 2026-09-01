@@ -12,7 +12,15 @@
 //                                fetch at 2s beside a live terminal).
 //   useSurfaceNav()           — open another page of the SAME project (the
 //                                react-router `useNavigate` replacement): the
-//                                shell decides panel vs full width.
+//                                shell decides panel vs full width. `openPage`
+//                                takes optional PARAMS — a deep link into the
+//                                other page's state.
+//   useSurfaceParams()        — THIS artifact's params (T9 — SWIT-63): the
+//                                page state a deep link named (`instrument`,
+//                                `date`, `caseId`…). Empty object when none;
+//                                a page reads it on mount and whenever it
+//                                changes, and falls back to its own store
+//                                intents for in-project navigation.
 //   useSurfaceAnchorRegistry  — publish a programmatic anchor provider
 //                                (canvas charts); see anchors.ts.
 //   useSurfaceKeydown()       — page shortcuts, scoped to the page (the host
@@ -21,6 +29,8 @@
 //                                replaces an in-page agent bridge.
 
 import { createContext, useContext, useEffect, useRef } from "react";
+import { NO_SURFACE_PARAMS } from "../lib/surfaceParams";
+import type { SurfaceParams } from "../lib/surfaceParams";
 
 export { SurfaceAnchorContext, useSurfaceAnchorRegistry } from "./anchors";
 export type { SurfaceAnchor, SurfaceAnchorProvider, SurfaceAnchorRegistry } from "./anchors";
@@ -43,14 +53,32 @@ export function useSurfaceActive(): boolean {
   return useContext(SurfaceActiveContext);
 }
 
+// ── Params (T9 — SWIT-63) ────────────────────────────────────────────────────
+// A surface artifact may carry `params` — a validated flat string map naming
+// the page STATE a deep link asked for (lib/surfaceParams.ts is the shape).
+// The host provides the artifact's own set; the default is the ONE frozen
+// empty object, so a page effect keyed on it never re-fires for nothing.
+
+export type { SurfaceParams } from "../lib/surfaceParams";
+
+export const SurfaceParamsContext = createContext<SurfaceParams>(NO_SURFACE_PARAMS);
+
+/** The params this page was opened with. Read the keys you understand and
+ *  ignore the rest; a page that knows no params keeps working unchanged. */
+export function useSurfaceParams(): SurfaceParams {
+  return useContext(SurfaceParamsContext);
+}
+
 // ── Navigation ───────────────────────────────────────────────────────────────
 
 export type SurfaceNav = {
   /** Open a page of this project. Where it opens (this panel's strip, or full
    *  width) is the shell's decision — the same rule a tree click follows. A
    *  page id the registry does not know renders the host's "no such page"
-   *  note rather than throwing. */
-  openPage: (page: string) => void;
+   *  note rather than throwing. Optional `params` deep-link into that page's
+   *  state (T9) — the same map its `useSurfaceParams()` will read; invalid
+   *  keys are dropped by the shell's validator. */
+  openPage: (page: string, params?: Record<string, string>) => void;
   /** Open a page of this project in ITS OWN always-on-top window (Inc 5d —
    *  the trading HUD). Re-opening focuses the existing window. */
   openWindow: (page: string) => void;

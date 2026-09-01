@@ -14,7 +14,7 @@ import { api, type ContextTables, type TradeRow } from "../api/client";
 import ExitSandbox from "../components/trading/ExitSandbox";
 import TradeDetail from "../components/trading/TradeDetail";
 import { ptTime } from "../lib/time";
-import { useSurfaceNav } from "../../../surfaces/page-api";
+import { useSurfaceNav, useSurfaceParams } from "../../../surfaces/page-api";
 
 const UP = "#4ea96a";
 const DN = "#e0645b";
@@ -73,6 +73,25 @@ export default function Trading() {
   const [sortDesc, setSortDesc] = useState(true);
   const [sortKey, setSortKey] = useState<"start" | "pnl_usd" | "hold_min">("start");
   const [detailIdx, setDetailIdx] = useState<number | null>(null);
+
+  // SWITCHBOARD (T9 — SWIT-63): a deep link's params. `instrument` and `date`
+  // are TradeRow columns, so they become filters (the generic filter path
+  // compares `String(row[key]) === value`) and the TRADES face opens on them
+  // — `surface:lodestar/trading?instrument=NQ&date=2026-06-05` lands on that
+  // day's NQ trades. Re-applied whenever the params change (the host keeps the
+  // page mounted across a route params change). `caseId` has no meaning on
+  // this page and is ignored; the chart page reads it.
+  const params = useSurfaceParams();
+  const paramInstrument = params.instrument;
+  const paramDate = params.date;
+  useEffect(() => {
+    if (!paramInstrument && !paramDate) return;
+    const next: Record<string, string> = {};
+    if (paramInstrument) next.symbol = paramInstrument;
+    if (paramDate) next.date = paramDate;
+    setFilters(next);
+    setTab("trades");
+  }, [paramInstrument, paramDate]);
 
   // Load with retry: a failed request is NOT "no trades" — the backend may still be
   // booting when the window opens. Keep trying; only has_data=false means empty.
