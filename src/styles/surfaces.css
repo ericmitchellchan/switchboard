@@ -66,15 +66,62 @@
   font-size: 12px;
   line-height: 1.5;
 }
-/* Tailwind's `text-xl`/`text-lg` etc. ride on `--text-*` sizes and need no
- * help. Form controls inherit the surface's type, which preflight would have
- * done for us. */
-.sb-surface button,
-.sb-surface select,
-.sb-surface input {
-  font: inherit;
-  color: inherit;
-}
-.sb-surface select {
-  background: var(--surface);
+/* FORM-CONTROL RESET, scoped and LAYERED (SWIT-57). Preflight stays off (see
+ * the header), so a copied page's <button> arrived with the UA's buttonface
+ * fill, 2px outset border and `1px 6px` padding — the white pills on
+ * Playground's tab row and stream chips. Their Tailwind classes (`border`,
+ * `border-b-2`, `px-2`, `text-dim`) were all present and all LOST, because the
+ * previous `.sb-surface button { color: inherit }` sat UNLAYERED, and an
+ * unlayered rule beats every layered utility whatever its specificity. So the
+ * reset lives in `@layer base` — below `utilities`, above nothing the shell
+ * owns — where a page's own classes win and an unclassed control gets the
+ * kit's shape (design/wireframe-kit/components.md: button · input + textarea).
+ * Tailwind's `border` utility restores `border-style: solid` + a width on top
+ * of `border: 0`, which is what turns the chips back into hairline outlines.
+ * Scoped to `.sb-surface`: the shell's chrome outside it is untouched. */
+@layer base {
+  .sb-surface {
+    /* Native popups (<select>, date pickers) render dark, not white-on-white. */
+    color-scheme: dark;
+  }
+  .sb-surface button,
+  .sb-surface input,
+  .sb-surface select,
+  .sb-surface textarea {
+    font: inherit;
+    color: inherit;
+  }
+  .sb-surface button {
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    padding: 0;
+    cursor: pointer;
+  }
+  .sb-surface button:disabled {
+    cursor: default;
+  }
+  .sb-surface input,
+  .sb-surface select,
+  .sb-surface textarea {
+    background: transparent;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 5px 8px;
+    outline: none;
+  }
+  .sb-surface input::placeholder,
+  .sb-surface textarea::placeholder {
+    color: var(--dim2);
+  }
+  .sb-surface input:focus,
+  .sb-surface select:focus,
+  .sb-surface textarea:focus {
+    border-color: var(--dim2);
+  }
+  /* An opaque popup: a transparent native <select> list is unreadable. */
+  .sb-surface option {
+    background: var(--surface);
+    color: var(--text);
+  }
 }

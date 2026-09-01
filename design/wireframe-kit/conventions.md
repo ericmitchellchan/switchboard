@@ -145,3 +145,15 @@ that stop being true.
   grows no sections of its own. Row chips: `?` = agent waiting on you, `↓ N` = unread
   cross-thread posts, a 6px white dot = changed since you last looked. Mock:
   features/coaching-platform/wireframes/shell-v2.html; spec: requirements.md beside it.
+- 2026-09-01 — NO HELPER/NARRATION COPY IN THE UI (Eric, on the first live question
+  tab: "why do we need this narration in the actual UI?"). If a sentence explains the
+  mechanism ("the answer lands on the page and goes to the agent…", "the agent writes
+  this page as it works…"), it belongs in the spec, or at most in a control's native
+  `title`. A surface states the thing and its one action; outcome states are one plain
+  line, never a bordered note.
+- 2026-09-01 — ONE VISUAL VOCABULARY, `design/wireframe-kit/components.md`; NO
+  PER-SURFACE BOXES (Eric: "why are there all these different boxes?"). Band header,
+  list row, button (primary / quiet / icon / text), input + textarea, chip, the
+  question block, the page sections, the tooltip — borrowed from Ky's desktop
+  components in our tokens. A row is the click target (no pill inside a row), boxes
+  are earned, and a shape the kit lacks is added to the kit before it is drawn.

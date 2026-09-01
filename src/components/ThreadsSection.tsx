@@ -30,6 +30,11 @@
 // Data flows from the threadStore singleton (useThreadsView); actions flow
 // back through the registered ThreadActions bridge (App owns session
 // creation/revival).
+//
+// SKIN (SWIT-57): the band header, the list row (hover = `--bg-active` +
+// `--text-primary`, active = the same fill + the inset bar) and the chip are
+// the kit's — design/wireframe-kit/components.md — nothing here is styled
+// that the kit does not name.
 
 import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
@@ -267,7 +272,7 @@ function ShellRow({ session, active }: { session: MenuSession; active: boolean }
       style={{
         ...ROW_STYLE,
         paddingLeft: 22,
-        background: active ? "var(--bg-active)" : "none",
+        background: active || hover ? "var(--bg-active)" : "none",
         boxShadow: active ? "inset 2px 0 0 var(--text-primary)" : "none",
         color: active || hover ? "var(--text-primary)" : "var(--text-secondary)",
       }}
@@ -391,7 +396,7 @@ function ThreadRow({
       style={{
         ...ROW_STYLE,
         paddingLeft: 22,
-        background: active ? "var(--bg-active)" : "none",
+        background: active || hover ? "var(--bg-active)" : "none",
         boxShadow: active ? "inset 2px 0 0 var(--text-primary)" : "none",
         color: active || hover ? "var(--text-primary)" : "var(--text-secondary)",
       }}

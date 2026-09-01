@@ -11,6 +11,12 @@
 // The NEW-SINCE-YOU-LOOKED stamp: after the page has been on screen for
 // SEEN_DWELL_MS the stamp advances; anything dated after the PREVIOUS stamp
 // carries a dot until then. A first visit marks nothing.
+//
+// SKIN (SWIT-57): the kit's PAGE SECTIONS — every section is a band header +
+// dense list rows, no section is a box, and nothing on the page explains the
+// page (design/wireframe-kit/components.md). A question row is a row with a
+// `?` glyph; a post is an origin line and its text; the empty state is one
+// line.
 
 import { useEffect, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
@@ -25,6 +31,7 @@ import type { InboxPost, PageItem, PageQuestion } from "../../lib/pageStore";
 
 const MONO = "var(--font-mono)";
 
+/** kit: band header, page-section variant (padding 0; the section gap does it). */
 const SECTION_TITLE: CSSProperties = {
   fontFamily: MONO,
   fontSize: 9.5,
@@ -44,6 +51,7 @@ const SECTION_META: CSSProperties = {
   color: "var(--text-faint)",
 };
 
+/** kit: the NEW dot. */
 const NEW_DOT: CSSProperties = {
   display: "inline-block",
   width: 6,
@@ -51,6 +59,29 @@ const NEW_DOT: CSSProperties = {
   borderRadius: "50%",
   background: "var(--text-primary)",
   flex: "none",
+};
+
+/** kit: dense list row (`2px 0`, no hover fill). */
+const DENSE_ROW: CSSProperties = {
+  display: "flex",
+  gap: 8,
+  alignItems: "baseline",
+  padding: "2px 0",
+};
+
+/** kit: the row's leading glyph column — fixed, so titles align. */
+const GLYPH: CSSProperties = {
+  flex: "none",
+  width: 14,
+  color: "var(--text-dim)",
+};
+
+/** kit: trailing meta on a row. */
+const ROW_META: CSSProperties = {
+  marginLeft: "auto",
+  flex: "none",
+  fontSize: 9.5,
+  color: "var(--text-dim)",
 };
 
 /** Item state glyphs — text, no new colour (the kit's rule). */
@@ -101,11 +132,6 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
       >
         <span style={{ fontSize: 14, color: "var(--text-muted)" }}>✦</span>
         <span>No page yet.</span>
-        <span style={{ color: "var(--text-faint)", maxWidth: 320 }}>
-          The agent writes this page as it works — theme, what needs you, to-dos, what happened,
-          evidence. It fills in once the thread's agent has page tools (a thread launched after the
-          tool server ships).
-        </span>
       </div>
     );
   }
@@ -123,7 +149,7 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
         color: "var(--text-secondary)",
         display: "flex",
         flexDirection: "column",
-        gap: 12,
+        gap: 14,
       }}
     >
       {page.theme && (
@@ -182,13 +208,11 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
             <div
               key={e.address}
               style={{
-                display: "flex",
+                ...DENSE_ROW,
                 gap: 10,
-                padding: "2px 0",
                 borderBottom: "1px solid var(--border)",
                 whiteSpace: "nowrap",
                 overflow: "hidden",
-                alignItems: "baseline",
               }}
             >
               {isNewSince(e.updatedAt, seenAt) && <span style={NEW_DOT} />}
@@ -196,11 +220,7 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
               <span style={{ color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis" }}>
                 {e.label}
               </span>
-              {e.status && (
-                <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10, flex: "none" }}>
-                  {e.status}
-                </span>
-              )}
+              {e.status && <span style={{ ...ROW_META, fontSize: 10 }}>{e.status}</span>}
             </div>
           ))}
         </Section>
@@ -209,12 +229,12 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
       {page.answeredQuestions.length > 0 && (
         <Section title="Questions" meta={`${page.answeredQuestions.length} answered`}>
           {page.answeredQuestions.map(({ question, answer }) => (
-            <div key={question.id} style={{ color: "var(--text-muted)", marginBottom: 3 }}>
-              {question.text}
-              <div style={{ color: "var(--text-secondary)" }}>
+            <div key={question.id} style={{ ...DENSE_ROW, flexDirection: "column", gap: 0 }}>
+              <span style={{ color: "var(--text-muted)" }}>{question.text}</span>
+              <span style={{ color: "var(--text-secondary)" }}>
                 <span style={{ color: "var(--text-dim)" }}>you: </span>
                 {answer.text}
-              </div>
+              </span>
             </div>
           ))}
         </Section>
@@ -257,81 +277,30 @@ function Section({
   );
 }
 
-/** An OPEN question. The answer AFFORDANCE (options, free text, write-back)
- *  is SWIT-51's question tab — until then the row states the question and
- *  says where to answer it: the terminal. */
+/** An OPEN question, as a row: `?` · the text · its options, dim, after it.
+ *  The answer affordance is the `? question` tab (SWIT-51), which the agent's
+ *  ask opens beside this page; the row states the question and nothing else. */
 function QuestionRow({ question, isNew }: { question: PageQuestion; isNew: boolean }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        gap: 8,
-        alignItems: "flex-start",
-        border: "1px solid var(--border-subtle)",
-        background: "var(--bg-elevated)",
-        padding: "6px 8px",
-        marginBottom: 4,
-      }}
-    >
-      <span
-        style={{
-          flex: "none",
-          width: 16,
-          height: 16,
-          border: "1px solid var(--text-secondary)",
-          borderRadius: 3,
-          fontSize: 10,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          color: "var(--text-primary)",
-          marginTop: 1,
-        }}
-      >
-        ?
-      </span>
+    <div style={DENSE_ROW}>
+      <span style={{ ...GLYPH, color: "var(--text-primary)" }}>?</span>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ color: "var(--text-primary)", display: "flex", gap: 6, alignItems: "center" }}>
-          <span style={{ minWidth: 0 }}>{question.text}</span>
-          {isNew && <span style={NEW_DOT} />}
-        </div>
+        <span style={{ color: "var(--text-primary)" }}>{question.text}</span>
+        {isNew && <span style={{ ...NEW_DOT, marginLeft: 6, verticalAlign: "middle" }} />}
         {question.options.length > 0 && (
-          <div style={{ display: "flex", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
-            {question.options.map((o) => (
-              <span
-                key={o}
-                style={{
-                  fontSize: 10,
-                  border: "1px solid var(--border-subtle)",
-                  borderRadius: 3,
-                  padding: "0 6px",
-                  color: "var(--text-muted)",
-                }}
-              >
-                {o}
-              </span>
-            ))}
-          </div>
+          <div style={{ fontSize: 10, color: "var(--text-dim)" }}>{question.options.join(" · ")}</div>
         )}
-        <div style={{ fontSize: 9.5, color: "var(--text-faint)", marginTop: 3 }}>
-          answer in the terminal — the question tab arrives with the next increment
-        </div>
       </div>
     </div>
   );
 }
 
+/** A cross-thread post: the origin as a 9.5px meta line, then the text. */
 function PostRow({ post, isNew }: { post: InboxPost; isNew: boolean }) {
   return (
-    <div
-      style={{
-        borderLeft: "2px solid var(--text-dim)",
-        paddingLeft: 8,
-        margin: "3px 0",
-      }}
-    >
+    <div style={{ ...DENSE_ROW, flexDirection: "column", gap: 0 }}>
       <div style={{ fontSize: 9.5, color: "var(--text-dim)", display: "flex", gap: 6, alignItems: "center" }}>
-        ↓ from thread <span style={{ color: "var(--text-muted)" }}>{post.from}</span>
+        ↓ <span style={{ color: "var(--text-muted)" }}>{post.from}</span>
         {isNew && <span style={NEW_DOT} />}
       </div>
       <div>{post.text}</div>
@@ -342,19 +311,12 @@ function PostRow({ post, isNew }: { post: InboxPost; isNew: boolean }) {
 function ItemRow({ item }: { item: PageItem }) {
   return (
     <div
-      style={{
-        display: "flex",
-        gap: 7,
-        alignItems: "baseline",
-        padding: "1px 0",
-        whiteSpace: "nowrap",
-        overflow: "hidden",
-      }}
+      style={{ ...DENSE_ROW, whiteSpace: "nowrap", overflow: "hidden" }}
       title={item.note ?? undefined}
     >
       <span
         style={{
-          flex: "none",
+          ...GLYPH,
           color: item.state === "in_progress" ? "var(--st-running, #3B82F6)" : "var(--text-dim)",
         }}
       >
@@ -370,14 +332,12 @@ function ItemRow({ item }: { item: PageItem }) {
       >
         {item.title}
       </span>
-      <span style={{ marginLeft: "auto", flex: "none", fontSize: 9.5, color: "var(--text-dim)" }}>
-        {item.owner === "user" ? "you" : item.owner}
-      </span>
+      <span style={ROW_META}>{item.owner === "user" ? "you" : item.owner}</span>
     </div>
   );
 }
 
-/** Earlier turns, folded behind a click — the latest is the page's face. */
+/** Earlier turns, folded behind a text link button — the latest is the page's face. */
 function EarlierTurns({ turns }: { turns: { at: string; lines: string[] }[] }) {
   const [open, setOpen] = useState(false);
   if (!open) {
