@@ -9,6 +9,7 @@ mod pty;
 use config::{load_config, Config};
 use discovery::ClaudeDiscovery;
 use pty::{PtyManager, SessionInfo};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{image::Image, Emitter, Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -1599,6 +1600,13 @@ pub fn run() {
     #[cfg(not(target_os = "macos"))]
     let paste_shortcut = Shortcut::new(Some(Modifiers::CONTROL), Code::KeyV);
 
+    // Debounce for the blur-side hotkey UNREGISTER below: each blur bumps the
+    // generation and arms a timer; a re-focus (or a newer blur) bumps it
+    // again, so only a blur that STAYS unfocused for the window actually
+    // unregisters Ctrl+V.
+    const BLUR_UNREGISTER_MS: u64 = 500;
+    let blur_generation: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+
     tauri::Builder::default()
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -1689,11 +1697,43 @@ pub fn run() {
                     }
                     let app = window.app_handle();
                     if *focused {
+                        // A re-focus cancels any pending debounced unregister
+                        // (below); registration stays IMMEDIATE.
+                        blur_generation.fetch_add(1, Ordering::SeqCst);
                         log::debug!("Main window focused, registering paste shortcut");
                         let _ = app.global_shortcut().register(paste_shortcut);
                     } else {
-                        log::debug!("Main window unfocused, unregistering paste shortcut");
-                        let _ = app.global_shortcut().unregister(paste_shortcut);
+                        // DEBOUNCED unregister (0.5.2). A snipping overlay
+                        // flips focus several times within a couple of
+                        // seconds, and the old immediate unregister left
+                        // Ctrl+V unowned in the gap — Eric's first paste
+                        // after a screenshot produced no hotkey event at
+                        // all. A blur arms a BLUR_UNREGISTER_MS timer; a
+                        // re-focus bumps the generation and the stale timer
+                        // stands down. HONEST TRADE: for up to 500ms after
+                        // really switching away, Switchboard still consumes
+                        // a Ctrl+V meant for the other app; that paste is
+                        // retryable, while a swallowed image paste into OUR
+                        // window was a silent loss. Taken deliberately.
+                        let generation = blur_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                        let generation_ref = blur_generation.clone();
+                        let app = app.clone();
+                        log::debug!("Main window unfocused, debouncing paste shortcut unregister");
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(BLUR_UNREGISTER_MS));
+                            let main_app = app.clone();
+                            // The generation is re-checked ON the main thread,
+                            // right beside the unregister (RegisterHotKey is
+                            // thread-affine on Windows, and the plugin's calls
+                            // belong on the main thread anyway), so a focus
+                            // racing the timer cannot lose.
+                            let _ = app.run_on_main_thread(move || {
+                                if generation_ref.load(Ordering::SeqCst) == generation {
+                                    log::debug!("Main window still unfocused, unregistering paste shortcut");
+                                    let _ = main_app.global_shortcut().unregister(paste_shortcut);
+                                }
+                            });
+                        });
                     }
                 }
                 // Emit file paths when files are dropped onto the window

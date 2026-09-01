@@ -7,11 +7,13 @@
 //
 // The band owns its HEADER (SideMenu renders <ThreadsSection /> and nothing
 // else for this band): `THREADS` and `SEE ALL` both open the history screen
-// (`{screen:"threads"}`), `SEE ALL` carries the ACTIVE count, and `+` creates
-// a thread IMMEDIATELY — titled `New thread`, in the active thread's repo
-// (else the last-used repo, else the tab's cwd) — and puts the title into
-// inline rename (threadStore.requestThreadRename). The repo picker dialog is
-// not on this band any more; Ctrl+T still has one.
+// (`{screen:"threads"}`), `SEE ALL` carries the ACTIVE count, and `+` drops a
+// small anchored CHOOSER (0.5.2 — Eric: "What if I don't want switchboard?"):
+// the merged registry+config repo list Ctrl+T's dialog reads, the current
+// default target first and PRESELECTED (Enter = the old blind create, zero
+// extra cost), the rest alphabetical, `no repo — shell in <dir>` last. The
+// pick creates IMMEDIATELY — titled `New thread`, title into inline rename
+// (threadStore.requestThreadRename). The full picker dialog stays on Ctrl+T.
 //
 // Rows are dense 11.5px: status dot + title + a DIM PROJECT SUFFIX in flat
 // mode (tabLabel.tabRepoSuffix's rule, so `switchboard · Sep 1` does not print
@@ -37,9 +39,10 @@
 // the kit's — design/wireframe-kit/components.md — nothing here is styled
 // that the kit does not name.
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { CSSProperties } from "react";
-import type { AgentStatus, Thread } from "../types";
+import type { AgentStatus, RepoConfig, Thread } from "../types";
 import {
   useThreadsView,
   getThreadActions,
@@ -49,11 +52,17 @@ import {
   selectShellSessions,
   threadRepoName,
   clearThreadRenameRequest,
+  quickCreateWorkingDir,
+  orderThreadRepoChoices,
 } from "../lib/threadStore";
+import type { ThreadCreateTarget } from "../lib/threadStore";
 import type { MenuSession } from "../lib/threadStore";
 import { navigate } from "../lib/route";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
-import { getExplorerActions } from "../lib/explorer";
+import { getExplorerActions, useSessionRepos, quickThreadTarget } from "../lib/explorer";
+import { sessionDirFor } from "../lib/devServer";
+import { getActiveTabSession } from "../lib/panelStore";
+import { getHomeDir } from "../lib/ipc";
 import { useShellMode } from "../lib/shellMode";
 import { tabRepoSuffix } from "../lib/tabLabel";
 import { ThreadRowMenu, ThreadTitleEditor, threadMenuItems } from "./ThreadRowMenu";
@@ -120,7 +129,7 @@ const HEADER_BUTTON: CSSProperties = {
   color: "var(--text-dim)",
 };
 
-export function ThreadsSection() {
+export function ThreadsSection({ repos }: { repos: readonly RepoConfig[] }) {
   const view = useThreadsView();
   const bare = useShellMode() === "bare";
 
@@ -155,7 +164,7 @@ export function ThreadsSection() {
 
   return (
     <>
-      <BandHeader total={active.length} />
+      <BandHeader total={active.length} repos={repos} />
       {groups
         ? groups.map((g) => (
             <div key={g.project}>
@@ -180,9 +189,11 @@ export function ThreadsSection() {
  *  history screen — reachable however short the list is — and `N` is the
  *  ACTIVE count (the history screen's Active tab), dim so the word leads.
  *  `+` creates directly through the actions bridge; nothing here knows how. */
-function BandHeader({ total }: { total: number }) {
+function BandHeader({ total, repos }: { total: number; repos: readonly RepoConfig[] }) {
   const [seeAllHover, setSeeAllHover] = useState(false);
   const [plusHover, setPlusHover] = useState(false);
+  const [chooserOpen, setChooserOpen] = useState(false);
+  const plusRef = useRef<HTMLButtonElement>(null);
   const openHistory = () => navigate({ screen: "threads" });
   return (
     <div
@@ -211,12 +222,15 @@ function BandHeader({ total }: { total: number }) {
         See all <span style={{ color: "var(--text-faint)", letterSpacing: 0 }}>({total})</span>
       </button>
       <button
+        ref={plusRef}
         type="button"
-        onClick={() => getThreadActions()?.createThreadNow()}
+        onClick={() => setChooserOpen((v) => !v)}
         onMouseEnter={() => setPlusHover(true)}
         onMouseLeave={() => setPlusHover(false)}
-        title="New thread"
+        title="New thread — choose a repo"
         aria-label="New thread"
+        aria-haspopup="listbox"
+        aria-expanded={chooserOpen}
         style={{
           ...HEADER_BUTTON,
           textTransform: "none",
@@ -224,11 +238,14 @@ function BandHeader({ total }: { total: number }) {
           fontSize: 13,
           lineHeight: 1,
           padding: "0 2px",
-          color: plusHover ? "var(--text-primary)" : "var(--text-dim)",
+          color: chooserOpen || plusHover ? "var(--text-primary)" : "var(--text-dim)",
         }}
       >
         +
       </button>
+      {chooserOpen && (
+        <NewThreadChooser anchor={plusRef} repos={repos} onClose={() => setChooserOpen(false)} />
+      )}
     </div>
   );
 }
@@ -468,5 +485,273 @@ function ThreadRow({
         </span>
       </span>
     </button>
+  );
+}
+
+// ── The `+` chooser (0.5.2) ──────────────────────────────────────────────────
+// Eric: "Every time I open a new thread, it automatically starts a session in
+// switchboard. What if I don't want switchboard?" So the `+` asks — once,
+// cheaply: the dropdown opens PRESELECTED on the current default target, so
+// Enter (or a second click) is exactly the old blind create. Rows come from
+// THE SAME merged registry+config list Ctrl+T's dialog reads
+// (explorer.useSessionRepos); order is threadStore.orderThreadRepoChoices
+// (default first, rest alphabetical, archived sunk) plus the trailing
+// `no repo — shell in <dir>` row (the quick-create target). Creation goes
+// through the SAME ThreadActions.createThreadNow machinery, now with a
+// target; App's creatingThreadRef is the durable double-create guard and a
+// local one-shot (NewThreadDialog's rule) stops the second gesture before it.
+// BacklogPanel's dropdown is the pattern: portalled, fixed under the anchor,
+// outside-mousedown closes, Esc closes, kit rows only.
+
+const CHOOSER_WIDTH = 280;
+
+function NewThreadChooser({
+  anchor,
+  repos,
+  onClose,
+}: {
+  anchor: React.RefObject<HTMLButtonElement>;
+  repos: readonly RepoConfig[];
+  onClose: () => void;
+}) {
+  const view = useThreadsView();
+  const { options, projects } = useSessionRepos(repos);
+  const boxRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  const [homeDir, setHomeDir] = useState("");
+
+  useEffect(() => {
+    getHomeDir()
+      .then(setHomeDir)
+      .catch(() => setHomeDir(""));
+  }, []);
+
+  // The default target and the tab's cwd are read ONCE, on open — the
+  // dropdown is transient, and rows must not reshuffle under the pointer.
+  // (The registry answer still lands async; the preselection effect below is
+  // what keeps the marked row selected when it does.)
+  /* eslint-disable react-hooks/exhaustive-deps */
+  const defaultDir = useMemo(() => quickCreateWorkingDir(view.threads, view.activeSessionId), []);
+  const tabDir = useMemo(() => sessionDirFor(getActiveTabSession()), []);
+  /* eslint-enable react-hooks/exhaustive-deps */
+
+  const { repos: ordered, defaultIsRepo } = useMemo(
+    () => orderThreadRepoChoices(options, defaultDir),
+    [options, defaultDir]
+  );
+  const quick = quickThreadTarget(projects, tabDir, homeDir);
+  // The no-repo row: when the default target IS a repo this is the dialog's
+  // quick target (tab cwd, else home) and selects `quick`; when it is not,
+  // the row IS the default — it names the resolved dir and Enter runs exactly
+  // the old `+` resolution (`default`).
+  const quickPath = defaultIsRepo ? quick.path : (defaultDir ?? quick.path);
+  const quickTarget: ThreadCreateTarget = defaultIsRepo ? { kind: "quick" } : { kind: "default" };
+  const rowCount = ordered.length + 1;
+  const defaultIndex = defaultIsRepo ? 0 : rowCount - 1;
+
+  const [selected, setSelected] = useState(defaultIndex);
+  const touchedRef = useRef(false);
+  useEffect(() => {
+    if (!touchedRef.current) setSelected(defaultIndex);
+    else setSelected((prev) => Math.min(prev, rowCount - 1));
+  }, [defaultIndex, rowCount]);
+
+  // Anchored under the `+`; re-measured on resize. `position: fixed` because
+  // the rail scrolls and clips (BacklogDropdown's rule).
+  useLayoutEffect(() => {
+    const measure = () => {
+      const r = anchor.current?.getBoundingClientRect();
+      if (!r) return;
+      setPos({
+        top: r.bottom + 4,
+        left: Math.max(4, Math.min(r.left, window.innerWidth - CHOOSER_WIDTH - 4)),
+      });
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [anchor]);
+
+  useEffect(() => {
+    if (pos) boxRef.current?.focus();
+  }, [pos]);
+
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (boxRef.current?.contains(t) || anchor.current?.contains(t)) return;
+      onClose();
+    };
+    document.addEventListener("mousedown", onDown, true);
+    return () => document.removeEventListener("mousedown", onDown, true);
+  }, [anchor, onClose]);
+
+  // One-shot like NewThreadDialog's: a double-Enter (or Enter + click) before
+  // the portal unmounts must not reach createThreadNow twice.
+  const submittedRef = useRef(false);
+  const select = useCallback(
+    (target: ThreadCreateTarget) => {
+      if (submittedRef.current) return;
+      submittedRef.current = true;
+      getThreadActions()?.createThreadNow(target);
+      onClose();
+    },
+    [onClose]
+  );
+
+  const targetAt = (i: number): ThreadCreateTarget => {
+    const o = ordered[i];
+    return o
+      ? { kind: "repo", name: o.name, path: o.path, color: o.color, group: o.group }
+      : quickTarget;
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    e.stopPropagation();
+    switch (e.key) {
+      case "ArrowDown":
+        e.preventDefault();
+        touchedRef.current = true;
+        setSelected((prev) => Math.min(prev + 1, rowCount - 1));
+        break;
+      case "ArrowUp":
+        e.preventDefault();
+        touchedRef.current = true;
+        setSelected((prev) => Math.max(prev - 1, 0));
+        break;
+      case "Enter":
+        e.preventDefault();
+        select(targetAt(selected));
+        break;
+      case "Escape":
+        e.preventDefault();
+        onClose();
+        break;
+    }
+  };
+
+  if (!pos) return null;
+  return createPortal(
+    <div
+      ref={boxRef}
+      tabIndex={-1}
+      role="listbox"
+      aria-label="New thread — choose a repo"
+      onKeyDown={onKeyDown}
+      style={{
+        position: "fixed",
+        top: pos.top,
+        left: pos.left,
+        width: CHOOSER_WIDTH,
+        maxHeight: "60vh",
+        zIndex: 230,
+        overflowY: "auto",
+        background: "var(--bg-secondary)",
+        border: "1px solid var(--border-subtle)",
+        borderRadius: 6,
+        boxShadow: "0 10px 30px rgba(0,0,0,0.55)",
+        fontFamily: "var(--font-mono)",
+        padding: "4px 0",
+        outline: "none",
+      }}
+    >
+      {ordered.map((o, i) => (
+        <ChooserRow
+          key={`repo:${o.path}`}
+          selected={selected === i}
+          onSelect={() => select(targetAt(i))}
+          onHover={() => {
+            touchedRef.current = true;
+            setSelected(i);
+          }}
+          dot={o.color}
+          name={o.name}
+          dim={o.archived}
+          meta={defaultIsRepo && i === 0 ? "default" : undefined}
+          title={o.path}
+        />
+      ))}
+      <ChooserRow
+        key="quick"
+        selected={selected === rowCount - 1}
+        onSelect={() => select(quickTarget)}
+        onHover={() => {
+          touchedRef.current = true;
+          setSelected(rowCount - 1);
+        }}
+        dot={null}
+        name={`no repo — shell in ${shortDir(quickPath) || "~"}`}
+        meta={!defaultIsRepo ? "default" : undefined}
+        title={quickPath}
+        hairlineAbove={ordered.length > 0}
+      />
+    </div>,
+    document.body
+  );
+}
+
+/** One chooser row — the kit's list row (dot · name · dim meta), same
+ *  geometry as a thread row, selection = the inset bar + `--bg-active`. */
+function ChooserRow({
+  selected,
+  onSelect,
+  onHover,
+  dot,
+  name,
+  meta,
+  dim,
+  title,
+  hairlineAbove,
+}: {
+  selected: boolean;
+  onSelect: () => void;
+  onHover: () => void;
+  /** Repo colour; null = the quick row's dashed empty dot. */
+  dot: string | null;
+  name: string;
+  /** `default` on the preselected row; nothing elsewhere. */
+  meta?: string;
+  dim?: boolean;
+  title: string;
+  hairlineAbove?: boolean;
+}) {
+  return (
+    <div
+      role="option"
+      aria-selected={selected}
+      onClick={onSelect}
+      onMouseEnter={onHover}
+      title={title}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "5px 12px",
+        cursor: "pointer",
+        background: selected ? "var(--bg-active)" : "transparent",
+        boxShadow: selected ? "inset 2px 0 0 var(--text-primary)" : "none",
+        color: dim ? "var(--text-dim)" : selected ? "var(--text-primary)" : "var(--text-secondary)",
+        fontSize: 11.5,
+        whiteSpace: "nowrap",
+        borderTop: hairlineAbove ? "1px solid var(--border-subtle)" : "none",
+        marginTop: hairlineAbove ? 2 : 0,
+      }}
+    >
+      <span
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: "50%",
+          flex: "none",
+          backgroundColor: dot ?? "transparent",
+          border: dot ? "none" : "1px dashed var(--text-faint)",
+          opacity: dim ? 0.4 : 1,
+        }}
+      />
+      <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+        {name}
+      </span>
+      {meta && <span style={{ flex: "none", fontSize: 9.5, color: "var(--text-faint)" }}>{meta}</span>}
+    </div>
   );
 }

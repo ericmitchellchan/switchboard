@@ -32,6 +32,7 @@ import { openArtifact, useActiveTabArtifact } from "../lib/panelStore";
 import { useShellMode } from "../lib/shellMode";
 import { projectsWithResearch, researchPages } from "../surfaces/registry";
 import { ThreadsSection } from "./ThreadsSection";
+import type { RepoConfig } from "../types";
 import { KbTreeSection } from "./KbTreeSection";
 import { ExplorerTreeSection } from "./ExplorerTreeSection";
 
@@ -124,7 +125,7 @@ const DEST_ROW: CSSProperties = {
   whiteSpace: "nowrap",
 };
 
-export function SideMenu({ route }: { route: Route }) {
+export function SideMenu({ route, repos }: { route: Route; repos: readonly RepoConfig[] }) {
   const [researchOpen, toggleResearch] = useBandOpen("research", false);
   const [kbOpen, toggleKb] = useBandOpen("kb", false);
   const [explorerOpen, toggleExplorer] = useBandOpen("explorer", false);
@@ -180,7 +181,7 @@ export function SideMenu({ route }: { route: Route }) {
         <div style={{ height: 1, background: "var(--border)", margin: "8px 0 2px" }} />
 
         {/* ── Band 2: threads ── header + rows, all ThreadsSection's (SWIT-56) */}
-        <ThreadsSection />
+        <ThreadsSection repos={repos} />
       </div>
 
       {/* ── Band 3: Explorer, pinned at the bottom, folded by default ── */}

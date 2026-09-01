@@ -27,8 +27,11 @@
 // hotkey (lib.rs, RegisterHotKey) consumes the keystroke before WebView2 and
 // re-delivers the clipboard as an app event — text as `clipboard-paste`
 // (App inserts it into the focused textarea), an image as
-// `clipboard-paste-image` (App stages it for the composer whose textarea is
-// focused, found by `data-composer-session`).
+// `clipboard-paste-image`. App routes the IMAGE (0.5.2): the composer whose
+// textarea holds focus (`data-composer-session`) takes it; else the FOCUSED
+// PANE's session takes it IF its composer is visible, and that textarea is
+// then focused so the next paste or keystroke lands visibly; with no visible
+// composer the image is dropped and the log says why.
 //
 // ATTACHMENTS. Chips sit in a row ABOVE the textarea that exists only while
 // there is at least one chip — never a permanent empty bar. Its appearance is

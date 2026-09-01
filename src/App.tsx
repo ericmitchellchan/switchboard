@@ -66,6 +66,7 @@ import {
   resolveThreadByQuery,
   activeThreads,
 } from "./lib/threadStore";
+import type { ThreadCreateTarget } from "./lib/threadStore";
 import {
   initPanelStore,
   initPanelSides,
@@ -156,7 +157,7 @@ import {
 } from "./lib/workspace";
 import { remapSessionIds, getMaxPaneIdNumber, setPaneIdCounter, closePane, getVisibleSessionIds } from "./lib/paneLayout";
 import type { PaneNode } from "./lib/paneLayout";
-import { toggleComposer, composeWrite } from "./lib/composer";
+import { toggleComposer, composeWrite, isComposerVisible } from "./lib/composer";
 import { initTaskDetector, destroyTaskDetector } from "./lib/taskDetector";
 import { startUpdater, registerPreRelaunchFlush } from "./lib/updater";
 import { log, initLogger } from "./lib/logger";
@@ -972,30 +973,40 @@ export default function App() {
     [doCreateSession, paneLayout, launchClaudeInSession]
   );
 
-  // The band header's `+` (SWIT-56): create NOW, ask nothing. The target is
-  // computed, in order: the active thread's directory → the most recently
-  // active thread's → the quick-create target the dialog already offers (the
-  // active tab's cwd, else home). A directory that matches a repo the picker
-  // would list carries that repo's identity (name/colour/group) so the tab
-  // prints exactly as one created through the dialog; a directory the
-  // registry does not know is filed as a no-repo thread, like the dialog's
-  // quick row. Same primitive as the dialog — handleCreateThread — with the
-  // rename-on-create flag.
+  // The band header's `+` (SWIT-56; a CHOOSER since 0.5.2 — Eric: "What if I
+  // don't want switchboard?"). No target (or `default`) = the old blind rule:
+  // the active thread's directory → the most recently active thread's → the
+  // quick-create target the dialog already offers (the active tab's cwd, else
+  // home); a directory that matches a repo the picker would list carries that
+  // repo's identity (name/colour/group), one the registry does not know is
+  // filed as a no-repo thread. `repo` = the chooser row's pick, taken as
+  // given; `quick` = the chooser's no-repo row (the tab's cwd, else home,
+  // never the active thread's dir — the row said "no repo"). Same primitive
+  // as the dialog — handleCreateThread — with the rename-on-create flag.
   //
   // ONE create at a time (review fix): the body awaits explorerProjects()
   // before anything is written, so a double-click used to mint two `New
   // thread`s. The ref is set synchronously at entry and released only when
   // the whole create — session spawn included — has settled.
   const creatingThreadRef = useRef(false);
-  const handleCreateThreadNow = useCallback(async () => {
+  const handleCreateThreadNow = useCallback(async (target?: ThreadCreateTarget) => {
     if (creatingThreadRef.current) return;
     creatingThreadRef.current = true;
     try {
+      if (target?.kind === "repo") {
+        await handleCreateThread(target.name, target.path, target.color, target.group, "", { renameOnCreate: true });
+        return;
+      }
       let projects: Awaited<ReturnType<typeof explorerProjects>> | null = null;
       try {
         projects = await explorerProjects();
       } catch {
         projects = null;
+      }
+      if (target?.kind === "quick") {
+        const dir = quickThreadTarget(projects, sessionDirFor(getActiveTabSession()), homeDirRef.current);
+        await handleCreateThread(dir.project, dir.path, undefined, undefined, "", { renameOnCreate: true });
+        return;
       }
       const known = quickCreateWorkingDir(getThreads(), activeIdRef.current);
       const dir = known ?? quickThreadTarget(projects, sessionDirFor(getActiveTabSession()), homeDirRef.current);
@@ -1282,7 +1293,7 @@ export default function App() {
       openThread: handleOpenThread,
       reviveThread: (id) => void handleReviveThread(id),
       newThread: () => setNewThreadDialogOpen(true),
-      createThreadNow: () => void handleCreateThreadNow(),
+      createThreadNow: (target) => void handleCreateThreadNow(target),
       openBacklogItemInThread: (itemId) => void handleOpenBacklogItemInThread(itemId),
       confirmDeleteThread: handleConfirmDeleteThread,
       renameThread: handleRenameThread,
@@ -2493,21 +2504,38 @@ export default function App() {
     };
   }, [closeConfirm]);
 
-  // The OS-level paste route's IMAGE half (SWIT-59). The global Ctrl+V hotkey
-  // consumes the keystroke before WebView2 sees it, so a screenshot on the
-  // clipboard never reaches the composer as a paste EVENT; lib.rs reads the
-  // clipboard image instead, encodes it as PNG and emits it here. It is staged
-  // ONLY for a composer whose textarea holds focus (`data-composer-session`)
-  // — a terminal cannot take an image, so with focus anywhere else this is a
-  // no-op, exactly as before.
+  // The OS-level paste route's IMAGE half (SWIT-59; routing widened for
+  // 0.5.2). The global Ctrl+V hotkey consumes the keystroke before WebView2
+  // sees it, so a screenshot on the clipboard never reaches the composer as a
+  // paste EVENT; lib.rs reads the clipboard image instead, encodes it as PNG
+  // and emits it here. ROUTING: (a) a composer textarea holding focus
+  // (`data-composer-session`) takes it, as always; else (b) the FOCUSED
+  // PANE's session takes it IF its composer is currently visible — Eric
+  // snips with focus in the xterm, and requiring the textarea meant "I had
+  // to press it a few times before the first one even went in" — and that
+  // composer's textarea is FOCUSED so the staged chip and the next paste are
+  // both visible in the same box. With no visible composer (plain shell,
+  // composer hidden) the image is dropped as before, but the log says why.
   useEffect(() => {
     const unlisten = listen<{ dataBase64: string; byteLength: number }>(
       "clipboard-paste-image",
       (event) => {
         const active = document.activeElement;
-        const sessionId =
+        let sessionId =
           active instanceof HTMLTextAreaElement ? active.dataset.composerSession : undefined;
-        if (!sessionId) return;
+        if (!sessionId) {
+          const paneId = effectiveActiveIdRef.current;
+          if (!paneId || !isComposerVisible(paneId)) {
+            log.warn(
+              `Clipboard image paste dropped: ${paneId ? "the focused pane's composer is not visible" : "no focused pane"}`
+            );
+            return;
+          }
+          sessionId = paneId;
+          document
+            .querySelector<HTMLTextAreaElement>(`textarea[data-composer-session="${paneId}"]`)
+            ?.focus();
+        }
         const { dataBase64, byteLength } = event.payload;
         log.debug(`Clipboard image paste received, bytes=${byteLength} session=${sessionId}`);
         void stagePastedBase64(sessionId, dataBase64, "png", byteLength).then((result) => {
@@ -2967,7 +2995,7 @@ export default function App() {
       )}
 
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
-        {sideMenuVisible && <SideMenu route={route} />}
+        {sideMenuVisible && <SideMenu route={route} repos={config.repos} />}
 
         {/* ── Screen switching (T4) ──
             Every screen is keep-alive: KEEP_ALIVE_SCREENS mount on their

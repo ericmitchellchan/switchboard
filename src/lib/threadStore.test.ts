@@ -43,6 +43,7 @@ import {
   derivedThreadTitle,
   threadRepoName,
   sameWorkingDir,
+  orderThreadRepoChoices,
   sortThreadsForHistory,
   selectMenuThreads,
   groupMenuThreads,
@@ -1237,5 +1238,54 @@ describe("rename request (the `+` opens the title box)", () => {
     expect(renameEditorHoldsFocus({ ...steal, blurredToTerminal: false })).toBe(false);
     // Past the settle window: commit (a bound, not a fight).
     expect(renameEditorHoldsFocus({ ...steal, ageMs: RENAME_FOCUS_HOLD_MS })).toBe(false);
+  });
+});
+
+// ── The header `+` chooser's order (0.5.2) ───────────────────────────────────
+describe("orderThreadRepoChoices", () => {
+  const opt = (name: string, path: string, archived = false) => ({
+    name,
+    path,
+    color: "#A78BFA",
+    group: "",
+    status: archived ? "archived" : "active",
+    archived,
+    source: "registry" as const,
+  });
+  const options = [
+    opt("switchboard", "C:/p/switchboard"),
+    opt("lodestar", "C:/p/lodestar"),
+    opt("orbit", "C:/p/orbit"),
+    opt("zz-retired", "C:/p/zz-retired", true),
+  ];
+
+  it("puts the default target's repo first, the rest alphabetical, archived sunk last", () => {
+    const r = orderThreadRepoChoices(options, "C:\\p\\Switchboard");
+    expect(r.defaultIsRepo).toBe(true);
+    expect(r.repos.map((o) => o.name)).toEqual(["switchboard", "lodestar", "orbit", "zz-retired"]);
+  });
+
+  it("matches the default by sameWorkingDir's rule (case, slashes, trailing separators)", () => {
+    const r = orderThreadRepoChoices(options, "C:\\P\\ORBIT\\");
+    expect(r.defaultIsRepo).toBe(true);
+    expect(r.repos[0].name).toBe("orbit");
+  });
+
+  it("no default dir → alphabetical with no default row", () => {
+    for (const dir of [null, "", "   "]) {
+      const r = orderThreadRepoChoices(options, dir);
+      expect(r.defaultIsRepo).toBe(false);
+      expect(r.repos.map((o) => o.name)).toEqual(["lodestar", "orbit", "switchboard", "zz-retired"]);
+    }
+  });
+
+  it("a default dir no repo claims leaves defaultIsRepo false — the no-repo row is the default", () => {
+    const r = orderThreadRepoChoices(options, "C:/somewhere/else");
+    expect(r.defaultIsRepo).toBe(false);
+    expect(r.repos).toHaveLength(4);
+  });
+
+  it("empty options never throw", () => {
+    expect(orderThreadRepoChoices([], "C:/p/x")).toEqual({ repos: [], defaultIsRepo: false });
   });
 });

@@ -31,6 +31,8 @@ import { useSyncExternalStore } from "react";
 import type { AgentStatus, SavedSession, SavedWorkspace, Thread } from "../types";
 import { parsePanels, parsePanelsV3, parsePanelWidth, parsePanelSides } from "./panelStore";
 import { sanitizeForTypedLine, SPAWN_CONTEXT_MAX } from "./agentContext";
+// Type-only (no runtime edge): explorer.ts imports nothing from this module.
+import type { SessionRepoOption } from "./explorer";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure helpers
@@ -525,6 +527,55 @@ export function quickCreateWorkingDir(
     (t) => t.workingDir.trim().length > 0
   );
   return recent ? recent.workingDir : null;
+}
+
+// ── The header `+` chooser (0.5.2) ───────────────────────────────────────────
+// Eric: "Every time I open a new thread, it automatically starts a session in
+// switchboard. What if I don't want switchboard?" The `+` drops a small
+// chooser instead of creating blindly. This is its ORDER, pure: the current
+// default target's repo first (the row Enter selects — zero extra cost over
+// the old blind create), then the rest alphabetically (live before archived,
+// the way the dialog sinks them), with the component appending its own
+// `no repo` row last. When the default dir matches no repo, that trailing row
+// IS the default and `defaultIsRepo` says so.
+
+/** What a chooser row asks App to create (ThreadActions.createThreadNow):
+ *  a REPO from the merged registry+config list, the QUICK no-repo target
+ *  (the tab's cwd, else home), or the DEFAULT resolution — exactly the old
+ *  `+` behaviour (active thread's dir → most recent → quick target). */
+export type ThreadCreateTarget =
+  | { kind: "repo"; name: string; path: string; color: string | undefined; group: string | undefined }
+  | { kind: "quick" }
+  | { kind: "default" };
+
+export interface ThreadRepoChoices {
+  /** Repo rows in draw order — the default first when it is a repo. */
+  repos: SessionRepoOption[];
+  /** The default target dir matched a repo (repos[0]); false = the caller's
+   *  trailing `no repo` row is the default and gets the preselection. */
+  defaultIsRepo: boolean;
+}
+
+/** Order the chooser's repo rows. `defaultDir` is quickCreateWorkingDir's
+ *  answer (null = nothing known); matching is sameWorkingDir's, so a repo
+ *  spelled with backslashes still claims its default slot. Pure. */
+export function orderThreadRepoChoices(
+  options: readonly SessionRepoOption[],
+  defaultDir: string | null
+): ThreadRepoChoices {
+  const def =
+    defaultDir !== null && defaultDir.trim().length > 0
+      ? options.find((o) => sameWorkingDir(o.path, defaultDir))
+      : undefined;
+  const alpha = (a: SessionRepoOption, b: SessionRepoOption) =>
+    a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+  const rest = options.filter((o) => o !== def);
+  const live = rest.filter((o) => !o.archived).sort(alpha);
+  const archived = rest.filter((o) => o.archived).sort(alpha);
+  return {
+    repos: def ? [def, ...live, ...archived] : [...live, ...archived],
+    defaultIsRepo: def !== undefined,
+  };
 }
 
 /** The `shells` group: published sessions no thread record claims (the
@@ -1192,11 +1243,12 @@ export type ThreadActions = {
    *  calls it since SWIT-56 (the header `+` creates directly); kept
    *  registered — the dialog stays built and reachable. */
   newThread: () => void;
-  /** The band header's `+` (SWIT-56): create a thread NOW — titled
-   *  NEW_THREAD_TITLE, in the active thread's repo (else the last-used repo,
-   *  else the tab's cwd) — open it, and put its title into inline rename.
-   *  No dialog, no question. */
-  createThreadNow: () => void;
+  /** The band header's `+` (SWIT-56; a CHOOSER since 0.5.2): create a thread
+   *  NOW — titled NEW_THREAD_TITLE, opened, title into inline rename. No
+   *  target (or `default`) = the old blind rule (active thread's repo →
+   *  last-used repo → the tab's cwd); `repo` = the chosen row; `quick` = the
+   *  no-repo row (the tab's cwd, else home). */
+  createThreadNow: (target?: ThreadCreateTarget) => void;
   /** SWIT-64, the backlog row's `open in thread`: the createThreadNow path
    *  with the item's project resolved to its repo dir, titled from the item
    *  text, the item as spawn context, and a `thread` link recorded on the
