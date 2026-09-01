@@ -157,3 +157,14 @@ that stop being true.
   question block, the page sections, the tooltip — borrowed from Ky's desktop
   components in our tokens. A row is the click target (no pill inside a row), boxes
   are earned, and a shape the kit lacks is added to the kit before it is drawn.
+- 2026-09-01 — CLEAR SECTIONS, NOT MONOTONE (Eric, on 0.6.0's Home: "it all blends
+  in … we need sections and break it out but not overuse boxes either"): screen-scale
+  surfaces separate sections with the RULE-WITH-LABEL header (label · 1px `--border`
+  hairline filling the line · meta right) plus whitespace ASYMMETRY (~28px above,
+  10px below); type follows the four-size RAMP (10 label / 12.5 title / 11 body /
+  9.5 meta — components.md); exactly ONE earned box per screen, reserved for a block
+  that asks the user to act (Home's question card); EMPTY sections fold to one quiet
+  9.5px line at the bottom instead of rendering; and decorative leading glyph columns
+  (`?` `○` `→`) are gone — dots are data and stay inline, the section label says
+  what rows are. The question TAB's radio glyphs stay: they are the multiple-choice
+  affordance, not decoration.

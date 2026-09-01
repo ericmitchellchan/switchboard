@@ -11,13 +11,21 @@
 //   Listening        → announced dev servers, probed (never "healthy").
 //   Kept views       → the scratchpad listing (_scratch/*.view.json).
 //
-// SKIN (post-0.5.0, SWIT-54 — Eric: "home screen is still this weird boxy
-// format"): ONE left-aligned column (max 720px, 18px padding) of kit BAND
-// sections; every item is a kit LIST ROW (no border, no elevated fill, hover
-// `--bg-active`, focus draws the inset bar, dim meta on the right); an empty
-// section is one dim line, never a dashed box; the question controls are the
-// same OptionRow list the question tab draws. Skin only — every click and
-// every write goes through the same bridge it did.
+// SKIN (SWIT-54 hierarchy pass — Eric: "it all blends in … we need sections
+// and break it out but not overuse boxes either"): ONE left-aligned column
+// (max 720px), Ky's HomeScreen hierarchy logic in our mono. The kit TYPE RAMP
+// (four sizes, no fifth): 10px uppercase `--text-faint` section label · 12.5px
+// `--text-primary` title · 11px `--text-secondary` body · 9.5px `--text-dim`
+// meta. Sections separate by STRUCTURE — the rule-with-label header (label,
+// then a 1px `--border` hairline filling the line, count/meta at the right)
+// with 28px above and 10px below — never by boxes. Exactly ONE earned box:
+// a question in Needs you is an elevated card (`--bg-elevated`, 1px
+// `--border`, radius 6), because it asks Eric to act; everything else is a
+// flat kit list row with its meta right-aligned. No decorative leading glyph
+// column — dots (live status, the probe) are data and stay inline. An EMPTY
+// section does not render; the empty ones fold into one quiet 9.5px line at
+// the page bottom. Skin only — every click and every write goes through the
+// same bridge it did.
 import { useCallback, useEffect, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { PulsingDot } from "./PulsingDot";
@@ -42,38 +50,55 @@ import { answerQuestion } from "../lib/panelStore";
 import { readThreadFile, listScratchViews } from "../lib/ipc";
 import { navigate } from "../lib/route";
 import { useAllKnownServers, serverKey } from "../lib/devServer";
+import type { DevServerHit } from "../lib/devServer";
 import { useBacklog, openItems, HOME_BACKLOG_LIMIT } from "../lib/backlogStore";
+import type { BacklogItem } from "../lib/backlogStore";
 import { BacklogListing } from "./BacklogPanel";
 import { OptionRow } from "./kb/OptionRow";
 
 const MONO = "var(--font-mono)";
 
-const BLOCK_TITLE: CSSProperties = {
+// ── The type ramp (kit: "type ramp — four sizes, no fifth") ─────────────────
+
+/** kit: section label — 10px uppercase `--text-faint`, tracking 0.08em. */
+const SECTION_LABEL: CSSProperties = {
   fontFamily: MONO,
+  fontSize: 10,
+  textTransform: "uppercase",
+  letterSpacing: "0.08em",
+  color: "var(--text-faint)",
+  flex: "none",
+};
+
+/** kit: row / question title — 12.5px `--text-primary`. */
+const TITLE: CSSProperties = {
+  fontSize: 12.5,
+  color: "var(--text-primary)",
+};
+
+/** kit: trailing meta on a row — 9.5px `--text-dim`, right-aligned. */
+const ROW_META: CSSProperties = {
+  marginLeft: "auto",
+  flex: "none",
   fontSize: 9.5,
   color: "var(--text-dim)",
-  textTransform: "uppercase",
-  letterSpacing: "1px",
-  marginBottom: 6,
-  display: "flex",
-  alignItems: "baseline",
+  whiteSpace: "nowrap",
 };
 
-const BLOCK_TITLE_RIGHT: CSSProperties = {
-  marginLeft: "auto",
-  textTransform: "none",
-  letterSpacing: 0,
-  color: "var(--text-faint)",
-};
-
-/** kit: the empty-section line — one dim line, no box. */
-const EMPTY_LINE: CSSProperties = {
-  padding: "5px 8px",
-  fontFamily: MONO,
-  fontSize: 11,
-  color: "var(--text-dim)",
-  lineHeight: 1.5,
-};
+/** kit: the rule-with-label section header — label · hairline · meta. */
+function SectionHeader({ label, meta }: { label: string; meta?: string }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+      <span style={SECTION_LABEL}>{label}</span>
+      <span style={{ flex: 1, height: 1, background: "var(--border)" }} />
+      {meta ? (
+        <span style={{ fontFamily: MONO, fontSize: 9.5, color: "var(--text-dim)", flex: "none" }}>
+          {meta}
+        </span>
+      ) : null}
+    </div>
+  );
+}
 
 /** kit: list row (content-body variant, `5px 8px`). The row IS the target. */
 const ROW: CSSProperties = {
@@ -86,38 +111,35 @@ const ROW: CSSProperties = {
   border: "none",
   boxShadow: "none",
   fontFamily: MONO,
-  fontSize: 11.5,
+  fontSize: 12.5,
   lineHeight: 1.5,
   color: "var(--text-secondary)",
   textAlign: "left",
   outline: "none",
 };
 
-/** kit: the row's leading glyph column — fixed, so titles align. */
-const GLYPH: CSSProperties = {
-  flex: "none",
-  width: 14,
-  color: "var(--text-dim)",
-};
-
-/** kit: trailing meta on a row. */
-const ROW_META: CSSProperties = {
-  marginLeft: "auto",
-  flex: "none",
-  fontSize: 9.5,
-  color: "var(--text-dim)",
-  whiteSpace: "nowrap",
+/** kit: THE EARNED BOX — reserved for a block that asks the user to act. */
+const CARD: CSSProperties = {
+  background: "var(--bg-elevated)",
+  border: "1px solid var(--border)",
+  borderRadius: 6,
+  padding: 14,
+  display: "flex",
+  flexDirection: "column",
+  gap: 10,
+  fontFamily: MONO,
 };
 
 /** kit: input. Transparent — the field takes the screen's surface. */
 const FIELD: CSSProperties = {
   width: "100%",
+  maxWidth: 480,
   background: "transparent",
   border: "1px solid var(--border-subtle)",
   borderRadius: 3,
   color: "var(--text-primary)",
   fontFamily: MONO,
-  fontSize: 11.5,
+  fontSize: 11,
   lineHeight: 1.5,
   padding: "5px 8px",
   outline: "none",
@@ -178,6 +200,8 @@ export function Home({
   backlogProjects?: readonly string[];
 }) {
   const view = useThreadsView();
+  const backlog = useBacklog();
+  const servers = useAllKnownServers();
   const [digests, setDigests] = useState<ThreadDigest[]>([]);
   const [kept, setKept] = useState<string[]>([]);
 
@@ -230,6 +254,26 @@ export function Home({
     // which is exactly when the thread list actually changed.
   }, [active, view.threads]);
 
+  // Which sections have anything to say — an empty one folds into the quiet
+  // line instead of rendering (page order preserved in both places).
+  const needsCount = digests.reduce(
+    (n, d) => n + d.page.openQuestions.length + d.page.requests.length + d.page.userItems.length,
+    0
+  );
+  const openBacklog = openItems(backlog.items);
+  const liveRows = sortThreadsForHistory(
+    view.threads.filter((t) => view.launched.has(t.id)),
+    view.launched
+  );
+  const recentPosts = collectRecentPosts(digests);
+  const quiet: string[] = [];
+  if (needsCount === 0) quiet.push("needs you");
+  if (openBacklog.length === 0) quiet.push("backlog");
+  if (liveRows.length === 0) quiet.push("live now");
+  if (recentPosts.length === 0) quiet.push("between threads");
+  if (servers.length === 0) quiet.push("listening");
+  if (kept.length === 0) quiet.push("kept views");
+
   return (
     <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
       <div
@@ -251,18 +295,25 @@ export function Home({
         <div
           style={{
             maxWidth: 720,
-            padding: 18,
+            padding: "28px 18px 18px",
             display: "flex",
             flexDirection: "column",
-            gap: 18,
+            gap: 28,
           }}
         >
-          <NeedsYou digests={digests} />
-          <BacklogBlock projectOptions={backlogProjects} />
-          <LiveNow digests={digests} />
-          <BetweenThreads digests={digests} />
-          <Listening active={active} />
-          <KeptViews kept={kept} />
+          {needsCount > 0 && <NeedsYou digests={digests} />}
+          {openBacklog.length > 0 && (
+            <BacklogBlock items={openBacklog} projectOptions={backlogProjects} />
+          )}
+          {liveRows.length > 0 && <LiveNow rows={liveRows} digests={digests} />}
+          {recentPosts.length > 0 && <BetweenThreads recent={recentPosts} />}
+          {servers.length > 0 && <Listening active={active} servers={servers} />}
+          {kept.length > 0 && <KeptViews kept={kept} />}
+          {quiet.length > 0 && (
+            <div style={{ fontFamily: MONO, fontSize: 9.5, color: "var(--text-dim)", lineHeight: 1.5 }}>
+              {quiet.join(" · ")} — all quiet
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -274,21 +325,23 @@ export function Home({
 /** Open items newest first, the first HOME_BACKLOG_LIMIT + `See all` (which
  *  opens the top bar's dropdown — the one place the whole list lives). Same
  *  row component as the dropdown; the block itself is a view over
- *  backlogStore, like every other block here. */
-function BacklogBlock({ projectOptions }: { projectOptions: readonly string[] }) {
-  const view = useBacklog();
-  const open = openItems(view.items);
+ *  backlogStore, like every other block here. Rendered only with items —
+ *  empty folds into the quiet line. */
+function BacklogBlock({
+  items,
+  projectOptions,
+}: {
+  items: readonly BacklogItem[];
+  projectOptions: readonly string[];
+}) {
   return (
     <div>
-      <div style={BLOCK_TITLE}>
-        Backlog{" "}
-        <span style={BLOCK_TITLE_RIGHT}>{open.length === 0 ? "" : String(open.length)}</span>
-      </div>
+      <SectionHeader label="Backlog" meta={String(items.length)} />
       <BacklogListing
-        items={open}
+        items={items}
         limit={HOME_BACKLOG_LIMIT}
         projectOptions={projectOptions}
-        empty={<div style={EMPTY_LINE}>nothing in the backlog</div>}
+        empty={null}
       />
     </div>
   );
@@ -311,19 +364,16 @@ function NeedsYou({ digests }: { digests: ThreadDigest[] }) {
   }
   return (
     <div>
-      <div style={BLOCK_TITLE}>
-        Needs you{" "}
-        <span style={BLOCK_TITLE_RIGHT}>
-          {entries.length === 0 ? "" : String(entries.length)}
-        </span>
-      </div>
-      {entries.length === 0 ? <div style={EMPTY_LINE}>nothing needs you</div> : entries}
+      <SectionHeader label="Needs you" meta={String(entries.length)} />
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>{entries}</div>
     </div>
   );
 }
 
 /** An open question, answerable IN PLACE — the same bridge the question tab
- *  uses, so answering from Home behaves exactly as from the page. */
+ *  uses, so answering from Home behaves exactly as from the page. THE one
+ *  earned box on Home: it asks Eric to act, so it gets the elevated card;
+ *  informational rows never do. */
 function QuestionCard({ digest, question }: { digest: ThreadDigest; question: PageQuestion }) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
@@ -351,20 +401,17 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
   );
   const options = orderedOptions(question);
   return (
-    <div style={{ display: "flex", flexDirection: "column" }}>
-      <div style={ROW}>
-        <span style={{ ...GLYPH, color: "var(--text-primary)" }}>?</span>
-        <span style={{ color: "var(--text-primary)", minWidth: 0 }}>
-          {question.text}{" "}
-          <span style={{ color: "var(--text-dim)", fontSize: 10 }}>
-            {digest.thread.title} · {threadRepoName(digest.thread.workingDir)}
-          </span>
+    <div style={CARD}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+        <span style={{ ...TITLE, lineHeight: 1.5, minWidth: 0, flex: 1 }}>{question.text}</span>
+        <span style={{ ...ROW_META, marginLeft: 0 }}>
+          {digest.thread.title} · {threadRepoName(digest.thread.workingDir)}
         </span>
       </div>
       {note ? (
-        <div style={{ ...EMPTY_LINE, color: "var(--text-muted)", paddingLeft: 30 }}>{note}</div>
+        <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>{note}</div>
       ) : (
-        <div style={{ paddingLeft: 22, display: "flex", flexDirection: "column", gap: 6 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {options.length > 0 && (
             <div
               role="listbox"
@@ -422,10 +469,9 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
 function RequestCard({ digest, post }: { digest: ThreadDigest; post: InboxPost }) {
   return (
     <Row onClick={() => getThreadActions()?.openThread(digest.thread.id)}>
-      <span style={GLYPH}>→</span>
-      <span style={{ minWidth: 0, flex: 1, color: "var(--text-primary)" }}>
+      <span style={{ minWidth: 0, flex: 1, ...TITLE }}>
         {post.text}{" "}
-        <span style={{ color: "var(--text-dim)", fontSize: 10 }}>
+        <span style={{ color: "var(--text-dim)", fontSize: 9.5 }}>
           from {post.from} · {digest.thread.title}
         </span>
       </span>
@@ -437,10 +483,9 @@ function RequestCard({ digest, post }: { digest: ThreadDigest; post: InboxPost }
 function UserItemCard({ digest, item }: { digest: ThreadDigest; item: PageItem }) {
   return (
     <Row onClick={() => getThreadActions()?.openThread(digest.thread.id)}>
-      <span style={GLYPH}>○</span>
-      <span style={{ minWidth: 0, flex: 1, color: "var(--text-primary)" }}>
+      <span style={{ minWidth: 0, flex: 1, ...TITLE }}>
         {item.title}{" "}
-        <span style={{ color: "var(--text-dim)", fontSize: 10 }}>
+        <span style={{ color: "var(--text-dim)", fontSize: 9.5 }}>
           {digest.thread.title}
           {item.note ? ` · ${item.note}` : ""}
         </span>
@@ -452,58 +497,53 @@ function UserItemCard({ digest, item }: { digest: ThreadDigest; item: PageItem }
 
 // ── Live now ─────────────────────────────────────────────────────────────────
 
-function LiveNow({ digests }: { digests: ThreadDigest[] }) {
+function LiveNow({ rows, digests }: { rows: Thread[]; digests: ThreadDigest[] }) {
   const view = useThreadsView();
-  const live = view.threads.filter((t) => view.launched.has(t.id));
-  const rows = sortThreadsForHistory(live, view.launched);
   const pageFor = (threadId: string) => digests.find((d) => d.thread.id === threadId)?.page;
   return (
     <div>
-      <div style={BLOCK_TITLE}>
-        Live now{" "}
-        <span style={BLOCK_TITLE_RIGHT}>
-          {rows.length === 0 ? "" : `${rows.length} thread${rows.length === 1 ? "" : "s"}`}
-        </span>
-      </div>
-      {rows.length === 0 ? (
-        <div style={EMPTY_LINE}>no live threads</div>
-      ) : (
-        rows.map((t) => {
-          const status = t.sessionId ? view.sessionStatuses[t.sessionId] : undefined;
-          const cfg = STATUS_CONFIGS[status ?? "idle"] ?? STATUS_CONFIGS.idle;
-          const lastLine = pageFor(t.id)?.latestTurn?.lines[0] ?? null;
-          return (
-            <Row key={t.id} onClick={() => getThreadActions()?.openThread(t.id)}>
-              <span style={{ ...GLYPH, display: "flex", alignItems: "center" }}>
-                <PulsingDot color={cfg.color} pulse={cfg.pulse} size={7} />
+      <SectionHeader
+        label="Live now"
+        meta={`${rows.length} thread${rows.length === 1 ? "" : "s"}`}
+      />
+      {rows.map((t) => {
+        const status = t.sessionId ? view.sessionStatuses[t.sessionId] : undefined;
+        const cfg = STATUS_CONFIGS[status ?? "idle"] ?? STATUS_CONFIGS.idle;
+        const lastLine = pageFor(t.id)?.latestTurn?.lines[0] ?? null;
+        return (
+          <Row key={t.id} onClick={() => getThreadActions()?.openThread(t.id)}>
+            <span style={{ flex: "none", display: "flex", alignItems: "center" }}>
+              <PulsingDot color={cfg.color} pulse={cfg.pulse} size={7} />
+            </span>
+            <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <span style={TITLE}>{t.title}</span>
+              <span style={{ color: "var(--text-dim)", fontSize: 9.5 }}>
+                {" "}
+                {threadRepoName(t.workingDir)}
               </span>
-              <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                <span style={{ color: "var(--text-primary)" }}>{t.title}</span>
-                <span style={{ color: "var(--text-dim)", fontSize: 10 }}>
-                  {" "}
-                  {threadRepoName(t.workingDir)}
+              {lastLine && (
+                <span style={{ color: "var(--text-muted)", fontSize: 11 }}>
+                  {"  "}
+                  {lastLine}
                 </span>
-                {lastLine && (
-                  <span style={{ color: "var(--text-muted)", fontSize: 10.5 }}>
-                    {"  "}
-                    {lastLine}
-                  </span>
-                )}
-              </span>
-              <span style={ROW_META}>open →</span>
-            </Row>
-          );
-        })
-      )}
+              )}
+            </span>
+            <span style={ROW_META}>open →</span>
+          </Row>
+        );
+      })}
     </div>
   );
 }
 
 // ── Between threads ──────────────────────────────────────────────────────────
 
-function BetweenThreads({ digests }: { digests: ThreadDigest[] }) {
+type RecentPost = { post: InboxPost; to: Thread; t: number };
+
+/** The last hour of cross-thread posts, newest first. */
+function collectRecentPosts(digests: ThreadDigest[]): RecentPost[] {
   const now = Date.now();
-  const recent: Array<{ post: InboxPost; to: Thread; t: number }> = [];
+  const recent: RecentPost[] = [];
   for (const d of digests) {
     for (const post of d.posts) {
       const t = Date.parse(post.at);
@@ -511,27 +551,24 @@ function BetweenThreads({ digests }: { digests: ThreadDigest[] }) {
     }
   }
   recent.sort((a, b) => b.t - a.t);
+  return recent;
+}
+
+function BetweenThreads({ recent }: { recent: RecentPost[] }) {
   return (
     <div>
-      <div style={BLOCK_TITLE}>
-        Between threads <span style={BLOCK_TITLE_RIGHT}>last hour</span>
-      </div>
-      {recent.length === 0 ? (
-        <div style={EMPTY_LINE}>nothing in the last hour</div>
-      ) : (
-        recent.map(({ post, to, t }) => (
-          <div key={`${to.id}-${post.id}`} style={ROW}>
-            <span style={GLYPH}>↓</span>
-            <span style={{ minWidth: 0, flex: 1 }}>
-              <span style={{ color: "var(--text-dim)", fontSize: 10 }}>
-                {post.from} → {to.title}
-              </span>{" "}
-              <span style={{ color: "var(--text-secondary)" }}>{post.text}</span>
-            </span>
-            <span style={ROW_META}>{new Date(t).toTimeString().slice(0, 5)}</span>
-          </div>
-        ))
-      )}
+      <SectionHeader label="Between threads" meta="last hour" />
+      {recent.map(({ post, to, t }) => (
+        <div key={`${to.id}-${post.id}`} style={{ ...ROW, fontSize: 11 }}>
+          <span style={{ minWidth: 0, flex: 1 }}>
+            <span style={{ color: "var(--text-dim)", fontSize: 9.5 }}>
+              {post.from} → {to.title}
+            </span>{" "}
+            <span style={{ color: "var(--text-secondary)" }}>{post.text}</span>
+          </span>
+          <span style={ROW_META}>{new Date(t).toTimeString().slice(0, 5)}</span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -541,29 +578,24 @@ function BetweenThreads({ digests }: { digests: ThreadDigest[] }) {
 function KeptViews({ kept }: { kept: string[] }) {
   return (
     <div>
-      <div style={BLOCK_TITLE}>
-        Kept views <span style={BLOCK_TITLE_RIGHT}>{kept.length === 0 ? "" : String(kept.length)}</span>
-      </div>
-      {kept.length === 0 ? (
-        <div style={EMPTY_LINE}>no kept views</div>
-      ) : (
-        kept.map((relPath) => {
-          const parts = relPath.split("/");
-          const project = parts[1] ?? "";
-          const name = (parts[parts.length - 1] ?? relPath).replace(/\.view\.json$/, "");
-          return (
-            <Row
-              key={relPath}
-              title={`${relPath} — opens the raw snapshot for now; rendered reopen is a follow-up`}
-              onClick={() => navigate({ screen: "kb", doc: relPath })}
-            >
-              <span style={GLYPH}>◫</span>
-              <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
-              <span style={ROW_META}>{project}</span>
-            </Row>
-          );
-        })
-      )}
+      <SectionHeader label="Kept views" meta={String(kept.length)} />
+      {kept.map((relPath) => {
+        const parts = relPath.split("/");
+        const project = parts[1] ?? "";
+        const name = (parts[parts.length - 1] ?? relPath).replace(/\.view\.json$/, "");
+        return (
+          <Row
+            key={relPath}
+            title={`${relPath} — opens the raw snapshot for now; rendered reopen is a follow-up`}
+            onClick={() => navigate({ screen: "kb", doc: relPath })}
+          >
+            <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", ...TITLE }}>
+              {name}
+            </span>
+            <span style={ROW_META}>{project}</span>
+          </Row>
+        );
+      })}
     </div>
   );
 }
@@ -572,8 +604,7 @@ function KeptViews({ kept }: { kept: string[] }) {
 
 const PROBE_MS = 5_000;
 
-function Listening({ active }: { active: boolean }) {
-  const servers = useAllKnownServers();
+function Listening({ active, servers }: { active: boolean; servers: readonly DevServerHit[] }) {
   const [alive, setAlive] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
@@ -601,40 +632,34 @@ function Listening({ active }: { active: boolean }) {
 
   return (
     <div>
-      <div style={BLOCK_TITLE}>
-        Listening <span style={BLOCK_TITLE_RIGHT}>probed, not health-checked</span>
-      </div>
-      {servers.length === 0 ? (
-        <div style={EMPTY_LINE}>nothing listening</div>
-      ) : (
-        servers.map((hit) => {
-          const key = serverKey(hit.url);
-          const state = alive[key];
-          const dotColor =
-            state === true ? "var(--st-done, #10B981)" : state === false ? "var(--st-exited, #52525B)" : "var(--text-faint)";
-          const label = state === true ? "listening" : state === false ? "not answering" : "probing…";
-          return (
-            <div
-              key={key}
-              title={
-                state === true
-                  ? "listening — something accepted the probe (opaque response; not a health check)"
-                  : state === false
-                    ? "not answering — nothing is listening on that port"
-                    : "probing"
-              }
-              style={{ ...ROW, whiteSpace: "nowrap", overflow: "hidden" }}
-            >
-              <span style={{ ...GLYPH, display: "flex", alignItems: "center" }}>
-                <span style={{ width: 7, height: 7, borderRadius: "50%", background: dotColor }} />
-              </span>
-              <span style={{ color: "var(--text-dim)", fontSize: 9.5, flex: "none" }}>{hit.source}</span>
-              <span style={{ color: "var(--text-secondary)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{hit.url}</span>
-              <span style={ROW_META}>{label}</span>
-            </div>
-          );
-        })
-      )}
+      <SectionHeader label="Listening" meta="probed, not health-checked" />
+      {servers.map((hit) => {
+        const key = serverKey(hit.url);
+        const state = alive[key];
+        const dotColor =
+          state === true ? "var(--st-done, #10B981)" : state === false ? "var(--st-exited, #52525B)" : "var(--text-faint)";
+        const label = state === true ? "listening" : state === false ? "not answering" : "probing…";
+        return (
+          <div
+            key={key}
+            title={
+              state === true
+                ? "listening — something accepted the probe (opaque response; not a health check)"
+                : state === false
+                  ? "not answering — nothing is listening on that port"
+                  : "probing"
+            }
+            style={{ ...ROW, fontSize: 11, whiteSpace: "nowrap", overflow: "hidden" }}
+          >
+            <span style={{ flex: "none", display: "flex", alignItems: "center" }}>
+              <span style={{ width: 7, height: 7, borderRadius: "50%", background: dotColor }} />
+            </span>
+            <span style={{ color: "var(--text-dim)", fontSize: 9.5, flex: "none" }}>{hit.source}</span>
+            <span style={{ color: "var(--text-secondary)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{hit.url}</span>
+            <span style={ROW_META}>{label}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }

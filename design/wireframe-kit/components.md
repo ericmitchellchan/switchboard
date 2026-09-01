@@ -42,6 +42,49 @@ same ramp: `--line` = `--border`, `--surface` = `--bg-elevated`, `--surface2` =
 
 ---
 
+## Type ramp
+
+FOUR sizes, no fifth (2026-09-01, the Home hierarchy pass — Eric: "the type seems
+disjointed"). Hierarchy on a screen-scale surface comes from this ramp, not from
+ad-hoc pixel values:
+
+- **Section label** — 10px uppercase, `letter-spacing: 0.08em`, `--text-faint`.
+- **Row / question title** — 12.5px `--text-primary`.
+- **Body / options** — 11px `--text-secondary` (options `--text-primary` — the thing
+  to read).
+- **Meta** — 9.5px `--text-dim`.
+
+Ky's HomeScreen is the model: type scales differ by ROLE (their serif headline /
+sans body / mono meta), and the ramp is what carries that logic into our one
+typeface. Legacy 11.5px survives in the dense chrome (side-menu rows, tab bar,
+inputs in the panel) — the ramp governs Home and every new screen-scale surface.
+
+## Rule-with-label (section header, screen scale)
+
+The section separator on a screen-scale surface (Home): the label, then a 1px
+`--border` hairline FILLING the rest of the line, count/meta at the right end —
+separation by structure, never by a box.
+
+- **Ky:** HomeScreen's section headings — a small label over whitespace asymmetry;
+  the hairline is our terminal-grade version of the same chunking.
+- **Ours:** `Home.SectionHeader` — flex row, `gap: 10px`: label (type-ramp section
+  label) · `flex: 1; height: 1px; background: var(--border)` · meta 9.5px
+  `--text-dim`. Spacing is ASYMMETRIC: ~28px above the header, 10px below — the
+  space says where a section starts. The side-menu band header (below) stays as it
+  is; this is the screen-scale variant.
+
+## The earned box
+
+An elevated card is RESERVED for a block that asks the user to act; informational
+content never gets one. ONE per screen is the norm (Ky's HomeScreen: exactly one
+raised card — the thing needing action — everything else flat).
+
+- **Ours:** `--bg-elevated`, 1px `--border`, radius 6, padding 14, column
+  `gap: 10px`. Home's question card (Needs you) is the reference: title row
+  (question 12.5px `--text-primary`, `thread · repo` meta 9.5px `--text-dim` at
+  the top-right), the OptionRow list between hairlines, the dim `or`, one kit
+  input at `max-width: 480px`. Requests, items, posts, threads stay flat rows.
+
 ## Band header
 
 The label over a side-menu band or a page section, with its right-end actions.
@@ -166,7 +209,7 @@ answer goes (that is the spec's sentence, `requirements.md` R4).
 - **Ours:** body padding `14px`, `gap: 12px`, column. (1) Question: 12.5px
   `--text-primary`, `line-height: 1.5`. (2) Options: the OPTION ROW
   (`components/kb/OptionRow.tsx`, shared with Home's Needs-you block) — one LIST ROW per
-  option, 11.5px, padding `5px 8px`, with the 14px leading glyph column drawing a text
+  option, 11px (the ramp's option size), padding `5px 8px`, with the 14px leading glyph column drawing a text
   RADIO: `○` in `--text-dim` resting, `●` in `--text-primary` on hover / focus and on
   the option being sent; the option text itself `--text-primary`; `default` after the
   agent's proposal in 9.5px `--text-dim`. The list sits between two 1px `--border`
@@ -205,18 +248,20 @@ questions · done. Every section is a band header + list rows; no section is a b
   hairline under each. NEW dot: 6px `--text-primary` circle after the item or title.
 - Empty page: the `✦` glyph 14px `--text-muted` over ONE line, `No page yet.` Nothing
   about who writes it or when.
-- **Home (`Home.tsx`, post-0.5.0)** is the same shape at screen scale: ONE left-aligned
-  column, `max-width: 720px`, padding `18px`, `gap: 18px` between band sections (Needs
-  you · Backlog · Live now · Between threads · Listening · Kept views). Section title =
-  the band header with its right-end count. Every item is the content-body list row
-  (`5px 8px`, 14px glyph column, hover `--bg-active` + `--text-primary`, focus bar,
-  9.5px `--text-dim` meta at the right: `open →`, a time, a project). No 2-column grid,
-  no card (border + elevated fill), no dashed reserved box: an EMPTY section is one
-  dim line in the row's own padding — `nothing needs you`, `no live threads`,
-  `nothing in the last hour`, `nothing listening`, `no kept views`, `nothing in the
-  backlog`. A question in Needs you is the `?` row followed, indented to the text
-  column, by the question block above (option rows between hairlines · `or` · one
-  kit input).
+- **Home (`Home.tsx`, SWIT-54 hierarchy pass)** is the same content at screen scale
+  with Ky's HomeScreen hierarchy logic: ONE left-aligned column, `max-width: 720px`,
+  sections separated by the RULE-WITH-LABEL header (~28px above, 10px below — the
+  whitespace asymmetry chunks them; entry above) in page order Needs you · Backlog ·
+  Live now · Between threads · Listening · Kept views. Type follows the RAMP: titles
+  12.5px `--text-primary`, body 11px, meta 9.5px `--text-dim` right-aligned in one
+  column (`open →`, a time, a project, `listening`). Every informational item is a
+  flat content-body list row (`5px 8px`, hover `--bg-active` + `--text-primary`,
+  focus bar) with NO leading glyph column — dots (live status, the probe) are data
+  and sit inline before the title; `?`/`○`/`→` decoration is gone, the section
+  label says what rows are. A question in Needs you is THE EARNED BOX (entry above)
+  — the only card on the screen. An EMPTY section does not render at all; the empty
+  ones fold into ONE quiet line at the page bottom, 9.5px `--text-dim`:
+  `needs you · live now · … — all quiet` (omitted when nothing is empty).
 
 ## Tooltip
 

@@ -32,7 +32,7 @@ const OPTION_ROW: CSSProperties = {
   boxShadow: "none",
   color: "var(--text-primary)",
   fontFamily: MONO,
-  fontSize: 11.5,
+  fontSize: 11, // the kit type ramp's body/option size (components.md, SWIT-54)
   lineHeight: 1.5,
   textAlign: "left",
   cursor: "pointer",
