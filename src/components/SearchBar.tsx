@@ -26,15 +26,15 @@ export function SearchBar({ searchAddon, onClose }: SearchBarProps) {
 
   const findNext = useCallback(() => {
     if (query) searchAddon.findNext(query, { regex: false, caseSensitive: false, decorations: {
-      matchOverviewRuler: "#F59E0B",
-      activeMatchColorOverviewRuler: "#F59E0B",
+      matchOverviewRuler: "#e8b765",
+      activeMatchColorOverviewRuler: "#e8b765",
     }});
   }, [query, searchAddon]);
 
   const findPrev = useCallback(() => {
     if (query) searchAddon.findPrevious(query, { regex: false, caseSensitive: false, decorations: {
-      matchOverviewRuler: "#F59E0B",
-      activeMatchColorOverviewRuler: "#F59E0B",
+      matchOverviewRuler: "#e8b765",
+      activeMatchColorOverviewRuler: "#e8b765",
     }});
   }, [query, searchAddon]);
 
@@ -47,8 +47,8 @@ export function SearchBar({ searchAddon, onClose }: SearchBarProps) {
   useEffect(() => {
     if (query) {
       searchAddon.findNext(query, { regex: false, caseSensitive: false, decorations: {
-        matchOverviewRuler: "#F59E0B",
-        activeMatchColorOverviewRuler: "#F59E0B",
+        matchOverviewRuler: "#e8b765",
+        activeMatchColorOverviewRuler: "#e8b765",
       }});
     } else {
       searchAddon.clearDecorations();

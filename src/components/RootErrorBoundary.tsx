@@ -84,8 +84,8 @@ export class RootErrorBoundary extends Component<Props, State> {
           justifyContent: "center",
           gap: 14,
           padding: 24,
-          background: "var(--bg-primary, #14171a)",
-          color: "var(--text-primary, #e6e6e6)",
+          background: "var(--bg-primary, #0f0f0f)",
+          color: "var(--text-primary, #ededed)",
           fontFamily: "var(--font-mono, ui-monospace, monospace)",
         }}
       >
@@ -93,7 +93,7 @@ export class RootErrorBoundary extends Component<Props, State> {
         <span
           style={{
             fontSize: 11,
-            color: "var(--text-dim, #8a8a8a)",
+            color: "var(--text-dim, #6e6e6e)",
             maxWidth: 620,
             textAlign: "center",
           }}
@@ -113,9 +113,9 @@ export class RootErrorBoundary extends Component<Props, State> {
             textAlign: "left",
             whiteSpace: "pre-wrap",
             wordBreak: "break-word",
-            color: "var(--text-secondary, #b8b8b8)",
-            background: "var(--bg-secondary, #1c2024)",
-            border: "1px solid var(--border, #2a2f35)",
+            color: "var(--text-secondary, #b4b4b4)",
+            background: "var(--bg-secondary, #141414)",
+            border: "1px solid var(--border, #2e2e2e)",
             borderRadius: 4,
           }}
         >
@@ -138,9 +138,9 @@ const BUTTON_STYLE = {
   padding: "6px 14px",
   fontFamily: "inherit",
   fontSize: 12,
-  color: "var(--text-primary, #e6e6e6)",
-  background: "var(--bg-secondary, #1c2024)",
-  border: "1px solid var(--border, #2a2f35)",
+  color: "var(--text-primary, #ededed)",
+  background: "var(--bg-secondary, #141414)",
+  border: "1px solid var(--border, #2e2e2e)",
   borderRadius: 4,
   cursor: "pointer",
 } as const;

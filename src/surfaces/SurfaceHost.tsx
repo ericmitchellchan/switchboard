@@ -30,7 +30,7 @@
 //      project's CSS variables and the type defaults preflight would have
 //      supplied, so copied code renders as designed without Tailwind's reset
 //      ever touching the shell. The root paints TRANSPARENT: a surface takes
-//      its host's value (panel #1A1A1D, full width #0C0C0E), the same rule
+//      its host's value (panel #1e1e1e, full width #0f0f0f), the same rule
 //      every other viewer follows.
 //
 // `active` gates the probe exactly as it gates DocView's poll — a surface on

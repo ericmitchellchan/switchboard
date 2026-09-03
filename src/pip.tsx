@@ -45,13 +45,13 @@ initLogger().catch(() => {});
 configurePinsIO({ read: kbReadDoc, write: kbWriteDoc });
 
 const THEME = {
-  background: "#0C0C0E",
-  foreground: "#E4E4E7",
-  cursor: "#A78BFA",
-  cursorAccent: "#0C0C0E",
-  selectionBackground: "rgba(167, 139, 250, 0.3)",
-  selectionForeground: "#E4E4E7",
-  black: "#18181B",
+  background: "#0f0f0f",
+  foreground: "#ededed",
+  cursor: "#7dd3a8",
+  cursorAccent: "#0f0f0f",
+  selectionBackground: "rgba(125, 211, 168, 0.3)",
+  selectionForeground: "#ededed",
+  black: "#1a1a1a",
   red: "#EF4444",
   green: "#34D399",
   yellow: "#F59E0B",
@@ -215,7 +215,7 @@ function PipApp({ sessionId }: { sessionId: string }) {
         left: 0,
         right: 0,
         bottom: 0,
-        backgroundColor: "#0C0C0E",
+        backgroundColor: "var(--bg-primary)",
         overflowY: "auto",
         overflowX: "hidden",
       }}
@@ -277,7 +277,7 @@ function TabStrip({
               background: isActive ? "rgba(167, 139, 250, 0.18)" : "transparent",
               border: isActive ? "1px solid rgba(167, 139, 250, 0.35)" : "1px solid transparent",
               borderRadius: 4,
-              color: isActive ? "#FAFAFA" : "#A1A1AA",
+              color: isActive ? "#FAFAFA" : "var(--text-secondary)",
               fontSize: 11,
               fontFamily: "'JetBrains Mono', 'Cascadia Code', 'SF Mono', monospace",
               cursor: "pointer",
@@ -322,7 +322,7 @@ function TabStrip({
           background: "transparent",
           border: "1px solid transparent",
           borderRadius: 4,
-          color: "#A1A1AA",
+          color: "var(--text-secondary)",
           fontSize: 13,
           lineHeight: 1,
           cursor: "pointer",
@@ -331,12 +331,12 @@ function TabStrip({
           justifyContent: "center",
         }}
         onMouseEnter={(e) => {
-          e.currentTarget.style.background = "rgba(239, 68, 68, 0.15)";
-          e.currentTarget.style.color = "#FCA5A5";
+          e.currentTarget.style.background = "rgba(232, 138, 138, 0.15)";
+          e.currentTarget.style.color = "#f0b0b0";
         }}
         onMouseLeave={(e) => {
           e.currentTarget.style.background = "transparent";
-          e.currentTarget.style.color = "#A1A1AA";
+          e.currentTarget.style.color = "var(--text-secondary)";
         }}
       >
         ×
@@ -379,18 +379,18 @@ function PipArtifact({ artifact, onClose }: { artifact: Artifact; onClose: () =>
           zIndex: 10,
           fontFamily: "var(--font-mono)",
           fontSize: 11,
-          color: "#A1A1AA",
+          color: "var(--text-secondary)",
           overflow: "hidden",
           whiteSpace: "nowrap",
         }}
         title={title}
       >
-        <Icon name={icon} style={{ color: "#52525B" }} />
+        <Icon name={icon} style={{ color: "var(--text-dim)" }} />
         <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
           {crumbs.map((crumb, i) => (
             <span key={`${i}-${crumb.text}`}>
-              {i > 0 && <span style={{ color: "#3F3F46" }}> / </span>}
-              <span style={{ color: crumb.tone === "bright" ? "#FAFAFA" : "#A1A1AA" }}>
+              {i > 0 && <span style={{ color: "var(--text-faint)" }}> / </span>}
+              <span style={{ color: crumb.tone === "bright" ? "#FAFAFA" : "var(--text-secondary)" }}>
                 {crumb.text}
               </span>
             </span>
@@ -410,18 +410,18 @@ function PipArtifact({ artifact, onClose }: { artifact: Artifact; onClose: () =>
             background: "transparent",
             border: "1px solid transparent",
             borderRadius: 4,
-            color: "#A1A1AA",
+            color: "var(--text-secondary)",
             fontSize: 13,
             lineHeight: 1,
             cursor: "pointer",
           }}
           onMouseEnter={(e) => {
-            e.currentTarget.style.background = "rgba(239, 68, 68, 0.15)";
-            e.currentTarget.style.color = "#FCA5A5";
+            e.currentTarget.style.background = "rgba(232, 138, 138, 0.15)";
+            e.currentTarget.style.color = "#f0b0b0";
           }}
           onMouseLeave={(e) => {
             e.currentTarget.style.background = "transparent";
-            e.currentTarget.style.color = "#A1A1AA";
+            e.currentTarget.style.color = "var(--text-secondary)";
           }}
         >
           ×
@@ -436,7 +436,7 @@ function PipArtifact({ artifact, onClose }: { artifact: Artifact; onClose: () =>
           bottom: 0,
           display: "flex",
           flexDirection: "column",
-          backgroundColor: "var(--bg-panel, #1A1A1D)",
+          backgroundColor: "var(--bg-panel)",
           overflow: "hidden",
         }}
       >
@@ -601,13 +601,13 @@ function SurfaceWindow({ artifact }: { artifact: Extract<Artifact, { kind: "surf
           zIndex: 10,
           fontFamily: "var(--font-mono)",
           fontSize: 11,
-          color: "#A1A1AA",
+          color: "var(--text-secondary)",
           overflow: "hidden",
           whiteSpace: "nowrap",
         }}
         title={title}
       >
-        <Icon name="surface" style={{ color: "#52525B" }} />
+        <Icon name="surface" style={{ color: "var(--text-dim)" }} />
         <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{title}</span>
         <button
           type="button"
@@ -619,7 +619,7 @@ function SurfaceWindow({ artifact }: { artifact: Extract<Artifact, { kind: "surf
             WebkitAppRegion: "no-drag",
             background: "transparent",
             border: "none",
-            color: "#71717A",
+            color: "var(--text-muted)",
             fontFamily: "var(--font-mono)",
             fontSize: 13,
             padding: "0 6px",
@@ -637,7 +637,7 @@ function SurfaceWindow({ artifact }: { artifact: Extract<Artifact, { kind: "surf
           right: 0,
           bottom: 0,
           display: "flex",
-          background: "#0C0C0E",
+          background: "var(--bg-primary)",
         }}
       >
         <SurfaceHost artifact={artifact} active onCloseHost={close} />
@@ -660,7 +660,7 @@ function safeParseArtifact(json: string): Artifact | null {
 // PiP body fills the window edge-to-edge — no scrollbars, no margins.
 document.body.style.margin = "0";
 document.body.style.overflow = "hidden";
-document.body.style.background = "#0C0C0E";
+document.body.style.background = "var(--bg-primary)";
 
 const params = new URLSearchParams(window.location.search);
 const sessionId = params.get("session");
@@ -691,10 +691,10 @@ if (surfaceArtifact) {
     <div
       style={{
         padding: 20,
-        color: "#EF4444",
+        color: "var(--accent-red)",
         fontFamily: "monospace",
         fontSize: 13,
-        backgroundColor: "#0C0C0E",
+        backgroundColor: "var(--bg-primary)",
         minHeight: "100vh",
       }}
     >

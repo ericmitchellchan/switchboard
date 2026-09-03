@@ -69,7 +69,7 @@ export function PaneDivider({ direction, branchId, onResize }: PaneDividerProps)
         width: isHorizontal ? 4 : "100%",
         height: isHorizontal ? "100%" : 4,
         cursor: isHorizontal ? "col-resize" : "row-resize",
-        backgroundColor: dragging ? "#E4E4E766" : "#1E1E22",
+        backgroundColor: dragging ? "#EDEDED66" : "var(--border)",
         transition: dragging ? "none" : "background-color 0.15s",
         position: "relative",
         zIndex: 5,

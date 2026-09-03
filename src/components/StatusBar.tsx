@@ -39,11 +39,11 @@ export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMe
         alignItems: "center",
         justifyContent: "space-between",
         padding: "4px 14px",
-        backgroundColor: "#0A0A0B",
-        borderTop: "1px solid #1E1E22",
+        backgroundColor: "var(--bg-secondary)",
+        borderTop: "1px solid var(--border)",
         fontFamily: "var(--font-mono)",
         fontSize: 10,
-        color: "#52525B",
+        color: "var(--text-dim)",
         flexShrink: 0,
         height: 26,
       }}
@@ -73,13 +73,13 @@ export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMe
                 cursor: "pointer",
                 fontFamily: "var(--font-mono)",
                 fontSize: 10,
-                color: "#52525B",
+                color: "var(--text-dim)",
                 padding: 0,
               }}
             >
               <span>Ctrl+Shift+B menu</span>
             </button>
-            <span style={{ color: "#3F3F46" }}>{"│"}</span>
+            <span style={{ color: "var(--text-faint)" }}>{"│"}</span>
           </>
         )}
         {onTogglePanel && (
@@ -92,13 +92,13 @@ export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMe
                 cursor: "pointer",
                 fontFamily: "var(--font-mono)",
                 fontSize: 10,
-                color: "#52525B",
+                color: "var(--text-dim)",
                 padding: 0,
               }}
             >
               <span>Ctrl+Shift+P panel</span>
             </button>
-            <span style={{ color: "#3F3F46" }}>{"│"}</span>
+            <span style={{ color: "var(--text-faint)" }}>{"│"}</span>
           </>
         )}
         {onTogglePip && (
@@ -112,13 +112,13 @@ export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMe
                 cursor: "pointer",
                 fontFamily: "var(--font-mono)",
                 fontSize: 10,
-                color: "#52525B",
+                color: "var(--text-dim)",
                 padding: 0,
               }}
             >
               <span>Ctrl+Shift+O float</span>
             </button>
-            <span style={{ color: "#3F3F46" }}>{"│"}</span>
+            <span style={{ color: "var(--text-faint)" }}>{"│"}</span>
           </>
         )}
         {onToggleComposer && (
@@ -132,27 +132,27 @@ export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMe
                 cursor: "pointer",
                 fontFamily: "var(--font-mono)",
                 fontSize: 10,
-                color: "#52525B",
+                color: "var(--text-dim)",
                 padding: 0,
               }}
             >
               <span>Ctrl+Shift+M composer</span>
             </button>
-            <span style={{ color: "#3F3F46" }}>{"│"}</span>
+            <span style={{ color: "var(--text-faint)" }}>{"│"}</span>
           </>
         )}
         <span>Ctrl+T new</span>
-        <span style={{ color: "#3F3F46" }}>{"\u2502"}</span>
+        <span style={{ color: "var(--text-faint)" }}>{"\u2502"}</span>
         <span>Ctrl+W close</span>
-        <span style={{ color: "#3F3F46" }}>{"\u2502"}</span>
+        <span style={{ color: "var(--text-faint)" }}>{"\u2502"}</span>
         <span>Ctrl+[ ] switch</span>
-        <span style={{ color: "#3F3F46" }}>{"\u2502"}</span>
+        <span style={{ color: "var(--text-faint)" }}>{"\u2502"}</span>
         <span>Ctrl+F find</span>
-        <span style={{ color: "#3F3F46" }}>{"\u2502"}</span>
+        <span style={{ color: "var(--text-faint)" }}>{"\u2502"}</span>
         <span>Ctrl+1-9 thread</span>
         {onToggleSidebar && (
           <>
-            <span style={{ color: "#3F3F46" }}>{"\u2502"}</span>
+            <span style={{ color: "var(--text-faint)" }}>{"\u2502"}</span>
             <button
               onClick={onToggleSidebar}
               style={{
@@ -161,7 +161,7 @@ export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMe
                 cursor: "pointer",
                 fontFamily: "var(--font-mono)",
                 fontSize: 10,
-                color: "#71717A",
+                color: "var(--text-muted)",
                 padding: "0 2px",
                 display: "flex",
                 alignItems: "center",
@@ -174,9 +174,9 @@ export function StatusBar({ sessions, taskCount, onToggleSidebar, onToggleSideMe
                   style={{
                     fontSize: 9,
                     fontWeight: 700,
-                    color: "#E4E4E7",
-                    backgroundColor: "#151518",
-                    border: "1px solid #27272A",
+                    color: "var(--text-primary)",
+                    backgroundColor: "var(--bg-active)",
+                    border: "1px solid var(--border-subtle)",
                     borderRadius: 3,
                     padding: "0 4px",
                   }}

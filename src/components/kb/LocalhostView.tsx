@@ -289,8 +289,8 @@ const NOTE_INPUT_STYLE: CSSProperties = {
 
 const HEALTH_TONE: Record<Health, string> = {
   checking: "var(--text-dim)",
-  up: "var(--status-running, #34D399)",
-  down: "#EF4444",
+  up: "var(--status-running, var(--accent-green))",
+  down: "var(--accent-red)",
 };
 
 /**
@@ -707,8 +707,8 @@ export function LocalhostView({
                   padding: "0 4px",
                   borderRadius: 9,
                   textAlign: "center",
-                  background: editingId === pin.id ? "var(--text-primary)" : "#E4E4E7",
-                  color: "#0C0C0E",
+                  background: editingId === pin.id ? "var(--text-primary)" : "var(--text-primary)",
+                  color: "var(--bg-primary)",
                   fontFamily: "var(--font-mono)",
                   fontSize: 11,
                   fontWeight: 600,
@@ -862,7 +862,7 @@ function ServerGone({
         fontFamily: "var(--font-mono)",
       }}
     >
-      <div style={{ fontSize: 12, color: "#EF4444", fontWeight: 600 }}>server gone</div>
+      <div style={{ fontSize: 12, color: "var(--accent-red)", fontWeight: 600 }}>server gone</div>
       <div style={{ fontSize: 11.5, color: "var(--text-secondary)", wordBreak: "break-all" }}>
         {url}
       </div>

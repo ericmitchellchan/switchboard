@@ -137,7 +137,7 @@ const ITEM_STYLE: CSSProperties = {
 /** Destructive red — the same functional red ConfirmDialog's destructive
  *  button uses. The soft palette's one exception is "colour that MEANS
  *  something"; nothing else in this menu is coloured. */
-const DESTRUCTIVE_COLOR = "#EF4444";
+const DESTRUCTIVE_COLOR = "var(--accent-red)";
 
 const MENU_WIDTH = 156;
 const ITEM_HEIGHT = 24;

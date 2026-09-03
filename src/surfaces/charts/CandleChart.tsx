@@ -89,10 +89,10 @@ export type CandleChartProps = {
 };
 
 const CHROME = {
-  text: "#a1a1aa",
-  grid: "#1e1e22",
-  border: "#27272a",
-  crosshair: "#52525b",
+  text: "#b4b4b4",
+  grid: "#242424",
+  border: "#2e2e2e",
+  crosshair: "#6e6e6e",
   font: "'JetBrains Mono', 'Cascadia Code', 'SF Mono', Consolas, monospace",
 };
 

@@ -77,10 +77,10 @@ export function nearestCandle(points: readonly CandlePoint[], ts: string | null 
  *  (styles/surfaces.css). Functional colours only: up / down / liquidity /
  *  accent. Unknown tone → accent. */
 export const LEVEL_COLORS: Readonly<Record<string, string>> = {
-  up: "#4ea96a",
-  dn: "#e0645b",
-  liq: "#5aa6c9",
-  accent: "#7c8ce8",
+  up: "#6fc492",
+  dn: "#e88a8a",
+  liq: "#7ab8e8",
+  accent: "#7dd3a8",
 };
 
 export function levelColor(tone: string | undefined): string {
@@ -92,14 +92,14 @@ export function levelColor(tone: string | undefined): string {
  *  a CSS var — change one, change the other, like LEVEL_COLORS above).
  *  `--up`/`--dn` are deliberately absent: those two carry meaning. */
 export const SERIES_PALETTE: readonly string[] = [
-  "#7c8ce8", // --chart-1 (accent)
-  "#5aa6c9", // --chart-2 (liq)
-  "#4fb3a4", // --chart-3
-  "#c9a55a", // --chart-4
-  "#b07cc9", // --chart-5
-  "#c97ca6", // --chart-6
-  "#8fb35a", // --chart-7
-  "#c9855a", // --chart-8
+  "#7ab8e8", // --chart-1 (blue / liq)
+  "#a99cf0", // --chart-2 (violet)
+  "#e8b765", // --chart-3 (amber)
+  "#6fc9c0", // --chart-4 (teal)
+  "#e89ab5", // --chart-5 (pink)
+  "#a8c97e", // --chart-6 (lime)
+  "#cf9de8", // --chart-7 (orchid)
+  "#e8a27a", // --chart-8 (peach)
 ];
 
 /** A STABLE colour for a series NAME (SWIT-70): the same name draws in the

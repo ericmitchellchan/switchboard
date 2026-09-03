@@ -30,20 +30,20 @@
    * (up / down / liquidity / accent carry meaning, not decoration).
    *
    * `bg` is transparent on purpose: a surface paints its host's value (panel
-   * #1A1A1D, full-width #0C0C0E), the same rule every other viewer follows.
+   * #1e1e1e, full-width #0f0f0f), the same rule every other viewer follows.
    * `bg-bg` on an inner control (Lodestar's <select>) therefore shows the
    * host through — which is the correct reading of "the canvas colour". */
   --color-bg: transparent;
-  --color-surface: #0f0f11;   /* --bg-elevated */
-  --color-surface2: #151518;  /* --bg-active */
-  --color-line: #1e1e22;      /* --border */
-  --color-text: #e4e4e7;      /* --text-primary */
-  --color-dim: #a1a1aa;       /* --text-secondary (Lodestar's dim was a mid grey; the shell's secondary is the same role) */
-  --color-dim2: #71717a;      /* --text-muted */
-  --color-up: #4ea96a;
-  --color-dn: #e0645b;
-  --color-liq: #5aa6c9;
-  --color-accent: #7c8ce8;
+  --color-surface: #141414;   /* --bg-elevated */
+  --color-surface2: #1a1a1a;  /* --bg-active */
+  --color-line: #2e2e2e;      /* --border */
+  --color-text: #ededed;      /* --text-primary */
+  --color-dim: #b4b4b4;       /* --text-secondary (Lodestar's dim was a mid grey; the shell's secondary is the same role) */
+  --color-dim2: #888888;      /* --text-muted */
+  --color-up: #6fc492;
+  --color-dn: #e88a8a;
+  --color-liq: #7ab8e8;
+  --color-accent: #7dd3a8;
 }
 
 /* The scope every surface mounts under (SurfaceHost). Copied code that reads
@@ -51,30 +51,30 @@
  * are the SAME mapping as the @theme block so class and var agree. */
 .sb-surface {
   --bg: transparent;
-  --surface: #0f0f11;
-  --surface2: #151518;
-  --line: #1e1e22;
-  --text: #e4e4e7;
-  --dim: #a1a1aa;
-  --dim2: #71717a;
-  --up: #4ea96a;
-  --dn: #e0645b;
-  --liq: #5aa6c9;
-  --accent: #7c8ce8;
-  /* THE SERIES PALETTE (SWIT-70): the eight tones a line chart's series draw
-   * in — chart-1/-2 are accent/liq, the rest sit in the same saturation and
-   * lightness family. `--up`/`--dn` stay reserved for their meanings and are
+  --surface: #141414;
+  --surface2: #1a1a1a;
+  --line: #2e2e2e;
+  --text: #ededed;
+  --dim: #b4b4b4;
+  --dim2: #888888;
+  --up: #6fc492;
+  --dn: #e88a8a;
+  --liq: #7ab8e8;
+  --accent: #7dd3a8;
+  /* THE SERIES PALETTE (SWIT-70, retoned SWIT-72): the eight tones a line
+   * chart's series draw in — Ky's blue/violet/amber first, the rest sit in
+   * the same pastel saturation and lightness family. `--up`/`--dn` stay reserved for their meanings and are
    * deliberately not in this ramp. MIRRORED as SERIES_PALETTE in
    * surfaces/charts/candles.ts (canvas cannot read a CSS var) — change one,
    * change the other. */
-  --chart-1: #7c8ce8;
-  --chart-2: #5aa6c9;
-  --chart-3: #4fb3a4;
-  --chart-4: #c9a55a;
-  --chart-5: #b07cc9;
-  --chart-6: #c97ca6;
-  --chart-7: #8fb35a;
-  --chart-8: #c9855a;
+  --chart-1: #7ab8e8;
+  --chart-2: #a99cf0;
+  --chart-3: #e8b765;
+  --chart-4: #6fc9c0;
+  --chart-5: #e89ab5;
+  --chart-6: #a8c97e;
+  --chart-7: #cf9de8;
+  --chart-8: #e8a27a;
   color: var(--text);
   font-family: var(--font-mono);
   font-size: 12px;

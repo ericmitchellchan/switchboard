@@ -138,7 +138,7 @@ export function liveProjectFor(projects: readonly ExplorerProject[], dir: string
 /** Repo-identity fallback for a registry project with no configured colour —
  *  the one surviving use of the brand purple outside the terminal theme
  *  (see SessionHeader, which falls back to the same value). */
-export const DEFAULT_REPO_COLOR = "#A78BFA";
+export const DEFAULT_REPO_COLOR = "#a99cf0";
 
 export interface SessionRepoOption {
   /** Session name AND repo label: the registry PROJECT KEY (suffixed with the

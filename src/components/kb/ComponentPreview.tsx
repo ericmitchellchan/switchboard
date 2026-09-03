@@ -94,6 +94,6 @@ export function ComponentPreview({
 /** Chunk-load failure. Same look as componentPreview's own notes, inlined
  *  because that module is what could not be loaded. */
 const FALLBACK_DOC = `<!doctype html><html><head><meta charset="utf-8"></head>
-<body style="margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#0C0C0E;color:#52525B;font:11px 'JetBrains Mono','Cascadia Code','SF Mono',monospace">
+<body style="margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#0f0f0f;color:#6e6e6e;font:11px 'JetBrains Mono','Cascadia Code','SF Mono',monospace">
 preview compiler unavailable
 </body></html>`;

@@ -31,28 +31,46 @@
 }
 
 :root {
-  --bg-primary: #0C0C0E;
-  --bg-secondary: #0A0A0B;
-  --bg-elevated: #0F0F11;
+  /* THE KY PALETTE (SWIT-72, 2026-09-02). Values re-pointed onto Ky's current
+     theme (ky-desktop global.css, the newer block: bg #0a0a0a · pane #141414 ·
+     raised #1a1a1a · hover #242424 · line #2e2e2e / #1e1e1e · txt #ededed /
+     #b4b4b4 / #888888 · accent #7dd3a8). Our ramp has more steps than Ky's, so
+     the in-between values (#0f0f0f, #6e6e6e, #565656, #3a3a3a) are warm-grey
+     interpolations that keep the ramp monotonic. NAMES are unchanged — every
+     component references the name, and tokens are the one source of truth. */
+  --bg-primary: #0f0f0f;
+  --bg-secondary: #0a0a0a;
+  --bg-elevated: #141414;
   /* Artifact panel surface. A DELIBERATE step up the ramp so the panel side
-     reads as a second surface beside the terminal's --bg-primary: 1.126:1,
-     vs 1.021:1 for --bg-elevated (3/255 per channel — invisible). Sits below
-     --border #1E1E22 so the divider still reads against it. */
-  --bg-panel: #1A1A1D;
-  --bg-active: #151518;
-  --border: #1E1E22;
-  --border-subtle: #27272A;
-  --text-primary: #E4E4E7;
-  --text-secondary: #A1A1AA;
-  --text-muted: #71717A;
-  --text-dim: #52525B;
-  --text-faint: #3F3F46;
-  --accent-purple: #A78BFA;
-  --accent-green: #34D399;
-  --accent-blue: #3B82F6;
-  --accent-blue-light: #60A5FA;
-  --accent-yellow: #F59E0B;
-  --accent-red: #EF4444;
+     reads as a second surface beside the terminal's --bg-primary: ~1.15:1
+     (was 1.126:1 pre-SWIT-72; a per-channel hair above --bg-active would be
+     invisible). Sits below --border #2e2e2e so the divider still reads
+     against it. */
+  --bg-panel: #1e1e1e;
+  --bg-active: #1a1a1a;
+  --border: #2e2e2e;
+  --border-subtle: #3a3a3a;
+  --text-primary: #ededed;
+  --text-secondary: #b4b4b4;
+  --text-muted: #888888;
+  --text-dim: #6e6e6e;
+  --text-faint: #565656;
+  /* Ky's accent family — the green is THE accent; the tones are the calm
+     four-hue set every coloured thing draws from. */
+  --accent: #7dd3a8;
+  --accent-dim: #3a6450;
+  --tone-blue: #7ab8e8;
+  --tone-violet: #a99cf0;
+  --tone-rose: #e88a8a;
+  --tone-amber: #e8b765;
+  /* The six loud accents are RETIRED IN VALUE, kept in name: each is
+     re-pointed at the closest Ky tone so nothing referencing them breaks. */
+  --accent-purple: #a99cf0;
+  --accent-green: #7dd3a8;
+  --accent-blue: #7ab8e8;
+  --accent-blue-light: #9ccaee;
+  --accent-yellow: #e8b765;
+  --accent-red: #e88a8a;
   --font-mono: 'JetBrains Mono', 'Cascadia Code', 'SF Mono', monospace;
 }
 
@@ -95,12 +113,12 @@ html, body, #root {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #27272A;
+  background: var(--border);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #3F3F46;
+  background: var(--border-subtle);
 }
 
 .tabs-scroll::-webkit-scrollbar {
@@ -121,16 +139,16 @@ html, body, #root {
 }
 
 .xterm-viewport::-webkit-scrollbar-thumb {
-  background: #27272A;
+  background: var(--border);
   border-radius: 3px;
 }
 
 /* Search result highlighting */
 .xterm-find-result-decoration {
-  background-color: rgba(245, 158, 11, 0.25) !important;
+  background-color: rgba(232, 183, 101, 0.25) !important;
 }
 
 .xterm-find-active-result-decoration {
-  background-color: rgba(245, 158, 11, 0.5) !important;
-  outline: 1px solid rgba(245, 158, 11, 0.6);
+  background-color: rgba(232, 183, 101, 0.5) !important;
+  outline: 1px solid rgba(232, 183, 101, 0.6);
 }

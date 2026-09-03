@@ -645,7 +645,7 @@ function Listening({ active, servers }: { active: boolean; servers: readonly Dev
         const key = serverKey(hit.url);
         const state = alive[key];
         const dotColor =
-          state === true ? "var(--st-done, #10B981)" : state === false ? "var(--st-exited, #52525B)" : "var(--text-faint)";
+          state === true ? "var(--st-done, var(--accent-green))" : state === false ? "var(--st-exited, var(--text-dim))" : "var(--text-faint)";
         const label = state === true ? "listening" : state === false ? "not answering" : "probing…";
         return (
           <div

@@ -7,11 +7,15 @@ export interface StatusConfig {
   label: string;
 }
 
+// Hex, not var(--…), on purpose: these colors also reach non-CSS consumers
+// (canvas-adjacent paths). Values mirror the SWIT-72 Ky tones in global.css —
+// running = --tone-blue, waiting = --tone-amber, done = --accent, error =
+// --tone-rose, idle/exited = --text-faint/--text-dim. Change one, change both.
 export const STATUS_CONFIGS: Record<AgentStatus, StatusConfig> = {
-  idle: { color: "#3F3F46", pulse: false, icon: "\u25CB", label: "IDLE" },
-  running: { color: "#3B82F6", pulse: true, icon: "\u27F3", label: "RUNNING" },
-  waiting: { color: "#F59E0B", pulse: true, icon: "\u25C9", label: "WAITING" },
-  done: { color: "#10B981", pulse: false, icon: "\u2714", label: "DONE" },
-  error: { color: "#EF4444", pulse: false, icon: "\u2715", label: "ERROR" },
-  exited: { color: "#52525B", pulse: false, icon: "\u25CB", label: "EXITED" },
+  idle: { color: "#565656", pulse: false, icon: "○", label: "IDLE" },
+  running: { color: "#7ab8e8", pulse: true, icon: "⟳", label: "RUNNING" },
+  waiting: { color: "#e8b765", pulse: true, icon: "◉", label: "WAITING" },
+  done: { color: "#7dd3a8", pulse: false, icon: "✔", label: "DONE" },
+  error: { color: "#e88a8a", pulse: false, icon: "✕", label: "ERROR" },
+  exited: { color: "#6e6e6e", pulse: false, icon: "○", label: "EXITED" },
 };

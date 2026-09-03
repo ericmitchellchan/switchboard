@@ -63,11 +63,12 @@ export function ConfirmDialog({
 
   if (!open) return null;
 
-  // Soft palette: the non-destructive primary action is a white button
-  // (zinc chrome, no brand color); destructive stays functional red.
-  const confirmBg = destructive ? "#EF4444" : "#E4E4E7";
-  const confirmHoverBg = destructive ? "#DC2626" : "#FAFAFA";
-  const confirmFg = destructive ? "#FFFFFF" : "#0C0C0E";
+  // Soft palette: the non-destructive primary action is a light button
+  // (warm-grey chrome, no brand color); destructive is the rose tone — light
+  // enough that BOTH variants take the dark fg.
+  const confirmBg = destructive ? "var(--accent-red)" : "var(--text-primary)";
+  const confirmHoverBg = destructive ? "#d97878" : "#FAFAFA";
+  const confirmFg = "var(--bg-primary)";
 
   return (
     <>

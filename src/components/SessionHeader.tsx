@@ -191,11 +191,11 @@ export function DevServerOffer({
           fontSize: compact ? 10 : 11,
           lineHeight: 1,
           padding: "0 3px",
-          color: "#3F3F46",
+          color: "var(--text-faint)",
           cursor: "pointer",
         }}
-        onMouseEnter={(e) => (e.currentTarget.style.color = "#A1A1AA")}
-        onMouseLeave={(e) => (e.currentTarget.style.color = "#3F3F46")}
+        onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-secondary)")}
+        onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-faint)")}
       >
         ×
       </span>
@@ -254,7 +254,7 @@ function PrepChip({ sessionId, compact }: { sessionId: string; compact: boolean 
 
 export const SessionHeader = memo(function SessionHeader({ session, compact }: SessionHeaderProps) {
   const cfg = STATUS_CONFIGS[session.status] || STATUS_CONFIGS.running;
-  const repoColor = session.repoColor || "#A78BFA";
+  const repoColor = session.repoColor || "var(--accent-purple)";
 
   return (
     <div
@@ -265,8 +265,8 @@ export const SessionHeader = memo(function SessionHeader({ session, compact }: S
         padding: compact ? "4px 10px" : "8px 16px",
         height: compact ? 25 : 33,
         boxSizing: "border-box",
-        backgroundColor: "#0F0F11",
-        borderBottom: "1px solid #1E1E22",
+        backgroundColor: "var(--bg-elevated)",
+        borderBottom: "1px solid var(--border)",
         flexShrink: 0,
         overflow: "hidden",
       }}
@@ -287,7 +287,7 @@ export const SessionHeader = memo(function SessionHeader({ session, compact }: S
           <span>{cfg.icon}</span>
           {cfg.label}
         </span>
-        <span style={{ color: "#3F3F46", fontSize: compact ? 10 : 11 }}>{"\u2502"}</span>
+        <span style={{ color: "var(--text-faint)", fontSize: compact ? 10 : 11 }}>{"\u2502"}</span>
         {session.repo && (
           <>
             <span
@@ -318,14 +318,14 @@ export const SessionHeader = memo(function SessionHeader({ session, compact }: S
                 {session.repo}
               </span>
             </span>
-            <span style={{ color: "#3F3F46", fontSize: compact ? 10 : 11 }}>{"\u2502"}</span>
+            <span style={{ color: "var(--text-faint)", fontSize: compact ? 10 : 11 }}>{"\u2502"}</span>
           </>
         )}
         <span
           style={{
             fontFamily: "var(--font-mono)",
             fontSize: compact ? 10 : 11,
-            color: "#A1A1AA",
+            color: "var(--text-secondary)",
           }}
         >
           {session.name}
@@ -342,7 +342,7 @@ export const SessionHeader = memo(function SessionHeader({ session, compact }: S
           style={{
             fontFamily: "var(--font-mono)",
             fontSize: 9.5,
-            color: "#52525B",
+            color: "var(--text-dim)",
           }}
         >
           {session.working_dir}

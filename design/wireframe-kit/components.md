@@ -23,18 +23,18 @@ Token map used below (Ky name → ours):
 
 | Ky (`ky-desktop/src/styles/global.css`) | Switchboard (`src/styles/global.css`) |
 |---|---|
-| `--bg` #0a0a0a | `--bg-primary` #0C0C0E (terminal side) / host value inside the panel |
-| `--bg-pane` #141414 | `--bg-secondary` #0A0A0B (side menu) / `--bg-panel` #1A1A1D (panel) |
-| `--bg-raised` #1a1a1a | `--bg-elevated` #0F0F11 |
-| `--bg-hover` #242424 | `--bg-active` #151518 |
-| `--line` #2e2e2e | `--border-subtle` #27272A |
-| `--line-soft` #1e1e1e | `--border` #1E1E22 |
-| `--txt` #ededed | `--text-primary` #E4E4E7 |
-| `--txt-dim` #b4b4b4 | `--text-secondary` #A1A1AA |
-| `--txt-faint` #888888 | `--text-muted` #71717A (labels) / `--text-dim` #52525B (meta) / `--text-faint` #3F3F46 (idle icon) |
-| `--accent` #7dd3a8 | none — `--text-primary` for emphasis and hover |
-| `--amber` (needs-input) | `STATUS_CONFIGS.waiting.color` #F59E0B, functional only |
-| `--rose` (destructive) | `--accent-red` #EF4444, destructive only |
+| `--bg` #0a0a0a | `--bg-secondary` #0a0a0a (side menu, bars) — SAME VALUE since SWIT-72 |
+| `--bg-pane` #141414 | `--bg-elevated` #141414; `--bg-primary` #0f0f0f is the terminal side (our extra step) |
+| `--bg-raised` #1a1a1a | `--bg-active` #1a1a1a; `--bg-panel` #1e1e1e is the panel's own step |
+| `--bg-hover` #242424 | (no direct slot — hovers use `--bg-active`) |
+| `--line` #2e2e2e | `--border` #2e2e2e |
+| `--line-soft` #1e1e1e | (surface role: `--bg-panel`); `--border-subtle` #3a3a3a is the brighter hairline |
+| `--txt` #ededed | `--text-primary` #ededed |
+| `--txt-dim` #b4b4b4 | `--text-secondary` #b4b4b4 |
+| `--txt-faint` #888888 | `--text-muted` #888888 (labels) / `--text-dim` #6e6e6e (meta) / `--text-faint` #565656 (idle icon) |
+| `--accent` #7dd3a8 | `--accent` #7dd3a8 (SWIT-72; `--accent-dim` #3a6450) — emphasis text stays `--text-primary` |
+| `--amber` #e8b765 | `--tone-amber` / `--accent-yellow` #e8b765 (`STATUS_CONFIGS.waiting.color`), functional only |
+| `--rose` #e88a8a | `--tone-rose` / `--accent-red` #e88a8a, destructive only |
 
 Surfaces (`.sb-surface`, `src/styles/surfaces.css`) speak Lodestar's names for the
 same ramp: `--line` = `--border`, `--surface` = `--bg-elevated`, `--surface2` =
@@ -145,7 +145,7 @@ Three ranks. One primary per surface; when a second action feels important it is
   `ky/main/Topbar.tsx` (~370–376) `h-7 w-7 rounded-md text-txt-faint hover:bg-bg-hover
   hover:text-txt-dim`; `ky/chat/ChatTerminal.tsx` composer `+` (~1392) `w-7 h-7 rounded
   text-[15px]`.
-- **Ours — primary:** `--text-primary` fill, text `#0C0C0E` (the one hardcoded value,
+- **Ours — primary:** `--text-primary` fill, text `--bg-primary` (near-black,
   as Ky's `#0f1115`: on-white text is near-black in any theme), 11px weight 600,
   padding `3px 10px`, radius 3, no border; hover `opacity: .9`; disabled `opacity: .4`.
   The confirm dialog's non-destructive button is this (conventions 2026-08-01).
@@ -193,7 +193,7 @@ it says so (a chip that toggles is a quiet button at chip size).
   border px-2 py-0.5`.
 - **Ours:** 9px, padding `0 5px`, 1px `--border-subtle`, radius 4, `--text-muted`,
   `white-space: nowrap`, `flex: none`. Outlined zinc, not filled (conventions
-  2026-08-01: count badges are bg `#151518` / 1px `#27272A` / text `#E4E4E7` — that is
+  2026-08-01: count badges are bg `--bg-active` / 1px `--border-subtle` / text `--text-primary` — that is
   this chip in its EMPHASIS form: `--text-primary` on border `--text-secondary`, used
   for `↓ N` unread). Nothing is filled: the filled `?` "agent waiting" chip RETIRED with
   SWIT-69 (words, not glyphs) — a thread's open questions are a dim 9.5px `· N` count

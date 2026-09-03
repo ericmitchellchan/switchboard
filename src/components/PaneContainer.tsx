@@ -106,7 +106,7 @@ function PaneNodeRenderer({
           overflow: "hidden",
           border: isSplit
             ? isFocused
-              ? "1px solid #E4E4E744"
+              ? "1px solid #EDEDED44"
               : "1px solid transparent"
             : "none",
           transition: "border-color 0.15s",

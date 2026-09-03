@@ -429,7 +429,7 @@ export const TerminalPane = memo(function TerminalPane({
           // point: showing the composer is a height change like any other.
           flex: 1,
           minHeight: 0,
-          backgroundColor: "#0C0C0E",
+          backgroundColor: "var(--bg-primary)",
           // Grow-only width (see resizePolicy.ts): when the pane is narrower
           // than the terminal's columns, scroll horizontally rather than
           // re-wrap/break already-rendered content. Vertical stays clipped —
@@ -450,7 +450,7 @@ export const TerminalPane = memo(function TerminalPane({
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            backgroundColor: "#0C0C0E",
+            backgroundColor: "var(--bg-primary)",
           }}
         >
           <span
@@ -460,7 +460,7 @@ export const TerminalPane = memo(function TerminalPane({
               textAlign: "center",
               fontFamily: "var(--font-mono)",
               fontSize: 12,
-              color: "#52525B",
+              color: "var(--text-dim)",
             }}
           >
             This session moved to another pane (one live terminal per session).
@@ -480,9 +480,9 @@ export const TerminalPane = memo(function TerminalPane({
           <button
             onClick={() => onRestart(session.id)}
             style={{
-              background: "#151518",
-              border: "1px solid #27272A",
-              color: "#E4E4E7",
+              background: "var(--bg-active)",
+              border: "1px solid var(--border-subtle)",
+              color: "var(--text-primary)",
               fontFamily: "var(--font-mono)",
               fontSize: 13,
               padding: "6px 16px",
@@ -491,12 +491,12 @@ export const TerminalPane = memo(function TerminalPane({
               transition: "background 0.15s, border-color 0.15s",
             }}
             onMouseEnter={(e) => {
-              e.currentTarget.style.background = "#1E1E22";
-              e.currentTarget.style.borderColor = "#3F3F46";
+              e.currentTarget.style.background = "var(--border)";
+              e.currentTarget.style.borderColor = "var(--text-faint)";
             }}
             onMouseLeave={(e) => {
-              e.currentTarget.style.background = "#151518";
-              e.currentTarget.style.borderColor = "#27272A";
+              e.currentTarget.style.background = "var(--bg-active)";
+              e.currentTarget.style.borderColor = "var(--border-subtle)";
             }}
           >
             Restart Session

@@ -3417,10 +3417,10 @@ function EmptyWorkspaceNote() {
         gap: 16,
       }}
     >
-      <span style={{ fontFamily: "var(--font-mono)", fontSize: 14, color: "#52525B" }}>
+      <span style={{ fontFamily: "var(--font-mono)", fontSize: 14, color: "var(--text-dim)" }}>
         No sessions open
       </span>
-      <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "#3F3F46" }}>
+      <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-faint)" }}>
         Press Ctrl+T to open a new terminal
       </span>
     </div>

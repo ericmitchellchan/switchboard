@@ -127,13 +127,13 @@ export const CRUMB_TONE: Record<ArtifactCrumb["tone"], CSSProperties> = {
 
 /** The panel's surface value (Increment B, Decision 4 / acceptance 6).
  *
- *  The terminal side is `--bg-primary` #0C0C0E; the panel is `--bg-panel`
- *  #1A1A1D — several steps up the SAME zinc ramp, measured at **1.126:1**.
- *  The first pass used `--bg-elevated` #0F0F11, which is 3/255 per channel
- *  and **1.021:1** — arithmetically a step, visually nothing; acceptance 6
+ *  The terminal side is `--bg-primary` #0f0f0f; the panel is `--bg-panel`
+ *  #1e1e1e — several steps up the SAME warm-grey ramp (Ky palette, SWIT-72),
+ *  ~1.15:1. The original pass used `--bg-elevated`, a few units per channel
+ *  and ~1.02:1 — arithmetically a step, visually nothing; acceptance 6
  *  was being carried entirely by the divider, and in OVERLAY mode (no
- *  divider) by a single hairline. #1A1A1D is a difference you can see without
- *  looking for it, and still sits BELOW `--border` #1E1E22 so the 4px divider
+ *  divider) by a single hairline. #1e1e1e is a difference you can see without
+ *  looking for it, and still sits BELOW `--border` #2e2e2e so the 4px divider
  *  keeps reading against the panel.
  *
  *  Still no new hue, no tinted text, no status colour touched: same neutral
@@ -142,7 +142,7 @@ export const CRUMB_TONE: Record<ArtifactCrumb["tone"], CSSProperties> = {
  *
  *  Applied to the STRIP, the header (by inheritance) and the body together —
  *  the panel's own viewers paint `transparent` so they take whichever surface
- *  hosts them (#1A1A1D here, #0C0C0E on the full-width screens). Anything
+ *  hosts them (--bg-panel here, --bg-primary on the full-width screens). Anything
  *  painting `--bg-primary` inside the panel punches a terminal-coloured hole
  *  in it. */
 const PANEL_SURFACE = "var(--bg-panel)";
@@ -495,7 +495,7 @@ function PanelDivider({ side }: { side: PanelSide }) {
         width: DIVIDER_WIDTH,
         height: "100%",
         cursor: "col-resize",
-        backgroundColor: dragging ? "#E4E4E766" : "var(--border)",
+        backgroundColor: dragging ? "#EDEDED66" : "var(--border)",
         transition: dragging ? "none" : "background-color 0.15s",
         position: "relative",
         zIndex: 5,
@@ -728,7 +728,7 @@ export function ArtifactPanel({
           // A hairline at the panel's own edge, in BOTH modes. Docked, it sits
           // just inside the 4px divider and gives the surface change a crisp
           // boundary instead of letting two near-blacks meet on a soft edge;
-          // `--border-subtle` #27272A is the brighter of the two hairline
+          // `--border-subtle` is the brighter of the two hairline
           // tokens, which is the "slightly stronger border" this needs. The
           // global border-box means it costs 1px of `layout.width`, not an
           // extra pixel of layout.

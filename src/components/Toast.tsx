@@ -35,8 +35,8 @@ export function ToastStack({ toasts, onDismiss, onClickToast }: ToastStackProps)
             alignItems: "center",
             gap: 10,
             padding: "10px 14px",
-            backgroundColor: "#1C1917",
-            border: "1px solid #F59E0B33",
+            backgroundColor: "var(--bg-active)",
+            border: "1px solid #E8B76533",
             borderRadius: 6,
             cursor: "pointer",
             fontFamily: "var(--font-mono)",
@@ -50,7 +50,7 @@ export function ToastStack({ toasts, onDismiss, onClickToast }: ToastStackProps)
               width: 8,
               height: 8,
               borderRadius: "50%",
-              backgroundColor: "#F59E0B",
+              backgroundColor: "var(--accent-yellow)",
               flexShrink: 0,
             }}
           />
@@ -59,7 +59,7 @@ export function ToastStack({ toasts, onDismiss, onClickToast }: ToastStackProps)
               style={{
                 fontSize: 11,
                 fontWeight: 600,
-                color: "#E4E4E7",
+                color: "var(--text-primary)",
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
@@ -70,7 +70,7 @@ export function ToastStack({ toasts, onDismiss, onClickToast }: ToastStackProps)
             <span
               style={{
                 fontSize: 10,
-                color: "#F59E0B",
+                color: "var(--accent-yellow)",
               }}
             >
               {toast.message}
@@ -85,7 +85,7 @@ export function ToastStack({ toasts, onDismiss, onClickToast }: ToastStackProps)
               background: "none",
               border: "none",
               cursor: "pointer",
-              color: "#52525B",
+              color: "var(--text-dim)",
               fontSize: 12,
               padding: "0 2px",
               marginLeft: "auto",

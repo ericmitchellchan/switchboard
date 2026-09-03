@@ -60,9 +60,9 @@ describe("anchors, highlight, levels", () => {
   });
 
   it("levelColor maps tones and falls back to accent; drawableLevels filters junk", () => {
-    expect(levelColor("up")).toBe("#4ea96a");
+    expect(levelColor("up")).toBe("#6fc492");
     expect(levelColor("nope")).toBe(levelColor("accent"));
-    expect(levelColor(undefined)).toBe("#7c8ce8");
+    expect(levelColor(undefined)).toBe("#7dd3a8");
     expect(
       drawableLevels([
         { price: 5622, label: "gamma wall", tone: "accent" },

@@ -131,7 +131,7 @@ const INSTRUMENT = `
       (function (p, n) {
         var b = document.createElement("div");
         b.textContent = String(n);
-        b.style.cssText = "position:absolute;transform:translate(-50%,-50%);min-width:18px;height:18px;line-height:18px;text-align:center;border-radius:9px;padding:0 4px;background:#E4E4E7;color:#0C0C0E;font:600 11px monospace;cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,0.45);user-select:none;";
+        b.style.cssText = "position:absolute;transform:translate(-50%,-50%);min-width:18px;height:18px;line-height:18px;text-align:center;border-radius:9px;padding:0 4px;background:#ededed;color:#0f0f0f;font:600 11px monospace;cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,0.45);user-select:none;";
         b.style.left = (w * p.xPct / 100 - offX) + "px";
         b.style.top = (h * p.yPct / 100 - offY) + "px";
         b.addEventListener("click", function (e) {
@@ -234,7 +234,7 @@ const FRAME_BOX_STYLE: CSSProperties = {
   overflow: "hidden",
   position: "relative",
   // Letterbox around the sandboxed iframe — transparent so it takes the
-  // HOST's surface (KB screen #0C0C0E, artifact panel #0F0F11). The wireframe
+  // HOST's surface (KB screen #0f0f0f, artifact panel #1e1e1e). The wireframe
   // itself paints its own background inside the frame, so this only affects
   // the margin around it.
   background: "transparent",

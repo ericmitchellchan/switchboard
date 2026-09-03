@@ -61,7 +61,7 @@ export function NewSessionDialog({ repos, onCreateSession, onClose }: NewSession
         type: "plain",
         name: "Plain Shell",
         path: homeDir,
-        color: "#6B7280",
+        color: "var(--text-muted)",
         group: "",
         status: "",
         archived: false,

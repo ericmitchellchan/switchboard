@@ -486,7 +486,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
             style={{
               fontFamily: "var(--font-mono)",
               fontSize: 9,
-              color: error ? "#F87171" : "var(--text-faint)",
+              color: error ? "var(--accent-red)" : "var(--text-faint)",
               whiteSpace: "nowrap",
               maxWidth: 320,
               overflow: "hidden",

@@ -196,3 +196,13 @@ that stop being true.
   waiting-on-you item appears ONCE, under Needs you. No `?` glyph anywhere: the
   thread rail's question marker is a dim `· N` with a worded tooltip; `✦` stays as
   the page tab's one identity mark, with a `title` legend.
+- 2026-09-02 — THE KY PALETTE (SWIT-72). Switchboard adopts Ky's current colouring
+  while keeping its identity: JetBrains Mono everywhere, sleek black. Neutrals are
+  Ky's warm greys (#0a0a0a / #141414 / #1a1a1a ground, #2e2e2e lines, #ededed /
+  #b4b4b4 / #888888 text; our extra ramp steps interpolate in the same warm family);
+  the accent is Ky's green `--accent` #7dd3a8 (+ `--accent-dim` #3a6450) with the
+  calm four-tone family `--tone-blue/violet/rose/amber`. The six loud accents are
+  retired in VALUE only — each old name is re-pointed at its nearest tone. Tokens
+  are the one source of truth: no raw hex in components (a hex survives only where
+  a CSS var cannot reach — canvas chart chrome, iframe-injected markup, the xterm
+  theme — and must mirror a token value, stated in a comment).

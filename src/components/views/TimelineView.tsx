@@ -47,9 +47,9 @@ const MONO = "var(--font-mono)";
 
 /** surfaces.css tokens as canvas literals. */
 const TONE = {
-  text: "#a1a1aa", // --dim
-  dim2: "#71717a", // --dim2
-  line: "#1e1e22", // --line
+  text: "#b4b4b4", // --dim (canvas — cannot read a CSS var)
+  dim2: "#888888", // --dim2
+  line: "#242424", // grid — a step under --line so the band fill stays quiet
   font: "10px 'JetBrains Mono', 'Cascadia Code', 'SF Mono', Consolas, monospace",
 };
 

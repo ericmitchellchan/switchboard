@@ -49,8 +49,8 @@ interface TopBarProps {
   backlogProjects?: readonly string[];
 }
 
-const DIM: React.CSSProperties = { color: "#52525B" };
-const BRIGHT: React.CSSProperties = { color: "#E4E4E7" };
+const DIM: React.CSSProperties = { color: "var(--text-dim)" };
+const BRIGHT: React.CSSProperties = { color: "var(--text-primary)" };
 
 export function TopBar({
   route,
@@ -73,8 +73,8 @@ export function TopBar({
       style={{
         display: "flex",
         alignItems: "stretch",
-        backgroundColor: "#0A0A0B",
-        borderBottom: "1px solid #1E1E22",
+        backgroundColor: "var(--bg-secondary)",
+        borderBottom: "1px solid var(--border)",
         height: 44,
         flexShrink: 0,
         overflow: "hidden",
@@ -87,7 +87,7 @@ export function TopBar({
           alignItems: "center",
           padding: "0 14px",
           gap: 7,
-          borderRight: "1px solid #1E1E22",
+          borderRight: "1px solid var(--border)",
           flexShrink: 0,
         }}
       >
@@ -102,7 +102,7 @@ export function TopBar({
             fontFamily: "var(--font-mono)",
             fontSize: 12.5,
             fontWeight: 700,
-            color: "#E4E4E7",
+            color: "var(--text-primary)",
             letterSpacing: "0.02em",
             cursor: "pointer",
           }}
@@ -114,8 +114,8 @@ export function TopBar({
             style={{
               fontSize: 10,
               fontWeight: 700,
-              color: "#0A0A0B",
-              backgroundColor: "#F59E0B",
+              color: "var(--bg-secondary)",
+              backgroundColor: "var(--accent-yellow)",
               borderRadius: 4,
               padding: "1px 5px",
               fontFamily: "var(--font-mono)",
@@ -151,7 +151,7 @@ export function TopBar({
           alignItems: "center",
           gap: 4,
           padding: "0 6px",
-          borderLeft: "1px solid #1E1E22",
+          borderLeft: "1px solid var(--border)",
           flexShrink: 0,
         }}
       >
@@ -269,9 +269,9 @@ function SessionName({
         style={{
           fontFamily: "var(--font-mono)",
           fontSize: 12,
-          color: "#E4E4E7",
-          backgroundColor: "#27272A",
-          border: "1px solid #3F3F46",
+          color: "var(--text-primary)",
+          backgroundColor: "var(--border-subtle)",
+          border: "1px solid var(--text-faint)",
           borderRadius: 3,
           padding: "1px 4px",
           outline: "none",
@@ -321,7 +321,7 @@ function TextAction({
         padding: "4px 8px",
         fontFamily: "var(--font-mono)",
         fontSize: 10.5,
-        color: hover ? "var(--text-primary)" : "#71717A",
+        color: hover ? "var(--text-primary)" : "var(--text-muted)",
         cursor: "pointer",
         transition: "background-color 0.15s ease, color 0.15s ease",
       }}
@@ -373,7 +373,7 @@ function PanelButton({
           : hover
             ? "var(--bg-elevated)"
             : "transparent",
-        color: open || hover ? "var(--text-primary)" : "#71717A",
+        color: open || hover ? "var(--text-primary)" : "var(--text-muted)",
         cursor: "pointer",
         transition: "background-color 0.15s ease, color 0.15s ease",
       }}

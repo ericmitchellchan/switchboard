@@ -16,17 +16,17 @@ interface TaskSidebarProps {
 }
 
 const PRIORITY_COLORS: Record<Task["priority"], string> = {
-  high: "#F59E0B",
-  med: "#6B7280",
-  low: "#3F3F46",
+  high: "var(--accent-yellow)",
+  med: "var(--text-muted)",
+  low: "var(--text-faint)",
 };
 
 const CATEGORY_COLORS: Record<TaskCategory, string> = {
-  build: "#EF4444",
-  test: "#F59E0B",
-  git: "#3B82F6",
-  runtime: "#A78BFA",
-  note: "#6B7280",
+  build: "var(--accent-red)",
+  test: "var(--accent-yellow)",
+  git: "var(--accent-blue)",
+  runtime: "var(--accent-purple)",
+  note: "var(--text-muted)",
 };
 
 const CATEGORY_ICONS: Record<TaskCategory, string> = {
@@ -66,8 +66,8 @@ export function TaskSidebar({
         onClick={onExpand}
         style={{
           width: 38,
-          backgroundColor: "#0A0A0B",
-          borderLeft: "1px solid #1E1E22",
+          backgroundColor: "var(--bg-secondary)",
+          borderLeft: "1px solid var(--border)",
           display: "flex",
           flexDirection: "column",
           alignItems: "center",
@@ -85,7 +85,7 @@ export function TaskSidebar({
             fontSize: 10,
             fontWeight: 700,
             letterSpacing: "0.1em",
-            color: "#71717A",
+            color: "var(--text-muted)",
           }}
         >
           TASKS
@@ -95,9 +95,9 @@ export function TaskSidebar({
             style={{
               fontSize: 9,
               fontWeight: 700,
-              color: "#E4E4E7",
-              backgroundColor: "#151518",
-              border: "1px solid #27272A",
+              color: "var(--text-primary)",
+              backgroundColor: "var(--bg-active)",
+              border: "1px solid var(--border-subtle)",
               borderRadius: 3,
               padding: "1px 4px",
               fontFamily: "var(--font-mono)",
@@ -138,8 +138,8 @@ export function TaskSidebar({
     <div
       style={{
         width: 280,
-        backgroundColor: "#0A0A0B",
-        borderLeft: "1px solid #1E1E22",
+        backgroundColor: "var(--bg-secondary)",
+        borderLeft: "1px solid var(--border)",
         display: "flex",
         flexDirection: "column",
         flexShrink: 0,
@@ -153,7 +153,7 @@ export function TaskSidebar({
           alignItems: "center",
           justifyContent: "space-between",
           padding: "10px 12px",
-          borderBottom: "1px solid #1E1E22",
+          borderBottom: "1px solid var(--border)",
           flexShrink: 0,
         }}
       >
@@ -163,7 +163,7 @@ export function TaskSidebar({
               fontFamily: "var(--font-mono)",
               fontSize: 11,
               fontWeight: 700,
-              color: "#E4E4E7",
+              color: "var(--text-primary)",
               letterSpacing: "0.03em",
             }}
           >
@@ -174,9 +174,9 @@ export function TaskSidebar({
               style={{
                 fontSize: 9,
                 fontWeight: 700,
-                color: "#E4E4E7",
-                backgroundColor: "#151518",
-                border: "1px solid #27272A",
+                color: "var(--text-primary)",
+                backgroundColor: "var(--bg-active)",
+                border: "1px solid var(--border-subtle)",
                 borderRadius: 3,
                 padding: "1px 5px",
                 fontFamily: "var(--font-mono)",
@@ -196,7 +196,7 @@ export function TaskSidebar({
                 cursor: "pointer",
                 fontFamily: "var(--font-mono)",
                 fontSize: 9,
-                color: "#3F3F46",
+                color: "var(--text-faint)",
                 padding: "0 2px",
               }}
             >
@@ -213,12 +213,12 @@ export function TaskSidebar({
                   }}
                   style={{
                     background: "none",
-                    border: "1px solid #F59E0B",
+                    border: "1px solid var(--accent-yellow)",
                     borderRadius: 3,
                     cursor: "pointer",
                     fontFamily: "var(--font-mono)",
                     fontSize: 8,
-                    color: "#F59E0B",
+                    color: "var(--accent-yellow)",
                     padding: "1px 4px",
                     whiteSpace: "nowrap",
                   }}
@@ -233,12 +233,12 @@ export function TaskSidebar({
                 }}
                 style={{
                   background: "none",
-                  border: "1px solid #EF4444",
+                  border: "1px solid var(--accent-red)",
                   borderRadius: 3,
                   cursor: "pointer",
                   fontFamily: "var(--font-mono)",
                   fontSize: 8,
-                  color: "#EF4444",
+                  color: "var(--accent-red)",
                   padding: "1px 4px",
                   whiteSpace: "nowrap",
                 }}
@@ -249,12 +249,12 @@ export function TaskSidebar({
                 onClick={() => setConfirmClearActive(false)}
                 style={{
                   background: "none",
-                  border: "1px solid #3F3F46",
+                  border: "1px solid var(--text-faint)",
                   borderRadius: 3,
                   cursor: "pointer",
                   fontFamily: "var(--font-mono)",
                   fontSize: 8,
-                  color: "#52525B",
+                  color: "var(--text-dim)",
                   padding: "1px 4px",
                 }}
               >
@@ -270,7 +270,7 @@ export function TaskSidebar({
               cursor: "pointer",
               fontFamily: "var(--font-mono)",
               fontSize: 14,
-              color: "#52525B",
+              color: "var(--text-dim)",
               padding: "0 2px",
             }}
           >
@@ -296,7 +296,7 @@ export function TaskSidebar({
                 fontFamily: "var(--font-mono)",
                 fontSize: 9,
                 fontWeight: 600,
-                color: "#52525B",
+                color: "var(--text-dim)",
                 letterSpacing: "0.05em",
               }}
             >
@@ -320,7 +320,7 @@ export function TaskSidebar({
             fontFamily: "var(--font-mono)",
             fontSize: 9,
             fontWeight: 600,
-            color: "#52525B",
+            color: "var(--text-dim)",
             letterSpacing: "0.05em",
           }}
         >
@@ -341,7 +341,7 @@ export function TaskSidebar({
               padding: "12px 12px",
               fontFamily: "var(--font-mono)",
               fontSize: 10,
-              color: "#3F3F46",
+              color: "var(--text-faint)",
               textAlign: "center",
             }}
           >
@@ -365,7 +365,7 @@ export function TaskSidebar({
                   fontFamily: "var(--font-mono)",
                   fontSize: 9,
                   fontWeight: 600,
-                  color: "#3F3F46",
+                  color: "var(--text-faint)",
                   letterSpacing: "0.05em",
                 }}
               >
@@ -380,12 +380,12 @@ export function TaskSidebar({
                     }}
                     style={{
                       background: "none",
-                      border: "1px solid #EF4444",
+                      border: "1px solid var(--accent-red)",
                       borderRadius: 3,
                       cursor: "pointer",
                       fontFamily: "var(--font-mono)",
                       fontSize: 9,
-                      color: "#EF4444",
+                      color: "var(--accent-red)",
                       padding: "1px 6px",
                     }}
                   >
@@ -395,12 +395,12 @@ export function TaskSidebar({
                     onClick={() => setConfirmClear(false)}
                     style={{
                       background: "none",
-                      border: "1px solid #3F3F46",
+                      border: "1px solid var(--text-faint)",
                       borderRadius: 3,
                       cursor: "pointer",
                       fontFamily: "var(--font-mono)",
                       fontSize: 9,
-                      color: "#52525B",
+                      color: "var(--text-dim)",
                       padding: "1px 6px",
                     }}
                   >
@@ -416,7 +416,7 @@ export function TaskSidebar({
                     cursor: "pointer",
                     fontFamily: "var(--font-mono)",
                     fontSize: 9,
-                    color: "#3F3F46",
+                    color: "var(--text-faint)",
                     padding: 0,
                   }}
                 >
@@ -440,7 +440,7 @@ export function TaskSidebar({
       <div
         style={{
           padding: "8px 10px",
-          borderTop: "1px solid #1E1E22",
+          borderTop: "1px solid var(--border)",
           flexShrink: 0,
         }}
       >
@@ -455,9 +455,9 @@ export function TaskSidebar({
             width: "100%",
             fontFamily: "var(--font-mono)",
             fontSize: 10.5,
-            color: "#E4E4E7",
-            backgroundColor: "#151518",
-            border: "1px solid #27272A",
+            color: "var(--text-primary)",
+            backgroundColor: "var(--bg-active)",
+            border: "1px solid var(--border-subtle)",
             borderRadius: 4,
             padding: "5px 8px",
             outline: "none",
@@ -477,7 +477,7 @@ function AutoTaskRow({
   onRemove: (id: string) => void;
   onSwitchToSession?: (sessionId: string) => void;
 }) {
-  const catColor = task.category ? CATEGORY_COLORS[task.category] : "#6B7280";
+  const catColor = task.category ? CATEGORY_COLORS[task.category] : "var(--text-muted)";
   const catIcon = task.category ? CATEGORY_ICONS[task.category] : "\u2022";
 
   return (
@@ -510,7 +510,7 @@ function AutoTaskRow({
           style={{
             fontFamily: "var(--font-mono)",
             fontSize: 10.5,
-            color: "#A1A1AA",
+            color: "var(--text-secondary)",
             lineHeight: "15px",
             wordBreak: "break-word",
             display: "block",
@@ -527,7 +527,7 @@ function AutoTaskRow({
               cursor: "pointer",
               fontFamily: "var(--font-mono)",
               fontSize: 9,
-              color: "#52525B",
+              color: "var(--text-dim)",
               padding: 0,
               marginTop: 1,
             }}
@@ -545,7 +545,7 @@ function AutoTaskRow({
           cursor: "pointer",
           fontFamily: "var(--font-mono)",
           fontSize: 10,
-          color: "#27272A",
+          color: "var(--border-subtle)",
           padding: 0,
           flexShrink: 0,
           marginTop: 1,
@@ -585,15 +585,15 @@ function ManualTaskRow({
           width: 12,
           height: 12,
           borderRadius: 3,
-          border: `1.5px solid ${task.done ? "#3F3F46" : priorityColor}`,
-          backgroundColor: task.done ? "#27272A" : "transparent",
+          border: `1.5px solid ${task.done ? "var(--text-faint)" : priorityColor}`,
+          backgroundColor: task.done ? "var(--border-subtle)" : "transparent",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
           flexShrink: 0,
           marginTop: 1,
           fontSize: 8,
-          color: "#52525B",
+          color: "var(--text-dim)",
         }}
       >
         {task.done && "\u2713"}
@@ -603,7 +603,7 @@ function ManualTaskRow({
         style={{
           fontFamily: "var(--font-mono)",
           fontSize: 10.5,
-          color: task.done ? "#3F3F46" : "#A1A1AA",
+          color: task.done ? "var(--text-faint)" : "var(--text-secondary)",
           textDecoration: task.done ? "line-through" : "none",
           flex: 1,
           lineHeight: "15px",
@@ -612,7 +612,7 @@ function ManualTaskRow({
       >
         {task.text}
         {task.autoResolved && (
-          <span style={{ color: "#3F3F46", fontSize: 9, marginLeft: 4 }}>
+          <span style={{ color: "var(--text-faint)", fontSize: 9, marginLeft: 4 }}>
             (auto-resolved)
           </span>
         )}
@@ -629,7 +629,7 @@ function ManualTaskRow({
           cursor: "pointer",
           fontFamily: "var(--font-mono)",
           fontSize: 10,
-          color: "#27272A",
+          color: "var(--border-subtle)",
           padding: 0,
           flexShrink: 0,
           marginTop: 1,

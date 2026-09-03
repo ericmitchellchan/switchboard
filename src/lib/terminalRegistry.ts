@@ -61,13 +61,13 @@ import {
 } from "./terminalLifecycle";
 
 const THEME = {
-  background: "#0C0C0E",
-  foreground: "#E4E4E7",
-  cursor: "#A78BFA",
-  cursorAccent: "#0C0C0E",
-  selectionBackground: "rgba(167, 139, 250, 0.3)",
-  selectionForeground: "#E4E4E7",
-  black: "#18181B",
+  background: "#0f0f0f",
+  foreground: "#ededed",
+  cursor: "#7dd3a8",
+  cursorAccent: "#0f0f0f",
+  selectionBackground: "rgba(125, 211, 168, 0.3)",
+  selectionForeground: "#ededed",
+  black: "#1a1a1a",
   red: "#EF4444",
   green: "#34D399",
   yellow: "#F59E0B",

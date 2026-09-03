@@ -1,8 +1,8 @@
 // Left workstation side menu — THE navigator (IDE-style). Hidden by default;
 // Ctrl+Shift+B or clicking the SWITCHBOARD wordmark toggles (Ctrl+B stays
-// the RIGHT task-sidebar cycle). 218px, bg --bg-secondary (#0A0A0B), border
-// --border (#1E1E22), 9.5px uppercase section labels, active row = inset 2px
-// WHITE left bar + #151518 bg. Soft palette only — black/white/zinc; color
+// the RIGHT task-sidebar cycle). 218px, bg --bg-secondary (#0a0a0a), border
+// --border (#2e2e2e), 9.5px uppercase section labels, active row = inset 2px
+// WHITE left bar + --bg-active bg. Soft palette only — black/white/zinc; color
 // is reserved for status dots.
 //
 // THREE BANDS (SWIT-46, the coaching-platform reorg):

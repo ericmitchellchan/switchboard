@@ -19,13 +19,13 @@ import { chipLabel, isChipClickable } from "../lib/updaterState";
 
 const BTN: React.CSSProperties = {
   background: "none",
-  border: "1px solid #27272A",
+  border: "1px solid var(--border-subtle)",
   borderRadius: 3,
   padding: "1px 6px",
   fontFamily: "var(--font-mono)",
   fontSize: 10,
   lineHeight: "14px",
-  color: "#A1A1AA",
+  color: "var(--text-secondary)",
   whiteSpace: "nowrap",
 };
 
@@ -50,7 +50,7 @@ export function UpdateChip() {
           title={state.phase === "error" && state.error ? state.error : undefined}
           style={{
             ...BTN,
-            color: state.phase === "error" ? "#52525B" : "#A1A1AA",
+            color: state.phase === "error" ? "var(--text-dim)" : "var(--text-secondary)",
             cursor: clickable ? "pointer" : "default",
           }}
         >

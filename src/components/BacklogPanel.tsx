@@ -90,7 +90,7 @@ export function TodosButton({
           padding: "4px 8px",
           fontFamily: MONO,
           fontSize: 10.5,
-          color: open || hover ? "var(--text-primary)" : "#71717A",
+          color: open || hover ? "var(--text-primary)" : "var(--text-muted)",
           cursor: "pointer",
           whiteSpace: "nowrap",
           transition: "background-color 0.15s ease, color 0.15s ease",

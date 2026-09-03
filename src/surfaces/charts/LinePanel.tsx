@@ -71,14 +71,14 @@ export type LinePanelProps = {
 };
 
 const CHROME = {
-  text: "#a1a1aa",
-  grid: "#1e1e22",
+  text: "#b4b4b4",
+  grid: "#242424",
   /** The zero rule (SWIT-70): --border-subtle — one step brighter than the
    *  grid, or a rule at 0 would vanish among the tick lines. */
-  zero: "#27272a",
-  /** Region bands: --text-secondary (#a1a1aa) at low alpha — neutral, never
+  zero: "#3a3a3a",
+  /** Region bands: --text-secondary (#b4b4b4) at low alpha — neutral, never
    *  a series tone. */
-  region: "rgba(161, 161, 170, 0.07)",
+  region: "rgba(180, 180, 180, 0.07)",
   font: "10px 'JetBrains Mono', 'Cascadia Code', 'SF Mono', Consolas, monospace",
 };
 

@@ -117,8 +117,8 @@ const PREVIEW_CSS = `
     align-items: center;
     justify-content: center;
     gap: 8px;
-    background: #0C0C0E;
-    color: #52525B;
+    background: #0f0f0f;
+    color: #6e6e6e;
     font-family: 'JetBrains Mono', 'Cascadia Code', 'SF Mono', monospace;
     font-size: 11px;
     line-height: 1.7;
@@ -126,7 +126,7 @@ const PREVIEW_CSS = `
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
-  .sb-preview-note b { color: #71717A; font-weight: 600; }
+  .sb-preview-note b { color: #888888; font-weight: 600; }
 `;
 
 function documentShell(bodyHtml: string, scripts: string): string {
