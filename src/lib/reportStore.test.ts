@@ -8,7 +8,10 @@ import {
   parseStatTiles,
   requestReportAnchor,
   takeReportAnchor,
+  subscribeReportAnchor,
+  reportAnchorNonce,
   STAT_TILE_CAP,
+  REPORT_BLOCK_CAP,
 } from "./reportStore";
 import { parseInlineViewSpec, inlineSpecAt, parseViewSpec } from "./viewStore";
 import type { ViewSpec } from "./viewStore";
@@ -49,7 +52,7 @@ describe("splitReport", () => {
 
   it("numbers blocks 1-based across BOTH kinds", () => {
     const md = "```stat\n{}\n```\n```view\n{}\n```\n```stat\n{}\n```";
-    const blocks = splitReport(md).filter((s) => s.kind !== "markdown");
+    const blocks = splitReport(md).filter((s) => s.kind === "view" || s.kind === "stat");
     expect(blocks.map((s) => s.block)).toEqual([1, 2, 3]);
     expect(blocks.map((s) => s.kind)).toEqual(["stat", "view", "stat"]);
   });
@@ -81,6 +84,63 @@ describe("splitReport", () => {
   it("tolerates trailing spaces on fence lines and multi-line bodies", () => {
     const segs = splitReport("```view  \n{\n  \"kind\": \"bar\"\n}\n```  ");
     expect(segs).toEqual([{ kind: "view", block: 1, body: '{\n  "kind": "bar"\n}' }]);
+  });
+
+  it("a ```view line inside a TILDE fence stays code (a doc quoting the syntax)", () => {
+    const md = "~~~\n```view\nnot a block\n```\n~~~\nafter";
+    const segs = splitReport(md);
+    expect(segs.every((s) => s.kind === "markdown")).toBe(true);
+    expect((segs[0] as { text: string }).text).toContain("```view");
+  });
+
+  it("a ````-opened fence closes only on a matching-or-longer run (CommonMark)", () => {
+    // A ````markdown example quoting a FULL ```view … ``` block stays
+    // narrative, and a later real block still renders.
+    const md = [
+      "````markdown",
+      "```view",
+      '{"kind":"line"}',
+      "```",
+      "````",
+      "",
+      "```view",
+      '{"kind":"bar"}',
+      "```",
+    ].join("\n");
+    const segs = splitReport(md);
+    expect(segs.map((s) => s.kind)).toEqual(["markdown", "view"]);
+    expect(segs[1]).toMatchObject({ block: 1, body: '{"kind":"bar"}' });
+    expect((segs[0] as { text: string }).text).toContain('{"kind":"line"}');
+  });
+
+  it("a tilde fence does not close on backticks, nor backticks on tildes", () => {
+    const md = "~~~json\n```\n~~~\n```view\n{}\n```";
+    const segs = splitReport(md);
+    expect(segs.map((s) => s.kind)).toEqual(["markdown", "view"]);
+  });
+
+  it("renders exactly REPORT_BLOCK_CAP blocks live and no overflow at the cap", () => {
+    const md = Array.from({ length: REPORT_BLOCK_CAP }, () => "```view\n{}\n```").join("\n");
+    const segs = splitReport(md);
+    expect(segs.filter((s) => s.kind === "view")).toHaveLength(REPORT_BLOCK_CAP);
+    expect(segs.some((s) => s.kind === "overflow")).toBe(false);
+  });
+
+  it("one past the cap: ONE overflow segment, the rest fall back to code fences", () => {
+    const total = REPORT_BLOCK_CAP + 1;
+    const md = Array.from({ length: total }, (_, i) =>
+      i % 2 === 0 ? `\`\`\`view\n{"i":${i}}\n\`\`\`` : `\`\`\`stat\n{"i":${i}}\n\`\`\``
+    ).join("\n");
+    const segs = splitReport(md);
+    const live = segs.filter((s) => s.kind === "view" || s.kind === "stat");
+    expect(live).toHaveLength(REPORT_BLOCK_CAP);
+    expect(live[live.length - 1]).toMatchObject({ block: REPORT_BLOCK_CAP });
+    const overflow = segs.filter((s) => s.kind === "overflow");
+    expect(overflow).toEqual([{ kind: "overflow", total }]);
+    // The over-cap block survives as a plain code fence in the narrative.
+    const tail = segs[segs.length - 1];
+    expect(tail.kind).toBe("markdown");
+    expect((tail as { text: string }).text).toBe(`\`\`\`view\n{"i":${total - 1}}\n\`\`\``);
   });
 });
 
@@ -266,5 +326,25 @@ describe("the evidence→heading one-shot", () => {
     requestReportAnchor("t1", "r1", "h:a");
     requestReportAnchor("t1", "r1", "h:b");
     expect(takeReportAnchor("t1", "r1")).toBe("h:b");
+  });
+
+  it("is observable: a request notifies and bumps the nonce; a take is quiet", () => {
+    let calls = 0;
+    const unsubscribe = subscribeReportAnchor(() => {
+      calls += 1;
+    });
+    const before = reportAnchorNonce();
+    requestReportAnchor("t1", "r1", "h:observed");
+    expect(calls).toBe(1);
+    expect(reportAnchorNonce()).toBe(before + 1);
+    // Consuming changes nothing a subscriber renders from.
+    expect(takeReportAnchor("t1", "r1")).toBe("h:observed");
+    expect(calls).toBe(1);
+    expect(reportAnchorNonce()).toBe(before + 1);
+    expect(takeReportAnchor("t1", "r1")).toBeNull();
+    unsubscribe();
+    requestReportAnchor("t1", "r1", "h:after");
+    expect(calls).toBe(1);
+    takeReportAnchor("t1", "r1");
   });
 });

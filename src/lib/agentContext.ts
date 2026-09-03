@@ -293,12 +293,13 @@ export function artifactRef(artifact: Artifact, opts: RefOptions = {}): string {
       if (root.length === 0) return "";
       // A drilled CHILD (T6) has no file of its own — its spec is the
       // parent's drill resolved for a key — so the ref names the parent's
-      // file and the key, which together are everything the agent needs to
-      // re-derive it.
+      // file plus whatever re-derives it: the key, and (SWIT-73) the report
+      // fence block number when the effective parent is an EMBEDDED view,
+      // because the spec file then holds a report, not the parent itself.
       return sanitizeForTypedLine(
         `view ${joinPath(root, `${artifact.threadId}/views/${artifact.viewId}.json`)}${
-          artifact.drill ? ` drill ${artifact.drill.key}` : ""
-        }`,
+          artifact.block !== undefined ? ` block ${artifact.block}` : ""
+        }${artifact.drill ? ` drill ${artifact.drill.key}` : ""}`,
         REF_MAX
       );
     }

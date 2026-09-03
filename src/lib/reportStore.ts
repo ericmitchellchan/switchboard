@@ -14,8 +14,12 @@
 // Fence grammar, deliberately narrow:
 //   · a line that is exactly ```view or ```stat (trailing spaces tolerated)
 //     OPENS a block; a line that is exactly ``` CLOSES it;
-//   · any OTHER ``` line opens an ordinary code fence — a ```view line inside
-//     one is code, not a block (the state machine tracks it);
+//   · any OTHER fence line — backtick or tilde, 3+ of either, per CommonMark —
+//     opens an ordinary code fence, and a ```view line inside one is code,
+//     not a block. The state machine tracks the opening fence's CHARACTER and
+//     LENGTH and closes only on a matching-or-longer run of the same
+//     character, so a ````markdown example quoting a full ```view block stays
+//     narrative and a ~~~ fence is not blind to backticks inside it;
 //   · CRLF is folded to LF before splitting, so a file written on Windows
 //     cuts identically;
 //   · an UNCLOSED view/stat fence at EOF is still that block (its body runs
@@ -25,16 +29,25 @@
 // Blocks are numbered 1-based across BOTH kinds in document order — the
 // number an error card names, the `b<n>` in a derived spec id, the `#b<n>`
 // pin-scope suffix and the `block` field on a drilled child's artifact all
-// come from this one count.
+// come from this one count. LIVE blocks are capped at REPORT_BLOCK_CAP:
+// blocks past the cap fall back to plain code fences in the narrative, with
+// ONE `overflow` segment (rendered as one error card) marking where the cap
+// bit — a runaway generator degrades to code, never to an unbounded page of
+// charts. The cap lives HERE only; the MCP server states it in the tool
+// description but cannot see inside the file to enforce it.
 
 export type ReportSegment =
   | { kind: "markdown"; text: string }
   | { kind: "view"; block: number; body: string }
-  | { kind: "stat"; block: number; body: string };
+  | { kind: "stat"; block: number; body: string }
+  | { kind: "overflow"; total: number };
+
+/** Most view/stat blocks one report renders LIVE; the rest render as code. */
+export const REPORT_BLOCK_CAP = 24;
 
 const OPEN_RE = /^```(view|stat)\s*$/;
 const CLOSE_RE = /^```\s*$/;
-const FENCE_RE = /^```/;
+const FENCE_RE = /^(`{3,}|~{3,})/;
 
 /** Cut a report's markdown into narrative and embedded blocks. Pure. */
 export function splitReport(markdown: string): ReportSegment[] {
@@ -43,6 +56,7 @@ export function splitReport(markdown: string): ReportSegment[] {
   let md: string[] = [];
   let body: string[] = [];
   let mode: "normal" | "code" | "view" | "stat" = "normal";
+  let codeClose: RegExp | null = null;
   let block = 0;
   const flushMd = () => {
     const text = md.join("\n");
@@ -65,7 +79,10 @@ export function splitReport(markdown: string): ReportSegment[] {
     }
     if (mode === "code") {
       md.push(line);
-      if (CLOSE_RE.test(line)) mode = "normal";
+      if (codeClose !== null && codeClose.test(line)) {
+        mode = "normal";
+        codeClose = null;
+      }
       continue;
     }
     const open = OPEN_RE.exec(line);
@@ -75,10 +92,37 @@ export function splitReport(markdown: string): ReportSegment[] {
       continue;
     }
     md.push(line);
-    if (FENCE_RE.test(line)) mode = "code";
+    const fence = FENCE_RE.exec(line);
+    if (fence) {
+      mode = "code";
+      const ch = fence[1][0];
+      codeClose = new RegExp(`^${ch}{${fence[1].length},}\\s*$`);
+    }
   }
   if (mode === "view" || mode === "stat") flushBlock(mode);
   else flushMd();
+  return capReportBlocks(out);
+}
+
+/** Enforce REPORT_BLOCK_CAP: blocks past the cap become plain code fences in
+ *  the narrative, and ONE `overflow` segment (carrying the TOTAL block count)
+ *  takes the first over-cap block's place. Under the cap this is identity. */
+function capReportBlocks(segs: ReportSegment[]): ReportSegment[] {
+  const total = segs.reduce((n, s) => (s.kind === "view" || s.kind === "stat" ? n + 1 : n), 0);
+  if (total <= REPORT_BLOCK_CAP) return segs;
+  const out: ReportSegment[] = [];
+  let marked = false;
+  for (const seg of segs) {
+    if (seg.kind === "markdown" || seg.kind === "overflow" || seg.block <= REPORT_BLOCK_CAP) {
+      out.push(seg);
+      continue;
+    }
+    if (!marked) {
+      out.push({ kind: "overflow", total });
+      marked = true;
+    }
+    out.push({ kind: "markdown", text: `\`\`\`${seg.kind}\n${seg.body}\n\`\`\`` });
+  }
   return out;
 }
 
@@ -143,11 +187,33 @@ export function parseStatTiles(body: string): { tiles: StatTile[]; error: null }
 // markdown is on screen and scrolls the stamped heading into view. RUNTIME
 // ONLY, single slot: a second request replaces the first (the newer click is
 // the intent), and a take for the wrong report answers null and leaves it.
+// The slot is OBSERVABLE: each request bumps a nonce and notifies listeners
+// (useSyncExternalStore shape), so a ReportView that is ALREADY on screen
+// (a floated ✦ page clicking an address at the open report) takes the anchor
+// now instead of parking it until some unrelated re-render minutes later.
+// Taking is quiet — consumption changes nothing a subscriber renders from.
 
 let pendingAnchor: { threadId: string; viewId: string; anchor: string } | null = null;
+let anchorNonce = 0;
+const anchorListeners = new Set<() => void>();
 
 export function requestReportAnchor(threadId: string, viewId: string, anchor: string): void {
   pendingAnchor = { threadId, viewId, anchor };
+  anchorNonce += 1;
+  for (const listener of anchorListeners) listener();
+}
+
+/** Subscribe to anchor REQUESTS (useSyncExternalStore's subscribe half). */
+export function subscribeReportAnchor(listener: () => void): () => void {
+  anchorListeners.add(listener);
+  return () => {
+    anchorListeners.delete(listener);
+  };
+}
+
+/** The request counter (useSyncExternalStore's snapshot half). */
+export function reportAnchorNonce(): number {
+  return anchorNonce;
 }
 
 export function takeReportAnchor(threadId: string, viewId: string): string | null {

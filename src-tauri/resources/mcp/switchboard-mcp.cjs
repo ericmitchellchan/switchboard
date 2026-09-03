@@ -706,7 +706,8 @@ const VIEW_TOOL = {
     '{label, value, n?} (or an array of them) renders stat tiles — e.g. ```view\\n' +
     '{"kind":"line","title":"net gamma","source":{"type":"file","path":".sb-views/gamma.json"}}\\n```. ' +
     "Blocks are validated when drawn — a broken block shows an error card in place and the " +
-    "rest of the report renders. op 'update' re-renders the open report (every block reloads " +
+    "rest of the report renders; at most 24 view/stat blocks render live, the rest as plain " +
+    "code. op 'update' re-renders the open report (every block reloads " +
     "its data); the markdown itself is re-read while the tab is active. A report's headings " +
     "are addressable from page evidence as view:<id>#h:<heading-slug>. Prefer one report over " +
     "several views when narrative belongs between the charts.",

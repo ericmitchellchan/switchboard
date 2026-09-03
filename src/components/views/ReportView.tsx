@@ -16,18 +16,30 @@
 //     toolbar/anchors/pins/hover/drill the standalone surface draws, with
 //     the block number namespacing its pin scope;
 //   · a malformed block renders as ONE inline error card naming the block;
-//     the rest of the report renders (the isolation rule).
+//     the rest of the report renders (the isolation rule) — and a render
+//     THROW inside a block is caught by a per-block boundary (BlockBoundary)
+//     so one crashing chart never trips the terminal screen's boundary;
+//   · live blocks are capped at reportStore.REPORT_BLOCK_CAP — the split
+//     turns the rest into plain code fences plus one `overflow` card.
 //
 // This file is a LAZY chunk (ViewSurface reaches it through `lazy()`), and
 // the chart libraries stay lazy below it — ViewChrome's ViewBody loads
 // uPlot/lightweight-charts only when a block actually draws one.
 
-import { useEffect, useMemo, useRef } from "react";
-import type { CSSProperties } from "react";
+import { Component, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import type { CSSProperties, ErrorInfo, ReactNode } from "react";
 
 import type { Artifact } from "../../types";
-import { splitReport, parseStatTiles, takeReportAnchor } from "../../lib/reportStore";
+import {
+  REPORT_BLOCK_CAP,
+  parseStatTiles,
+  reportAnchorNonce,
+  splitReport,
+  subscribeReportAnchor,
+  takeReportAnchor,
+} from "../../lib/reportStore";
 import type { ReportSegment, StatTile } from "../../lib/reportStore";
+import { log } from "../../lib/logger";
 import { parseInlineViewSpec, useInlineViewData } from "../../lib/viewStore";
 import type { ViewSpec } from "../../lib/viewStore";
 import { MarkdownBody, MarkdownDocStyles } from "../kb/MarkdownDoc";
@@ -112,11 +124,14 @@ export default function ReportView({
   const rootRef = useRef<HTMLDivElement | null>(null);
 
   // Evidence → heading (SWIT-73): an address `view:<id>#h:<slug>` parked its
-  // anchor in reportStore's one-shot before opening this artifact. Taken only
-  // once the markdown is on screen; the stamp lands ASYNC (MarkdownBody's
-  // processor then its decorate effect), so a short retry loop holds the
-  // taken anchor until the element exists — or gives up quietly (a renamed
-  // heading is not an error state).
+  // anchor in reportStore's one-shot before opening this artifact. The slot
+  // is OBSERVABLE — the nonce bumps on every request — so a report ALREADY
+  // on screen consumes a fresh click now rather than whenever it happens to
+  // re-render. Taken only once the markdown is on screen; the stamp lands
+  // ASYNC (MarkdownBody's processor then its decorate effect), so a short
+  // retry loop holds the taken anchor until the element exists — or gives up
+  // quietly (a renamed heading is not an error state).
+  const anchorRequest = useSyncExternalStore(subscribeReportAnchor, reportAnchorNonce);
   useEffect(() => {
     if (markdown === null) return;
     const anchor = takeReportAnchor(threadId, viewId);
@@ -133,7 +148,7 @@ export default function ReportView({
     };
     find();
     return () => window.clearTimeout(timer);
-  }, [threadId, viewId, markdown]);
+  }, [threadId, viewId, markdown, anchorRequest]);
 
   const sourcePath = spec.source.type === "file" ? spec.source.path : "";
   return (
@@ -160,7 +175,7 @@ export default function ReportView({
           ) : (
             segments.map((seg, i) => (
               <Segment
-                key={seg.kind === "markdown" ? `md-${i}` : `b${seg.block}`}
+                key={seg.kind === "view" || seg.kind === "stat" ? `b${seg.block}` : `md-${i}`}
                 seg={seg}
                 report={spec}
                 threadId={threadId}
@@ -192,18 +207,59 @@ function Segment({
   active: boolean;
 }) {
   if (seg.kind === "markdown") return <MarkdownBody content={seg.text} />;
+  if (seg.kind === "overflow") {
+    return (
+      <div style={BLOCK_ERROR}>
+        report has {seg.total} view/stat blocks; the cap is {REPORT_BLOCK_CAP} — the rest render as
+        code
+      </div>
+    );
+  }
   if (seg.kind === "stat") return <StatBlock block={seg.block} body={seg.body} />;
   return (
-    <EmbeddedView
-      block={seg.block}
-      body={seg.body}
-      report={report}
-      threadId={threadId}
-      viewId={viewId}
-      artifact={artifact}
-      active={active}
-    />
+    <BlockBoundary block={seg.block}>
+      <EmbeddedView
+        block={seg.block}
+        body={seg.body}
+        report={report}
+        threadId={threadId}
+        viewId={viewId}
+        artifact={artifact}
+        active={active}
+      />
+    </BlockBoundary>
   );
+}
+
+// Per-BLOCK crash isolation (SWIT-73 review): a render throw inside one
+// embedded chart becomes THAT block's error card, never the terminal screen's
+// boundary — the same rule SurfaceErrorBoundary applies per page, at block
+// grain. No retry button: the markdown poll / `op: update` remounts blocks
+// when the report changes, which is the honest recovery path.
+type BoundaryState = { error: Error | null };
+
+class BlockBoundary extends Component<{ block: number; children: ReactNode }, BoundaryState> {
+  state: BoundaryState = { error: null };
+
+  static getDerivedStateFromError(error: Error): BoundaryState {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    log.error(`Report view block ${this.props.block} crashed: ${error}${info.componentStack ?? ""}`);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={BLOCK_ERROR}>
+          view block {this.props.block} failed to render:{" "}
+          {String(this.state.error.message || this.state.error)}
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 function BlockError({ block, kind, error }: { block: number; kind: "view" | "stat"; error: string }) {

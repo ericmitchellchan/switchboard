@@ -199,6 +199,19 @@ describe("artifactRef", () => {
     const ref = artifactRef({ kind: "kb-doc", path: `${"deep/".repeat(200)}doc.md` });
     expect(Array.from(ref).length).toBeLessThanOrEqual(REF_MAX);
   });
+
+  it("a view ref names the spec file; a block child (SWIT-73) adds the fence block", () => {
+    const THREADS = { threadsRoot: "C:/Users/eric/AppData/Local/switchboard/threads" };
+    expect(artifactRef({ kind: "view", threadId: "t1", viewId: "v1" }, THREADS)).toBe(
+      "view C:/Users/eric/AppData/Local/switchboard/threads/t1/views/v1.json"
+    );
+    expect(
+      artifactRef(
+        { kind: "view", threadId: "t1", viewId: "r1", block: 3, drill: { key: "m-9" } },
+        THREADS
+      )
+    ).toBe("view C:/Users/eric/AppData/Local/switchboard/threads/t1/views/r1.json block 3 drill m-9");
+  });
 });
 
 // ─── buildSpawnContext (seam 1) ──────────────────────────────────────────────
