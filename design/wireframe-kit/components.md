@@ -85,6 +85,21 @@ raised card — the thing needing action — everything else flat).
   the top-right), the OptionRow list between hairlines, the dim `or`, one kit
   input at `max-width: 480px`. Requests, items, posts, threads stay flat rows.
 
+## Stat tile (reports — SWIT-73)
+
+ONE NUMBER with a label and an optional n — the report's headline figure. A fenced
+`stat` block in a report's markdown renders one tile ({label, value, n?}) or a
+wrapping row of them (an array, ≤ 8). The box is earned: it holds a figure the
+narrative leans on, never decoration.
+
+- **Ours** (`components/views/ReportView.tsx` `StatTileBox`): `--bg-panel`, 1px
+  `--border`, radius 4, padding `8px 14px 9px`, min-width 96px, mono. Label on top:
+  9.5px uppercase, 0.5px letter-spacing, `--text-dim`, 3px below it the value: 16px /
+  1.2 `--text-primary`; `n=<count>` rides 6px after the value at 9.5px `--text-faint`.
+  Tiles sit in a `flex-wrap` row, `gap: 8px`, aligned with the doc's 24px gutter.
+- No trend arrows, no tones — a stat tile states a number; judgement lives in the
+  narrative beside it.
+
 ## Band header
 
 The label over a side-menu band or a page section, with its right-end actions.

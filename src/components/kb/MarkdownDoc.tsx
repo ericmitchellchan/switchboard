@@ -121,13 +121,23 @@ const DOC_CSS = `
 export function MarkdownDoc({ content }: { content: string }) {
   return (
     <>
-      <style>{DOC_CSS}</style>
+      <MarkdownDocStyles />
       <MarkdownBody content={content} />
     </>
   );
 }
 
-function MarkdownBody({ content }: { content: string }) {
+/** The typography block alone (SWIT-73): a host that renders MANY markdown
+ *  fragments (the report's narrative segments) mounts this ONCE and
+ *  `MarkdownBody` per fragment — same pipeline, same CSS, no fork. */
+export function MarkdownDocStyles() {
+  return <style>{DOC_CSS}</style>;
+}
+
+/** One rendered markdown fragment — the pipeline + anchor stamps + link
+ *  policy, without the style block. Exported for the report surface
+ *  (SWIT-73); everything else goes through MarkdownDoc. */
+export function MarkdownBody({ content }: { content: string }) {
   const [html, setHtml] = useState("");
   const renderSeq = useRef(0);
   const bodyRef = useRef<HTMLDivElement>(null);

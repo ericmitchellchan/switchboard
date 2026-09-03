@@ -12,6 +12,7 @@ import {
   resolveDocTarget,
   viewAddress,
   viewIdOfAddress,
+  viewAnchorOfAddress,
   RECENT_CAP,
   SCANNED_STATUS,
 } from "./evidenceModel";
@@ -118,6 +119,17 @@ describe("view rows (SWIT-69 — the tab budget's ledger half)", () => {
     expect(viewIdOfAddress("view:no spaces!")).toBeNull();
     expect(viewIdOfAddress("view:")).toBeNull();
     expect(viewIdOfAddress("SWIT-64")).toBeNull();
+  });
+
+  it("viewAnchorOfAddress (SWIT-73): an optional #<anchor> names a report heading", () => {
+    expect(viewAnchorOfAddress("view:v1")).toEqual({ viewId: "v1", anchor: null });
+    expect(viewAnchorOfAddress("view:v1#h:the-path")).toEqual({ viewId: "v1", anchor: "h:the-path" });
+    expect(viewAnchorOfAddress("view:v1#table:1:row:2")).toEqual({ viewId: "v1", anchor: "table:1:row:2" });
+    // A malformed fragment makes the WHOLE address plain — never half a link.
+    expect(viewAnchorOfAddress("view:v1#")).toBeNull();
+    expect(viewAnchorOfAddress("view:v1#notakey")).toBeNull();
+    expect(viewAnchorOfAddress("view:bad id#h:x")).toBeNull();
+    expect(viewAnchorOfAddress("SWIT-64")).toBeNull();
   });
 
   it("mergeViewEvidence synthesizes a row per spec; an agent-posted row at the same address wins", () => {

@@ -68,8 +68,9 @@ import {
   mergeScannedEvidence,
   mergeViewEvidence,
   resolveDocTarget,
-  viewIdOfAddress,
+  viewAnchorOfAddress,
 } from "../../lib/evidenceModel";
+import { requestReportAnchor } from "../../lib/reportStore";
 import type { EvidenceGroupId, ThreadViewRow } from "../../lib/evidenceModel";
 import { useScannedEvidence } from "../../lib/evidenceScan";
 import { getCachedDocList, refreshDocList } from "../../lib/kb";
@@ -342,13 +343,19 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
   const reviewFirst = page.latestTurn?.reviewFirst ?? null;
 
   const renderAddress = (address: string) => {
-    const viewId = viewIdOfAddress(address);
-    if (viewId !== null) {
+    // SWIT-73: `view:<id>#h:<slug>` names a heading INSIDE a report — the
+    // anchor rides reportStore's one-shot; the open is the ordinary view
+    // open. A malformed fragment made the whole address plain upstream.
+    const viewHit = viewAnchorOfAddress(address);
+    if (viewHit !== null) {
       return (
         <AddressButton
           text={address}
           title="open this view beside the thread"
-          onOpen={() => openViewAddress(viewId)}
+          onOpen={() => {
+            if (viewHit.anchor) requestReportAnchor(threadId, viewHit.viewId, viewHit.anchor);
+            openViewAddress(viewHit.viewId);
+          }}
         />
       );
     }

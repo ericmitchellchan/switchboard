@@ -293,8 +293,14 @@ function applyOp(page, args, now, answeredIds = new Set()) {
 // SWIT-70: the line kind gains `seriesLabels` (legend words), `regions`
 // (shaded time bands) and `panels` (small multiples — fixed sources, no
 // {key}); validated here, parsed tolerantly by viewStore.
+// SWIT-73: `report` — markdown with embedded live views. The source must be
+// a FILE ending .md (no query, no {key}); the fenced ```view / ```stat
+// blocks INSIDE the markdown are validated at RENDER time by the shell's
+// tolerant parser (this server cannot see inside the file) — a broken block
+// shows an error card in place and the rest of the report renders. A report
+// cannot be a drill target and cannot embed a report.
 
-const VIEW_KINDS = ["table", "candles", "dist", "line", "bar", "timeline"];
+const VIEW_KINDS = ["table", "candles", "dist", "line", "bar", "timeline", "report"];
 const VIEW_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const VIEW_MARKER_CAP = 200;
 // T6 (SWIT-60): the three optional fields' caps — mirrored in viewStore.ts
@@ -418,6 +424,9 @@ function buildDrill(raw) {
   if (!VIEW_KINDS.includes(raw.kind)) {
     throw new OpError(`drill.kind must be one of ${VIEW_KINDS.join(", ")}`);
   }
+  if (raw.kind === "report") {
+    throw new OpError("drill.kind cannot be report — a report is a document, not a drill target");
+  }
   const title = text(raw.title, "drill.title").trim().slice(0, VIEW_DRILL_TITLE_CAP);
   const source = buildViewSource(raw.source, "drill.source");
   const template = source.type === "file" ? source.path : `${source.url}${source.body || ""}`;
@@ -531,6 +540,18 @@ function buildViewSpec(args, existingIds, now) {
   }
   const title = text(args.title, "title");
   const cleanSource = buildViewSource(args.source, "source");
+  // SWIT-73: a report's source is a markdown FILE, nothing else — the
+  // embedded blocks are validated when drawn, not here.
+  if (kind === "report") {
+    if (cleanSource.type !== "file" || !/\.md$/i.test(cleanSource.path) || cleanSource.path.includes("{key}")) {
+      throw new OpError(
+        "a report's source must be {type:'file', path:'….md'} — a markdown file in this thread's working directory"
+      );
+    }
+    if (args.drill !== undefined && args.drill !== null) {
+      throw new OpError("a report takes no drill — declare drills on the embedded ```view blocks instead");
+    }
+  }
   let id;
   if (typeof args.id === "string" && args.id.trim().length > 0) {
     id = args.id.trim();
@@ -677,7 +698,18 @@ const VIEW_TOOL = {
     "view a `definition` that says what to look at; anchors and pins publish from the main " +
     "chart only — the panels are read-only. line extras: `seriesLabels` {column: plain " +
     "words} names the legend (the same column keeps the same colour in every view), " +
-    "`regions` [{from, to, label?}] shade time bands (sessions, halts, regimes; <=12).",
+    "`regions` [{from, to, label?}] shade time bands (sessions, halts, regimes; <=12). " +
+    "report: ONE document with live views embedded — write a .md file in the thread cwd and " +
+    "pass kind:'report', source:{type:'file', path:'analysis.md'}; inside it a fenced block " +
+    "```view whose body is a view-spec JSON (the same fields as this tool, NO id — the " +
+    "block's position names it) renders as an interactive chart in place, and ```stat with " +
+    '{label, value, n?} (or an array of them) renders stat tiles — e.g. ```view\\n' +
+    '{"kind":"line","title":"net gamma","source":{"type":"file","path":".sb-views/gamma.json"}}\\n```. ' +
+    "Blocks are validated when drawn — a broken block shows an error card in place and the " +
+    "rest of the report renders. op 'update' re-renders the open report (every block reloads " +
+    "its data); the markdown itself is re-read while the tab is active. A report's headings " +
+    "are addressable from page evidence as view:<id>#h:<heading-slug>. Prefer one report over " +
+    "several views when narrative belongs between the charts.",
   inputSchema: {
     type: "object",
     properties: {
@@ -685,14 +717,14 @@ const VIEW_TOOL = {
       id: { type: "string", description: "View id ([A-Za-z0-9_-]). Omit on show to mint one; required on update." },
       kind: {
         type: "string",
-        enum: ["table", "candles", "dist", "line", "bar", "timeline"],
+        enum: ["table", "candles", "dist", "line", "bar", "timeline", "report"],
         description:
-          "How the data renders: table (rows), candles (OHLC + markers), dist (pre-binned counts), line (series over time), bar (one value per category), timeline (price over a match + sized marks per moment + score steps).",
+          "How the data renders: table (rows), candles (OHLC + markers), dist (pre-binned counts), line (series over time), bar (one value per category), timeline (price over a match + sized marks per moment + score steps), report (a .md file with ```view / ```stat blocks embedded).",
       },
       title: { type: "string", description: "A few plain words — the tab and toolbar name." },
       source: {
         type: "object",
-        description: "{type:'file', path: relative JSON file in the thread cwd} or {type:'query', url: local backend, body?: JSON string → POST}.",
+        description: "{type:'file', path: relative JSON file in the thread cwd (report: a .md file)} or {type:'query', url: local backend, body?: JSON string → POST} (report: file only).",
       },
       columns: { type: "array", items: { type: "string" }, description: "table: column display order (subset of the row keys)." },
       keyColumn: { type: "string", description: "table: the column whose value identifies a row (pin anchors). Default: the first column." },

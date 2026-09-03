@@ -77,11 +77,28 @@
 //     time domain and — when every chart draws the same series set — one
 //     value domain (`lineDomains`). Anchors and pins publish from the MAIN
 //     chart only in v1; the multiples are read-only.
+//
+// SWIT-73 — `report`, the seventh kind: markdown with embedded LIVE views.
+//   · The spec's source must be a FILE ending `.md` in the thread cwd (no
+//     query sources, no `{key}` — enforced by the server AND re-checked in
+//     `parseViewSpec`). The markdown POLLS at the spec cadence while active
+//     (`useView` returns it as `text`; unchanged content = no re-render).
+//   · Fenced ```view blocks embed specs (reportStore cuts the fences;
+//     `parseInlineViewSpec` derives each block's spec — id `<report>~b<n>`,
+//     builtAt from the REPORT, so an `op: update` reloads every embedded
+//     view's data exactly the way it reloads a standalone one). A report
+//     cannot embed a report. `useInlineViewData` is the load path for one —
+//     the SAME fetch + payload parse as the main hook.
+//   · A drilled child of an embedded view carries `block` on its artifact:
+//     `useView(…, drillKey, block)` reads the report spec, reads the
+//     markdown, finds block <n>'s inline spec, and resolves the drill
+//     against THAT — nothing is ever written to disk for it.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { readThreadView, readViewData } from "./ipc";
+import { splitReport } from "./reportStore";
 
-export const VIEW_KINDS = ["table", "candles", "dist", "line", "bar", "timeline"] as const;
+export const VIEW_KINDS = ["table", "candles", "dist", "line", "bar", "timeline", "report"] as const;
 export type ViewKind = (typeof VIEW_KINDS)[number];
 
 export function isViewKind(v: unknown): v is ViewKind {
@@ -316,6 +333,9 @@ export function parseViewDrill(raw: unknown): ViewDrill | null {
   if (!isRecord(raw)) return null;
   const kind = raw.kind;
   if (!isViewKind(kind)) return null;
+  // SWIT-73: a report is a document, not a drill target — refused here (and
+  // at the server), so no template can mint one per key.
+  if (kind === "report") return null;
   const src = parseViewSource(raw.source);
   if ("error" in src) return null;
   const drill: ViewDrill = {
@@ -360,6 +380,13 @@ export function parseViewSpec(raw: string): { spec: ViewSpec | null; specError: 
   const parsedSource = parseViewSource(data.source);
   if ("error" in parsedSource) return { spec: null, specError: parsedSource.error };
   const source = parsedSource.source;
+  // SWIT-73: a report's source is a MARKDOWN file, nothing else — the server
+  // validates on write, and the reader re-checks so a hand-written spec
+  // cannot route a query response (or a `{key}` template) into the markdown
+  // pipeline.
+  if (kind === "report" && (source.type !== "file" || !/\.md$/i.test(source.path) || source.path.includes("{key}"))) {
+    return { spec: null, specError: "a report's source must be a .md file in the thread's working directory" };
+  }
   const spec: ViewSpec = {
     id,
     kind,
@@ -405,6 +432,51 @@ export function parseViewSpec(raw: string): { spec: ViewSpec | null; specError: 
       }));
   }
   return { spec, specError: null };
+}
+
+/** An embedded ```view block's body → its spec (SWIT-73). The body is the
+ *  same JSON the `view` tool takes, with NO id — the block's position names
+ *  it (`<report id>~b<n>`), and builtAt/builtBy come from the REPORT so an
+ *  `op: update` moves every embedded view's build key at once. A report
+ *  cannot embed a report. Errors name the block — the error card's copy.
+ *  Everything else rides `parseViewSpec` unchanged (one tolerant parser,
+ *  drill and filters included). Pure. */
+export function parseInlineViewSpec(
+  body: string,
+  block: number,
+  report: ViewSpec
+): { spec: ViewSpec | null; error: string | null } {
+  let data: unknown;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    return { spec: null, error: `view block ${block}: not valid JSON` };
+  }
+  if (!isRecord(data)) return { spec: null, error: `view block ${block}: not an object` };
+  if (data.kind === "report") return { spec: null, error: `view block ${block}: a report cannot embed a report` };
+  const withId = {
+    ...data,
+    id: `${report.id}~b${block}`,
+    builtAt: report.builtAt,
+    builtBy: report.builtBy,
+  };
+  const parsed = parseViewSpec(JSON.stringify(withId));
+  if (!parsed.spec) return { spec: null, error: `view block ${block}: ${parsed.specError}` };
+  return { spec: parsed.spec, error: null };
+}
+
+/** The embedded view spec at block <n> of a report's markdown, or why there
+ *  is none. Pure — the seam `useView` resolves a `block` artifact through. */
+export function inlineSpecAt(
+  markdown: string,
+  block: number,
+  report: ViewSpec
+): { spec: ViewSpec | null; error: string | null } {
+  const seg = splitReport(markdown).find((s) => s.kind === "view" && s.block === block);
+  if (!seg || seg.kind !== "view") {
+    return { spec: null, error: `the report has no view block ${block}` };
+  }
+  return parseInlineViewSpec(seg.body, block, report);
 }
 
 /** Rows AND the optional `meta` object out of a data payload (T8): a JSON
@@ -1112,6 +1184,19 @@ export function specLines(spec: ViewSpec): string[] {
 
 export const VIEW_SPEC_POLL_MS = 2_500;
 
+/** One raw read of a view source — the ONE fetch path every data load goes
+ *  through (main, panels, embedded): a file through the guarded IPC, a query
+ *  against a loopback URL the parse already vetted. */
+async function fetchViewRaw(threadId: string, source: ViewSource): Promise<string> {
+  if (source.type === "file") return readViewData(threadId, source.path);
+  const init: RequestInit = source.body
+    ? { method: "POST", headers: { "content-type": "application/json" }, body: source.body }
+    : { method: "GET" };
+  const res = await fetch(source.url, init);
+  if (!res.ok) throw new Error(`the backend answered ${res.status}`);
+  return res.text();
+}
+
 export type ViewRead = {
   spec: ViewSpec | null;
   /** Why there is no spec / no rows — the cannot-render card's copy. */
@@ -1119,6 +1204,10 @@ export type ViewRead = {
   rows: ViewRow[] | null;
   /** The data file's `meta` object, when it carries one (T8). */
   meta: ViewMeta | null;
+  /** A report's MARKDOWN (SWIT-73) — polled at the spec cadence while the
+   *  tab is active, reference-stable on unchanged content. null for every
+   *  other kind. */
+  text: string | null;
   /** Rows are loading right now (first load or a re-run). */
   loading: boolean;
   /** Eric's re-run (query sources; a file source re-reads the file). */
@@ -1130,15 +1219,21 @@ export function useView(
   viewId: string,
   active: boolean,
   /** T6: a drilled CHILD — the parent's drill resolved for this key. */
-  drillKey: string | null = null
+  drillKey: string | null = null,
+  /** SWIT-73: the spec file holds a REPORT and the effective view is its
+   *  embedded block <n> (always set together with drillKey on a child
+   *  drilled from an embedded view). */
+  block: number | null = null
 ): ViewRead {
   const [spec, setSpec] = useState<ViewSpec | null>(null);
   const [specError, setSpecError] = useState<string | null>(null);
   const [rows, setRows] = useState<ViewRow[] | null>(null);
   const [meta, setMeta] = useState<ViewMeta | null>(null);
+  const [text, setText] = useState<string | null>(null);
   const [dataError, setDataError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const lastSpecRawRef = useRef<string | null>(null);
+  const lastTextRef = useRef<string | null>(null);
   // WHICH spec build the loaded rows belong to — file data reloads when the
   // agent re-shows (builtAt moves); query data does not (re-run is Eric's).
   const loadedForRef = useRef<string | null>(null);
@@ -1147,13 +1242,15 @@ export function useView(
   // Spec poll (pins cadence, active-gated, no-op on unchanged raw).
   useEffect(() => {
     lastSpecRawRef.current = null;
+    lastTextRef.current = null;
     loadedForRef.current = null;
     setSpec(null);
     setSpecError(null);
     setRows(null);
     setMeta(null);
+    setText(null);
     setDataError(null);
-  }, [threadId, viewId, drillKey]);
+  }, [threadId, viewId, drillKey, block]);
 
   useEffect(() => {
     if (!active || threadId.length === 0 || viewId.length === 0) return;
@@ -1161,20 +1258,53 @@ export function useView(
     const tick = async () => {
       try {
         const raw = await readThreadView(threadId, viewId);
-        if (cancelled || raw === lastSpecRawRef.current) return;
-        lastSpecRawRef.current = raw;
+        // SWIT-73: a `block` artifact's effective spec lives in the report's
+        // MARKDOWN, so the change key covers both files — an edited block
+        // re-derives even while the spec file itself is unchanged.
+        let markdown: string | null = null;
+        let changeKey = raw;
+        if (block !== null) {
+          const parsed0 = parseViewSpec(raw);
+          if (parsed0.spec?.kind === "report" && parsed0.spec.source.type === "file") {
+            try {
+              markdown = await readViewData(threadId, parsed0.spec.source.path);
+            } catch {
+              markdown = null;
+            }
+          }
+          changeKey = `${raw} ${markdown ?? ""}`;
+        }
+        if (cancelled || changeKey === lastSpecRawRef.current) return;
+        lastSpecRawRef.current = changeKey;
         const parsed = parseViewSpec(raw);
+        // SWIT-73: resolve the embedded block first — the effective parent a
+        // drill then resolves against.
+        let base = parsed.spec;
+        let baseError = parsed.specError;
+        if (base && block !== null) {
+          if (base.kind !== "report") {
+            base = null;
+            baseError = `view ${viewId} is not a report — block ${block} names nothing`;
+          } else if (markdown === null) {
+            base = null;
+            baseError = "the report's markdown is unreadable";
+          } else {
+            const inline = inlineSpecAt(markdown, block, base);
+            base = inline.spec;
+            baseError = inline.error;
+          }
+        }
         // A DRILLED child (T6): the file holds the PARENT; the child is the
         // parent's drill resolved for this key, re-derived on every spec
         // change so an agent `update` of the parent re-shapes the child too.
-        if (parsed.spec && drillKey !== null) {
-          const child = resolveDrill(parsed.spec, drillKey);
+        if (base && drillKey !== null) {
+          const child = resolveDrill(base, drillKey);
           setSpec(child.spec);
           setSpecError(child.error);
           return;
         }
-        setSpec(parsed.spec);
-        setSpecError(parsed.specError);
+        setSpec(base);
+        setSpecError(baseError);
       } catch (err) {
         if (!cancelled && lastSpecRawRef.current === null) {
           setSpecError(String(err));
@@ -1187,7 +1317,36 @@ export function useView(
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [threadId, viewId, active, drillKey]);
+  }, [threadId, viewId, active, drillKey, block]);
+
+  // SWIT-73: a REPORT's markdown polls at the same cadence gates as the spec
+  // (active-gated, no-op on unchanged content — the mergeDocRead lesson: an
+  // unchanged read returns the SAME string reference, so nothing repaints).
+  // A failed re-read keeps the last good markdown, degraded beats blanked.
+  useEffect(() => {
+    if (!active || !spec || spec.kind !== "report" || spec.source.type !== "file") return;
+    const path = spec.source.path;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const raw = await readViewData(threadId, path);
+        if (cancelled || raw === lastTextRef.current) return;
+        lastTextRef.current = raw;
+        setText(raw);
+        setDataError(null);
+      } catch (err) {
+        if (!cancelled && lastTextRef.current === null) {
+          setDataError(String(err instanceof Error ? err.message : err));
+        }
+      }
+    };
+    void tick();
+    const id = window.setInterval(() => void tick(), VIEW_SPEC_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [threadId, spec, active]);
 
   const load = useCallback(
     async (target: ViewSpec) => {
@@ -1195,21 +1354,7 @@ export function useView(
       setLoading(true);
       setDataError(null);
       try {
-        let raw: string;
-        if (target.source.type === "file") {
-          raw = await readViewData(threadId, target.source.path);
-        } else {
-          const init: RequestInit = target.source.body
-            ? {
-                method: "POST",
-                headers: { "content-type": "application/json" },
-                body: target.source.body,
-              }
-            : { method: "GET" };
-          const res = await fetch(target.source.url, init);
-          if (!res.ok) throw new Error(`the backend answered ${res.status}`);
-          raw = await res.text();
-        }
+        const raw = await fetchViewRaw(threadId, target.source);
         if (seq !== loadSeqRef.current) return;
         const parsed = parseViewPayload(raw);
         if (parsed === null) {
@@ -1237,7 +1382,9 @@ export function useView(
   // query never refetches (re-run is Eric's); a file re-reads only through
   // re-run too.
   useEffect(() => {
-    if (!spec) return;
+    // SWIT-73: a report has no rows — its markdown loads through the poll
+    // above, and each embedded view loads its own data (useInlineViewData).
+    if (!spec || spec.kind === "report") return;
     const buildKey = `${spec.id}:${spec.builtAt}:${spec.source.type === "file" ? spec.source.path : spec.source.url}`;
     if (loadedForRef.current === buildKey) return;
     loadedForRef.current = buildKey;
@@ -1245,7 +1392,7 @@ export function useView(
   }, [spec, load]);
 
   const rerun = useCallback(() => {
-    if (spec) void load(spec);
+    if (spec && spec.kind !== "report") void load(spec);
   }, [spec, load]);
 
   return {
@@ -1253,9 +1400,82 @@ export function useView(
     error: specError ?? dataError,
     rows,
     meta,
+    text,
     loading,
     rerun,
   };
+}
+
+// ── Embedded views (SWIT-73): one block's data ──────────────────────────────
+
+export type InlineViewData = {
+  rows: ViewRow[] | null;
+  meta: ViewMeta | null;
+  error: string | null;
+  loading: boolean;
+  rerun: () => void;
+};
+
+/** Load an EMBEDDED view's data — the same rules as the main hook: once per
+ *  build (id + builtAt + source; the report's `op: update` moves builtAt for
+ *  every block at once), `rerun` is Eric's gesture, a failed re-read keeps
+ *  the last good rows. The spec arrives already derived
+ *  (`parseInlineViewSpec`); null = nothing to load. */
+export function useInlineViewData(threadId: string, spec: ViewSpec | null): InlineViewData {
+  const [rows, setRows] = useState<ViewRow[] | null>(null);
+  const [meta, setMeta] = useState<ViewMeta | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const loadedForRef = useRef<string | null>(null);
+  const loadSeqRef = useRef(0);
+
+  const load = useCallback(
+    async (target: ViewSpec) => {
+      const seq = ++loadSeqRef.current;
+      setLoading(true);
+      setError(null);
+      try {
+        const raw = await fetchViewRaw(threadId, target.source);
+        if (seq !== loadSeqRef.current) return;
+        const parsed = parseViewPayload(raw);
+        if (parsed === null) {
+          setError("the source did not contain rows (expected a JSON array of objects)");
+          setRows(null);
+          setMeta(null);
+        } else {
+          setRows(parsed.rows);
+          setMeta(parsed.meta);
+        }
+      } catch (err) {
+        if (seq !== loadSeqRef.current) return;
+        setError(String(err instanceof Error ? err.message : err));
+        // Keep the last good rows if any — degraded beats blanked.
+      } finally {
+        if (seq === loadSeqRef.current) setLoading(false);
+      }
+    },
+    [threadId]
+  );
+
+  useEffect(() => {
+    if (!spec || spec.kind === "report") {
+      loadedForRef.current = null;
+      setRows(null);
+      setMeta(null);
+      setError(null);
+      return;
+    }
+    const buildKey = `${spec.id}:${spec.builtAt}:${spec.source.type === "file" ? spec.source.path : spec.source.url}`;
+    if (loadedForRef.current === buildKey) return;
+    loadedForRef.current = buildKey;
+    void load(spec);
+  }, [spec, load]);
+
+  const rerun = useCallback(() => {
+    if (spec && spec.kind !== "report") void load(spec);
+  }, [spec, load]);
+
+  return { rows, meta, error, loading, rerun };
 }
 
 // ── Small multiples (SWIT-70): each panel's rows ─────────────────────────────
@@ -1293,17 +1513,7 @@ export function useViewPanels(threadId: string, spec: ViewSpec | null, active: b
       void (async () => {
         let next: PanelData;
         try {
-          let raw: string;
-          if (p.source.type === "file") {
-            raw = await readViewData(threadId, p.source.path);
-          } else {
-            const init: RequestInit = p.source.body
-              ? { method: "POST", headers: { "content-type": "application/json" }, body: p.source.body }
-              : { method: "GET" };
-            const res = await fetch(p.source.url, init);
-            if (!res.ok) throw new Error(`the backend answered ${res.status}`);
-            raw = await res.text();
-          }
+          const raw = await fetchViewRaw(threadId, p.source);
           const parsed = parseViewPayload(raw);
           next =
             parsed === null

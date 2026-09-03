@@ -211,6 +211,27 @@ export function viewIdOfAddress(address: string): string | null {
   return /^[A-Za-z0-9_-]{1,64}$/.test(id) ? id : null;
 }
 
+/** A `view:` address with an optional ANCHOR fragment (SWIT-73): a report's
+ *  heading is addressable as `view:<id>#h:<slug>` — opening it opens the
+ *  view and scrolls the stamped heading into view. The fragment must be a
+ *  well-formed anchor key (`<kind>:<id>`, no control chars — the
+ *  surfaces/anchors grammar, restated here so this module stays
+ *  import-light); a malformed one makes the WHOLE address plain (null),
+ *  never a half-honoured link. Pure. */
+export function viewAnchorOfAddress(address: string): { viewId: string; anchor: string | null } | null {
+  const a = address.trim();
+  if (!a.startsWith("view:")) return null;
+  const rest = a.slice("view:".length);
+  const hash = rest.indexOf("#");
+  const id = hash === -1 ? rest : rest.slice(0, hash);
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) return null;
+  if (hash === -1) return { viewId: id, anchor: null };
+  const anchor = rest.slice(hash + 1);
+  // eslint-disable-next-line no-control-regex
+  if (!/^[a-z][a-z0-9-]*:.+$/s.test(anchor) || /[\x00-\x1f\x7f]/.test(anchor)) return null;
+  return { viewId: id, anchor };
+}
+
 /** What the view poll LATCHES after a pass (SWIT-70 review fix, F2): only
  *  the ids whose spec actually read. A failed or torn read leaves the latched
  *  key UNEQUAL to the id list's key, so the next tick retries that spec

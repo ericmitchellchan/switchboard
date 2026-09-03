@@ -327,12 +327,50 @@ describe("the view tool (SWIT-50)", () => {
     expect(() => server.buildViewSpec({ ...base, kind: "pie" }, [], NOW)).toThrow(/kind must be/);
     expect(() => server.buildViewSpec({ ...base, kind: "line" }, [], NOW)).not.toThrow();
     expect(() => server.buildViewSpec({ ...base, kind: "bar" }, [], NOW)).not.toThrow();
+    // SWIT-73: report joins the enum — .md file sources only, no query, no
+    // {key}, no top-level drill; embedded blocks validate at render time.
+    const report = (source: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
+      ...base,
+      kind: "report",
+      markers: undefined,
+      source,
+      ...extra,
+    });
+    expect(() => server.buildViewSpec(report({ type: "file", path: "analysis.md" }), [], NOW)).not.toThrow();
+    expect(server.buildViewSpec(report({ type: "file", path: "notes/Analysis.MD" }), [], NOW)).toMatchObject({
+      kind: "report",
+    });
+    expect(() => server.buildViewSpec(report({ type: "file", path: "rows.json" }), [], NOW)).toThrow(/\.md/);
+    expect(() => server.buildViewSpec(report({ type: "file", path: "per/{key}.md" }), [], NOW)).toThrow(/\.md/);
+    expect(() => server.buildViewSpec(report({ type: "query", url: "http://127.0.0.1:8799/r" }), [], NOW)).toThrow(
+      /\.md/
+    );
+    expect(() =>
+      server.buildViewSpec(
+        report(
+          { type: "file", path: "analysis.md" },
+          { drill: { kind: "table", title: "t", source: { type: "file", path: "per/{key}.json" } } }
+        ),
+        [],
+        NOW
+      )
+    ).toThrow(/no drill/);
+    expect(() =>
+      server.buildViewSpec(
+        { ...base, drill: { kind: "report", title: "{key}", source: { type: "file", path: "per/{key}.md" } } },
+        [],
+        NOW
+      )
+    ).toThrow(/cannot be report/);
+    expect((server.VIEW_TOOL.inputSchema as { properties: { kind: { enum: string[] } } }).properties.kind.enum).toContain(
+      "report"
+    );
     expect(() => server.buildViewSpec({ ...base, id: "no spaces!" }, [], NOW)).toThrow(/must match/);
   });
 
   it("T7 (SWIT-61): the enum lists line + bar; series / valueColumn normalise and ROUND-TRIP; the drill takes them too", () => {
     const props = (server.VIEW_TOOL.inputSchema as { properties: Record<string, { enum?: string[] }> }).properties;
-    expect(props.kind.enum).toEqual(["table", "candles", "dist", "line", "bar", "timeline"]);
+    expect(props.kind.enum).toEqual(["table", "candles", "dist", "line", "bar", "timeline", "report"]);
     expect(props.series).toBeDefined();
     expect(props.valueColumn).toBeDefined();
     const line = server.buildViewSpec({ ...base, kind: "line", series: [" close ", "", 3, "rsi"] }, [], NOW);

@@ -216,7 +216,12 @@ export type Artifact =
   // drill resolved for one anchor key. The child's spec is derived from the
   // parent's file at render time (viewStore.resolveDrill), never written to
   // disk, so the record is the parent's two ids plus the key.
-  | { kind: "view"; threadId: string; viewId: string; drill?: { key: string } }
+  //
+  // SWIT-73: `block` marks a child drilled from an EMBEDDED view — the spec
+  // file holds a REPORT, and the effective parent is fence block <n> of its
+  // markdown (viewStore.inlineSpecAt). Always set together with `drill`;
+  // derived at render time like the drill itself.
+  | { kind: "view"; threadId: string; viewId: string; block?: number; drill?: { key: string } }
   // A QUESTION tab (SWIT-51, R3 rule 1) — the ONE write-back channel besides
   // the composer: the agent's ask opens it, answering writes answers.json,
   // types the answer into the terminal as Eric's message, and closes it.

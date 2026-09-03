@@ -290,6 +290,12 @@ describe("T6 — spec parse of definition / filters / drill", () => {
       parseViewDrill({ kind: "table", title: "t", source: { type: "query", url: "http://127.0.0.1:8799/setups/{key}" } })
     ).toMatchObject({ kind: "table", source: { type: "query", url: "http://127.0.0.1:8799/setups/{key}" } });
   });
+
+  it("SWIT-73: a report is never a drill target — the drill is ABSENT, not a broken parent", () => {
+    expect(
+      parseViewDrill({ kind: "report", title: "{key}", source: { type: "file", path: "per/{key}.md" } })
+    ).toBeNull();
+  });
 });
 
 describe("T6 — client-side filters", () => {
@@ -611,7 +617,7 @@ const T7_BAR_ROWS = [
 
 describe("T7 — kinds + spec round-trip", () => {
   it("line and bar are kinds; unknown is not; the parse round-trips series / valueColumn on spec AND drill", () => {
-    expect(VIEW_KINDS).toEqual(["table", "candles", "dist", "line", "bar", "timeline"]);
+    expect(VIEW_KINDS).toEqual(["table", "candles", "dist", "line", "bar", "timeline", "report"]);
     expect(isViewKind("line") && isViewKind("bar")).toBe(true);
     expect(isViewKind("pie")).toBe(false);
     const raw = JSON.stringify({

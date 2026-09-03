@@ -72,6 +72,14 @@
 // vertical rules, and `panels` as SMALL MULTIPLES (LineView: 2-up grid,
 // shared time domain, shared value domain when the series sets match;
 // anchors/pins from the main chart only in v1).
+//
+// SWIT-73 — `report`: markdown with embedded live views, one document beside
+// the thread. ViewSurface routes a bare report artifact to ReportView (its
+// own lazy chunk); everything below the useView call is now `ViewChrome`, a
+// component the standalone surface AND every embedded block render through —
+// same toolbar, same anchors/pins/hover/drill, the block's `#b<n>` pin-scope
+// prefix and its `block` field on a drilled child's artifact being the only
+// differences an embedded instance carries.
 
 import { Suspense, lazy, memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent as ReactMouseEvent, MutableRefObject } from "react";
@@ -132,6 +140,9 @@ import type { AnchoredPinTarget } from "../../surfaces/SurfacePins";
 const CandleChart = lazy(() => import("../../surfaces/charts/CandleChart"));
 const LinePanel = lazy(() => import("../../surfaces/charts/LinePanel"));
 const TimelineView = lazy(() => import("./TimelineView"));
+// The report document (SWIT-73) — markdown pipeline + embedded blocks, its
+// own lazy chunk (a plain table view never loads unified/remark).
+const ReportView = lazy(() => import("./ReportView"));
 
 const MONO = "var(--font-mono)";
 
@@ -231,15 +242,101 @@ type PriceMode = "points" | "percent";
 export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; active: boolean }) {
   const { threadId, viewId } = artifact;
   const drillKey = artifact.drill?.key ?? null;
-  const { spec, error, rows, meta, loading, rerun } = useView(threadId, viewId, active, drillKey);
+  const block = artifact.block ?? null;
+  const view = useView(threadId, viewId, active, drillKey, block);
 
+  // SWIT-73: a REPORT renders as a document (narrative + embedded views) in
+  // its own lazy chunk. Only the BARE report artifact takes this branch — a
+  // `block`/`drill` child resolves to an ordinary kind in useView and draws
+  // through the chrome like any standalone view.
+  if (view.spec?.kind === "report" && drillKey === null && block === null) {
+    return (
+      <Suspense fallback={<ChartFallback />}>
+        <ReportView
+          spec={view.spec}
+          markdown={view.text}
+          error={view.error}
+          threadId={threadId}
+          viewId={viewId}
+          artifact={artifact}
+          active={active}
+        />
+      </Suspense>
+    );
+  }
+  return (
+    <ViewChrome
+      spec={view.spec}
+      error={view.error}
+      rows={view.rows}
+      meta={view.meta}
+      loading={view.loading}
+      rerun={view.rerun}
+      threadId={threadId}
+      viewId={viewId}
+      artifact={artifact}
+      active={active}
+      drillKey={drillKey}
+      block={block}
+    />
+  );
+}
+
+export type ViewChromeProps = {
+  spec: ViewSpec | null;
+  error: string | null;
+  rows: ViewRow[] | null;
+  meta: ViewMeta | null;
+  loading: boolean;
+  rerun: () => void;
+  threadId: string;
+  viewId: string;
+  /** The HOST artifact — a standalone view's own record, or the REPORT's for
+   *  an embedded block (the pins identity and drilled-child opens key off
+   *  it; the `#b<n>` scope keeps blocks apart under one identity). */
+  artifact: ViewArtifact;
+  active: boolean;
+  drillKey: string | null;
+  /** SWIT-73: the embedded block this chrome draws (inside a report, or on
+   *  a child drilled from one) — namespaces the pin scope and rides into a
+   *  drilled child's artifact. */
+  block: number | null;
+  /** SWIT-73: inside the report document — natural height, capped scroller. */
+  embedded?: boolean;
+};
+
+/** Everything a rendered view IS — toolbar, filters, spec disclosure, pins,
+ *  hover tooltip, drill opens, keep — over data the caller loaded. The
+ *  standalone surface and every embedded report block draw through THIS one
+ *  component, which is what "the SAME interactive charts" means (SWIT-73). */
+export function ViewChrome({
+  spec,
+  error,
+  rows,
+  meta,
+  loading,
+  rerun,
+  threadId,
+  viewId,
+  artifact,
+  active,
+  drillKey,
+  block,
+  embedded,
+}: ViewChromeProps) {
   // ── Filters (T6): client-side slices, per view instance ───────────────────
   const [activeFilters, setActiveFilters] = useState<ActiveFilters>({});
   const filteredRows = useMemo(
     () => (rows && spec ? applyFilters(rows, spec.filters, activeFilters) : rows),
     [rows, spec, activeFilters]
   );
-  const pinScope = useMemo(() => viewPinScope(activeFilters, drillKey), [activeFilters, drillKey]);
+  // SWIT-73: the block namespaces the pin scope (`#b<n>` before the drill/
+  // filter suffix) — two identical charts in one report file their pins
+  // under two docs and never collide.
+  const pinScope = useMemo(
+    () => `${block !== null ? `#b${block}` : ""}${viewPinScope(activeFilters, drillKey)}`,
+    [activeFilters, drillKey, block]
+  );
   const [showSpec, setShowSpec] = useState(false);
   const [hover, setHover] = useState<HoverHint>(null);
   const [priceMode, setPriceMode] = useState<PriceMode>("points");
@@ -348,7 +445,15 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
           flashNote("no thread to open it beside");
           return;
         }
-        openDrillInPanel(sessionId, artifact, { kind: "view", threadId, viewId, drill: { key: hit.key } });
+        openDrillInPanel(sessionId, artifact, {
+          kind: "view",
+          threadId,
+          viewId,
+          // SWIT-73: a child drilled from an EMBEDDED view carries the block —
+          // useView re-derives the effective parent from the report's markdown.
+          ...(block !== null ? { block } : {}),
+          drill: { key: hit.key },
+        });
         return;
       }
       if (!canSend) {
@@ -357,7 +462,7 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
       }
       sendToThread(sanitizeForTypedLine(drillFallbackSentence(spec.title, hit.label), REF_MAX));
     },
-    [spec, describeAnchor, flashNote, artifact, threadId, viewId, canSend]
+    [spec, describeAnchor, flashNote, artifact, threadId, viewId, block, canSend]
   );
   const onBodyClick = useCallback(
     (e: ReactMouseEvent) => {
@@ -463,7 +568,13 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
 
   return (
     <SurfaceAnchorContext.Provider value={registry}>
-      <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }}>
+      <div
+        style={
+          embedded
+            ? { minWidth: 0, display: "flex", flexDirection: "column" }
+            : { flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }
+        }
+      >
         <div style={TOOLBAR_STYLE}>
           <span style={{ color: "var(--text-primary)", flex: "none" }}>{spec.kind}</span>
           <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{spec.title}</span>
@@ -565,7 +676,15 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
           </button>
         </div>
         {showSpec && <pre style={SPEC_STYLE}>{specLines(spec).join("\n")}</pre>}
-        <div ref={scrollerRef} style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
+        <div
+          ref={scrollerRef}
+          style={
+            // Embedded (SWIT-73): the DOCUMENT scrolls; a long table scrolls
+            // inside its own capped block rather than nesting two full-height
+            // scrollers.
+            embedded ? { maxHeight: 480, overflow: "auto" } : { flex: 1, minHeight: 0, overflow: "auto" }
+          }
+        >
           <div
             ref={setRoot}
             onClickCapture={pins.onCapture}
@@ -729,6 +848,12 @@ const ViewBody = memo(function ViewBody({
     case "dist":
     case "bar":
       return <BarsView spec={spec} rows={rows} hoverKey={hoverKey} onActivate={onActivate} onHover={onHover} />;
+    case "report":
+      // Unreachable: ViewSurface routes a report to ReportView before any
+      // chrome, a report cannot embed a report (parseInlineViewSpec) and
+      // cannot be a drill target (parseViewDrill) — the case exists so the
+      // switch stays the registration list (tsc is the tripwire).
+      return null;
   }
 });
 

@@ -619,8 +619,21 @@ export function sanitizeArtifact(raw: unknown): Artifact | null {
         typeof drill === "object" && drill !== null && isNonEmptyString((drill as Record<string, unknown>).key)
           ? String((drill as Record<string, unknown>).key).slice(0, 120)
           : null;
+      // SWIT-73: `block` marks a child drilled from a report's embedded view.
+      // A malformed one drops with the drill (a block without its key names
+      // nothing renderable), same tolerance rule as the key itself.
+      const block =
+        typeof raw.block === "number" && Number.isInteger(raw.block) && raw.block >= 1 && raw.block <= 999
+          ? raw.block
+          : null;
       return key !== null
-        ? { kind: "view", threadId: raw.threadId, viewId: raw.viewId, drill: { key } }
+        ? {
+            kind: "view",
+            threadId: raw.threadId,
+            viewId: raw.viewId,
+            ...(block !== null ? { block } : {}),
+            drill: { key },
+          }
         : { kind: "view", threadId: raw.threadId, viewId: raw.viewId };
     }
     case "question":
@@ -676,7 +689,11 @@ export function artifactIdentity(artifact: Artifact): string {
       return `page:${artifact.threadId}`;
     case "view":
       // A drilled child is its OWN tab (T6): one parent, many children.
-      return `view:${artifact.threadId}:${artifact.viewId}${artifact.drill ? `/${artifact.drill.key}` : ""}`;
+      // SWIT-73: the block joins the identity — the same key drilled from two
+      // embedded views is two children.
+      return `view:${artifact.threadId}:${artifact.viewId}${
+        artifact.block !== undefined ? `#b${artifact.block}` : ""
+      }${artifact.drill ? `/${artifact.drill.key}` : ""}`;
     case "question":
       return `question:${artifact.threadId}:${artifact.questionId}`;
   }

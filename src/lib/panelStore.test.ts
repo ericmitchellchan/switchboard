@@ -2711,6 +2711,22 @@ describe("openDrillInPanel (T6) — the child takes the preview slot; back lands
     expect(sanitizeArtifact({ kind: "view", threadId: "t1", viewId: "setups", drill: "nope" })).toEqual(PARENT);
   });
 
+  it("SWIT-73: a child drilled from an EMBEDDED view keeps its block — identity and sanitize", () => {
+    const embedded: Artifact = { kind: "view", threadId: "t1", viewId: "setups", block: 3, drill: { key: "ES" } };
+    expect(artifactIdentity(embedded)).toBe("view:t1:setups#b3/ES");
+    expect(artifactIdentity(embedded)).not.toBe(artifactIdentity(CHILD_2));
+    expect(sanitizeArtifact({ ...embedded, extra: 1 })).toEqual(embedded);
+    // A malformed block drops with the drill's tolerance rules: not an
+    // integer / out of range → the field goes, the record survives.
+    const noBlock: Artifact = { kind: "view", threadId: "t1", viewId: "setups", drill: { key: "ES" } };
+    expect(
+      sanitizeArtifact({ kind: "view", threadId: "t1", viewId: "setups", block: "b3", drill: { key: "ES" } })
+    ).toEqual(noBlock);
+    expect(
+      sanitizeArtifact({ kind: "view", threadId: "t1", viewId: "setups", block: 0, drill: { key: "ES" } })
+    ).toEqual(noBlock);
+  });
+
   it("parent IS the preview: the ordinary replace-with-back (one step returns to it)", () => {
     openInPanel("s1", PARENT, { preview: true });
     openDrillInPanel("s1", PARENT, CHILD);
