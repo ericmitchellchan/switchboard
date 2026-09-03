@@ -22,6 +22,10 @@ import {
   decisionAddress,
   conventionLine,
   pageSummary,
+  REVIEW_FIRST_CAP,
+  answerSuccessNote,
+  answerErrorNote,
+  noteReplacesForm,
 } from "./pageStore";
 import type { PageQuestion } from "./pageStore";
 
@@ -223,12 +227,29 @@ describe("mergePage", () => {
     expect(mergePage(p, {}, []).latestTurn?.reviewFirst).toBe("surface:lodestar/trading?instrument=NQ");
   });
 
-  it("pageSummary is the theme + the newest turn's first line, plain (SWIT-68)", () => {
+  it("pageSummary is the theme + the newest turn's first line, joined with a dash (SWIT-68)", () => {
     const merged = mergePage(page, {}, []);
-    expect(pageSummary(merged)).toBe("Give every market an anchor Latest turn.");
+    expect(pageSummary(merged)).toBe("Give every market an anchor — Latest turn.");
     const themeOnly = mergePage(parsePageFile(JSON.stringify({ theme: "Just a theme" })), {}, []);
     expect(pageSummary(themeOnly)).toBe("Just a theme");
     expect(pageSummary(mergePage(EMPTY_PAGE, {}, []))).toBeNull();
+  });
+
+  it("a hand-written reviewFirst is capped at REVIEW_FIRST_CAP on the way in (review F3)", () => {
+    const p = parsePageFile(
+      JSON.stringify({ turns: [{ at: "t", lines: ["x"], reviewFirst: "a".repeat(REVIEW_FIRST_CAP + 50) }] })
+    );
+    expect(p.turns[0].reviewFirst).toBe("a".repeat(REVIEW_FIRST_CAP));
+  });
+
+  it("answer notes: only success collapses the form; an error keeps it (review F1)", () => {
+    expect(answerSuccessNote("sent")).toEqual({ kind: "success", text: "answered → sent to the thread" });
+    expect(answerSuccessNote("saved")).toEqual({ kind: "success", text: "answered → saved on the page" });
+    expect(answerErrorNote(new Error("disk full"))).toEqual({ kind: "error", text: "could not save: disk full" });
+    expect(answerErrorNote("nope").text).toBe("could not save: nope");
+    expect(noteReplacesForm(answerSuccessNote("sent"))).toBe(true);
+    expect(noteReplacesForm(answerErrorNote(new Error("x")))).toBe(false);
+    expect(noteReplacesForm(null)).toBe(false);
   });
 
   it("inbox splits by kind: requests under Needs You, updates under What Happened", () => {

@@ -6,6 +6,7 @@ import {
   evidenceKindOf,
   groupEvidence,
   isPathShaped,
+  latchViewKey,
   mergeScannedEvidence,
   mergeViewEvidence,
   resolveDocTarget,
@@ -183,5 +184,22 @@ describe("resolveDocTarget", () => {
     expect(resolveDocTarget("src/lib/pageStore.ts", [], null)).toBeNull(); // no project
     expect(resolveDocTarget("Cargo.toml", [], "switchboard")).toBeNull(); // no slash, not in KB
     expect(resolveDocTarget("SWIT-64", ["SWIT-64"], "switchboard")).toBeNull(); // not a doc/file kind
+  });
+});
+
+describe("latchViewKey (SWIT-70 review fix F2 — a failed spec read retries)", () => {
+  it("a clean pass latches the id list's own key", () => {
+    expect(latchViewKey(["a", "b"], ["a", "b"])).toBe(["a", "b"].join("\n"));
+  });
+
+  it("a failed read leaves the latch unequal to the list key, so the next tick retries", () => {
+    const latched = latchViewKey(["a", "b"], ["a"]); // "b" was caught mid-write
+    expect(latched).not.toBe(["a", "b"].join("\n"));
+    // ...and once "b" reads, the pass latches clean and the poll goes quiet.
+    expect(latchViewKey(["a", "b"], ["a", "b"])).toBe(["a", "b"].join("\n"));
+  });
+
+  it("every read failing latches nothing that matches a non-empty list", () => {
+    expect(latchViewKey(["a"], [])).not.toBe(["a"].join("\n"));
   });
 });

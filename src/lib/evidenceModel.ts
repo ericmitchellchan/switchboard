@@ -211,6 +211,14 @@ export function viewIdOfAddress(address: string): string | null {
   return /^[A-Za-z0-9_-]{1,64}$/.test(id) ? id : null;
 }
 
+/** What the view poll LATCHES after a pass (SWIT-70 review fix, F2): only
+ *  the ids whose spec actually read. A failed or torn read leaves the latched
+ *  key UNEQUAL to the id list's key, so the next tick retries that spec
+ *  instead of dropping its row until the id list happens to change. Pure. */
+export function latchViewKey(ids: readonly string[], okIds: readonly string[]): string {
+  return okIds.length === ids.length ? ids.join("\n") : okIds.join("\n");
+}
+
 /** Fold the thread's view specs under the evidence rows: one synthesized row
  *  per view NOT already addressed by the agent, newest-first overall (the
  *  same merge shape as `mergeScannedEvidence`). */

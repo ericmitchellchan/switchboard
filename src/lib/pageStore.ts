@@ -38,6 +38,10 @@ export const EVIDENCE_CAP = 60;
 export const QUESTION_CAP = 20;
 /** Done items beyond this fold behind a count. */
 export const DONE_FOLD = 10;
+/** A turn's reviewFirst is an ADDRESS, not prose — the server refuses more
+ *  (SWIT-67); here a hand-written longer one is truncated, same posture as
+ *  the other caps. Mirrors the server's REVIEW_FIRST_CAP. */
+export const REVIEW_FIRST_CAP = 300;
 
 // ── File shapes ──────────────────────────────────────────────────────────────
 
@@ -142,7 +146,7 @@ export function parsePageFile(raw: string): PageFile {
         .filter((l): l is string => typeof l === "string" && l.trim().length > 0)
         .slice(0, TURN_LINE_CAP);
       if (lines.length === 0) continue;
-      const reviewFirst = str(t.reviewFirst);
+      const reviewFirst = str(t.reviewFirst)?.slice(0, REVIEW_FIRST_CAP) ?? null;
       turns.push(
         reviewFirst !== null
           ? { at: str(t.at) ?? "", lines, reviewFirst }
@@ -406,14 +410,43 @@ export function mergePage(page: PageFile, answers: AnswersFile, inbox: InboxPost
 }
 
 /** SWIT-68: the one-paragraph SUMMARY at the top of the page — the theme line
- *  plus the newest turn's first line, plain text, no label. Null when neither
- *  exists (the empty-page state covers that). Pure. */
+ *  plus the newest turn's first line, joined with ` — ` (a bare space ran two
+ *  sentences together), plain text, no label. Null when neither exists (the
+ *  empty-page state covers that). Pure. */
 export function pageSummary(page: RenderedPage): string | null {
   const parts: string[] = [];
   if (page.theme) parts.push(page.theme);
   const first = page.latestTurn?.lines[0];
   if (first && first !== page.theme) parts.push(first);
-  return parts.length > 0 ? parts.join(" ") : null;
+  return parts.length > 0 ? parts.join(" — ") : null;
+}
+
+// ── Answer notes (SWIT-70 review fix) ────────────────────────────────────────
+// The ONE state rule both answering surfaces (PageView's InlineQuestion,
+// Home's QuestionCard) draw from: a SUCCESS note replaces the form (the poll
+// collapses the block to the decided line next), a FAILURE note renders
+// BESIDE the form — options stay clickable, the draft stays in the box, so a
+// rejected answer is retryable (the retired QuestionView's rule kept). Pure.
+
+export type AnswerNote = { kind: "success" | "error"; text: string };
+
+export function answerSuccessNote(outcome: "sent" | "saved"): AnswerNote {
+  return {
+    kind: "success",
+    text: outcome === "sent" ? "answered → sent to the thread" : "answered → saved on the page",
+  };
+}
+
+export function answerErrorNote(err: unknown): AnswerNote {
+  return {
+    kind: "error",
+    text: `could not save: ${err instanceof Error ? err.message : String(err)}`,
+  };
+}
+
+/** Only a SUCCESS collapses the form; an error must leave it interactive. */
+export function noteReplacesForm(note: AnswerNote | null): boolean {
+  return note !== null && note.kind === "success";
 }
 
 // ── New-since-you-looked (device-local — R2, Ky's rule verbatim) ─────────────

@@ -44,8 +44,11 @@ import {
   parseInboxFile,
   mergePage,
   orderedOptions,
+  answerSuccessNote,
+  answerErrorNote,
+  noteReplacesForm,
 } from "../lib/pageStore";
-import type { InboxPost, PageItem, PageQuestion, RenderedPage } from "../lib/pageStore";
+import type { AnswerNote, InboxPost, PageItem, PageQuestion, RenderedPage } from "../lib/pageStore";
 import { answerQuestion } from "../lib/panelStore";
 import { readThreadFile, listScratchViews } from "../lib/ipc";
 import { navigate } from "../lib/route";
@@ -378,7 +381,7 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [chosen, setChosen] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
+  const [note, setNote] = useState<AnswerNote | null>(null);
   const [fieldFocus, setFieldFocus] = useState(false);
   const submit = useCallback(
     async (text: string) => {
@@ -389,9 +392,9 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
       setNote(null);
       try {
         const outcome = await answerQuestion(digest.thread.id, question.id, question.text, clean, question.kind);
-        setNote(outcome === "sent" ? "answered → sent to the thread" : "answered → saved on the page");
+        setNote(answerSuccessNote(outcome));
       } catch (err) {
-        setNote(`could not save: ${err instanceof Error ? err.message : String(err)}`);
+        setNote(answerErrorNote(err));
       } finally {
         setBusy(false);
         setChosen(null);
@@ -408,8 +411,8 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
           {digest.thread.title} · {threadRepoName(digest.thread.workingDir)}
         </span>
       </div>
-      {note ? (
-        <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>{note}</div>
+      {noteReplacesForm(note) ? (
+        <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>{note?.text}</div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {options.length > 0 && (
@@ -460,6 +463,11 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
             disabled={busy}
             style={{ ...FIELD, borderColor: fieldFocus ? "var(--text-dim)" : "var(--border-subtle)" }}
           />
+          {/* A failed answer keeps the form — options clickable, draft intact
+              (pageStore.noteReplacesForm); the error is one line below it. */}
+          {note?.kind === "error" && (
+            <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>{note.text}</div>
+          )}
         </div>
       )}
     </div>

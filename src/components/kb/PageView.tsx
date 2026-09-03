@@ -54,13 +54,17 @@ import {
   SEEN_DWELL_MS,
   orderedOptions,
   PAGE_POLL_MS,
+  answerSuccessNote,
+  answerErrorNote,
+  noteReplacesForm,
 } from "../../lib/pageStore";
-import type { InboxPost, PageItem, PageQuestion } from "../../lib/pageStore";
+import type { AnswerNote, InboxPost, PageItem, PageQuestion } from "../../lib/pageStore";
 import { parseSurfaceAddress } from "../../lib/surfaceParams";
 import { answerQuestion, openArtifact, openInPanel, getActiveTabSession } from "../../lib/panelStore";
 import type { OpenableArtifact } from "../../lib/panelStore";
 import {
   groupEvidence,
+  latchViewKey,
   mergeScannedEvidence,
   mergeViewEvidence,
   resolveDocTarget,
@@ -212,16 +216,23 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
         const key = ids.join("\n");
         if (key === viewIdsRef.current) return;
         const rows: ThreadViewRow[] = [];
+        const okIds: string[] = [];
         for (const id of ids) {
           try {
             const { spec } = parseViewSpec(await readThreadView(threadId, id));
-            if (spec) rows.push({ id, title: spec.title, builtAt: spec.builtAt });
+            if (spec) {
+              rows.push({ id, title: spec.title, builtAt: spec.builtAt });
+              okIds.push(id);
+            }
           } catch {
-            // an unreadable spec drops alone
+            // an unreadable spec drops alone — and is NOT latched (below)
           }
         }
         if (cancelled) return;
-        viewIdsRef.current = key;
+        // Latch only what actually read (evidenceModel.latchViewKey): a spec
+        // caught mid-write keeps the keys unequal, so the next tick retries
+        // it instead of dropping the row until the id list happens to change.
+        viewIdsRef.current = latchViewKey(ids, okIds);
         setThreadViews(rows);
       } catch {
         // a failed listing is a quiet tick
@@ -524,8 +535,10 @@ function Section({
  *  OptionRow list between hairlines · a free-text input · the quiet `answer`
  *  button — the SAME bridge Home's Needs You uses (answerQuestion), so
  *  answering here behaves exactly as from Home. On success the note stands in
- *  until the poll collapses the block to the decided line. No box: the
- *  section is the surface (Home's card is Home's earned box). */
+ *  until the poll collapses the block to the decided line; a FAILED answer
+ *  renders its error UNDER the form, which stays interactive with the draft
+ *  intact (pageStore.noteReplacesForm is the rule). No box: the section is
+ *  the surface (Home's card is Home's earned box). */
 function InlineQuestion({
   threadId,
   question,
@@ -538,7 +551,7 @@ function InlineQuestion({
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [chosen, setChosen] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
+  const [note, setNote] = useState<AnswerNote | null>(null);
   const [fieldFocus, setFieldFocus] = useState(false);
   const submit = useCallback(
     async (text: string) => {
@@ -549,9 +562,9 @@ function InlineQuestion({
       setNote(null);
       try {
         const outcome = await answerQuestion(threadId, question.id, question.text, clean, question.kind);
-        setNote(outcome === "sent" ? "answered → sent to the thread" : "answered → saved on the page");
+        setNote(answerSuccessNote(outcome));
       } catch (err) {
-        setNote(`could not save: ${err instanceof Error ? err.message : String(err)}`);
+        setNote(answerErrorNote(err));
       } finally {
         setBusy(false);
         setChosen(null);
@@ -566,8 +579,8 @@ function InlineQuestion({
         {question.text}
         {isNew && <span style={{ ...NEW_DOT, marginLeft: 6, verticalAlign: "middle" }} />}
       </div>
-      {note ? (
-        <div style={{ color: "var(--text-muted)" }}>{note}</div>
+      {noteReplacesForm(note) ? (
+        <div style={{ color: "var(--text-muted)" }}>{note?.text}</div>
       ) : (
         <>
           {options.length > 0 && (
@@ -628,6 +641,7 @@ function InlineQuestion({
               answer
             </button>
           </div>
+          {note?.kind === "error" && <div style={{ color: "var(--text-muted)" }}>{note.text}</div>}
         </>
       )}
     </div>
@@ -692,7 +706,15 @@ function AddressButton({
       onClick={(e) => onOpen(e.ctrlKey || e.metaKey)}
       title={title}
       style={{
-        flex: "none",
+        // Shrinkable, never row-blowing: a reviewFirst address can run to
+        // REVIEW_FIRST_CAP chars, so it ellipsizes like the kit's other rows.
+        flex: "0 1 auto",
+        minWidth: 0,
+        maxWidth: "100%",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+        textAlign: "left",
         background: "none",
         border: "none",
         padding: 0,
@@ -717,7 +739,21 @@ function AddressButton({
  *  path, a malformed surface query — prints as plain text, no link. The
  *  caller resolves; this component only draws. */
 function EvidenceAddress({ address, target }: { address: string; target: OpenableArtifact | null }) {
-  if (!target) return <span style={{ color: "var(--text-primary)", flex: "none" }}>{address}</span>;
+  if (!target)
+    return (
+      <span
+        style={{
+          color: "var(--text-primary)",
+          flex: "0 1 auto",
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {address}
+      </span>
+    );
   const title =
     target.kind === "surface"
       ? `open ${target.project} / ${target.page}${target.params ? " in that state" : ""} beside this thread (Ctrl+click: full width)`
