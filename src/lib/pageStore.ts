@@ -41,7 +41,14 @@ export const DONE_FOLD = 10;
 
 // ── File shapes ──────────────────────────────────────────────────────────────
 
-export type PageTurn = { at: string; lines: string[] };
+export type PageTurn = {
+  at: string;
+  lines: string[];
+  /** SWIT-67: the ONE thing to look at first when a turn opened or produced
+   *  more than one — an evidence-style address, rendered as `start here →`
+   *  directly under the page summary. Absent on most turns. */
+  reviewFirst?: string;
+};
 export type PageEvidence = {
   /** The dedupe key and the link — `SWIT-43`, `switchboard #61`, a path. */
   address: string;
@@ -135,7 +142,12 @@ export function parsePageFile(raw: string): PageFile {
         .filter((l): l is string => typeof l === "string" && l.trim().length > 0)
         .slice(0, TURN_LINE_CAP);
       if (lines.length === 0) continue;
-      turns.push({ at: str(t.at) ?? "", lines });
+      const reviewFirst = str(t.reviewFirst);
+      turns.push(
+        reviewFirst !== null
+          ? { at: str(t.at) ?? "", lines, reviewFirst }
+          : { at: str(t.at) ?? "", lines }
+      );
       if (turns.length >= TURN_CAP) break;
     }
   }
@@ -297,11 +309,13 @@ export type AnsweredQuestion = { question: PageQuestion; answer: PageAnswer };
 export type RenderedPage = {
   theme: string | null;
   /** NEEDS YOU, in rail order: open questions first, then requests from other
-   *  threads, then to-do items owned by the user. */
+   *  threads, then the items WAITING ON THE USER — owned by the user, or in
+   *  state `waiting` (SWIT-69: such an item appears ONCE, here, and is
+   *  excluded from To do). */
   openQuestions: PageQuestion[];
   requests: InboxPost[];
   userItems: PageItem[];
-  /** TO DO — every open (non-done) item, page order. */
+  /** TO DO — the open (non-done) items NOT already under Needs You. */
   openItems: PageItem[];
   /** WHAT HAPPENED — the latest turn; earlier ones folded behind a count.
    *  Cross-thread updates ride here too, tagged with their origin. */
@@ -341,7 +355,11 @@ export function mergePage(page: PageFile, answers: AnswersFile, inbox: InboxPost
   const answeredQuestions: AnsweredQuestion[] = page.questions
     .filter((q) => q.id in answers)
     .map((q) => ({ question: q, answer: answers[q.id] }));
-  const openItems = page.items.filter((i) => i.state !== "done");
+  const openAll = page.items.filter((i) => i.state !== "done");
+  // SWIT-69: an item waiting on the user renders ONCE, under Needs You —
+  // owned by the user, or parked in `waiting`. To do gets the rest.
+  const userItems = openAll.filter((i) => i.owner === "user" || i.state === "waiting");
+  const openItems = openAll.filter((i) => !userItems.includes(i));
   const doneAll = page.items.filter((i) => i.state === "done");
   const doneItems = doneAll.slice(0, DONE_FOLD);
   const requests = inbox.filter((p) => p.kind === "request");
@@ -366,7 +384,7 @@ export function mergePage(page: PageFile, answers: AnswersFile, inbox: InboxPost
     theme: page.theme,
     openQuestions,
     requests,
-    userItems: openItems.filter((i) => i.owner === "user"),
+    userItems,
     openItems,
     latestTurn: page.turns[0] ?? null,
     earlierTurns: page.turns.slice(1),
@@ -385,6 +403,17 @@ export function mergePage(page: PageFile, answers: AnswersFile, inbox: InboxPost
       inbox.length === 0,
   };
   return merged;
+}
+
+/** SWIT-68: the one-paragraph SUMMARY at the top of the page — the theme line
+ *  plus the newest turn's first line, plain text, no label. Null when neither
+ *  exists (the empty-page state covers that). Pure. */
+export function pageSummary(page: RenderedPage): string | null {
+  const parts: string[] = [];
+  if (page.theme) parts.push(page.theme);
+  const first = page.latestTurn?.lines[0];
+  if (first && first !== page.theme) parts.push(first);
+  return parts.length > 0 ? parts.join(" ") : null;
 }
 
 // ── New-since-you-looked (device-local — R2, Ky's rule verbatim) ─────────────

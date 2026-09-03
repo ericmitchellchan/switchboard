@@ -66,6 +66,7 @@ import {
   getThreadsView,
   publishMenuSessions,
   publishThreadUnread,
+  publishThreadQuestions,
   resolveThreadByQuery,
   activeThreads,
 } from "./lib/threadStore";
@@ -1404,6 +1405,9 @@ export default function App() {
         await drainBacklogInbox();
         const threads = activeThreads(getThreads());
         const unread: Record<string, number> = {};
+        // SWIT-69: open-question counts ride the same pass — the rail row's
+        // dim `· N` marker (the filled `?` chip is retired; words, not glyphs).
+        const questions: Record<string, number> = {};
         for (const t of threads) {
           const sessionId = t.sessionId;
           const live =
@@ -1420,6 +1424,18 @@ export default function App() {
           if (live && sessionId !== null && noteScanWriteCount(t.id, getSessionWriteCount(sessionId))) {
             const text = plainTextTerminal(sessionId);
             if (text !== null) scanThreadTranscript(t.id, text);
+          }
+          try {
+            const [pageRaw, answersRaw] = await Promise.all([
+              readThreadFile(t.id, "page.json"),
+              readThreadFile(t.id, "answers.json"),
+            ]);
+            if (cancelled) return;
+            const answers = parseAnswersFile(answersRaw);
+            const n = parsePageFile(pageRaw).questions.filter((q) => !(q.id in answers)).length;
+            if (n > 0) questions[t.id] = n;
+          } catch {
+            // no page yet — no marker
           }
           let posts;
           try {
@@ -1450,7 +1466,10 @@ export default function App() {
             );
           }
         }
-        if (!cancelled) publishThreadUnread(unread);
+        if (!cancelled) {
+          publishThreadUnread(unread);
+          publishThreadQuestions(questions);
+        }
       } finally {
         busy = false;
       }
@@ -1550,7 +1569,8 @@ export default function App() {
   // ── View intents (SWIT-50) ─────────────────────────────────────────────────
   // How an agent's `view show` becomes a panel tab with no push channel: the
   // ACTIVE thread's views/ dir is polled at the pins cadence, and an id not
-  // seen before opens as a pinned view tab. The FIRST listing per thread is a
+  // seen before opens INTO THE PREVIEW SLOT (SWIT-69: agent-driven opens
+  // replace the one preview, never append). The FIRST listing per thread is a
   // BASELINE (marked seen, nothing opened): a revived thread's old views are
   // scratch surfaces that were gone by design, and re-opening them all on
   // revive would be the billion-tabs failure wearing a new hat. Per-thread
@@ -1561,12 +1581,10 @@ export default function App() {
   // the next `sessions` churn (status flips land within seconds) rather than
   // instantly. Deliberate: a threadStore subscription here would re-render
   // App on every thread bump for a seconds-level win.
+  // SWIT-67: questions no longer open a tab — the ✦ page's Open questions
+  // section is the answering surface (the `question` artifact kind stays in
+  // the build for restored workspaces; nothing creates it any more).
   const seenViewsRef = useRef(new Map<string, Set<string>>());
-  // Question intents (SWIT-51): OPEN questions get a tab. Unlike views there
-  // is NO baseline — an unanswered question from before this app session
-  // still needs Eric, so it opens once per session; closing it unanswered is
-  // respected (the seen set), and the app never types a question anywhere.
-  const seenQuestionsRef = useRef(new Map<string, Set<string>>());
   useEffect(() => {
     if (route.screen !== "terminal" || !activeSessionId) return;
     const thread = findThreadBySessionId(activeSessionId);
@@ -1589,27 +1607,14 @@ export default function App() {
           for (const viewId of ids) {
             if (seen.has(viewId)) continue;
             seen.add(viewId);
-            log.info(`View intent: thread=${threadId} view=${viewId} — opening in the panel`);
-            openInPanel(sessionId, { kind: "view", threadId, viewId });
+            log.info(`View intent: thread=${threadId} view=${viewId} — opening in the preview slot`);
+            // THE TAB BUDGET (SWIT-69, Eric: "only one or two tabs open"):
+            // an AGENT-driven open takes the ONE preview slot, replacing what
+            // was there — never a pinned append. A view Eric pins (double-
+            // click) stays pinned; every view stays reachable from the page's
+            // Evidence `views` group.
+            openInPanel(sessionId, { kind: "view", threadId, viewId }, { preview: true });
           }
-        }
-        // OPEN questions (SWIT-51) — same tick, same files the page reads.
-        const [pageRaw, answersRaw] = await Promise.all([
-          readThreadFile(threadId, "page.json"),
-          readThreadFile(threadId, "answers.json"),
-        ]);
-        if (cancelled) return;
-        const answers = parseAnswersFile(answersRaw);
-        let seenQ = seenQuestionsRef.current.get(threadId);
-        if (!seenQ) {
-          seenQ = new Set();
-          seenQuestionsRef.current.set(threadId, seenQ);
-        }
-        for (const q of parsePageFile(pageRaw).questions) {
-          if (q.id in answers || seenQ.has(q.id)) continue;
-          seenQ.add(q.id);
-          log.info(`Question intent: thread=${threadId} question=${q.id} — opening the tab`);
-          openInPanel(sessionId, { kind: "question", threadId, questionId: q.id });
         }
       } catch {
         // A failed listing is a quiet tick — the next one retries.

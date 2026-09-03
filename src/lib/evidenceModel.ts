@@ -15,6 +15,9 @@
 //     where precedence lives. page.json is NEVER written by the app — the
 //     scanned rows are synthesized at render time exactly like the
 //     `decision:<id>` rows in pageStore.mergePage (one writer per file).
+//   · `mergeViewEvidence` (SWIT-69, the tab budget) folds the thread's view
+//     specs in as `view:<id>` rows — every view stays reachable from the
+//     ledger even though only ONE preview tab is open at a time.
 //   · `resolveDocTarget` is the doc/file row's link rule: a KB doc resolves
 //     against the REAL doc list, a repo file resolves syntactically against
 //     the thread's own project (v1 — the charset is tight and `..` never
@@ -32,6 +35,7 @@ export type EvidenceKind =
   | "pr"
   | "page"
   | "decision"
+  | "view"
   | "doc"
   | "file"
   | "other";
@@ -59,6 +63,7 @@ export function evidenceKindOf(address: string): EvidenceKind {
   const a = address.trim();
   if (a.startsWith("decision:")) return "decision";
   if (a.startsWith("surface:")) return "page";
+  if (a.startsWith("view:")) return "view";
   if (TICKET_ADDRESS.test(a)) return "ticket";
   if (PR_ADDRESS.test(a)) return "pr";
   if (isPathShaped(a)) {
@@ -81,6 +86,7 @@ export type EvidenceGroupId =
   | "docs"
   | "files"
   | "pages"
+  | "views"
   | "decisions"
   | "other";
 
@@ -98,6 +104,7 @@ const KIND_GROUP: Record<Exclude<EvidenceKind, never>, Exclude<EvidenceGroupId, 
   doc: "docs",
   file: "files",
   page: "pages",
+  view: "views",
   decision: "decisions",
   other: "other",
 };
@@ -109,6 +116,7 @@ const GROUP_ORDER: EvidenceGroupId[] = [
   "docs",
   "files",
   "pages",
+  "views",
   "decisions",
   "other",
 ];
@@ -175,6 +183,50 @@ export function mergeScannedEvidence(
     extra.push({ address: s.address, label: "", status: SCANNED_STATUS, updatedAt: s.at });
   }
   return [...agentRows, ...extra].sort(byNewest);
+}
+
+// ── The thread's views as ledger rows (SWIT-69 — the tab budget) ─────────────
+// Every view the agent ever showed stays reachable from the page: one row per
+// spec on disk, address `view:<viewId>`, label = the view's title. Synthesized
+// at render time like the scanned rows — page.json is never written — and an
+// agent-posted row at the same address WINS (same precedence as the scan).
+
+export type ThreadViewRow = {
+  id: string;
+  title: string;
+  /** The spec's builtAt ISO stamp — the row's clock. */
+  builtAt: string;
+};
+
+/** The address a view row carries (and the prefix `evidenceKindOf` reads). */
+export function viewAddress(viewId: string): string {
+  return `view:${viewId}`;
+}
+
+/** The bare view id behind a `view:` address, or null. */
+export function viewIdOfAddress(address: string): string | null {
+  const a = address.trim();
+  if (!a.startsWith("view:")) return null;
+  const id = a.slice("view:".length);
+  return /^[A-Za-z0-9_-]{1,64}$/.test(id) ? id : null;
+}
+
+/** Fold the thread's view specs under the evidence rows: one synthesized row
+ *  per view NOT already addressed by the agent, newest-first overall (the
+ *  same merge shape as `mergeScannedEvidence`). */
+export function mergeViewEvidence(
+  rows: readonly PageEvidence[],
+  views: readonly ThreadViewRow[]
+): PageEvidence[] {
+  const posted = new Set(rows.map((r) => r.address));
+  const extra: PageEvidence[] = [];
+  for (const v of views) {
+    const address = viewAddress(v.id);
+    if (posted.has(address)) continue;
+    posted.add(address);
+    extra.push({ address, label: v.title, status: null, updatedAt: v.builtAt });
+  }
+  return [...rows, ...extra].sort(byNewest);
 }
 
 // ── Doc/file row → artifact (the link rule) ──────────────────────────────────

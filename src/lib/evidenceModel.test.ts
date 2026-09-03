@@ -7,7 +7,10 @@ import {
   groupEvidence,
   isPathShaped,
   mergeScannedEvidence,
+  mergeViewEvidence,
   resolveDocTarget,
+  viewAddress,
+  viewIdOfAddress,
   RECENT_CAP,
   SCANNED_STATUS,
 } from "./evidenceModel";
@@ -100,9 +103,35 @@ describe("groupEvidence", () => {
     expect(groups.find((g) => g.id === "tickets")?.count).toBe(12);
   });
 
-  it("gives decisions and pages their own groups", () => {
-    const groups = groupEvidence([row("decision:q1"), row("surface:lodestar/trading")]);
-    expect(groups.map((g) => g.id)).toEqual(["recent", "pages", "decisions"]);
+  it("gives decisions, pages and views their own groups", () => {
+    const groups = groupEvidence([row("decision:q1"), row("surface:lodestar/trading"), row("view:v3")]);
+    expect(groups.map((g) => g.id)).toEqual(["recent", "pages", "views", "decisions"]);
+  });
+});
+
+describe("view rows (SWIT-69 — the tab budget's ledger half)", () => {
+  it("evidenceKindOf reads the view: prefix; viewIdOfAddress holds the id alphabet", () => {
+    expect(evidenceKindOf("view:v1")).toBe("view");
+    expect(viewAddress("v1")).toBe("view:v1");
+    expect(viewIdOfAddress("view:v1")).toBe("v1");
+    expect(viewIdOfAddress("view:no spaces!")).toBeNull();
+    expect(viewIdOfAddress("view:")).toBeNull();
+    expect(viewIdOfAddress("SWIT-64")).toBeNull();
+  });
+
+  it("mergeViewEvidence synthesizes a row per spec; an agent-posted row at the same address wins", () => {
+    const agent = row("view:v1", { label: "the agent's words", status: "kept", updatedAt: "2026-09-01T12:00:00Z" });
+    const out = mergeViewEvidence(
+      [agent],
+      [
+        { id: "v1", title: "ignored — agent wins", builtAt: "2026-09-01T10:00:00Z" },
+        { id: "v2", title: "Flow anomalies", builtAt: "2026-09-01T11:00:00Z" },
+      ]
+    );
+    expect(out).toEqual([
+      agent,
+      { address: "view:v2", label: "Flow anomalies", status: null, updatedAt: "2026-09-01T11:00:00Z" },
+    ]);
   });
 });
 

@@ -461,14 +461,16 @@ export function describeArtifact(artifact: Artifact): ArtifactDescription {
     }
     case "page":
       // The ✦ page (SWIT-48). The thread's TITLE is what the breadcrumb bar
-      // above already prints — the header stays generic and short.
+      // above already prints — the header stays generic and short. The title
+      // is the hover LEGEND for the `✦` mark (SWIT-69: surviving glyphs get
+      // a worded `title`).
       return {
         icon: FILE_ICON,
         crumbs: [
           { text: "thread", tone: "dim" },
           { text: "✦ page", tone: "bright" },
         ],
-        title: "the thread's page",
+        title: "✦ — the thread's living page: questions, plan, evidence",
       };
     case "view":
       return {
@@ -483,11 +485,14 @@ export function describeArtifact(artifact: Artifact): ArtifactDescription {
           : `view / ${artifact.viewId}`,
       };
     case "question":
+      // SWIT-69 (words, not glyphs): no `?` mark — the word says what it is.
+      // Legacy kind: nothing creates these since SWIT-67 (questions answer on
+      // the page), but a restored strip may still hold one.
       return {
         icon: FILE_ICON,
         crumbs: [
           { text: "thread", tone: "dim" },
-          { text: "? question", tone: "bright" },
+          { text: "question", tone: "bright" },
         ],
         title: "a question from the agent",
       };
@@ -709,7 +714,7 @@ export function artifactShortTitle(artifact: Artifact): string {
   if (artifact.kind === "view") {
     return artifact.drill ? `${artifact.viewId} › ${artifact.drill.key}` : artifact.viewId;
   }
-  if (artifact.kind === "question") return "? question";
+  if (artifact.kind === "question") return "question";
   // A surface's short title is its page LABEL (the same word the header's
   // last crumb prints), not a path — it has none.
   if (artifact.kind === "surface") {
@@ -1028,7 +1033,7 @@ export function notePanelThreadBinding(sessionId: string): void {
   );
   if (panelSides.has(from)) {
     panelSides = new Map(panelSides);
-    if (!panelSides.has(to)) panelSides.set(to, "left");
+    if (!panelSides.has(to)) panelSides.set(to, panelSides.get(from)!);
     panelSides.delete(from);
     changed = true;
   }
@@ -1121,18 +1126,34 @@ let previewBacks = new Map<string, Artifact[]>();
 let lastPanelStates = new Map<string, PanelState>();
 
 // ── Panel SIDE per tab (SWIT-33 — Ky's SplitView "Swap", in this panel) ──────
-// Right is the default and is not stored; the map holds only the tabs whose
-// panel sits on the LEFT of the pane tree. Per TAB, like the strip itself,
-// and persisted with the workspace (`panelSides`) so a flipped tab comes back
-// flipped. Not part of PanelState on purpose: every strip op builds a fresh
-// PanelState literal, and threading a `side` field through all of them would
-// be a dozen places to forget — while the side is one bit that outlives the
-// strip (a tab keeps its side across close + Ctrl+Shift+P reopen).
+// Right is the default; the map holds only tabs whose side was EXPLICITLY set
+// (a `⇄` toggle, or the surfaces-left default below) — both values, because
+// "never set" and "set back to right" must stay distinguishable: a SURFACE
+// opening into a never-set tab defaults that tab LEFT (SWIT-69's fifth rule,
+// Eric: "the lodestar page should always be pinned to the left side"), and a
+// user's `⇄` afterwards wins forever precisely because it writes the map.
+// Per TAB, like the strip itself, and persisted with the workspace
+// (`panelSides`) so a flipped tab comes back flipped. Not part of PanelState
+// on purpose: every strip op builds a fresh PanelState literal, and threading
+// a `side` field through all of them would be a dozen places to forget —
+// while the side is one bit that outlives the strip (a tab keeps its side
+// across close + Ctrl+Shift+P reopen).
 export type PanelSide = "left" | "right";
-let panelSides = new Map<string, "left">();
+let panelSides = new Map<string, PanelSide>();
 
 export function panelSideFor(sessionId: string | null): PanelSide {
-  return sessionId && panelSides.has(ownerKeyFor(sessionId)) ? "left" : "right";
+  return (sessionId && panelSides.get(ownerKeyFor(sessionId))) || "right";
+}
+
+/** The side a fresh open should WRITE for its tab, or null for "leave it".
+ *  PURE (SWIT-69, rule 5): a surface artifact opening into a tab with no
+ *  explicit side defaults that tab LEFT; an explicit side — either value —
+ *  is the user's and is never touched. */
+export function sideOnOpen(
+  kind: Artifact["kind"],
+  explicit: PanelSide | undefined
+): PanelSide | null {
+  return kind === "surface" && explicit === undefined ? "left" : null;
 }
 
 export function usePanelSide(sessionId: string | null): PanelSide {
@@ -1140,11 +1161,12 @@ export function usePanelSide(sessionId: string | null): PanelSide {
 }
 
 export function setPanelSide(sessionId: string, side: PanelSide): void {
-  if (panelSideFor(sessionId) === side) return;
   const key = ownerKeyFor(sessionId);
+  // Explicit both ways: a "right" is RECORDED, not deleted, so the surface
+  // default above cannot re-flip a tab the user deliberately put back.
+  if (panelSides.get(key) === side) return;
   panelSides = new Map(panelSides);
-  if (side === "left") panelSides.set(key, "left");
-  else panelSides.delete(key);
+  panelSides.set(key, side);
   bump();
 }
 
@@ -1152,23 +1174,26 @@ export function togglePanelSide(sessionId: string): void {
   setPanelSide(sessionId, panelSideFor(sessionId) === "left" ? "right" : "left");
 }
 
-/** Lean record for the workspace blob: only the left-side THREAD panels,
- *  keyed by thread id (a shell's side is transient, like its strip). */
-export function getPanelSidesRecord(): Record<string, "left"> {
-  const out: Record<string, "left"> = {};
-  for (const key of panelSides.keys()) {
-    if (isThreadKey(key)) out[threadIdOfKey(key)] = "left";
+/** Lean record for the workspace blob: the EXPLICITLY-set THREAD panel sides,
+ *  both values, keyed by thread id (a shell's side is transient, like its
+ *  strip). "right" entries matter: they are the user's ⇄ overriding the
+ *  surfaces-left default, and dropping them would re-flip the tab at restore. */
+export function getPanelSidesRecord(): Record<string, PanelSide> {
+  const out: Record<string, PanelSide> = {};
+  for (const [key, side] of panelSides) {
+    if (isThreadKey(key)) out[threadIdOfKey(key)] = side;
   }
   return out;
 }
 
-/** Tolerant parse of a saved `panelSides` record: keeps `"left"` entries with
- *  non-empty keys, drops everything else — a stranger value is "right". */
-export function parsePanelSides(raw: unknown): Record<string, "left"> {
-  const out: Record<string, "left"> = {};
+/** Tolerant parse of a saved `panelSides` record: keeps `"left"` / `"right"`
+ *  entries with non-empty keys, drops everything else. An old blob (left-only)
+ *  parses unchanged — its unset tabs simply take the surface default. */
+export function parsePanelSides(raw: unknown): Record<string, PanelSide> {
+  const out: Record<string, PanelSide> = {};
   if (!isRecord(raw)) return out;
   for (const [key, value] of Object.entries(raw)) {
-    if (key.length > 0 && value === "left") out[key] = "left";
+    if (key.length > 0 && (value === "left" || value === "right")) out[key] = value;
   }
   return out;
 }
@@ -1178,7 +1203,7 @@ export function parsePanelSides(raw: unknown): Record<string, "left"> {
  *  here. */
 export function initPanelSides(initial: unknown): void {
   panelSides = new Map(
-    Object.keys(parsePanelSides(initial)).map((threadId) => [`t:${threadId}`, "left" as const])
+    Object.entries(parsePanelSides(initial)).map(([threadId, side]) => [`t:${threadId}`, side])
   );
   bump();
 }
@@ -1493,6 +1518,16 @@ export function openInPanel(
     return;
   }
   const key = ownerKeyFor(sessionId);
+  // SWIT-69 rule 5: a SURFACE opening into a tab whose side was never
+  // explicitly set defaults that tab's panel LEFT — written into the map so
+  // it persists; the user's `⇄` (either direction) is explicit and wins
+  // forever. `sideOnOpen` is the pure rule.
+  const defaultSide = sideOnOpen(clean.kind, panelSides.get(key));
+  if (defaultSide !== null) {
+    panelSides = new Map(panelSides);
+    panelSides.set(key, defaultSide);
+    bump();
+  }
   if (clean.kind === "session") {
     // ONE SESSION, ONE HOME (increment H). A live shell must not be listed in
     // two strips: only one panel renders at a time, so it would not produce two
@@ -1994,9 +2029,9 @@ export function remapPanelSessions(idMap: Map<string, string>, threadIds: Readon
   panels = next;
   // Sides: thread-keyed sides survive with their thread, everything else goes.
   {
-    const sides = new Map<string, "left">();
-    for (const key of panelSides.keys()) {
-      if (isThreadKey(key) && threadIds.has(threadIdOfKey(key))) sides.set(key, "left");
+    const sides = new Map<string, PanelSide>();
+    for (const [key, side] of panelSides) {
+      if (isThreadKey(key) && threadIds.has(threadIdOfKey(key))) sides.set(key, side);
     }
     panelSides = sides;
   }

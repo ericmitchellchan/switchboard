@@ -18,10 +18,11 @@
 // Rows are dense 11.5px: status dot + title + a DIM PROJECT SUFFIX in flat
 // mode (tabLabel.tabRepoSuffix's rule, so `switchboard · Sep 1` does not print
 // the project twice) + the `⋯` menu, which appears on HOVER/FOCUS only. No
-// chips except `↓ N` (unread posts), `?` (agent waiting) and `⟳ booting…`
-// (the revive-boot window) — the status dot's statusConfig color is the ONLY
-// color allowed; a dead row is the exited color and no chip: clicking it
-// revives.
+// chips except `↓ N` (unread posts), a dim `· N` open-question count with a
+// worded tooltip (SWIT-69 — the filled `?` glyph chip is retired; the waiting
+// state lives in the status dot) and `booting…` (the revive-boot window) —
+// the status dot's statusConfig color is the ONLY color allowed; a dead row
+// is the exited color and no chip: clicking it revives.
 //
 // FLAT in bare mode: live threads first, then most recent by last activity,
 // capped by selectMenuThreads' rule (a live thread is never truncated out —
@@ -157,6 +158,7 @@ export function ThreadsSection({ repos }: { repos: readonly RepoConfig[] }) {
       status={t.sessionId ? view.sessionStatuses[t.sessionId] : undefined}
       active={t.sessionId !== null && t.sessionId === view.activeSessionId}
       unread={view.unreadPosts[t.id] ?? 0}
+      questions={view.openQuestions[t.id] ?? 0}
       suffix={withSuffix ? tabRepoSuffix(t.title, threadRepoName(t.workingDir)) : null}
       renameRequested={view.renameRequest === t.id}
     />
@@ -322,6 +324,7 @@ function ThreadRow({
   status,
   active,
   unread,
+  questions,
   suffix,
   renameRequested,
 }: {
@@ -333,6 +336,9 @@ function ThreadRow({
   active: boolean;
   /** Unread cross-thread posts (`↓ N`, SWIT-52). */
   unread: number;
+  /** Open page questions (SWIT-69) — the dim `· N` count with its worded
+   *  tooltip; the filled `?` glyph chip is retired. */
+  questions: number;
   /** The dim project name after the title (flat mode), already de-duplicated
    *  against the title by tabLabel; null draws nothing (grouped mode, or a
    *  title that leads with the project). */
@@ -446,8 +452,10 @@ function ThreadRow({
           {suffix}
         </span>
       )}
-      {/* Chips: `↓ N` (unread posts), then `?` (agent waiting on you) or
-          booting. No revive chip (SWIT-56): the dot says dead, the click
+      {/* Chips: `↓ N` (unread posts), the dim `· N` open-question count
+          (SWIT-69 — words, not glyphs: the tooltip says what N counts; the
+          filled `?` chip is retired, the waiting status lives in the dot),
+          or booting. No revive chip (SWIT-56): the dot says dead, the click
           revives. */}
       {unread > 0 && (
         <span style={{ ...CHIP_STYLE, color: "var(--text-primary)", borderColor: "var(--text-secondary)" }}>
@@ -455,18 +463,13 @@ function ThreadRow({
         </span>
       )}
       {booting ? (
-        <span style={CHIP_STYLE}>⟳ booting…</span>
-      ) : live && status === "waiting" ? (
+        <span style={CHIP_STYLE}>booting…</span>
+      ) : questions > 0 ? (
         <span
-          style={{
-            ...CHIP_STYLE,
-            background: STATUS_CONFIGS.waiting.color,
-            color: "#0C0C0E",
-            borderColor: "transparent",
-            fontWeight: 600,
-          }}
+          title={`${questions} open question${questions === 1 ? "" : "s"}`}
+          style={{ flex: "none", fontSize: 9.5, color: "var(--text-dim)", whiteSpace: "nowrap" }}
         >
-          ?
+          · {questions}
         </span>
       ) : null}
       {/* RESERVED SLOT, not conditional rendering: the `⋯` occupies its width

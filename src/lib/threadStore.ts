@@ -878,6 +878,10 @@ export type ThreadsView = {
   /** Unread cross-thread posts per thread id — the `↓ N` chip. RENDER-SIDE
    *  ONLY until SWIT-52 publishes real counts; empty means no chip. */
   unreadPosts: Readonly<Record<string, number>>;
+  /** OPEN page questions per thread id (SWIT-69 — words, not glyphs): the
+   *  rail's dim `· N` count with its `N open question(s)` tooltip, published
+   *  by App's 5s page pass. Empty = no marker. */
+  openQuestions: Readonly<Record<string, number>>;
   /** A thread whose title should be in INLINE RENAME the moment its row
    *  renders (SWIT-56: the header `+` creates first and asks for the name
    *  second). Consumed — cleared — by the row that honours it; ALSO cleared
@@ -895,6 +899,7 @@ let sessionStatuses: Record<string, AgentStatus> = {};
 let activeSessionId: string | null = null;
 let menuSessions: readonly MenuSession[] = [];
 let unreadPosts: Record<string, number> = {};
+let openQuestions: Record<string, number> = {};
 let renameRequest: string | null = null;
 
 const listeners = new Set<() => void>();
@@ -934,6 +939,7 @@ export function getThreadsView(): ThreadsView {
       activeSessionId,
       menuSessions,
       unreadPosts,
+      openQuestions,
       renameRequest,
     };
   }
@@ -1312,6 +1318,13 @@ export function publishThreadUnread(counts: Record<string, number>): void {
   bump();
 }
 
+/** Open page questions per thread (SWIT-69): the rail row's dim `· N` count.
+ *  Published by App's 5s page pass beside the unread counts. */
+export function publishThreadQuestions(counts: Record<string, number>): void {
+  openQuestions = counts;
+  bump();
+}
+
 // ── Actions bridge ───────────────────────────────────────────────────────────
 // App owns session creation/revival; ThreadsSection renders deep inside
 // SideMenu. Rather than threading callbacks through SideMenu's props, App
@@ -1382,6 +1395,7 @@ export function __resetThreadStoreForTests(): void {
   activeSessionId = null;
   menuSessions = [];
   unreadPosts = {};
+  openQuestions = {};
   renameRequest = null;
   cachedView = null;
   threadActions = null;

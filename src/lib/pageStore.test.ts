@@ -21,6 +21,7 @@ import {
   orderedOptions,
   decisionAddress,
   conventionLine,
+  pageSummary,
 } from "./pageStore";
 import type { PageQuestion } from "./pageStore";
 
@@ -173,12 +174,19 @@ describe("mergePage", () => {
     expect(merged.answeredQuestions[0].answer.text).toBe("yes");
   });
 
-  it("splits items: user-owned open items under Needs You, done folded", () => {
+  it("splits items ONCE (SWIT-69): user-owned and waiting items under Needs You, the rest under To do, done folded", () => {
     const merged = mergePage(page, {}, []);
     expect(merged.userItems.map((i) => i.id)).toEqual(["i2"]);
-    expect(merged.openItems.map((i) => i.id)).toEqual(["i1", "i2"]);
+    expect(merged.openItems.map((i) => i.id)).toEqual(["i1"]); // no duplication
     expect(merged.doneItems.map((i) => i.id)).toEqual(["i3"]);
     expect(merged.doneFolded).toBe(0);
+    // A `waiting` item is waiting ON THE USER — Needs You, whoever owns it.
+    const waiting = parsePageFile(
+      JSON.stringify({ items: [{ id: "w1", title: "t", owner: "agent", state: "waiting" }] })
+    );
+    const m2 = mergePage(waiting, {}, []);
+    expect(m2.userItems.map((i) => i.id)).toEqual(["w1"]);
+    expect(m2.openItems).toEqual([]);
   });
 
   it("folds done past DONE_FOLD", () => {
@@ -199,6 +207,28 @@ describe("mergePage", () => {
     const merged = mergePage(page, {}, []);
     expect(merged.latestTurn?.lines[0]).toBe("Latest turn.");
     expect(merged.earlierTurns).toHaveLength(1);
+  });
+
+  it("a turn's reviewFirst parses through and rides the latest turn (SWIT-67)", () => {
+    const p = parsePageFile(
+      JSON.stringify({
+        turns: [
+          { at: "t2", lines: ["Newest."], reviewFirst: "surface:lodestar/trading?instrument=NQ" },
+          { at: "t1", lines: ["Older."], reviewFirst: 7 }, // wrong type drops alone
+        ],
+      })
+    );
+    expect(p.turns[0].reviewFirst).toBe("surface:lodestar/trading?instrument=NQ");
+    expect(p.turns[1].reviewFirst).toBeUndefined();
+    expect(mergePage(p, {}, []).latestTurn?.reviewFirst).toBe("surface:lodestar/trading?instrument=NQ");
+  });
+
+  it("pageSummary is the theme + the newest turn's first line, plain (SWIT-68)", () => {
+    const merged = mergePage(page, {}, []);
+    expect(pageSummary(merged)).toBe("Give every market an anchor Latest turn.");
+    const themeOnly = mergePage(parsePageFile(JSON.stringify({ theme: "Just a theme" })), {}, []);
+    expect(pageSummary(themeOnly)).toBe("Just a theme");
+    expect(pageSummary(mergePage(EMPTY_PAGE, {}, []))).toBeNull();
   });
 
   it("inbox splits by kind: requests under Needs You, updates under What Happened", () => {

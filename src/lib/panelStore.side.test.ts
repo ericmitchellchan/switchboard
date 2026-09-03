@@ -6,7 +6,9 @@ import {
   __resetPanelStoreForTests,
   panelSideFor,
   setPanelSide,
+  sideOnOpen,
   togglePanelSide,
+  openInPanel,
   getPanelSidesRecord,
   parsePanelSides,
   initPanelSides,
@@ -27,34 +29,68 @@ describe("panel side", () => {
     expect(panelSideFor(null)).toBe("right");
   });
 
-  it("toggles per tab; the workspace record holds THREAD-bound left sides only (SWIT-47)", () => {
+  it("toggles per tab; the workspace record holds THREAD-bound EXPLICIT sides, both values (SWIT-69)", () => {
     setPanelThreadResolver((s) => (s === "t1" ? "th1" : null));
     togglePanelSide("t1");
     expect(panelSideFor("t1")).toBe("left");
     expect(panelSideFor("t2")).toBe("right");
     expect(getPanelSidesRecord()).toEqual({ th1: "left" });
+    // Toggling back records an EXPLICIT right — the user's ⇄ wins forever,
+    // so the surfaces-left default may never re-flip this tab.
     togglePanelSide("t1");
-    expect(getPanelSidesRecord()).toEqual({});
+    expect(panelSideFor("t1")).toBe("right");
+    expect(getPanelSidesRecord()).toEqual({ th1: "right" });
     // A SHELL's side works live but is transient — never persisted.
     togglePanelSide("t2");
     expect(panelSideFor("t2")).toBe("left");
-    expect(getPanelSidesRecord()).toEqual({});
+    expect(getPanelSidesRecord()).toEqual({ th1: "right" });
   });
 
-  it("setting the side it already has does not notify", () => {
+  it("setting the side an explicit entry already holds does not notify", () => {
     let n = 0;
     const off = subscribeToPanelStore(() => (n += 1));
-    setPanelSide("t1", "right");
-    expect(n).toBe(0);
     setPanelSide("t1", "left");
     expect(n).toBe(1);
+    setPanelSide("t1", "left");
+    expect(n).toBe(1);
+    setPanelSide("t1", "right");
+    expect(n).toBe(2);
+    setPanelSide("t1", "right");
+    expect(n).toBe(2);
     off();
   });
 
-  it("parsePanelSides keeps `left` entries and drops junk", () => {
-    expect(parsePanelSides({ a: "left", b: "right", c: 1, "": "left" })).toEqual({ a: "left" });
+  it("parsePanelSides keeps `left` and `right` entries and drops junk", () => {
+    expect(parsePanelSides({ a: "left", b: "right", c: 1, "": "left" })).toEqual({
+      a: "left",
+      b: "right",
+    });
     expect(parsePanelSides(undefined)).toEqual({});
     expect(parsePanelSides(["left"])).toEqual({});
+  });
+
+  it("sideOnOpen (pure): a surface into a never-set tab goes LEFT; explicit sides are untouched; other kinds never move it", () => {
+    expect(sideOnOpen("surface", undefined)).toBe("left");
+    expect(sideOnOpen("surface", "right")).toBeNull();
+    expect(sideOnOpen("surface", "left")).toBeNull();
+    expect(sideOnOpen("kb-doc", undefined)).toBeNull();
+    expect(sideOnOpen("view", undefined)).toBeNull();
+    expect(sideOnOpen("session", undefined)).toBeNull();
+  });
+
+  it("opening a surface defaults the tab's side LEFT and persists it; the user's ⇄ then wins", () => {
+    setPanelThreadResolver((s) => (s === "s1" ? "th1" : null));
+    openInPanel("s1", { kind: "surface", project: "lodestar", page: "trading" });
+    expect(panelSideFor("s1")).toBe("left");
+    expect(getPanelSidesRecord()).toEqual({ th1: "left" });
+    togglePanelSide("s1"); // the user puts it back
+    expect(panelSideFor("s1")).toBe("right");
+    openInPanel("s1", { kind: "surface", project: "lodestar", page: "markets" });
+    expect(panelSideFor("s1")).toBe("right"); // explicit right holds
+    // A non-surface open into a fresh tab moves nothing.
+    setPanelThreadResolver(() => null);
+    openInPanel("s2", { kind: "kb-doc", path: "notes.md" });
+    expect(panelSideFor("s2")).toBe("right");
   });
 
   it("seeds from a saved record (thread-keyed, SWIT-47) and survives restore with its thread", () => {

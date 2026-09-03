@@ -168,3 +168,31 @@ that stop being true.
   (`?` `○` `→`) are gone — dots are data and stay inline, the section label says
   what rows are. The question TAB's radio glyphs stay: they are the multiple-choice
   affordance, not decoration.
+- 2026-09-02 — QUESTIONS LIVE ON THE PAGE (SWIT-67, Eric driving a real Lodestar
+  thread: 2 questions + 7 views = 10 tabs). `ask` no longer opens a tab: the ✦ page's
+  Open questions section IS the answering surface (the same question block Home's
+  Needs-you card draws), collapsing to the decided line once answered. The `question`
+  artifact kind stays in the build for restored workspaces; nothing creates it. A
+  turn may name `reviewFirst` — one evidence-style address the page prints as
+  `start here →` directly under the summary.
+- 2026-09-02 — THE TAB BUDGET (SWIT-69, Eric: "only one or two tabs open — questions,
+  and then an artifact… start with one and the rest could be linked in the page or
+  ledger"). AGENT-driven opens (a `view show`, any agent-caused artifact) go through
+  the ONE preview slot, always replacing it — never a pinned append; a view the USER
+  pins stays pinned. Every view stays reachable: the page's Evidence lists the
+  thread's view specs as `view:<id>` rows (a `views` group), each opening in the
+  preview slot. Net strip = ✦ page + preview + user pins.
+- 2026-09-02 — SURFACES DEFAULT LEFT (Eric: "the lodestar page should always be
+  pinned to the left side"). A `surface` artifact opening into a tab whose side was
+  never explicitly set writes that tab's side LEFT (persisted via `panelSides`); the
+  user's `⇄` — either direction — is explicit and wins forever, which is why the side
+  map now records `right` too.
+- 2026-09-02 — WORDS, NOT GLYPHS; TYPE UPRIGHT ON THE PAGE (SWIT-68/69). Page section
+  titles are sentence case 12.5px `--text-primary` with the count dim beside them —
+  the uppercase faint label voice retired there (Home keeps its rule-with-label
+  headers). A one-paragraph summary (theme + newest turn's first line) tops the page,
+  unlabeled. Items are checkboxes `☐`/`☑` + text + a one-word status where not
+  obvious + owner right-aligned dim; the blue `⟳` and colored item dots are gone. A
+  waiting-on-you item appears ONCE, under Needs you. No `?` glyph anywhere: the
+  thread rail's question marker is a dim `· N` with a worded tooltip; `✦` stays as
+  the page tab's one identity mark, with a `title` legend.

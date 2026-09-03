@@ -93,7 +93,8 @@ The label over a side-menu band or a page section, with its right-end actions.
   label `font-mono text-[9px] uppercase tracking-[0.16em] text-txt-faint`; actions
   `See all` in the same voice + `+` at `text-[13px] leading-none px-1`, both
   `hover:text-accent`.
-- **Ours:** `ThreadsSection.BandHeader`, `SideMenu.SectionLabel`, `PageView.Section`.
+- **Ours:** `ThreadsSection.BandHeader`, `SideMenu.SectionLabel`. (The ✦ page's section
+  titles left this voice with SWIT-68 — see The page sections below.)
   Padding `10px 12px 4px` (side menu) / `0` (page section, the section gap does it).
   Label 9.5px uppercase, `letter-spacing: 1px`, `--text-dim`. Actions: same voice,
   `--text-dim` → `--text-primary` on hover; the count in parentheses `--text-faint`
@@ -194,14 +195,18 @@ it says so (a chip that toggles is a quiet button at chip size).
   `white-space: nowrap`, `flex: none`. Outlined zinc, not filled (conventions
   2026-08-01: count badges are bg `#151518` / 1px `#27272A` / text `#E4E4E7` — that is
   this chip in its EMPHASIS form: `--text-primary` on border `--text-secondary`, used
-  for `↓ N` unread). FUNCTIONAL chip: a `statusConfig` fill with `#0C0C0E` text weight
-  600 and no border — the `?` "agent waiting on you". Nothing else is filled.
+  for `↓ N` unread). Nothing is filled: the filled `?` "agent waiting" chip RETIRED with
+  SWIT-69 (words, not glyphs) — a thread's open questions are a dim 9.5px `· N` count
+  with a worded `title` (`1 open question`); the waiting state lives in the status dot.
 
 ## The question block
 
-What the `? question` tab draws (`QuestionView.tsx`): the question · options as a plain
-list · one input · one action. Nothing else — no glyph box, no note about where the
-answer goes (that is the spec's sentence, `requirements.md` R4).
+Where a question is ANSWERED: the ✦ page's Open questions section (`PageView.InlineQuestion`,
+SWIT-67 — `ask` no longer opens a tab) and Home's Needs-you card. The shape everywhere:
+the question · options as a plain list · one input · one action. Nothing else — no glyph
+box, no note about where the answer goes (that is the spec's sentence, `requirements.md`
+R4). `QuestionView.tsx` (the old `? question` tab) keeps the same shape for restored
+workspaces only.
 
 - **Ky:** `ky/chat/ChatTerminal.tsx` composer + permission strip (~1305–1330): the
   prompt as one line, `✓ Approve ↵` / `✕ Deny esc` as two buttons in a row, the
@@ -230,22 +235,32 @@ answer goes (that is the spec's sentence, `requirements.md` R4).
 
 ## The page sections
 
-The ✦ page (`PageView.tsx`): theme · needs you · to do · what happened · evidence ·
-questions · done. Every section is a band header + list rows; no section is a box.
+The ✦ page (`PageView.tsx`, re-cut SWIT-67/68/69): summary · open questions · needs you ·
+to do · what happened · evidence · questions · done. Every section is a title + list
+rows; no section is a box. Ky's thread panel is the reference: ONE page, everything on it.
 
 - **Ky:** `ky/todos/TodoPanel.tsx` (header + rows + one input), `ky/thread/LedgerPanel.tsx`
   for the ledger's section-then-rows rhythm, `ky/components/InfoNote.tsx` for the rule
   that explanatory prose is never resting on the page.
-- **Ours:** body padding `12px 14px`, 11px, `line-height: 1.55`, `--text-secondary`,
-  `gap: 14px` between sections. Theme: 12.5px `--text-primary`, no label. Section
-  title: the band header at padding 0 with its right-end meta. Rows: the dense list
-  row (`padding: 2px 0`) — leading 14px glyph column, title with ellipsis, trailing
-  9.5px `--text-dim` owner/status. A question row: `?` glyph in `--text-primary`, the
-  text, the options after it as 10px `--text-dim` separated by ` · `. A cross-thread
-  post: a 9.5px `--text-dim` origin line (`↓ <thread>`) then the text. What happened:
-  the latest turn as plain lines, `earlier (N) ▸` as a text link button. Evidence:
-  address `--text-primary` · label `--text-muted` · status `--text-dim`, 1px `--border`
-  hairline under each. NEW dot: 6px `--text-primary` circle after the item or title.
+- **Ours:** body padding `12px 14px`, 11px, `line-height: 1.45`, `--text-secondary`,
+  `gap: 26px` between sections (air between, tight within). SUMMARY at the top, no
+  label: the theme line + the newest turn's first line as one plain 11.5px
+  `--text-secondary` paragraph; under it, an optional `start here → <address>` line
+  (the turn's reviewFirst, drawn as the same link an Evidence row gets). SECTION
+  TITLE: sentence case, 12.5px `--text-primary`, upright — the count beside it in
+  11px `--text-dim` (`Open questions 1` · `To do 4`); the uppercase faint band-header
+  voice is RETIRED on this page (Home keeps its rule-with-label headers). An open
+  question renders the FULL question block in place (options as OptionRows between
+  hairlines, input, quiet `answer`) — option text stays `--text-primary`, brighter
+  than body. ITEM ROW (words, not glyphs): a checkbox `☐`/`☑` in the 14px glyph
+  column, title with ellipsis, then `waiting · you` style trailing meta — a one-word
+  status only where not obvious, owner right-aligned 9.5px `--text-dim`; no colored
+  glyph, no spinner. A cross-thread post: a 9.5px `--text-dim` origin line
+  (`↓ <thread>`) then the text. What happened: the latest turn as plain lines,
+  `earlier (N) ▸` as a text link button. Evidence: address `--text-primary` · label
+  `--text-muted` · status `--text-dim`, 1px `--border` hairline under each; the
+  thread's VIEWS appear here too (`view:<id>` rows, label = the view title) and open
+  in the preview slot. NEW dot: 6px `--text-primary` circle after the item or title.
 - Empty page: the `✦` glyph 14px `--text-muted` over ONE line, `No page yet.` Nothing
   about who writes it or when.
 - **Home (`Home.tsx`, SWIT-54 hierarchy pass)** is the same content at screen scale

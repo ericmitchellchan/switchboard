@@ -38,6 +38,8 @@ const TURN_LINE_CAP = 6;
 const EVIDENCE_CAP = 60;
 const QUESTION_CAP = 20;
 const TEXT_CAP = 500; // any single text field — a page line is a sentence, not a document
+const OPTION_CAP = 60; // an ask option is a short choice, not a paragraph (SWIT-69)
+const REVIEW_FIRST_CAP = 300; // a turn's reviewFirst is an ADDRESS, not prose (SWIT-67)
 /** SWIT-58: what an `ask` wants back. decision = a choice that shapes this
  *  work; convention = a standing rule (the app appends the answer to the
  *  design conventions file); info = a fact only the user knows. */
@@ -116,7 +118,19 @@ function applyOp(page, args, now, answeredIds = new Set()) {
         .map((l) => text(l, "a turn line"));
       if (lines.length === 0) throw new OpError("every line was empty");
       const kept = lines.slice(0, TURN_LINE_CAP);
-      const turns = [{ at, lines: kept }, ...page.turns].slice(0, TURN_CAP);
+      // SWIT-67: `reviewFirst` — the ONE address to look at first when the
+      // turn opened or produced more than one thing. Validated like an
+      // evidence address (a short non-empty string); rendered by the page as
+      // `start here →` under the summary.
+      let reviewFirst;
+      if (args.reviewFirst !== undefined && args.reviewFirst !== null) {
+        reviewFirst = text(args.reviewFirst, "reviewFirst");
+        if (reviewFirst.length > REVIEW_FIRST_CAP) {
+          throw new OpError(`reviewFirst is too long (${reviewFirst.length} chars; the cap is ${REVIEW_FIRST_CAP}) — it is an address (a ticket key, a path, surface:<project>/<page>, view:<id>), not prose`);
+        }
+      }
+      const turn = reviewFirst ? { at, lines: kept, reviewFirst } : { at, lines: kept };
+      const turns = [turn, ...page.turns].slice(0, TURN_CAP);
       const note =
         lines.length > TURN_LINE_CAP
           ? ` Kept the first ${TURN_LINE_CAP} lines — a turn is 2–5 plain lines; put detail in evidence rows.`
@@ -148,14 +162,18 @@ function applyOp(page, args, now, answeredIds = new Set()) {
     }
     case "ask": {
       const t = text(args.text, "text");
-      const open = page.questions.filter((q) => q && !answeredIds.has(q.id)).length;
-      if (open >= QUESTION_CAP) {
-        throw new OpError(`${QUESTION_CAP} questions are already OPEN on the page — wait for answers before asking more`);
-      }
       const options = Array.isArray(args.options)
         ? args.options
             .filter((o) => typeof o === "string" && o.trim().length > 0)
-            .map((o) => text(o, "an option"))
+            .map((o) => {
+              const opt = text(o, "an option");
+              // SWIT-69: an option is a SHORT choice — long ones wrap into
+              // paragraphs the multiple-choice list cannot carry.
+              if (opt.length > OPTION_CAP) {
+                throw new OpError(`an option is too long (${opt.length} chars; the cap is ${OPTION_CAP}) — keep options short; detail belongs in the question text`);
+              }
+              return opt;
+            })
             .slice(0, 6)
         : [];
       // SWIT-58 — a question says WHAT KIND of answer it wants and PROPOSES
@@ -180,8 +198,25 @@ function applyOp(page, args, now, answeredIds = new Set()) {
       const id = typeof args.id === "string" && args.id.trim().length > 0
         ? args.id.trim()
         : nextId(page.questions, "q");
-      if (page.questions.some((q) => q && q.id === id)) {
-        throw new OpError(`a question with id ${id} already exists — do not ask a question twice`);
+      const existingIndex = page.questions.findIndex((q) => q && q.id === id);
+      if (existingIndex >= 0) {
+        // SWIT-67 (supersede): re-asking an OPEN id REPLACES the question in
+        // place — the older text is superseded, no duplicate row. An ANSWERED
+        // id refuses: the decision already exists.
+        if (answeredIds.has(id)) {
+          throw new OpError(`question ${id} was already answered — its answer is evidence row decision:${id}; reuse it instead of re-asking`);
+        }
+        const questions = page.questions.map((q, i) =>
+          i === existingIndex ? { id, text: t, options, askedAt: at, kind, default: dflt } : q
+        );
+        return {
+          page: { ...page, questions },
+          message: `Question ${id} replaced on the page (superseded). Wait for the user's answer — it arrives as their next message and becomes evidence row decision:${id}.`,
+        };
+      }
+      const open = page.questions.filter((q) => q && !answeredIds.has(q.id)).length;
+      if (open >= QUESTION_CAP) {
+        throw new OpError(`${QUESTION_CAP} questions are already OPEN on the page — wait for answers before asking more`);
       }
       const questions = [{ id, text: t, options, askedAt: at, kind, default: dflt }, ...page.questions];
       return {
@@ -825,9 +860,13 @@ const PAGE_TOOL = {
   name: "page",
   description:
     "Write this thread's ✦ PAGE — the one surface the user reads (it renders beside your " +
-    "terminal). After each turn of work, record what happened (op turn: 2–5 plain lines a " +
-    "non-engineer follows — no file paths, code names or hashes; a list is NEVER inside a " +
-    "line, N things are N evidence rows). Keep Evidence current (op evidence: one row per " +
+    "terminal). After each turn of work, record what happened (op turn: 2–5 SHORT plain lines, " +
+    "one clause each, that a " +
+    "non-engineer follows — never restate what a section already shows; no file paths, code " +
+    "names or hashes; a list is NEVER inside a " +
+    "line, N things are N evidence rows; when the turn opened or produced more than one " +
+    "thing, name reviewFirst — an evidence-style address the page prints as `start here`). " +
+    "Keep Evidence current (op evidence: one row per " +
     "PR / ticket / doc / file with a plain label and a status; writing the same address " +
     "again UPDATES its row — omit status to keep the previous one; to point Eric at a page " +
     "state, write the address as surface:<project>/<page>?key=value, e.g. " +
@@ -835,8 +874,10 @@ const PAGE_TOOL = {
     "state beside the thread). Track the plan with op " +
     "item (owner agent|user|team, state todo|in_progress|waiting|done; status changes go in " +
     "the item's note or state, never a new turn). Something only the user can answer: op " +
-    "ask (prefer 2–4 short options) — it lands under Needs You on the page; the answer " +
-    "arrives as their next message, so never ask the same question twice. Asking is HELP ME " +
+    "ask (prefer 2–4 short options, each ≤ 60 chars) — it renders under Open questions on the " +
+    "page, answerable in place; the answer " +
+    "arrives as their next message, so never ask the same question twice (re-asking an open " +
+    "id replaces that question). Asking is HELP ME " +
     "HELP YOU: ask only when the answer changes the work; batch related questions into one " +
     "ask; always propose a default (one of the options — the user confirms it in one " +
     "click); say what kind of answer you need (kind decision | convention | info — a " +
@@ -857,7 +898,12 @@ const PAGE_TOOL = {
       lines: {
         type: "array",
         items: { type: "string" },
-        description: "turn: 2–5 plain sentences describing what just happened.",
+        description: "turn: 2–5 short plain lines, one clause each, describing what just happened.",
+      },
+      reviewFirst: {
+        type: "string",
+        description:
+          "turn: the ONE address to look at first (a ticket key, a doc/file path, surface:<project>/<page>?k=v, view:<id>). Name it when you open or produce more than one thing.",
       },
       address: {
         type: "string",
@@ -871,7 +917,7 @@ const PAGE_TOOL = {
       options: {
         type: "array",
         items: { type: "string" },
-        description: "ask: 2–4 short answer options (free text is always possible).",
+        description: "ask: 2–4 short answer options, each ≤ 60 chars (free text is always possible).",
       },
       kind: {
         type: "string",

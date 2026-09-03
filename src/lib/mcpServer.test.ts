@@ -100,7 +100,7 @@ describe("applyOp semantics", () => {
     expect(turns[0].lines[0]).toBe(`turn ${server.TURN_CAP + 4}`);
   });
 
-  it("asking beyond the question cap is a VISIBLE error, and duplicate ids refuse", () => {
+  it("asking beyond the question cap is a VISIBLE error; re-asking an OPEN id SUPERSEDES; an answered id refuses", () => {
     let page = empty();
     for (let i = 0; i < server.QUESTION_CAP; i++) {
       page = server.applyOp(page, { op: "ask", text: `q ${i}` }, NOW).page;
@@ -110,13 +110,52 @@ describe("applyOp semantics", () => {
     const answered = new Set(["q1", "q2", "q3"]);
     const unblocked = server.applyOp(page, { op: "ask", text: "one more" }, NOW, answered);
     expect((unblocked.page.questions as unknown[]).length).toBe(server.QUESTION_CAP + 1);
+    // SWIT-67: the same OPEN id asked again replaces the question in place —
+    // superseded, never a duplicate row, and the cap is not consulted.
+    const first = server.applyOp(empty(), { op: "ask", id: "q1", text: "t", options: ["a", "b"] }, NOW).page;
+    const re = server.applyOp(first, { op: "ask", id: "q1", text: "again", options: ["c"] }, NOW);
+    const qs = re.page.questions as Array<Record<string, unknown>>;
+    expect(qs).toHaveLength(1);
+    expect(qs[0]).toMatchObject({ id: "q1", text: "again", options: ["c"] });
+    expect(re.message).toContain("superseded");
+    // An ANSWERED id refuses and points at the decision row.
     expect(() =>
-      server.applyOp(
-        server.applyOp(empty(), { op: "ask", id: "q1", text: "t" }, NOW).page,
-        { op: "ask", id: "q1", text: "again" },
-        NOW
-      )
-    ).toThrow(/already exists/);
+      server.applyOp(first, { op: "ask", id: "q1", text: "again" }, NOW, new Set(["q1"]))
+    ).toThrow(/decision:q1/);
+  });
+
+  it("an ask option beyond 60 chars is a VISIBLE error (SWIT-69)", () => {
+    expect(() =>
+      server.applyOp(empty(), { op: "ask", text: "Which?", options: ["ok", "x".repeat(61)] }, NOW)
+    ).toThrow(/cap is 60/);
+    expect(() =>
+      server.applyOp(empty(), { op: "ask", text: "Which?", options: ["x".repeat(60)] }, NOW)
+    ).not.toThrow();
+  });
+
+  it("a turn's reviewFirst is validated like an address, stored on the turn, and round-trips (SWIT-67)", () => {
+    const { page } = server.applyOp(
+      empty(),
+      { op: "turn", lines: ["Did a thing."], reviewFirst: " surface:lodestar/trading?instrument=NQ " },
+      NOW
+    );
+    const turns = page.turns as Array<Record<string, unknown>>;
+    expect(turns[0].reviewFirst).toBe("surface:lodestar/trading?instrument=NQ");
+    // Absent = absent, not null.
+    const bare = server.applyOp(empty(), { op: "turn", lines: ["t"] }, NOW).page;
+    expect("reviewFirst" in (bare.turns as Array<Record<string, unknown>>)[0]).toBe(false);
+    expect(() =>
+      server.applyOp(empty(), { op: "turn", lines: ["t"], reviewFirst: "" }, NOW)
+    ).toThrow(/reviewFirst/);
+    expect(() =>
+      server.applyOp(empty(), { op: "turn", lines: ["t"], reviewFirst: "x".repeat(301) }, NOW)
+    ).toThrow(/cap is 300/);
+    // ROUND-TRIP: pageStore reads it back onto the latest turn.
+    const parsed = parsePageFile(JSON.stringify(page));
+    expect(parsed.turns[0].reviewFirst).toBe("surface:lodestar/trading?instrument=NQ");
+    expect(mergePage(parsed, {}, []).latestTurn?.reviewFirst).toBe(
+      "surface:lodestar/trading?instrument=NQ"
+    );
   });
 
   it("items: add mints sequential ids; update and close by id; unknown id errors", () => {
@@ -219,7 +258,7 @@ describe("ROUND-TRIP: the server's writes parse through pageStore (the seam)", (
     expect(merged.evidence.map((e) => e.address)).toEqual(["decision:q1", "switchboard #61", "SWIT-49"]);
     expect(merged.evidence[0].status).toBe("decided");
     expect(merged.userItems.map((i) => i.title)).toEqual(["Check the pins"]);
-    expect(merged.openItems).toHaveLength(2);
+    expect(merged.openItems).toHaveLength(1); // needs-you items render ONCE (SWIT-69)
     expect(merged.doneItems).toHaveLength(1);
     expect(merged.latestTurn?.lines[0]).toBe("Second turn.");
     expect(merged.evidence[1].status).toBe("open");
@@ -234,7 +273,12 @@ describe("ROUND-TRIP: the server's writes parse through pageStore (the seam)", (
   it("the tool table carries the behavioural contract", () => {
     expect(server.PAGE_TOOL.name).toBe("page");
     for (const rule of [
-      "2–5 plain lines",
+      // SWIT-67/69 — the agent's own voice, tightened.
+      "2–5 SHORT plain lines",
+      "one clause each",
+      "never restate what a section already shows",
+      "each ≤ 60 chars",
+      "name reviewFirst",
       "UPDATES its row",
       "never ask the same question twice",
       // SWIT-58 — help me help you.
@@ -249,6 +293,7 @@ describe("ROUND-TRIP: the server's writes parse through pageStore (the seam)", (
     const props = (server.PAGE_TOOL.inputSchema as { properties: Record<string, { enum?: string[] }> }).properties;
     expect(props.kind.enum).toEqual(["decision", "convention", "info"]);
     expect(props.default).toBeDefined();
+    expect(props.reviewFirst).toBeDefined();
   });
 });
 

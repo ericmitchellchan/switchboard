@@ -98,7 +98,7 @@ export interface SavedWorkspace {
    *  the right", which is also what every pre-SWIT-33 blob means. Keys are
    *  saved session ids, remapped through the restore idMap like `panels`.
    *  Optional: the v5 SHAPE is unchanged. */
-  panelSides?: Record<string, "left">;
+  panelSides?: Record<string, "left" | "right">;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
