@@ -61,6 +61,20 @@
   --dn: #e0645b;
   --liq: #5aa6c9;
   --accent: #7c8ce8;
+  /* THE SERIES PALETTE (SWIT-70): the eight tones a line chart's series draw
+   * in — chart-1/-2 are accent/liq, the rest sit in the same saturation and
+   * lightness family. `--up`/`--dn` stay reserved for their meanings and are
+   * deliberately not in this ramp. MIRRORED as SERIES_PALETTE in
+   * surfaces/charts/candles.ts (canvas cannot read a CSS var) — change one,
+   * change the other. */
+  --chart-1: #7c8ce8;
+  --chart-2: #5aa6c9;
+  --chart-3: #4fb3a4;
+  --chart-4: #c9a55a;
+  --chart-5: #b07cc9;
+  --chart-6: #c97ca6;
+  --chart-7: #8fb35a;
+  --chart-8: #c9855a;
   color: var(--text);
   font-family: var(--font-mono);
   font-size: 12px;

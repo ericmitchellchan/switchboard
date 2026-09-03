@@ -2,11 +2,13 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  SERIES_PALETTE,
   barAnchorKey,
   drawableLevels,
   isoToUtcSeconds,
   levelColor,
   nearestCandle,
+  seriesColor,
   toCandlePoints,
 } from "./candles";
 
@@ -68,5 +70,39 @@ describe("anchors, highlight, levels", () => {
         { price: 1, label: "  ", tone: "up" },
       ])
     ).toEqual([{ price: 5622, label: "gamma wall", tone: "accent" }]);
+  });
+});
+
+// ── SWIT-70: the stable series palette ───────────────────────────────────────
+
+describe("seriesColor — the stable per-name palette (SWIT-70)", () => {
+  it("has eight tones, all hex, none of them --up/--dn (those carry meaning)", () => {
+    expect(SERIES_PALETTE).toHaveLength(8);
+    for (const c of SERIES_PALETTE) expect(c).toMatch(/^#[0-9a-f]{6}$/);
+    expect(SERIES_PALETTE).not.toContain(levelColor("up"));
+    expect(SERIES_PALETTE).not.toContain(levelColor("dn"));
+  });
+
+  it("is stable: the same name always gets the same colour, from the palette", () => {
+    for (const name of ["close", "gamma", "net_gamma", "rsi", "volume", ""]) {
+      const first = seriesColor(name);
+      expect(seriesColor(name)).toBe(first);
+      expect(SERIES_PALETTE).toContain(first);
+    }
+  });
+
+  it("spreads realistic series names across the palette", () => {
+    const names = ["close", "volume", "rsi", "delta", "gamma", "vega", "theta", "iv"];
+    const distinct = new Set(names.map(seriesColor));
+    // Eight names into eight tones will collide sometimes; what matters is
+    // that four near-identical charts do not come out one colour.
+    expect(distinct.size).toBeGreaterThanOrEqual(5);
+    const more = ["price", "spread", "oi", "funding", "net_gamma", "call_oi", "put_oi", "vix"];
+    expect(new Set([...names, ...more].map(seriesColor)).size).toBeGreaterThanOrEqual(6);
+  });
+
+  it("separates the pairs that ride one chart together", () => {
+    expect(seriesColor("close")).not.toBe(seriesColor("volume"));
+    expect(seriesColor("gamma")).not.toBe(seriesColor("vega"));
   });
 });

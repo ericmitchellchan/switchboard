@@ -65,6 +65,13 @@
 //     `meta` (`timelineNote`: `flagged moments only · N of M trades`) — the
 //     rows are the flagged moments on disk, and the full tape is a backend
 //     upgrade the view must not imply.
+//
+// SWIT-70 — line charts tell the story: stable per-series palette
+// (charts/candles.seriesColor, keyed on the COLUMN), `seriesLabels` in the
+// legend, a zero rule, `regions` as shaded bands, markers as labeled
+// vertical rules, and `panels` as SMALL MULTIPLES (LineView: 2-up grid,
+// shared time domain, shared value domain when the series sets match;
+// anchors/pins from the main chart only in v1).
 
 import { Suspense, lazy, memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent as ReactMouseEvent, MutableRefObject } from "react";
@@ -90,8 +97,14 @@ import {
   drillFallbackSentence,
   specLines,
   timelineNote,
+  useViewPanels,
+  lineDomains,
 } from "../../lib/viewStore";
-import type { ActiveFilters, ViewMeta, ViewRow, ViewSpec } from "../../lib/viewStore";
+import type { ActiveFilters, LinePoints, ViewMeta, ViewRow, ViewSpec } from "../../lib/viewStore";
+// candles.ts is pure helpers (its lightweight-charts import is type-only,
+// erased at build) — importing seriesColor here pulls no chart library into
+// the main chunk; the vite-build gate checks that.
+import { seriesColor } from "../../surfaces/charts/candles";
 import { viewPinTargetFor } from "../../lib/pins";
 import { getThreadById, threadRepoName } from "../../lib/threadStore";
 import {
@@ -577,6 +590,8 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
               priceMode={priceMode}
               onActivate={openAnchor}
               onHover={onHoverAnchor}
+              threadId={threadId}
+              active={active}
             />
             {pins.marks}
             {hover && hover.fields.length > 0 && !pinMode && (
@@ -677,7 +692,9 @@ const ViewBody = memo(function ViewBody({
   priceMode,
   onActivate,
   onHover,
-}: RendererProps & { priceMode: PriceMode; meta: ViewMeta | null }) {
+  threadId,
+  active,
+}: RendererProps & { priceMode: PriceMode; meta: ViewMeta | null; threadId: string; active: boolean }) {
   switch (spec.kind) {
     case "timeline":
       return (
@@ -706,7 +723,7 @@ const ViewBody = memo(function ViewBody({
     case "line":
       return (
         <Suspense fallback={<ChartFallback />}>
-          <LineView spec={spec} rows={rows} />
+          <LineView spec={spec} rows={rows} threadId={threadId} active={active} />
         </Suspense>
       );
     case "dist":
@@ -953,24 +970,149 @@ function BarsView({ spec, rows, hoverKey, onActivate, onHover }: RendererProps) 
 /** Three days or less of data reads as a session (time-of-day ticks). */
 const INTRADAY_SPAN_S = 3 * 24 * 3600;
 
-/** The line renderer (T7): the spec's series (or every numeric column) over
- *  one time axis on LinePanel, `pt:<iso>` anchors, the spec's markers on the
- *  canvas. uPlot's legend is the hover readout. */
-function LineView({ spec, rows }: { spec: ViewSpec; rows: ViewRow[] }) {
+const PANEL_TITLE_STYLE: CSSProperties = {
+  fontFamily: MONO,
+  fontSize: 10,
+  color: "var(--text-secondary)",
+  padding: "2px 0 4px",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
+/** The line renderer (T7, SWIT-70): the spec's series (or every numeric
+ *  column) over one time axis on LinePanel — `pt:<iso>` anchors, markers as
+ *  labeled rules, `regions` as shaded bands, legend labels from
+ *  `seriesLabels` (the COLOUR keys on the column via seriesColor, so a label
+ *  never moves a tone). With `panels` it becomes SMALL MULTIPLES: a 2-up
+ *  grid, the main chart first, every cell sharing the union time domain and
+ *  — when the series sets match — one value domain (lineDomains). Anchors
+ *  and pins publish from the MAIN chart only (v1, stated in the tool
+ *  description): the multiples get no `points`, so they are read-only by
+ *  construction. */
+function LineView({
+  spec,
+  rows,
+  threadId,
+  active,
+}: {
+  spec: ViewSpec;
+  rows: ViewRow[];
+  threadId: string;
+  active: boolean;
+}) {
   const points = useMemo(() => toLinePoints(rows, spec), [rows, spec]);
-  const series = useMemo(() => points.series.map((s) => ({ label: s.label, values: s.values })), [points]);
+  const labels = spec.seriesLabels;
+  const series = useMemo(
+    () =>
+      points.series.map((s) => ({
+        label: labels?.[s.label] ?? s.label,
+        values: s.values,
+        color: seriesColor(s.label),
+      })),
+    [points, labels]
+  );
   const markers = useMemo(() => (spec.markers ?? []).map((m) => ({ ts: m.ts, label: m.label })), [spec.markers]);
-  if (points.xs.length === 0 || points.series.length === 0) {
+  const regions = spec.regions;
+  const panelData = useViewPanels(threadId, spec, active);
+  const panelPoints = useMemo(
+    () => panelData.map((p) => (p.rows ? toLinePoints(p.rows, spec) : null)),
+    [panelData, spec]
+  );
+  const domains = useMemo(
+    () => lineDomains([points, ...panelPoints.filter((p): p is LinePoints => p !== null)]),
+    [points, panelPoints]
+  );
+  const panelSeries = useMemo(
+    () =>
+      panelPoints.map((p) =>
+        p
+          ? p.series.map((s) => ({
+              label: labels?.[s.label] ?? s.label,
+              values: s.values,
+              color: seriesColor(s.label),
+            }))
+          : null
+      ),
+    [panelPoints, labels]
+  );
+  const hasPanels = panelData.length > 0;
+  if (!hasPanels && (points.xs.length === 0 || points.series.length === 0)) {
     return (
       <div style={{ padding: 24, fontFamily: MONO, fontSize: 11, color: "var(--text-dim)" }}>
         no series — a line view expects rows with a time column and at least one numeric column
       </div>
     );
   }
-  const intraday = points.xs[points.xs.length - 1] - points.xs[0] <= INTRADAY_SPAN_S;
+  const spanEnds = domains.x ?? [points.xs[0] ?? 0, points.xs[points.xs.length - 1] ?? 0];
+  const intraday = spanEnds[1] - spanEnds[0] <= INTRADAY_SPAN_S;
+  if (!hasPanels) {
+    return (
+      <div style={{ padding: "8px 10px" }}>
+        <LinePanel
+          xs={points.xs}
+          series={series}
+          points={points.ts}
+          markers={markers}
+          regions={regions}
+          height={300}
+          intraday={intraday}
+        />
+      </div>
+    );
+  }
+  const cellHeight = 180;
   return (
-    <div style={{ padding: "8px 10px" }}>
-      <LinePanel xs={points.xs} series={series} points={points.ts} markers={markers} height={300} intraday={intraday} />
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+        gap: "4px 12px",
+        padding: "8px 10px",
+      }}
+    >
+      <div style={{ minWidth: 0 }}>
+        <div style={PANEL_TITLE_STYLE}>{spec.title}</div>
+        {points.xs.length > 0 && points.series.length > 0 ? (
+          <LinePanel
+            xs={points.xs}
+            series={series}
+            points={points.ts}
+            markers={markers}
+            regions={regions}
+            height={cellHeight}
+            intraday={intraday}
+            xRange={domains.x ?? undefined}
+            yRange={domains.y ?? undefined}
+          />
+        ) : (
+          <div style={{ padding: 12, fontFamily: MONO, fontSize: 10, color: "var(--text-dim)" }}>no series</div>
+        )}
+      </div>
+      {panelData.map((p, i) => {
+        const pts = panelPoints[i];
+        const s = panelSeries[i];
+        return (
+          <div key={`${p.title}-${i}`} style={{ minWidth: 0 }}>
+            <div style={PANEL_TITLE_STYLE}>{p.title}</div>
+            {pts && s && pts.xs.length > 0 && pts.series.length > 0 ? (
+              <LinePanel
+                xs={pts.xs}
+                series={s}
+                regions={regions}
+                height={cellHeight}
+                intraday={intraday}
+                xRange={domains.x ?? undefined}
+                yRange={domains.y ?? undefined}
+              />
+            ) : (
+              <div style={{ padding: 12, fontFamily: MONO, fontSize: 10, color: "var(--text-dim)" }}>
+                {p.error ?? (p.rows ? "no series" : "loading…")}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

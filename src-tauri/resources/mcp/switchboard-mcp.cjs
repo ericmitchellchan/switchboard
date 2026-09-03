@@ -290,6 +290,10 @@ function applyOp(page, args, now, answeredIds = new Set()) {
 // score as steps) — `sizeColumn` names the mark-radius column (default
 // `size_z` at the reader). The data file may carry `{meta, rows}`; the
 // toolbar prints meta.coverage + meta.n_trades as the coverage line.
+// SWIT-70: the line kind gains `seriesLabels` (legend words), `regions`
+// (shaded time bands) and `panels` (small multiples — fixed sources, no
+// {key}); validated here, parsed tolerantly by viewStore.
+
 const VIEW_KINDS = ["table", "candles", "dist", "line", "bar", "timeline"];
 const VIEW_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const VIEW_MARKER_CAP = 200;
@@ -299,6 +303,10 @@ const VIEW_DEFINITION_CAP = 600;
 const VIEW_FILTER_CAP = 4;
 const VIEW_FILTER_KINDS = ["select", "date"];
 const VIEW_DRILL_TITLE_CAP = 120;
+// SWIT-70: the line kind's story fields — caps mirrored in viewStore.ts.
+const VIEW_REGION_CAP = 12;
+const VIEW_PANEL_CAP = 6;
+const VIEW_SERIES_LABEL_CAP = 24;
 
 function validViewSourcePath(p) {
   if (typeof p !== "string" || p.trim().length === 0) return false;
@@ -432,6 +440,78 @@ function buildDrill(raw) {
   return drill;
 }
 
+/** A parseable time for regions (SWIT-70): the candle rule — naive = UTC. */
+function parseableTime(v) {
+  if (typeof v !== "string" || v.trim().length === 0) return false;
+  const t = v.trim().replace(" ", "T");
+  const zoned = /(Z|[+-]\d\d:?\d\d)$/i.test(t) ? t : `${t}Z`;
+  return Number.isFinite(Date.parse(zoned));
+}
+
+/** `seriesLabels` (SWIT-70): legend labels in plain words, by series COLUMN
+ *  (the colour stays keyed on the column, so a label never moves a tone). */
+function buildSeriesLabels(raw) {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new OpError("seriesLabels must be an object mapping a series column to a plain-words label");
+  }
+  const entries = Object.entries(raw);
+  if (entries.length > VIEW_SERIES_LABEL_CAP) {
+    throw new OpError(`seriesLabels has ${entries.length} entries; the cap is ${VIEW_SERIES_LABEL_CAP}`);
+  }
+  const out = {};
+  for (const [k, v] of entries) {
+    if (typeof v !== "string" || v.trim().length === 0) {
+      throw new OpError(`seriesLabels.${k} must be a non-empty string`);
+    }
+    if (k.trim().length === 0) continue;
+    out[k.trim()] = v.trim().slice(0, 40);
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** `regions` (SWIT-70): shaded time bands on a line chart. */
+function buildRegions(raw) {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) throw new OpError("regions must be an array of {from, to, label?}");
+  if (raw.length > VIEW_REGION_CAP) {
+    throw new OpError(`regions has ${raw.length} entries; the cap is ${VIEW_REGION_CAP}`);
+  }
+  const out = raw.map((r, i) => {
+    if (typeof r !== "object" || r === null) throw new OpError(`regions[${i}] must be {from, to, label?}`);
+    if (!parseableTime(r.from) || !parseableTime(r.to)) {
+      throw new OpError(`regions[${i}].from and .to must be parseable times (ISO; a naive stamp is read as UTC)`);
+    }
+    const region = { from: r.from.trim(), to: r.to.trim() };
+    if (typeof r.label === "string" && r.label.trim().length > 0) region.label = r.label.trim().slice(0, 40);
+    return region;
+  });
+  return out.length > 0 ? out : undefined;
+}
+
+/** `panels` (SWIT-70): small multiples — line kind only, each source
+ *  validated like the main one, `{key}` REFUSED (a panel is a fixed source,
+ *  never a drill template). */
+function buildPanels(raw, kind) {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) throw new OpError("panels must be an array of {title, source}");
+  if (kind !== "line") throw new OpError("panels apply to the line kind (small multiples)");
+  if (raw.length > VIEW_PANEL_CAP) {
+    throw new OpError(`panels has ${raw.length} entries; the cap is ${VIEW_PANEL_CAP}`);
+  }
+  const out = raw.map((p, i) => {
+    if (typeof p !== "object" || p === null) throw new OpError(`panels[${i}] must be {title, source}`);
+    const title = text(p.title, `panels[${i}].title`).trim().slice(0, 80);
+    const source = buildViewSource(p.source, `panels[${i}].source`);
+    const template = source.type === "file" ? source.path : `${source.url}${source.body || ""}`;
+    if (template.includes("{key}")) {
+      throw new OpError(`panels[${i}].source must not contain {key} — a panel is a fixed source; use drill for templates`);
+    }
+    return { title, source };
+  });
+  return out.length > 0 ? out : undefined;
+}
+
 /** `sizeColumn` (T8): the timeline's mark-radius column. Absent = the
  *  reader's default; given, it must be a non-empty column name. Pure. */
 function buildSizeColumn(v, field) {
@@ -505,6 +585,13 @@ function buildViewSpec(args, existingIds, now) {
   if (filters !== undefined) spec.filters = filters;
   const drill = buildDrill(args.drill);
   if (drill !== undefined) spec.drill = drill;
+  // SWIT-70: the line kind's story fields.
+  const seriesLabels = buildSeriesLabels(args.seriesLabels);
+  if (seriesLabels !== undefined) spec.seriesLabels = seriesLabels;
+  const regions = buildRegions(args.regions);
+  if (regions !== undefined) spec.regions = regions;
+  const panels = buildPanels(args.panels, kind);
+  if (panels !== undefined) spec.panels = panels;
   return spec;
 }
 
@@ -584,7 +671,13 @@ const VIEW_TOOL = {
     "in a file path it is reduced to one component, [A-Za-z0-9._-] with everything else " +
     "as _; in a query url it is URL-encoded) — opening a row then shows the child beside " +
     "the terminal with back. Declare `filters` [{column, kind:'select'|'date'}] so the " +
-    "user can slice the loaded rows themselves without asking you.",
+    "user can slice the loaded rows themselves without asking you. Prefer ONE line view " +
+    "with `panels` [{title, source}] (small multiples: a 2-up grid with the main chart, " +
+    "shared time axis, <=6, no {key}) over several near-identical views, and give every " +
+    "view a `definition` that says what to look at; anchors and pins publish from the main " +
+    "chart only — the panels are read-only. line extras: `seriesLabels` {column: plain " +
+    "words} names the legend (the same column keeps the same colour in every view), " +
+    "`regions` [{from, to, label?}] shade time bands (sessions, halts, regimes; <=12).",
   inputSchema: {
     type: "object",
     properties: {
@@ -630,6 +723,23 @@ const VIEW_TOOL = {
         items: { type: "object" },
         description:
           "Up to 4 selectors over the view's own columns: [{column, kind:'select'|'date', label?}]. Values come from the loaded rows; the slice is client-side.",
+      },
+      seriesLabels: {
+        type: "object",
+        description:
+          "line: legend labels by series column, plain words ({net_gamma:'net gamma ($bn)'}). Colour stays keyed on the column.",
+      },
+      regions: {
+        type: "array",
+        items: { type: "object" },
+        description:
+          "line: shaded time bands [{from: ISO, to: ISO, label?}] (<=12) — sessions, halts, regimes.",
+      },
+      panels: {
+        type: "array",
+        items: { type: "object" },
+        description:
+          "line only: small multiples [{title, source}] (<=6, {key} not allowed) — a 2-up grid with the main chart, shared time axis, shared value axis when the series sets match. Anchors/pins publish from the main chart only.",
       },
       drill: {
         type: "object",
@@ -1112,6 +1222,9 @@ module.exports = {
   VIEW_DEFINITION_CAP,
   VIEW_FILTER_CAP,
   VIEW_FILTER_KINDS,
+  VIEW_REGION_CAP,
+  VIEW_PANEL_CAP,
+  VIEW_SERIES_LABEL_CAP,
   parsePage,
   applyOp,
   performOp,

@@ -87,6 +87,35 @@ export function levelColor(tone: string | undefined): string {
   return (tone && LEVEL_COLORS[tone]) || LEVEL_COLORS.accent;
 }
 
+/** THE SERIES PALETTE (SWIT-70): eight tones for line series, MIRRORING the
+ *  `--chart-1`…`--chart-8` tokens in styles/surfaces.css (canvas cannot read
+ *  a CSS var — change one, change the other, like LEVEL_COLORS above).
+ *  `--up`/`--dn` are deliberately absent: those two carry meaning. */
+export const SERIES_PALETTE: readonly string[] = [
+  "#7c8ce8", // --chart-1 (accent)
+  "#5aa6c9", // --chart-2 (liq)
+  "#4fb3a4", // --chart-3
+  "#c9a55a", // --chart-4
+  "#b07cc9", // --chart-5
+  "#c97ca6", // --chart-6
+  "#8fb35a", // --chart-7
+  "#c9855a", // --chart-8
+];
+
+/** A STABLE colour for a series NAME (SWIT-70): the same name draws in the
+ *  same tone in every view, so `gamma` is recognisable across four panels
+ *  without reading four legends. FNV-1a over the name into the fixed palette
+ *  — pure, no state, no registration. Key it on the DATA name (the column),
+ *  not a display label, so relabelling never moves a colour. */
+export function seriesColor(name: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < name.length; i++) {
+    h ^= name.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return SERIES_PALETTE[(h >>> 0) % SERIES_PALETTE.length];
+}
+
 /** A horizontal level line (gamma flip, walls, vol trigger). */
 export type PriceLevel = { price: number; label: string; tone: string };
 

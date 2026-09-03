@@ -65,6 +65,19 @@
 //     cannot know a per-match total. No meta → `N moments`, which claims
 //     nothing about the tape.
 
+// SWIT-70 — line charts tell the story:
+//   · `seriesLabels` (column → plain words) names the legend; the COLOUR
+//     stays keyed on the column (charts/candles.ts `seriesColor`), so a
+//     label never moves a tone.
+//   · `regions` [{from, to, label?}] shade time bands on the chart.
+//   · `panels` [{title, source}] are SMALL MULTIPLES: mini line charts in a
+//     2-up grid with the main chart, each with its own source (validated
+//     like the main one; `{key}` refused — a panel is fixed, not a drill
+//     template), loaded once per build (`useViewPanels`), sharing the union
+//     time domain and — when every chart draws the same series set — one
+//     value domain (`lineDomains`). Anchors and pins publish from the MAIN
+//     chart only in v1; the multiples are read-only.
+
 import { useCallback, useEffect, useRef, useState } from "react";
 import { readThreadView, readViewData } from "./ipc";
 
@@ -88,6 +101,16 @@ export type ViewFilterKind = (typeof VIEW_FILTER_KINDS)[number];
  *  column's distinct values; `date` offers the distinct DAYS of a date-ish
  *  column (ISO strings, epoch seconds). */
 export type ViewFilter = { column: string; kind: ViewFilterKind; label?: string };
+
+/** A shaded time band on a line chart (SWIT-70): ISO from/to, an optional
+ *  small label at the band's top. */
+export type ViewRegion = { from: string; to: string; label?: string };
+
+/** A SMALL MULTIPLE (SWIT-70): one mini line chart with its own source and
+ *  title, drawn in a 2-up grid with the main chart, sharing its time domain.
+ *  A panel is a FIXED source — `{key}` is a drill's affordance, not a
+ *  panel's, and is refused. */
+export type ViewPanel = { title: string; source: ViewSource };
 
 /** What is behind an anchor (T6): a child view whose source strings carry
  *  `{key}` — replaced by the anchor's key value at resolve time. */
@@ -128,6 +151,12 @@ export type ViewSpec = {
   definition?: string;
   filters?: ViewFilter[];
   drill?: ViewDrill;
+  /** line (SWIT-70): legend labels in plain words, by series column. */
+  seriesLabels?: Record<string, string>;
+  /** line (SWIT-70): shaded time bands. */
+  regions?: ViewRegion[];
+  /** line (SWIT-70): small multiples beside the main chart. */
+  panels?: ViewPanel[];
 };
 
 /** Caps, mirrored from the MCP server (the writer) — the reader trims to the
@@ -135,6 +164,10 @@ export type ViewSpec = {
  *  would have accepted. */
 export const VIEW_DEFINITION_CAP = 600;
 export const VIEW_FILTER_CAP = 4;
+/** SWIT-70: the line kind's story caps — mirrored in the MCP server. */
+export const VIEW_REGION_CAP = 12;
+export const VIEW_PANEL_CAP = 6;
+export const VIEW_SERIES_LABEL_CAP = 24;
 /** Longest anchor key value a drill accepts (rowAnchorId's own cap). */
 export const DRILL_KEY_CAP = 120;
 
@@ -210,6 +243,60 @@ export function parseViewFilters(raw: unknown): ViewFilter[] {
     if (typeof f.label === "string" && f.label.trim().length > 0) filter.label = f.label.trim().slice(0, 40);
     out.push(filter);
     if (out.length >= VIEW_FILTER_CAP) break;
+  }
+  return out;
+}
+
+/** Tolerant seriesLabels parse (SWIT-70): a record of non-empty strings,
+ *  capped; anything else is ABSENT (null). Keys are series COLUMNS — the
+ *  colour hash keys on the column, so a label never moves a colour. Pure. */
+export function parseSeriesLabels(raw: unknown): Record<string, string> | null {
+  if (!isRecord(raw)) return null;
+  const out: Record<string, string> = {};
+  let n = 0;
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof v !== "string" || v.trim().length === 0 || k.trim().length === 0) continue;
+    out[k.trim()] = v.trim().slice(0, 40);
+    if (++n >= VIEW_SERIES_LABEL_CAP) break;
+  }
+  return n > 0 ? out : null;
+}
+
+/** Tolerant regions parse (SWIT-70): malformed entries drop alone — both
+ *  ends must be parseable times (the candle rule: naive = UTC); capped.
+ *  Reversed ends are kept as written (the renderer swaps). Pure. */
+export function parseViewRegions(raw: unknown): ViewRegion[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ViewRegion[] = [];
+  for (const r of raw) {
+    if (!isRecord(r) || typeof r.from !== "string" || typeof r.to !== "string") continue;
+    if (isoToSeconds(r.from) === null || isoToSeconds(r.to) === null) continue;
+    const region: ViewRegion = { from: r.from, to: r.to };
+    if (typeof r.label === "string" && r.label.trim().length > 0) region.label = r.label.trim().slice(0, 40);
+    out.push(region);
+    if (out.length >= VIEW_REGION_CAP) break;
+  }
+  return out;
+}
+
+/** Tolerant panels parse (SWIT-70): each panel needs a title and a valid
+ *  source (same loopback rule as the main one); a source carrying `{key}`
+ *  drops — a panel is a fixed source, never a drill template, so no key
+ *  substitution (and no path surprise) can reach it. Capped. Pure. */
+export function parseViewPanels(raw: unknown): ViewPanel[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ViewPanel[] = [];
+  for (const p of raw) {
+    if (!isRecord(p)) continue;
+    const title = typeof p.title === "string" && p.title.trim().length > 0 ? p.title.trim().slice(0, 80) : null;
+    if (title === null) continue;
+    const src = parseViewSource(p.source);
+    if ("error" in src) continue;
+    const template =
+      src.source.type === "file" ? src.source.path : `${src.source.url}${src.source.body ?? ""}`;
+    if (template.includes("{key}")) continue;
+    out.push({ title, source: src.source });
+    if (out.length >= VIEW_PANEL_CAP) break;
   }
   return out;
 }
@@ -301,6 +388,13 @@ export function parseViewSpec(raw: string): { spec: ViewSpec | null; specError: 
   if (filters.length > 0) spec.filters = filters;
   const drill = parseViewDrill(data.drill);
   if (drill) spec.drill = drill;
+  // SWIT-70 — the line kind's story fields, each tolerated as ABSENT.
+  const seriesLabels = parseSeriesLabels(data.seriesLabels);
+  if (seriesLabels) spec.seriesLabels = seriesLabels;
+  const regions = parseViewRegions(data.regions);
+  if (regions.length > 0) spec.regions = regions;
+  const panels = parseViewPanels(data.panels);
+  if (panels.length > 0) spec.panels = panels;
   if (Array.isArray(data.markers)) {
     spec.markers = data.markers
       .filter((m): m is Record<string, unknown> => isRecord(m) && typeof m.ts === "string")
@@ -541,6 +635,53 @@ export function toLinePoints(rows: ViewRow[], spec: ViewSpec): LinePoints {
     rows: times.map((t) => at(t).row),
     series: columns.map((label) => ({ label, values: times.map((t) => numericCell(at(t).row[label])) })),
   };
+}
+
+export type LineDomains = {
+  /** The UNION time domain across every chart, UTC seconds; null when no
+   *  chart has a point. */
+  x: [number, number] | null;
+  /** One shared value domain — only when every chart draws the SAME series
+   *  set (same units by declaration); null means per-panel auto. */
+  y: [number, number] | null;
+};
+
+/** Shared axes for small multiples (SWIT-70). X is always the union — the
+ *  whole point of multiples is reading the same moment down a column. Y is
+ *  shared only when every chart's series LABEL SET matches (the honest proxy
+ *  for "same units"; gamma next to volume must not share a scale), padded 4%
+ *  so the extremes are not on the frame. Pure. */
+export function lineDomains(charts: readonly LinePoints[]): LineDomains {
+  let xMin = Number.POSITIVE_INFINITY;
+  let xMax = Number.NEGATIVE_INFINITY;
+  for (const c of charts) {
+    if (c.xs.length === 0) continue;
+    if (c.xs[0] < xMin) xMin = c.xs[0];
+    if (c.xs[c.xs.length - 1] > xMax) xMax = c.xs[c.xs.length - 1];
+  }
+  const x: [number, number] | null = xMin <= xMax ? [xMin, xMax] : null;
+  const drawn = charts.filter((c) => c.series.length > 0);
+  const setOf = (c: LinePoints) => c.series.map((s) => s.label).sort().join(" ");
+  const sameUnits = drawn.length > 1 && drawn.every((c) => setOf(c) === setOf(drawn[0]));
+  let y: [number, number] | null = null;
+  if (sameUnits) {
+    let yMin = Number.POSITIVE_INFINITY;
+    let yMax = Number.NEGATIVE_INFINITY;
+    for (const c of drawn) {
+      for (const s of c.series) {
+        for (const v of s.values) {
+          if (v === null || !Number.isFinite(v)) continue;
+          if (v < yMin) yMin = v;
+          if (v > yMax) yMax = v;
+        }
+      }
+    }
+    if (yMin <= yMax) {
+      const pad = (yMax - yMin) * 0.04 || Math.abs(yMax) * 0.04 || 1;
+      y = [yMin - pad, yMax + pad];
+    }
+  }
+  return { x, y };
 }
 
 /** Every field of a row as `[key, printed value]` in the row's own order —
@@ -948,6 +1089,13 @@ export function specLines(spec: ViewSpec): string[] {
   if (spec.filters && spec.filters.length > 0) {
     lines.push(`filters   ${spec.filters.map((f) => `${f.label ?? f.column} (${f.kind})`).join(" · ")}`);
   }
+  if (spec.seriesLabels) {
+    lines.push(`labels    ${Object.entries(spec.seriesLabels).map(([k, v]) => `${k} = ${v}`).join(" · ")}`);
+  }
+  if (spec.regions && spec.regions.length > 0) lines.push(`regions   ${spec.regions.length}`);
+  if (spec.panels && spec.panels.length > 0) {
+    lines.push(`panels    ${spec.panels.map((p) => p.title).join(" · ")}`);
+  }
   if (spec.drill) {
     lines.push(
       `drill     ${spec.drill.kind} ${spec.drill.title} ← ${
@@ -1108,4 +1256,66 @@ export function useView(
     loading,
     rerun,
   };
+}
+
+// ── Small multiples (SWIT-70): each panel's rows ─────────────────────────────
+
+export type PanelData = { title: string; rows: ViewRow[] | null; error: string | null };
+
+const NO_PANELS: PanelData[] = [];
+
+/** Load each panel's source ONCE per spec build, like the main load: an
+ *  agent `update` moves builtAt and every panel re-reads; between builds a
+ *  panel never refetches (v1: the toolbar's `re-run` re-reads the MAIN
+ *  source only — a panel is a companion chart, not a live feed). Same
+ *  loading rules as the main source: file through the guarded IPC, query
+ *  against a loopback URL the parse already vetted. */
+export function useViewPanels(threadId: string, spec: ViewSpec | null, active: boolean): PanelData[] {
+  const [data, setData] = useState<PanelData[]>(NO_PANELS);
+  const loadedForRef = useRef<string | null>(null);
+  const seqRef = useRef(0);
+  useEffect(() => {
+    const panels = spec?.panels;
+    if (!spec || !panels || panels.length === 0) {
+      loadedForRef.current = null;
+      setData((prev) => (prev.length === 0 ? prev : NO_PANELS));
+      return;
+    }
+    if (!active) return;
+    const buildKey = `${spec.id}:${spec.builtAt}:${panels
+      .map((p) => (p.source.type === "file" ? p.source.path : p.source.url))
+      .join("|")}`;
+    if (loadedForRef.current === buildKey) return;
+    loadedForRef.current = buildKey;
+    const seq = ++seqRef.current;
+    setData(panels.map((p) => ({ title: p.title, rows: null, error: null })));
+    panels.forEach((p, i) => {
+      void (async () => {
+        let next: PanelData;
+        try {
+          let raw: string;
+          if (p.source.type === "file") {
+            raw = await readViewData(threadId, p.source.path);
+          } else {
+            const init: RequestInit = p.source.body
+              ? { method: "POST", headers: { "content-type": "application/json" }, body: p.source.body }
+              : { method: "GET" };
+            const res = await fetch(p.source.url, init);
+            if (!res.ok) throw new Error(`the backend answered ${res.status}`);
+            raw = await res.text();
+          }
+          const parsed = parseViewPayload(raw);
+          next =
+            parsed === null
+              ? { title: p.title, rows: null, error: "not rows (expected a JSON array of objects)" }
+              : { title: p.title, rows: parsed.rows, error: null };
+        } catch (err) {
+          next = { title: p.title, rows: null, error: String(err instanceof Error ? err.message : err) };
+        }
+        if (seq !== seqRef.current) return;
+        setData((prev) => prev.map((d, j) => (j === i ? next : d)));
+      })();
+    });
+  }, [threadId, spec, active]);
+  return data;
 }

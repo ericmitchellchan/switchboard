@@ -1275,3 +1275,158 @@ describe("T8 smoke — the tennis table's drill opens the exporter's timeline fi
     }
   });
 });
+
+// ── SWIT-70: line charts tell the story ──────────────────────────────────────
+
+import {
+  parseSeriesLabels,
+  parseViewRegions,
+  parseViewPanels,
+  lineDomains,
+  VIEW_REGION_CAP,
+  VIEW_PANEL_CAP,
+  VIEW_SERIES_LABEL_CAP,
+} from "./viewStore";
+import type { LinePoints } from "./viewStore";
+
+const S70_SPEC: ViewSpec = {
+  id: "v70",
+  kind: "line",
+  title: "gamma story",
+  source: { type: "file", path: "out/gamma.json" },
+  builtAt: "2026-09-01T10:00:00Z",
+  builtBy: "agent",
+};
+
+describe("SWIT-70 — seriesLabels / regions / panels parse (tolerant)", () => {
+  it("seriesLabels keeps non-empty string entries, trims, caps value length and entry count", () => {
+    expect(parseSeriesLabels(undefined)).toBeNull();
+    expect(parseSeriesLabels("words")).toBeNull();
+    expect(parseSeriesLabels({})).toBeNull();
+    expect(parseSeriesLabels({ net_gamma: " net gamma ($bn) ", bad: 3, "": "x", blank: "  " })).toEqual({
+      net_gamma: "net gamma ($bn)",
+    });
+    expect(parseSeriesLabels({ a: "x".repeat(80) })).toEqual({ a: "x".repeat(40) });
+    const many = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`c${i}`, `label ${i}`]));
+    expect(Object.keys(parseSeriesLabels(many) ?? {})).toHaveLength(VIEW_SERIES_LABEL_CAP);
+  });
+
+  it("regions drop malformed entries alone (both ends must parse), keep order, cap at 12", () => {
+    expect(parseViewRegions(undefined)).toEqual([]);
+    expect(
+      parseViewRegions([
+        { from: "2026-06-05T13:30:00Z", to: "2026-06-05T14:00:00Z", label: " open drive " },
+        { from: "not a time", to: "2026-06-05T14:00:00Z" },
+        { from: "2026-06-05 15:00:00", to: "2026-06-05 15:30:00" },
+        "junk",
+        { from: "2026-06-05T16:00:00Z" },
+      ])
+    ).toEqual([
+      { from: "2026-06-05T13:30:00Z", to: "2026-06-05T14:00:00Z", label: "open drive" },
+      { from: "2026-06-05 15:00:00", to: "2026-06-05 15:30:00" },
+    ]);
+    const many = Array.from({ length: 20 }, (_, i) => ({
+      from: `2026-06-05T0${i % 9}:00:00Z`,
+      to: `2026-06-05T0${i % 9}:30:00Z`,
+    }));
+    expect(parseViewRegions(many)).toHaveLength(VIEW_REGION_CAP);
+  });
+
+  it("panels need a title and a valid source; {key} and bad sources drop the panel; cap 6", () => {
+    expect(parseViewPanels(undefined)).toEqual([]);
+    expect(
+      parseViewPanels([
+        { title: " net gamma ", source: { type: "file", path: "out/a.json" } },
+        { title: "templated", source: { type: "file", path: "out/{key}.json" } },
+        // A ../ file path is tolerated HERE like the main source's — the Rust
+        // read guard is the containment line; the server refuses it earlier.
+        { title: "off box", source: { type: "query", url: "https://evil.example/x" } },
+        { source: { type: "file", path: "out/b.json" } },
+        { title: "local query", source: { type: "query", url: "http://127.0.0.1:8799/rows" } },
+      ])
+    ).toEqual([
+      { title: "net gamma", source: { type: "file", path: "out/a.json" } },
+      { title: "local query", source: { type: "query", url: "http://127.0.0.1:8799/rows" } },
+    ]);
+    const many = Array.from({ length: 9 }, (_, i) => ({
+      title: `p${i}`,
+      source: { type: "file", path: `out/${i}.json` },
+    }));
+    expect(parseViewPanels(many)).toHaveLength(VIEW_PANEL_CAP);
+  });
+
+  it("round-trips through parseViewSpec, and specLines names them", () => {
+    const raw = JSON.stringify({
+      ...S70_SPEC,
+      seriesLabels: { net_gamma: "net gamma ($bn)" },
+      regions: [{ from: "2026-06-05T13:30:00Z", to: "2026-06-05T14:00:00Z", label: "open" }],
+      panels: [
+        { title: "vol", source: { type: "file", path: "out/vol.json" } },
+        { title: "oi", source: { type: "file", path: "out/oi.json" } },
+      ],
+    });
+    const { spec } = parseViewSpec(raw);
+    expect(spec?.seriesLabels).toEqual({ net_gamma: "net gamma ($bn)" });
+    expect(spec?.regions).toHaveLength(1);
+    expect(spec?.panels?.map((p) => p.title)).toEqual(["vol", "oi"]);
+    const lines = specLines(spec as ViewSpec).join("\n");
+    expect(lines).toContain("labels    net_gamma = net gamma ($bn)");
+    expect(lines).toContain("regions   1");
+    expect(lines).toContain("panels    vol · oi");
+  });
+
+  it("malformed story fields are ABSENT, never a broken spec", () => {
+    const raw = JSON.stringify({
+      ...S70_SPEC,
+      seriesLabels: ["not", "a", "record"],
+      regions: { from: "x" },
+      panels: "nope",
+    });
+    const { spec, specError } = parseViewSpec(raw);
+    expect(specError).toBeNull();
+    expect(spec?.seriesLabels).toBeUndefined();
+    expect(spec?.regions).toBeUndefined();
+    expect(spec?.panels).toBeUndefined();
+  });
+});
+
+describe("SWIT-70 — lineDomains (shared axes for small multiples)", () => {
+  const chart = (xs: number[], series: { label: string; values: (number | null)[] }[]): LinePoints => ({
+    xs,
+    ts: xs.map((x) => new Date(x * 1000).toISOString()),
+    rows: xs.map(() => ({})),
+    series,
+  });
+
+  it("x is the union across every chart; empty charts do not shrink it", () => {
+    const a = chart([100, 200], [{ label: "close", values: [1, 2] }]);
+    const b = chart([50, 150], [{ label: "close", values: [3, 4] }]);
+    const none = chart([], []);
+    expect(lineDomains([a, b, none]).x).toEqual([50, 200]);
+    expect(lineDomains([none]).x).toBeNull();
+    expect(lineDomains([]).x).toBeNull();
+  });
+
+  it("y is shared only when every drawn chart has the SAME series set, padded past the extremes", () => {
+    const a = chart([100], [{ label: "close", values: [10] }, { label: "rsi", values: [30] }]);
+    const b = chart([200], [{ label: "rsi", values: [70] }, { label: "close", values: [-10] }]);
+    const y = lineDomains([a, b]).y;
+    expect(y).not.toBeNull();
+    const [lo, hi] = y as [number, number];
+    expect(lo).toBeLessThan(-10);
+    expect(hi).toBeGreaterThan(70);
+  });
+
+  it("different series sets (different units) mean per-panel auto — y is null", () => {
+    const a = chart([100], [{ label: "gamma", values: [1] }]);
+    const b = chart([200], [{ label: "volume", values: [1e9] }]);
+    expect(lineDomains([a, b]).y).toBeNull();
+  });
+
+  it("a single chart never shares y (auto is already right), and null cells are ignored", () => {
+    const a = chart([100, 200], [{ label: "close", values: [null, 5] }]);
+    expect(lineDomains([a]).y).toBeNull();
+    const b = chart([300], [{ label: "close", values: [null] }]);
+    expect(lineDomains([a, b]).y).not.toBeNull();
+  });
+});

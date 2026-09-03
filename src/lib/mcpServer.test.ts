@@ -673,3 +673,82 @@ describe("the backlog tool (SWIT-64) — ONE op, an inbox the app drains", () =>
     expect(mcpServerSource).not.toMatch(/["'`]backlog\.json["'`]/);
   });
 });
+
+// ── SWIT-70: the line kind's story fields ────────────────────────────────────
+
+describe("the view tool — seriesLabels / regions / panels (SWIT-70)", () => {
+  const line = {
+    op: "show",
+    kind: "line",
+    title: "gamma story",
+    source: { type: "file", path: "out/gamma.json" },
+  };
+  const build = (extra: Record<string, unknown>, base: Record<string, unknown> = line) =>
+    server.buildViewSpec({ ...base, ...extra }, [], NOW);
+
+  it("accepts the three fields, trims and caps, and round-trips through viewStore's parse", () => {
+    const spec = build({
+      seriesLabels: { net_gamma: " net gamma ($bn) ", vol: "x".repeat(80) },
+      regions: [{ from: "2026-06-05T13:30:00Z", to: "2026-06-05 14:00:00", label: " open drive " }],
+      panels: [
+        { title: " net gamma ", source: { type: "file", path: "out/a.json" } },
+        { title: "vol", source: { type: "query", url: "http://127.0.0.1:8799/rows" } },
+      ],
+    });
+    expect(spec.seriesLabels).toEqual({ net_gamma: "net gamma ($bn)", vol: "x".repeat(40) });
+    expect(spec.regions).toEqual([
+      { from: "2026-06-05T13:30:00Z", to: "2026-06-05 14:00:00", label: "open drive" },
+    ]);
+    expect((spec.panels as { title: string }[]).map((p) => p.title)).toEqual(["net gamma", "vol"]);
+    const parsed = parseViewSpec(JSON.stringify(spec));
+    expect(parsed.specError).toBeNull();
+    expect(parsed.spec?.seriesLabels).toEqual(spec.seriesLabels);
+    expect(parsed.spec?.regions).toEqual(spec.regions);
+    expect(parsed.spec?.panels).toEqual(spec.panels);
+  });
+
+  it("rejects malformed fields as visible errors, with the caps named", () => {
+    expect(() => build({ seriesLabels: ["a"] })).toThrow(/seriesLabels/);
+    expect(() => build({ seriesLabels: { a: "" } })).toThrow(/non-empty/);
+    expect(() => build({ regions: [{ from: "junk", to: "2026-06-05T14:00:00Z" }] })).toThrow(/parseable/);
+    expect(() =>
+      build({ regions: Array.from({ length: 13 }, () => ({ from: "2026-06-05T13:00:00Z", to: "2026-06-05T14:00:00Z" })) })
+    ).toThrow(/cap is 12/);
+    expect(() =>
+      build({ panels: Array.from({ length: 7 }, (_, i) => ({ title: `p${i}`, source: { type: "file", path: `o/${i}.json` } })) })
+    ).toThrow(/cap is 6/);
+  });
+
+  it("panels are line-only, loopback-only, and never templates", () => {
+    expect(() =>
+      build({ panels: [{ title: "x", source: { type: "file", path: "o/a.json" } }] }, { ...line, kind: "table" })
+    ).toThrow(/line kind/);
+    expect(() =>
+      build({ panels: [{ title: "x", source: { type: "file", path: "o/{key}.json" } }] })
+    ).toThrow(/\{key\}/);
+    expect(() =>
+      build({ panels: [{ title: "x", source: { type: "query", url: "https://evil.example/rows" } }] })
+    ).toThrow(/local backend/);
+    expect(() =>
+      build({ panels: [{ title: "x", source: { type: "file", path: "../o.json" } }] })
+    ).toThrow(/relative path/);
+  });
+
+  it("the tool description states the small-multiples preference and the read-only panels", () => {
+    for (const rule of [
+      "Prefer ONE line view",
+      "small multiples",
+      "no {key}",
+      "definition` that says what to look at",
+      "main chart only",
+      "seriesLabels",
+      "regions",
+    ]) {
+      expect(server.VIEW_TOOL.description).toContain(rule);
+    }
+    const props = (server.VIEW_TOOL.inputSchema as { properties: Record<string, unknown> }).properties;
+    expect(props.seriesLabels).toBeDefined();
+    expect(props.regions).toBeDefined();
+    expect(props.panels).toBeDefined();
+  });
+});
