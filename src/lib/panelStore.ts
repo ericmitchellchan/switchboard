@@ -1142,7 +1142,11 @@ export type PanelSide = "left" | "right";
 let panelSides = new Map<string, PanelSide>();
 
 export function panelSideFor(sessionId: string | null): PanelSide {
-  return (sessionId && panelSides.get(ownerKeyFor(sessionId))) || "right";
+  // LEFT is the default (2026-09-02, Eric: "I thought we talked about having
+  // the page one be pinned to the left side" — the panel, ✦ page included,
+  // sits left of the terminal unless the user's ⇄ said otherwise). An
+  // explicit entry — either value — is the user's and wins.
+  return (sessionId && panelSides.get(ownerKeyFor(sessionId))) || "left";
 }
 
 /** The side a fresh open should WRITE for its tab, or null for "leave it".
