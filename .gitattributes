@@ -1,3 +1,8 @@
-# Shell scripts must keep LF line endings so they run under macOS / Linux bash
-# even when the repo is cloned on Windows with autocrlf=true.
-*.sh text eol=lf
+# Line endings: LF in the repo for everything text (2026-09-02 — a CRLF/LF
+# mismatch between two checked-out files broke a byte-identity test on CI;
+# Windows working copies still get CRLF via core.autocrlf where configured).
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.png binary
+*.woff2 binary
+*.ico binary

@@ -561,7 +561,11 @@ describe("isLocalBackendUrl — the server's copy is the reader's copy", () => {
 
   it("is BYTE-IDENTICAL to viewStore's body (the pairing comment is a promise; this is the check)", () => {
     const body = (src: string) => {
-      const m = src.match(/function isLocalBackendUrl\([^)]*\)[^{]*\{[\s\S]*?\n\}/);
+      // Normalize line endings FIRST: the two files can be checked out with
+      // different EOLs (this broke CI once — no .gitattributes meant the .cjs
+      // and the .ts stored/checked out differently). The promise is identical
+      // CODE, and EOL is transport, not code.
+      const m = src.replace(/\r\n/g, "\n").match(/function isLocalBackendUrl\([^)]*\)[^{]*\{[\s\S]*?\n\}/);
       if (!m) throw new Error("isLocalBackendUrl not found");
       // Only the TS annotations differ: strip them and the bodies must match.
       return m[0].replace("(url: string): boolean", "(url)").replace("let parsed: URL;", "let parsed;");
