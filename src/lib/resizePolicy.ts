@@ -27,7 +27,21 @@
 //     in-flight repaint is exactly the duplication bug).
 //   • AGENT BUSY → "defer" too, and for LONGER. See below.
 //   • INITIAL fit (a freshly created terminal, nothing rendered yet) sizes
-//     freely to the container — shrink allowed — but still capped.
+//     freely to the container — shrink allowed — but still capped. There is
+//     deliberately NO minimum-cols floor: a grid wider than its pane from the
+//     first keystroke would put claude's own input box beyond the right edge.
+//
+// WHAT "HORIZONTAL SCROLL INSTEAD" MEANS FOR THE READER (SWIT-68 deferred
+// bullet, 2026-09-07): after a narrow, the grid is wider than the pane and
+// everything the PTY app drew past the pane's right edge is still in the
+// buffer — a table claude rendered to 160 cols in a pane that now shows 98 is
+// COMPLETE, just off-screen. (claude itself never emits past `cols`: verified
+// against real scrollback — a table wider than the grid is squeezed to the
+// grid with cells wrapped, never truncated.) `hiddenCols` names that overflow
+// so the fit path can log it; the host's horizontal scrollbar (global.css
+// `.terminal-host`) is the affordance that reaches it — thin and one step
+// brighter than the global bar, because the default one measured 15px of
+// `--border` on `--bg-primary` and read as nothing.
 //
 // WHY "BUSY" EXISTS ON TOP OF "STREAMING" (2026-08-02, Eric, driving the app):
 // output recency alone is the physically-correct signal but its window is only
@@ -66,6 +80,20 @@ export const BUSY_QUIET_MS = 30_000;
 export interface GridSize {
   cols: number;
   rows: number;
+}
+
+/**
+ * Columns of the CURRENT grid that lie beyond the pane's right edge — what the
+ * host's horizontal scroll reaches and nothing else shows. `proposed` is the
+ * container-fitted grid (fitAddon.proposeDimensions()), so the answer is the
+ * grow-only surplus: current minus what would fit. 0 when the grid fits, and
+ * 0 for an unusable proposal (an unmeasurable container hides nothing that a
+ * measurement could show).
+ */
+export function hiddenCols(current: GridSize, proposed: GridSize | null | undefined): number {
+  if (!proposed || !Number.isFinite(proposed.cols) || proposed.cols <= 0) return 0;
+  if (!Number.isFinite(current.cols)) return 0;
+  return Math.max(0, Math.floor(current.cols) - Math.floor(proposed.cols));
 }
 
 export type ResizeAction =

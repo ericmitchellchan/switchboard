@@ -109,6 +109,7 @@ DiagramView runs mermaid `theme: "base"`, whose nodes carry their own fills.
 | Picker row | pad `5px 12px`, gap 8, 12px icon slot `--text-faint`, label 11.5px, meta 9.5px `--text-dim` | ArtifactPicker.tsx |
 | Task sidebar | full 280px / collapsed 38px / hidden (right side) | TaskSidebar.tsx:68,139 |
 | Scrollbars | 5px, thumb `--border`, hover `--border-subtle` | global.css |
+| Terminal horizontal scrollbar | **6px, thumb `--border-subtle`, hover `--text-faint`**, present only while the grid is wider than the pane (grow-only policy: the overflow is content, reached by this bar and nothing else) | global.css `.terminal-host` |
 | Terminal | xterm.js, bg `--bg-primary` | terminal.ts |
 
 ## Icons (src/components/icons.tsx — the only icon module)

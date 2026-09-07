@@ -7,6 +7,7 @@ import {
   BUSY_QUIET_MS,
   MAX_TERMINAL_COLS,
   STREAM_QUIET_MS,
+  hiddenCols,
   resizeDecision,
   type GridSize,
 } from "./resizePolicy";
@@ -175,6 +176,44 @@ describe("initial fit (fresh terminal, nothing rendered)", () => {
     expect(
       resizeDecision(grid(80, 24), grid(100, 40), { streaming: true, initial: true })
     ).toEqual({ kind: "resize", cols: 100, rows: 40 });
+  });
+});
+
+// The grow-only surplus: what "horizontal scroll instead" leaves past the
+// pane's right edge (SWIT-68's clipped-table bullet — the bytes are there,
+// this is how many columns of them the pane does not show).
+describe("hiddenCols", () => {
+  it("a grid kept wider than the pane → the columns past the edge", () => {
+    expect(hiddenCols(grid(160, 40), grid(98, 40))).toBe(62);
+  });
+
+  it("a grid that fits → 0; a pane wider than the grid → 0, never negative", () => {
+    expect(hiddenCols(grid(120, 30), grid(120, 30))).toBe(0);
+    expect(hiddenCols(grid(120, 30), grid(140, 30))).toBe(0);
+  });
+
+  it("rows do not matter — only width overflows", () => {
+    expect(hiddenCols(grid(120, 30), grid(120, 12))).toBe(0);
+    expect(hiddenCols(grid(120, 30), grid(100, 60))).toBe(20);
+  });
+
+  it("an unusable proposal (hidden / unmeasurable container) hides nothing measurable → 0", () => {
+    expect(hiddenCols(grid(120, 30), null)).toBe(0);
+    expect(hiddenCols(grid(120, 30), undefined)).toBe(0);
+    expect(hiddenCols(grid(120, 30), grid(0, 30))).toBe(0);
+    expect(hiddenCols(grid(120, 30), grid(NaN, 30))).toBe(0);
+    expect(hiddenCols(grid(NaN, 30), grid(80, 30))).toBe(0);
+  });
+
+  it("agrees with the decision: a narrower pane is `none`, and the surplus is what none leaves", () => {
+    const current = grid(160, 40);
+    const proposed = grid(98, 40);
+    expect(resizeDecision(current, proposed, idle)).toEqual({ kind: "none" });
+    expect(hiddenCols(current, proposed)).toBe(current.cols - proposed.cols);
+  });
+
+  it("the capped legacy shrink still reports the surplus against the pane, not the cap", () => {
+    expect(hiddenCols(grid(200, 40), grid(150, 40))).toBe(50);
   });
 });
 

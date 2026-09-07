@@ -401,6 +401,11 @@ export const TerminalPane = memo(function TerminalPane({
       )}
       <div
         ref={containerRef}
+        // `terminal-host` carries the HORIZONTAL scrollbar rule (global.css):
+        // thin, one step brighter, drawn only while the grid is wider than the
+        // pane — the affordance that reaches what grow-only leaves past the
+        // right edge (resizePolicy.ts header, "horizontal scroll instead").
+        className="terminal-host"
         // Click-to-focus for the WHOLE pane, not just the xterm element.
         // xterm installs its own focus handler on its element — but this
         // container is wider/taller than that element whenever `overflowX`
@@ -433,7 +438,8 @@ export const TerminalPane = memo(function TerminalPane({
           // Grow-only width (see resizePolicy.ts): when the pane is narrower
           // than the terminal's columns, scroll horizontally rather than
           // re-wrap/break already-rendered content. Vertical stays clipped —
-          // xterm scrolls itself.
+          // xterm scrolls itself. `auto`, not `scroll`: the bar exists only
+          // while there is overflow, so a fitting grid pays no height for it.
           overflowX: "auto",
           overflowY: "hidden",
           transition: "opacity 0.05s",

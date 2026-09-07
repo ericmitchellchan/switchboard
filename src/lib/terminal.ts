@@ -9,7 +9,7 @@
 // keep their import surface unchanged.
 
 import { log } from "./logger";
-import { resizeDecision } from "./resizePolicy";
+import { hiddenCols, resizeDecision } from "./resizePolicy";
 import {
   getTerminal,
   getAllTerminalIds,
@@ -279,6 +279,19 @@ export function fitTerminal(
       proposed ?? null,
       { streaming: !!opts?.streaming, busy: !!opts?.busy, initial: !!opts?.initial }
     );
+
+    // The grow-only surplus, named at the seam where it is decided: when the
+    // grid is wider than the pane the columns past the right edge are in the
+    // buffer and reachable only by the host's horizontal scroll. A report of
+    // "the table is cut off" correlates with this line, not with a refit
+    // (SWIT-68's deferred bullet — the receipt was a 160-col grid in a pane
+    // that fit 98).
+    const hidden = hiddenCols({ cols: term.cols, rows: term.rows }, proposed ?? null);
+    if (hidden > 0) {
+      log.debug(
+        `fit id=${sessionId} grid=${term.cols} cols, pane fits ${proposed?.cols}: ${hidden} beyond the right edge (horizontal scroll)`
+      );
+    }
 
     switch (decision.kind) {
       case "none":

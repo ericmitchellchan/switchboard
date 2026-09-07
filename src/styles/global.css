@@ -130,6 +130,30 @@ html, body, #root {
   padding: 0;
 }
 
+/* THE TERMINAL HOST'S HORIZONTAL SCROLLBAR (SWIT-68 deferred bullet,
+   2026-09-07). The grow-only resize policy keeps cols when a pane narrows and
+   the host scrolls horizontally instead (TerminalPane `overflow-x: auto`), so
+   a table claude drew to 160 cols in a pane that fits 98 is complete in the
+   buffer and off-screen to the right. The global rule above sets only `width`
+   (the vertical bar); for the horizontal axis Chromium falls back to its
+   default thickness — measured in headless Chrome against this exact chain:
+   15px of `--border` on `--bg-primary`, which read as nothing. So: thin, one
+   step brighter than the global bar (the same lesson as the chart zero rule —
+   one step up or it vanishes among the lines around it), and drawn only while
+   there is overflow. Never `scrollbar-gutter`: the spec reserves the inline
+   gutter only, and a permanent band would cost every fitting grid 6px. */
+.terminal-host::-webkit-scrollbar {
+  height: 6px;
+}
+
+.terminal-host::-webkit-scrollbar-thumb {
+  background: var(--border-subtle);
+}
+
+.terminal-host::-webkit-scrollbar-thumb:hover {
+  background: var(--text-faint);
+}
+
 .xterm-viewport::-webkit-scrollbar {
   width: 5px;
 }
