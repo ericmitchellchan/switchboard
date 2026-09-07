@@ -18,8 +18,8 @@ function utcMs(ts: string): number {
   return Date.parse(s.endsWith("Z") ? s : `${s}Z`);
 }
 const TFS = ["1m", "5m", "15m", "1h"] as const;
-const UP = "#4ea96a";
-const DN = "#e0645b";
+const UP = "#6fc492"; // = --up
+const DN = "#e88a8a"; // = --dn
 const CTX_BEFORE = 16; // bars of context before the pattern
 const CTX_AFTER = 40; // bars after (covers the 32-bar forward outcome + a little)
 
@@ -80,12 +80,12 @@ function DetailCandles({
     ) : null;
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="block w-full">
-      {band(pat, "#7c8ce8", 0.12)}
-      {band(fwd, "#8a8a93", 0.07)}
+      {band(pat, "#7dd3a8" /* = --accent */, 0.12)}
+      {band(fwd, "#b4b4b4" /* = --dim */, 0.07)}
       {[hi, (hi + lo) / 2, lo].map((v, i) => (
         <g key={i}>
-          <line x1={PAD.l} x2={W - PAD.r} y1={y(v)} y2={y(v)} stroke="#1e1e24" strokeDasharray="2 4" />
-          <text x={PAD.l - 5} y={y(v) + 3} textAnchor="end" fill="#8a8a93" fontSize="9" fontFamily="monospace">
+          <line x1={PAD.l} x2={W - PAD.r} y1={y(v)} y2={y(v)} stroke={"#2e2e2e" /* = --line */} strokeDasharray="2 4" />
+          <text x={PAD.l - 5} y={y(v) + 3} textAnchor="end" fill={"#b4b4b4" /* = --dim */} fontSize="9" fontFamily="monospace">
             {v.toFixed(0)}
           </text>
         </g>
@@ -104,8 +104,8 @@ function DetailCandles({
       {/* pattern-window bounds */}
       {pat.length ? (
         <>
-          <line x1={x(pat[0]) - cw / 2} x2={x(pat[0]) - cw / 2} y1={PAD.t} y2={H - PAD.b} stroke="#7c8ce8" strokeWidth="0.8" opacity="0.6" />
-          <line x1={x(pat[pat.length - 1]) + cw / 2} x2={x(pat[pat.length - 1]) + cw / 2} y1={PAD.t} y2={H - PAD.b} stroke="#7c8ce8" strokeWidth="0.8" opacity="0.6" />
+          <line x1={x(pat[0]) - cw / 2} x2={x(pat[0]) - cw / 2} y1={PAD.t} y2={H - PAD.b} stroke={"#7dd3a8" /* = --accent */} strokeWidth="0.8" opacity="0.6" />
+          <line x1={x(pat[pat.length - 1]) + cw / 2} x2={x(pat[pat.length - 1]) + cw / 2} y1={PAD.t} y2={H - PAD.b} stroke={"#7dd3a8" /* = --accent */} strokeWidth="0.8" opacity="0.6" />
         </>
       ) : null}
       {/* structural points within the pattern window — the swing low ("the bottom") + high */}
@@ -133,7 +133,7 @@ function DetailCandles({
             );
           })()
         : null}
-      <text x={PAD.l} y={H - 8} fill="#55555e" fontSize="8" fontFamily="monospace">
+      <text x={PAD.l} y={H - 8} fill={"#888888" /* = --dim2 */} fontSize="8" fontFamily="monospace">
         {pts.length} bars · shaded = pattern · lighter = 32-bar forward · ○ swing low/high
       </text>
     </svg>

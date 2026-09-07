@@ -18,9 +18,9 @@ function utcMs(ts: string): number {
   const s = ts.replace(" ", "T");
   return Date.parse(s.endsWith("Z") ? s : `${s}Z`);
 }
-const UP = "#4ea96a";
-const DN = "#e0645b";
-const AC = "#6ea8d8";
+const UP = "#6fc492"; // = --up
+const DN = "#e88a8a"; // = --dn
+const AC = "#7dd3a8"; // = --accent
 
 // fixed-width bars → the chart is drawn at its natural width and scrolls, so bars aren't
 // squashed and the entry/exit can sit at the middle of the view.
@@ -90,9 +90,9 @@ function Candles({
       {/* EXIT — marker + label at the TOP */}
       {exitIdx >= 0 ? (
         <g>
-          <line x1={x(exitIdx)} x2={x(exitIdx)} y1={CH_PAD.t} y2={H - CH_PAD.b} stroke="#9a9aa4" strokeWidth="0.9" strokeDasharray="3 2" />
-          <path d={`M ${x(exitIdx) - 4} ${CH_PAD.t - 10} L ${x(exitIdx) + 4} ${CH_PAD.t - 10} L ${x(exitIdx)} ${CH_PAD.t - 2} Z`} fill="#9a9aa4" />
-          <text x={x(exitIdx)} y={CH_PAD.t - 13} textAnchor="middle" fill="#9a9aa4" fontSize="9" fontFamily="monospace">EXIT</text>
+          <line x1={x(exitIdx)} x2={x(exitIdx)} y1={CH_PAD.t} y2={H - CH_PAD.b} stroke={"#b4b4b4" /* = --dim */} strokeWidth="0.9" strokeDasharray="3 2" />
+          <path d={`M ${x(exitIdx) - 4} ${CH_PAD.t - 10} L ${x(exitIdx) + 4} ${CH_PAD.t - 10} L ${x(exitIdx)} ${CH_PAD.t - 2} Z`} fill={"#b4b4b4" /* = --dim */} />
+          <text x={x(exitIdx)} y={CH_PAD.t - 13} textAnchor="middle" fill={"#b4b4b4" /* = --dim */} fontSize="9" fontFamily="monospace">EXIT</text>
         </g>
       ) : null}
     </svg>
@@ -193,7 +193,7 @@ export default function SetupDetail({
   const rewardPts = Math.abs(tp - entryPx);
   const riskPts = Math.abs(entryPx - stop);
   const pnl = outcome === "win" ? rewardPts * pointValue : outcome === "stop" ? -riskPts * pointValue : null;
-  const outColor = outcome === "win" ? UP : outcome === "stop" ? DN : "#8a8a93";
+  const outColor = outcome === "win" ? UP : outcome === "stop" ? DN : "#b4b4b4"; // = --dim
 
   // centre the scroll view on the entry→exit midpoint (owner: entry/exit at the middle)
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -212,7 +212,7 @@ export default function SetupDetail({
           <span className="text-sm text-text">{symbol} · {timeframe}</span>
           <span className="text-dim">{s.ts.slice(0, 10)} · {utcTime(s.ts)} UTC · {ptTime(s.ts)} PT</span>
           {entryIdx >= 0 && entryIdx < 20 ? (
-            <span className="rounded px-1.5" style={{ background: "rgba(224,180,90,0.15)", color: "#e0b45a" }}>
+            <span className="rounded px-1.5" style={{ background: "rgba(232,183,101,0.15)" /* = --chart-3 + alpha */, color: "var(--chart-3)" }}>
               session just opened · {entryIdx} bars prior
             </span>
           ) : null}

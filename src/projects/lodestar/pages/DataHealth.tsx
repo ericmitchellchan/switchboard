@@ -25,12 +25,12 @@ import {
 } from "../api/client";
 import { etTime, ptDate, ptTime, utcTime } from "../lib/time";
 
-const OK = "#4ea96a";
-const WARN = "#d9a441";
-const FAIL = "#e0645b";
-const UP = "#4ea96a";
-const DN = "#e0645b";
-const SEL = "#8ab4f8";
+const OK = "#6fc492"; // = --up
+const WARN = "#e8b765"; // = --chart-3
+const FAIL = "#e88a8a"; // = --dn
+const UP = "#6fc492"; // = --up
+const DN = "#e88a8a"; // = --dn
+const SEL = "#7ab8e8"; // = --liq
 
 /** Gate columns: label + how a row scores on it. */
 const GATES: {
@@ -331,8 +331,8 @@ function CoverageTimeline({
       >
         {[0, 50, 100].map((t) => (
           <g key={t}>
-            <line x1={PAD_L} x2={W - 4} y1={y(t)} y2={y(t)} stroke="#2a2f3a" strokeWidth={1} />
-            <text x={2} y={y(t) + 3} fill="#6b7280" fontFamily="monospace" fontSize={9}>
+            <line x1={PAD_L} x2={W - 4} y1={y(t)} y2={y(t)} stroke={"#2e2e2e" /* = --line */} strokeWidth={1} />
+            <text x={2} y={y(t) + 3} fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={9}>
               {t}%
             </text>
           </g>
@@ -340,7 +340,7 @@ function CoverageTimeline({
         {days.map((d, i) => {
           const pct = d.coverage_pct ?? 0;
           const isSel = d.date === selectedDate;
-          const tone = isSel ? SEL : pct >= 99.5 ? OK : pct >= 50 ? WARN : "#4a5163";
+          const tone = isSel ? SEL : pct >= 99.5 ? OK : pct >= 50 ? WARN : "#888888"; // = --dim2
           return (
             <rect
               key={d.date}
@@ -363,10 +363,10 @@ function CoverageTimeline({
           );
         })}
         <SelectionBand drag={drag} top={4} bottom={H - PAD_B} />
-        <text x={PAD_L} y={H - 5} fill="#6b7280" fontFamily="monospace" fontSize={9}>
+        <text x={PAD_L} y={H - 5} fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={9}>
           {days[0].date}
         </text>
-        <text x={W - 4} y={H - 5} textAnchor="end" fill="#6b7280" fontFamily="monospace" fontSize={9}>
+        <text x={W - 4} y={H - 5} textAnchor="end" fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={9}>
           {days[days.length - 1].date}
         </text>
       </svg>
@@ -547,8 +547,8 @@ function DayChart({
           const p = lo + f * span;
           return (
             <g key={f}>
-              <line x1={PAD_L} x2={W - 4} y1={y(p)} y2={y(p)} stroke="#2a2f3a" strokeWidth={1} />
-              <text x={2} y={y(p) + 3} fill="#6b7280" fontFamily="monospace" fontSize={9}>
+              <line x1={PAD_L} x2={W - 4} y1={y(p)} y2={y(p)} stroke={"#2e2e2e" /* = --line */} strokeWidth={1} />
+              <text x={2} y={y(p) + 3} fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={9}>
                 {p.toFixed(2)}
               </text>
             </g>
@@ -556,7 +556,7 @@ function DayChart({
         })}
 
         {/* time axis */}
-        <line x1={PAD_L} x2={W - 4} y1={H - PAD_B} y2={H - PAD_B} stroke="#2a2f3a" strokeWidth={1} />
+        <line x1={PAD_L} x2={W - 4} y1={H - PAD_B} y2={H - PAD_B} stroke={"#2e2e2e" /* = --line */} strokeWidth={1} />
         {ticks.map((t) => (
           <g key={t.i}>
             <line
@@ -564,7 +564,7 @@ function DayChart({
               x2={xOf(t.i)}
               y1={8}
               y2={H - PAD_B}
-              stroke="#2a2f3a"
+              stroke={"#2e2e2e" /* = --line */}
               strokeWidth={1}
               opacity={0.45}
             />
@@ -572,7 +572,7 @@ function DayChart({
               x={xOf(t.i)}
               y={H - 12}
               textAnchor="middle"
-              fill="#6b7280"
+              fill={"#888888" /* = --dim2 */}
               fontFamily="monospace"
               fontSize={9}
             >
@@ -583,7 +583,7 @@ function DayChart({
                 x={xOf(t.i)}
                 y={H - 2}
                 textAnchor="middle"
-                fill="#8b93a1"
+                fill={"#b4b4b4" /* = --dim */}
                 fontFamily="monospace"
                 fontSize={8.5}
               >
@@ -592,7 +592,7 @@ function DayChart({
             )}
           </g>
         ))}
-        <text x={2} y={H - 12} fill="#6b7280" fontFamily="monospace" fontSize={8.5}>
+        <text x={2} y={H - 12} fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={8.5}>
           PT
         </text>
 
@@ -632,7 +632,7 @@ function DayChart({
             <line x1={xOf(hover)} x2={xOf(hover)} y1={4} y2={H - PAD_B} stroke={SEL} strokeWidth={1} opacity={0.55} />
             <line x1={PAD_L} x2={W - 4} y1={y(b.close)} y2={y(b.close)} stroke={SEL} strokeWidth={1} opacity={0.35} />
             <rect x={0} y={y(b.close) - 6} width={PAD_L - 4} height={12} fill={SEL} opacity={0.9} rx={2} />
-            <text x={PAD_L - 6} y={y(b.close) + 3} textAnchor="end" fill="#0b0d12" fontFamily="monospace" fontSize={9}>
+            <text x={PAD_L - 6} y={y(b.close) + 3} textAnchor="end" fill={"#0a0a0a" /* = --bg-primary (global.css) */} fontFamily="monospace" fontSize={9}>
               {b.close.toFixed(2)}
             </text>
             <rect x={xOf(hover) - 22} y={H - PAD_B + 1} width={44} height={11} fill={SEL} opacity={0.9} rx={2} />
@@ -640,7 +640,7 @@ function DayChart({
               x={xOf(hover)}
               y={H - PAD_B + 9.5}
               textAnchor="middle"
-              fill="#0b0d12"
+              fill={"#0a0a0a" /* = --bg-primary (global.css) */}
               fontFamily="monospace"
               fontSize={8.5}
             >

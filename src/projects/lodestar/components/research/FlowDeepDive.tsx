@@ -6,7 +6,7 @@
  * surface ring). Single y-axis by design; identity never rides on color alone
  * (flagged dots are bigger + ringed; a legend row names everything).
  *
- * Dataviz method: price line = accent (#7c8ce8), flagged = status dn (#e0645b)
+ * Dataviz method: price line = accent (--accent), flagged = status dn (--dn)
  * — CVD ΔE 27.9 protan / 60.5 normal on the dark surface (validated);
  * unflagged trades are deliberately recessive muted ink (context, not a series).
  */
@@ -183,14 +183,14 @@ export default function FlowDeepDive({ points, moments, breaks, sets, onAnnotate
           <span className="inline-block h-2 w-2 rounded-full bg-dim/60" /> trade (size = contracts)
         </span>
         <span className="flex items-center gap-1">
-          <span className="inline-block h-2.5 w-2.5 rounded-full ring-2 ring-bg" style={{ background: "#e0645b" }} />
+          <span className="inline-block h-2.5 w-2.5 rounded-full ring-2 ring-bg" style={{ background: "var(--dn)" }} />
           flagged flow (score ≥ {FLAG_SCORE})
         </span>
         <span className="flex items-center gap-1">
           <span className="inline-block h-3 w-px bg-line" /> set / break
         </span>
         <span className="flex items-center gap-1">
-          <span className="inline-block h-0.5 w-4" style={{ background: "#5aa6c9" }} /> net of top-scored trades (p1 up / p2 down)
+          <span className="inline-block h-0.5 w-4" style={{ background: "var(--liq)" }} /> net of top-scored trades (p1 up / p2 down)
         </span>
         {gameWindow ? (
           <span className="flex gap-1">
@@ -227,8 +227,8 @@ export default function FlowDeepDive({ points, moments, breaks, sets, onAnnotate
         {/* y gridlines at 0/50/100¢ — recessive */}
         {[0, 50, 100].map((c) => (
           <g key={c}>
-            <line x1={PAD.l} x2={W - PAD.r} y1={y(c)} y2={y(c)} stroke="#1e1e22" strokeDasharray="2 4" />
-            <text x={4} y={y(c) + 3} fill="#57575f" fontSize="9" fontFamily="monospace">
+            <line x1={PAD.l} x2={W - PAD.r} y1={y(c)} y2={y(c)} stroke={"#2e2e2e" /* = --line */} strokeDasharray="2 4" />
+            <text x={4} y={y(c) + 3} fill={"#888888" /* = --dim2 */} fontSize="9" fontFamily="monospace">
               {c}¢
             </text>
           </g>
@@ -236,11 +236,11 @@ export default function FlowDeepDive({ points, moments, breaks, sets, onAnnotate
         {/* game events */}
         {events.map((e, i) => (
           <g key={i}>
-            <line x1={x(e.t)} x2={x(e.t)} y1={PAD.t} y2={H - PAD.b} stroke="#1e1e22" />
+            <line x1={x(e.t)} x2={x(e.t)} y1={PAD.t} y2={H - PAD.b} stroke={"#2e2e2e" /* = --line */} />
             <text
               x={x(e.t) + 2}
               y={H - PAD.b - 3}
-              fill="#57575f"
+              fill={"#888888" /* = --dim2 */}
               fontSize="8"
               fontFamily="monospace"
             >
@@ -249,16 +249,16 @@ export default function FlowDeepDive({ points, moments, breaks, sets, onAnnotate
           </g>
         ))}
         {/* price line */}
-        <path d={path} fill="none" stroke="#7c8ce8" strokeWidth="1.6" />
+        <path d={path} fill="none" stroke={"#7dd3a8" /* = --accent */} strokeWidth="1.6" />
         {/* cumulative backing pressure band */}
-        <line x1={PAD.l} x2={W - PAD.r} y1={yBand(0)} y2={yBand(0)} stroke="#1e1e22" strokeDasharray="2 4" />
-        <text x={4} y={yBand(0) + 3} fill="#57575f" fontSize="8" fontFamily="monospace">±{maxAbs}</text>
-        <path d={pressurePath} fill="none" stroke="#5aa6c9" strokeWidth="1.4" />
+        <line x1={PAD.l} x2={W - PAD.r} y1={yBand(0)} y2={yBand(0)} stroke={"#2e2e2e" /* = --line */} strokeDasharray="2 4" />
+        <text x={4} y={yBand(0) + 3} fill={"#888888" /* = --dim2 */} fontSize="8" fontFamily="monospace">±{maxAbs}</text>
+        <path d={pressurePath} fill="none" stroke={"#7ab8e8" /* = --liq */} strokeWidth="1.4" />
         {/* trade dots: unflagged first (recessive), flagged on top with ring */}
         {dots
           .filter((d) => !d.flagged)
           .map((d, i) => (
-            <circle key={`u${i}`} cx={d.cx} cy={d.cy} r={d.r} fill="#8a8a93" opacity="0.35" />
+            <circle key={`u${i}`} cx={d.cx} cy={d.cy} r={d.r} fill={"#b4b4b4" /* = --dim */} opacity="0.35" />
           ))}
         {dots
           .filter((d) => d.flagged)
@@ -268,7 +268,7 @@ export default function FlowDeepDive({ points, moments, breaks, sets, onAnnotate
               cx={d.cx}
               cy={d.cy}
               r={d.r + 1}
-              fill="#e0645b"
+              fill={"#e88a8a" /* = --dn */}
               stroke="#000000"
               strokeWidth="2"
             />
@@ -303,22 +303,22 @@ export default function FlowDeepDive({ points, moments, breaks, sets, onAnnotate
         ))}
         {hover ? (
           <g pointerEvents="none">
-            <line x1={hover.x} x2={hover.x} y1={PAD.t} y2={H - PAD.b} stroke="#7c8ce8" strokeWidth="0.6" opacity="0.5" />
+            <line x1={hover.x} x2={hover.x} y1={PAD.t} y2={H - PAD.b} stroke={"#7dd3a8" /* = --accent */} strokeWidth="0.6" opacity="0.5" />
             <rect
               x={Math.min(hover.x + 6, W - 320)}
               y={PAD.t + 2}
               width={314}
               height={44}
               rx={4}
-              fill="#131316"
-              stroke="#1e1e22"
+              fill={"#141414" /* = --surface */}
+              stroke={"#2e2e2e" /* = --line */}
             />
             {hover.label.map((ln, i) => (
               <text
                 key={i}
                 x={Math.min(hover.x + 12, W - 314)}
                 y={PAD.t + 15 + i * 12}
-                fill="#e6e6ea"
+                fill={"#ededed" /* = --text */}
                 fontSize="9"
                 fontFamily="monospace"
               >
@@ -330,16 +330,16 @@ export default function FlowDeepDive({ points, moments, breaks, sets, onAnnotate
         {/* crosshair readout — scan anywhere */}
         {cross ? (
           <g pointerEvents="none">
-            <line x1={cross.px} x2={cross.px} y1={PAD.t} y2={H - PAD.b} stroke="#8a8a93" strokeDasharray="3 3" opacity="0.7" />
+            <line x1={cross.px} x2={cross.px} y1={PAD.t} y2={H - PAD.b} stroke={"#b4b4b4" /* = --dim */} strokeDasharray="3 3" opacity="0.7" />
             {(() => {
               const bw = 232;
               const bx = Math.min(Math.max(cross.px + 8, PAD.l), W - PAD.r - bw);
               const bh = 12 + cross.lines.length * 11;
               return (
                 <g transform={`translate(${bx}, ${PAD.t + 2})`}>
-                  <rect width={bw} height={bh} rx="4" fill="#131316" stroke="#1e1e22" />
+                  <rect width={bw} height={bh} rx="4" fill={"#141414" /* = --surface */} stroke={"#2e2e2e" /* = --line */} />
                   {cross.lines.map((ln, i) => (
-                    <text key={i} x="7" y={14 + i * 11} fill={i === 0 ? "#e6e6ea" : "#8a8a93"} fontSize="8.5" fontFamily="monospace">
+                    <text key={i} x="7" y={14 + i * 11} fill={i === 0 ? "#ededed" /* = --text */ : "#b4b4b4" /* = --dim */} fontSize="8.5" fontFamily="monospace">
                       {ln}
                     </text>
                   ))}

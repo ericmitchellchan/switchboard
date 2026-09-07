@@ -16,8 +16,8 @@ import TradeDetail from "../components/trading/TradeDetail";
 import { ptTime } from "../lib/time";
 import { useSurfaceNav, useSurfaceParams } from "../../../surfaces/page-api";
 
-const UP = "#4ea96a";
-const DN = "#e0645b";
+const UP = "#6fc492"; // = --up
+const DN = "#e88a8a"; // = --dn
 
 const DIM_LABEL: Record<string, string> = {
   edge_book: "Edge book vs the cloud",

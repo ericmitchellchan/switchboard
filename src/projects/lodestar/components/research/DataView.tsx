@@ -15,11 +15,11 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-const UP = "#6fb38a";
-const DN = "#e0645b";
+const UP = "#6fc492"; // = --up
+const DN = "#e88a8a"; // = --dn
 
 /** A tiny normalized-shape line — so a pattern match is VISUAL, not a row of numbers. */
-function Sparkline({ shape, stroke = "#7c8ce8", w = 128, h = 38 }: { shape?: number[]; stroke?: string; w?: number; h?: number }) {
+function Sparkline({ shape, stroke = "#7dd3a8" /* = --accent */, w = 128, h = 38 }: { shape?: number[]; stroke?: string; w?: number; h?: number }) {
   const pts = (shape ?? []).filter((n) => Number.isFinite(n));
   if (pts.length < 2) return <div style={{ height: h }} className="text-[9px] text-dim/60">no shape</div>;
   const lo = Math.min(...pts);
@@ -60,7 +60,7 @@ export function PatternResultView({ result }: { result: Record<string, unknown> 
           {queryShape ? (
             <div className="shrink-0">
               <div className="mb-0.5 font-mono text-[9px] uppercase tracking-wide text-dim">the pattern</div>
-              <Sparkline shape={queryShape} stroke="#eaeaed" w={120} h={44} />
+              <Sparkline shape={queryShape} stroke={"#ededed" /* = --text */} w={120} h={44} />
             </div>
           ) : null}
           {sig ? (

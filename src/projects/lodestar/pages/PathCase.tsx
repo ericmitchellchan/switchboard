@@ -20,10 +20,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { getJson } from "../api/client";
 
-const OK = "#4ea96a";
-const FAIL = "#e0645b";
-const SEL = "#8ab4f8";
-const MUTE = "#6d7684";
+const OK = "#6fc492"; // = --up
+const FAIL = "#e88a8a"; // = --dn
+const SEL = "#7ab8e8"; // = --liq
+const MUTE = "#888888"; // = --dim2
 
 interface Curve {
   t: number; n: number; p10: number; p25: number; med: number; p75: number; p90: number;
@@ -75,7 +75,7 @@ function PathFan({ curves, horizon }: { curves: Curve[]; horizon: number }) {
     <svg width={W} height={H} role="img" aria-label="Path fan with max and min envelope">
       {ticks.map((v) => (
         <g key={v}>
-          <line x1={PL} x2={W - 10} y1={y(v)} y2={y(v)} stroke={v === 0 ? "#3a4150" : "#242a35"} />
+          <line x1={PL} x2={W - 10} y1={y(v)} y2={y(v)} stroke={v === 0 ? "#3a3a3a" /* = --border-subtle (global.css) */ : "#2e2e2e" /* = --line */} />
           <text x={PL - 6} y={y(v) + 4} fill={MUTE} fontSize="10" textAnchor="end">{v.toFixed(1)}</text>
         </g>
       ))}
@@ -101,9 +101,9 @@ function Dispersion({ curves, horizon }: { curves: Curve[]; horizon: number }) {
   const y = (v: number) => PT + (1 - v / Math.max(1e-9, hi)) * (H - PT - PB);
   return (
     <svg width={W} height={H} role="img" aria-label="Spread between paths over time">
-      <line x1={PL} x2={W - 10} y1={y(0)} y2={y(0)} stroke="#3a4150" />
+      <line x1={PL} x2={W - 10} y1={y(0)} y2={y(0)} stroke={"#3a3a3a" /* = --border-subtle (global.css) */} />
       <path d={c.map((r, i) => `${i ? "L" : "M"}${x(r.t)},${y(r.iqr)}`).join(" ")}
-        stroke="#d9a441" strokeWidth={2} fill="none" />
+        stroke={"#e8b765" /* = --chart-3 */} strokeWidth={2} fill="none" />
       <text x={PL - 6} y={y(hi) + 4} fill={MUTE} fontSize="10" textAnchor="end">{hi.toFixed(1)}</text>
       <text x={PL} y={H - 6} fill={MUTE} fontSize="10">spread (IQR, ATR) — grows with time</text>
     </svg>
@@ -133,7 +133,7 @@ function Distribution({ d }: { d: Dist }) {
       ))}
       <path d={xs.map((v, i) => `${i ? "L" : "M"}${x(v)},${y((g(v) / gMax) * maxN)}`).join(" ")}
         stroke={FAIL} strokeWidth={1.5} fill="none" />
-      <line x1={x(0)} x2={x(0)} y1={PT} y2={y(0)} stroke="#3a4150" strokeDasharray="3 3" />
+      <line x1={x(0)} x2={x(0)} y1={PT} y2={y(0)} stroke={"#3a3a3a" /* = --border-subtle (global.css) */} strokeDasharray="3 3" />
       <text x={PL} y={H - 6} fill={MUTE} fontSize="10">outcome (ATR) · red = matched normal</text>
       <text x={W - 10} y={H - 6} fill={MUTE} fontSize="10" textAnchor="end">
         step {step.toFixed(2)}
@@ -160,10 +160,10 @@ function Sampler({ c }: { c: Case }) {
         return (
           <g key={b.rel}>
             <line x1={x(b.rel)} x2={x(b.rel)} y1={y(b.h)} y2={y(b.l)}
-              stroke={b.rel < 0 ? "#4a5262" : up ? OK : FAIL} strokeWidth={0.8} />
+              stroke={b.rel < 0 ? "#888888" /* = --dim2 */ : up ? OK : FAIL} strokeWidth={0.8} />
             <rect x={x(b.rel) - w / 2} y={y(Math.max(b.o, b.c))} width={w}
               height={Math.max(0.8, Math.abs(y(b.o) - y(b.c)))}
-              fill={b.rel < 0 ? "#4a5262" : up ? OK : FAIL} opacity={b.rel < 0 ? 0.5 : 0.9} />
+              fill={b.rel < 0 ? "#888888" /* = --dim2 */ : up ? OK : FAIL} opacity={b.rel < 0 ? 0.5 : 0.9} />
           </g>
         );
       })}
@@ -223,7 +223,7 @@ export default function PathCase() {
 
       <div style={{ display: "flex", gap: 16, alignItems: "center", margin: "16px 0" }}>
         <select value={moment} onChange={(e) => setMoment(e.target.value)}
-          style={{ background: "#12151c", color: "#e6e9ef", border: "1px solid #2a3040",
+          style={{ background: "var(--surface)", color: "var(--text)", border: "1px solid var(--line)",
             padding: "6px 10px", borderRadius: 4 }}>
           {Object.entries(MOMENT_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
         </select>
@@ -231,7 +231,7 @@ export default function PathCase() {
           horizon
           <input type="range" min={5} max={data.max_t} step={5} value={horizon}
             onChange={(e) => setHorizon(Number(e.target.value))} style={{ flex: 1 }} />
-          <strong style={{ color: "#e6e9ef", width: 74 }}>{horizon} min</strong>
+          <strong style={{ color: "var(--text)", width: 74 }}>{horizon} min</strong>
         </label>
       </div>
 
@@ -285,7 +285,7 @@ export default function PathCase() {
               </thead>
               <tbody>
                 {d.tails.map((t) => (
-                  <tr key={t.k} style={{ textAlign: "right", borderTop: "1px solid #222834" }}>
+                  <tr key={t.k} style={{ textAlign: "right", borderTop: "1px solid var(--line)" }}>
                     <td style={{ textAlign: "left", padding: "2px 8px" }}>{t.k} SD</td>
                     <td style={{ padding: "2px 8px" }}>{(100 * t.observed).toFixed(2)}%</td>
                     <td style={{ padding: "2px 8px", color: MUTE }}>{(100 * t.normal).toFixed(3)}%</td>
@@ -309,11 +309,11 @@ export default function PathCase() {
         <>
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
             <button onClick={() => setIdx((i) => (i - 1 + cases.length) % cases.length)}
-              style={{ background: "#1b1f29", color: "#e6e9ef", border: "1px solid #2a3040",
+              style={{ background: "var(--surface2)", color: "var(--text)", border: "1px solid var(--line)",
                 borderRadius: 4, padding: "4px 12px", cursor: "pointer" }}>←</button>
             <span style={{ color: MUTE }}>{idx + 1} / {cases.length}</span>
             <button onClick={() => setIdx((i) => (i + 1) % cases.length)}
-              style={{ background: "#1b1f29", color: "#e6e9ef", border: "1px solid #2a3040",
+              style={{ background: "var(--surface2)", color: "var(--text)", border: "1px solid var(--line)",
                 borderRadius: 4, padding: "4px 12px", cursor: "pointer" }}>→</button>
           </div>
           <Sampler c={cases[idx]} />
@@ -342,8 +342,8 @@ export default function PathCase() {
               <tr key={k}><td style={{ padding: "4px 10px" }}>{label}</td>
                 <td colSpan={7} style={{ color: MUTE, padding: "4px 10px" }}>—</td></tr>);
             return (
-              <tr key={k} style={{ borderTop: "1px solid #222834",
-                background: k === moment ? "#161b24" : undefined, textAlign: "right" }}>
+              <tr key={k} style={{ borderTop: "1px solid var(--line)",
+                background: k === moment ? "var(--surface2)" : undefined, textAlign: "right" }}>
                 <td style={{ textAlign: "left", padding: "4px 10px" }}>{label}</td>
                 <td style={{ padding: "4px 10px" }}>{m.summary.n?.toLocaleString()}</td>
                 <td style={{ padding: "4px 10px" }}>{fmt(r.med)}</td>

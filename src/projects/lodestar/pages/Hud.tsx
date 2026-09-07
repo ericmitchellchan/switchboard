@@ -13,9 +13,9 @@ import { useEffect, useRef, useState } from "react";
 import { api, type LiveTradeState } from "../api/client";
 import { useSurfaceActive, useSurfaceNav } from "../../../surfaces/page-api";
 
-const UP = "#4ea96a";
-const DN = "#e0645b";
-const AMBER = "#d1a05a";
+const UP = "#6fc492"; // = --up
+const DN = "#e88a8a"; // = --dn
+const AMBER = "#e8b765"; // = --chart-3
 
 function hms(sinceIso: string, now: number): string {
   const s = Math.max(0, Math.floor((now - Date.parse(sinceIso)) / 1000));

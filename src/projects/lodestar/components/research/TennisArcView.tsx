@@ -10,11 +10,11 @@ import { useEffect, useState } from "react";
 import { api, type TennisArc, type TennisHistPlayer } from "../../api/client";
 
 const CLASS_COLOR: Record<string, string> = {
-  rising: "#4ea96a",
-  fading: "#e0645b",
-  peak: "#7c8ce8",
-  steady: "#5aa6c9",
-  unrated: "#55555e",
+  rising: "#6fc492", // = --up
+  fading: "#e88a8a", // = --dn
+  peak: "#7dd3a8", // = --accent
+  steady: "#7ab8e8", // = --liq
+  unrated: "#888888", // = --dim2
 };
 const CLASS_NOTE: Record<string, string> = {
   rising: "recent form well above earlier",
@@ -32,7 +32,7 @@ const monthLabel = (p: string): string => {
 function ArcChart({ arc }: { arc: TennisArc }) {
   const pts = arc.series.filter((s) => s.matches > 0);
   if (pts.length < 2) return <div className="text-[11px] text-dim">not enough dated matches to draw a trajectory</div>;
-  const color = CLASS_COLOR[arc.arc_class] ?? "#5aa6c9";
+  const color = CLASS_COLOR[arc.arc_class] ?? "#7ab8e8"; // = --liq
   const W = 640;
   const H = 190;
   const PAD = { l: 34, r: 10, t: 12, b: 40 };
@@ -47,8 +47,8 @@ function ArcChart({ arc }: { arc: TennisArc }) {
     <svg viewBox={`0 0 ${W} ${H}`} className="block w-full">
       {[0, 0.5, 1].map((t) => (
         <g key={t}>
-          <line x1={PAD.l} x2={W - PAD.r} y1={y(t)} y2={y(t)} stroke="#1e1e24" strokeDasharray="2 4" />
-          <text x={PAD.l - 5} y={y(t) + 3} textAnchor="end" fill="#8a8a93" fontSize="8" fontFamily="monospace">
+          <line x1={PAD.l} x2={W - PAD.r} y1={y(t)} y2={y(t)} stroke={"#2e2e2e" /* = --line */} strokeDasharray="2 4" />
+          <text x={PAD.l - 5} y={y(t) + 3} textAnchor="end" fill={"#b4b4b4" /* = --dim */} fontSize="8" fontFamily="monospace">
             {Math.round(t * 100)}%
           </text>
         </g>
@@ -56,7 +56,7 @@ function ArcChart({ arc }: { arc: TennisArc }) {
       {/* match-count bars along the bottom */}
       {pts.map((s, i) => {
         const h = (s.matches / maxMatches) * barH;
-        return <rect key={`b${i}`} x={x(i) - 2.5} y={H - PAD.b + 12 - h} width="5" height={h} fill="#55555e" opacity="0.4" />;
+        return <rect key={`b${i}`} x={x(i) - 2.5} y={H - PAD.b + 12 - h} width="5" height={h} fill={"#888888" /* = --dim2 */} opacity="0.4" />;
       })}
       <path d={path} fill="none" stroke={color} strokeWidth="1.5" />
       {pts.map((s, i) => (
@@ -64,7 +64,7 @@ function ArcChart({ arc }: { arc: TennisArc }) {
       ))}
       {pts.map((s, i) =>
         i % labelEvery === 0 ? (
-          <text key={`l${i}`} x={x(i)} y={H - 4} textAnchor="middle" fill="#55555e" fontSize="7.5" fontFamily="monospace">
+          <text key={`l${i}`} x={x(i)} y={H - 4} textAnchor="middle" fill={"#888888" /* = --dim2 */} fontSize="7.5" fontFamily="monospace">
             {monthLabel(s.period)}
           </text>
         ) : null,

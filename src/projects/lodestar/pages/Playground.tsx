@@ -828,7 +828,7 @@ export default function Playground() {
         {/* snapshot the case into the knowledge base (durable copy + backlink) */}
         {openCase ? (
           caseSavedFor === openCase.case_id ? (
-            <span className="flex h-7 items-center px-1 font-mono text-[11px]" style={{ color: "#4ea96a" }}>
+            <span className="flex h-7 items-center px-1 font-mono text-[11px]" style={{ color: "var(--up)" }}>
               ✓ in knowledge
             </span>
           ) : (

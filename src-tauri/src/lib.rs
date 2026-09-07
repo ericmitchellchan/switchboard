@@ -332,6 +332,93 @@ async fn read_thread_file(thread_id: String, name: String) -> Result<String, Str
     }
 }
 
+/// A change stamp over a thread's three page files: the max mtime (ms since
+/// epoch) of page.json / answers.json / inbox.json, a missing file counting 0.
+/// The frontend's 5s pass compares it tick-to-tick and skips the three reads
+/// when nothing moved — a per-thread stat instead of three reads per thread
+/// per tick. Same guard posture as read_thread_file: the id is validated and
+/// the names come from the fixed THREAD_FILES set, so nothing caller-named
+/// reaches the filesystem. Compared by INEQUALITY on the frontend (a stamp is
+/// a change signal, not a clock — a restored older file must still re-read).
+#[tauri::command]
+async fn thread_files_stamp(thread_id: String) -> Result<u64, String> {
+    if !valid_thread_id(&thread_id) {
+        return Err("invalid thread id".into());
+    }
+    let dir = threads_data_dir()?.join(&thread_id);
+    Ok(max_mtime_ms(&dir, &THREAD_FILES))
+}
+
+/// Pure half of thread_files_stamp: max mtime in ms across `names` under
+/// `dir`; anything unreadable (missing file, missing dir, pre-epoch mtime)
+/// contributes 0, so "no page yet" is stamp 0, not an error — the ordinary
+/// state of every thread until its agent first writes.
+fn max_mtime_ms(dir: &std::path::Path, names: &[&str]) -> u64 {
+    let mut max = 0u64;
+    for name in names {
+        let ms = std::fs::metadata(dir.join(name))
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        if ms > max {
+            max = ms;
+        }
+    }
+    max
+}
+
+#[cfg(test)]
+mod thread_stamp_tests {
+    use super::{max_mtime_ms, valid_thread_id, THREAD_FILES};
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "swb-stamp-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn missing_dir_and_missing_files_stamp_zero() {
+        assert_eq!(max_mtime_ms(std::path::Path::new("Z:/no/such/dir"), &THREAD_FILES), 0);
+        let dir = temp_dir("empty");
+        assert_eq!(max_mtime_ms(&dir, &THREAD_FILES), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stamp_is_the_newest_of_the_three_and_moves_on_write() {
+        let dir = temp_dir("write");
+        std::fs::write(dir.join("page.json"), "{}").unwrap();
+        let one = max_mtime_ms(&dir, &THREAD_FILES);
+        assert!(one > 0);
+        // A second file can only hold the stamp or advance it — and rewriting
+        // it advances past any earlier value (mtime moves forward on write).
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.join("inbox.json"), "{\"posts\":[]}").unwrap();
+        let two = max_mtime_ms(&dir, &THREAD_FILES);
+        assert!(two > one, "stamp must advance on a newer write: {one} -> {two}");
+        // Only the fixed name set counts: an unrelated file moves nothing.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.join("other.json"), "x").unwrap();
+        assert_eq!(max_mtime_ms(&dir, &THREAD_FILES), two);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn thread_id_guard_is_the_same_one_reads_use() {
+        assert!(valid_thread_id("3f1c2a9e-0b7d-4c1e-9a55-1234567890ab"));
+        assert!(!valid_thread_id("../escape"));
+        assert!(!valid_thread_id(""));
+    }
+}
+
 // ── Question answers (SWIT-51) ───────────────────────────────────────────────
 // The APP is answers.json's SOLE writer (one-writer-per-file: page.json is
 // the MCP server's, this file is ours). Read-modify-write server-side,
@@ -1827,6 +1914,7 @@ fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         scrollback_root,
         threads_root,
         read_thread_file,
+        thread_files_stamp,
         prepare_thread_launch,
         list_thread_views,
         read_thread_view,

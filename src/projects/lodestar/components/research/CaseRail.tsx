@@ -18,7 +18,7 @@ function SectionHeader({ label, count, first }: { label: string; count: number; 
   return (
     <div
       className={`${first ? "mt-5" : "mt-7"} mb-2 font-mono text-[10.5px] font-semibold uppercase tracking-[0.11em]`}
-      style={{ color: "#9a9aa4" }}
+      style={{ color: "var(--dim)" }}
     >
       {label} <span className="font-normal text-faint">· {count}</span>
     </div>
@@ -54,7 +54,7 @@ function HomeRow({
   return (
     <div
       className={`group relative -ml-px flex items-start border-l-2 transition-colors ${
-        active ? "border-[#5aa6c9]" : "border-transparent hover:border-line"
+        active ? "border-liq" : "border-transparent hover:border-line"
       }`}
     >
       <button type="button" onClick={onOpen} className="flex min-w-0 flex-1 items-start gap-2 py-1 pl-2.5 text-left">

@@ -41,10 +41,10 @@ const QUICK_STARTS: { label: string; group_by: string; measure: string }[] = [
 
 // Real capture uses lowercase surface values (clay/hard; no grass this window).
 const KEY_COLOR: Record<string, string> = {
-  clay: "#d18f5a", hard: "#5aa6c9", grass: "#6fb38a",
-  atp: "#7c8ce8", wta: "#c77dcf", atp_challenger: "#5aa6c9", wta_challenger: "#6fb38a",
-  "all-court": "#7c8ce8", "serve-dominant": "#5aa6c9", "return-dominant": "#6fb38a", baseliner: "#d18f5a",
-  field: "#55555e",
+  clay: "#e8a27a" /* = --chart-8 */, hard: "#7ab8e8" /* = --liq */, grass: "#a8c97e" /* = --chart-6 */,
+  atp: "#a99cf0" /* = --chart-2 */, wta: "#cf9de8" /* = --chart-7 */, atp_challenger: "#7ab8e8" /* = --liq */, wta_challenger: "#a8c97e" /* = --chart-6 */,
+  "all-court": "#a99cf0" /* = --chart-2 */, "serve-dominant": "#7ab8e8" /* = --liq */, "return-dominant": "#a8c97e" /* = --chart-6 */, baseliner: "#e8a27a" /* = --chart-8 */,
+  field: "#888888", // = --dim2
 };
 const KEY_LABEL: Record<string, string> = {
   clay: "Clay", hard: "Hard", grass: "Grass",
@@ -83,8 +83,8 @@ function BarChart({ agg }: { agg: TennisAggregate }) {
     <svg viewBox={`0 0 ${W} ${H}`} className="block w-full">
       {ticks.map((t, i) => (
         <g key={i}>
-          <line x1={PAD.l} x2={W - PAD.r} y1={y(t)} y2={y(t)} stroke="#1e1e24" strokeDasharray="2 4" />
-          <text x={PAD.l - 6} y={y(t) + 3} textAnchor="end" fill="#8a8a93" fontSize="9" fontFamily="monospace">
+          <line x1={PAD.l} x2={W - PAD.r} y1={y(t)} y2={y(t)} stroke={"#2e2e2e" /* = --line */} strokeDasharray="2 4" />
+          <text x={PAD.l - 6} y={y(t) + 3} textAnchor="end" fill={"#b4b4b4" /* = --dim */} fontSize="9" fontFamily="monospace">
             {fmt(t, pct)}
           </text>
         </g>
@@ -92,17 +92,17 @@ function BarChart({ agg }: { agg: TennisAggregate }) {
       {groups.map((g, i) => {
         const cx = PAD.l + i * step + step / 2;
         const top = y(g.value as number);
-        const color = KEY_COLOR[g.key] ?? "#7c8ce8";
+        const color = KEY_COLOR[g.key] ?? "#a99cf0"; // = --chart-2
         return (
           <g key={g.key}>
             <rect x={cx - bw / 2} y={top} width={bw} height={H - PAD.b - top} rx="3" fill={color} opacity="0.85" />
             <text x={cx} y={top - 6} textAnchor="middle" fill={color} fontSize="11" fontFamily="monospace">
               {fmt(g.value, pct)}
             </text>
-            <text x={cx} y={H - PAD.b + 15} textAnchor="middle" fill="#c9c9cf" fontSize="11">
+            <text x={cx} y={H - PAD.b + 15} textAnchor="middle" fill={"#b4b4b4" /* = --dim */} fontSize="11">
               {prettyKey(g.key)}
             </text>
-            <text x={cx} y={H - PAD.b + 28} textAnchor="middle" fill="#55555e" fontSize="8.5" fontFamily="monospace">
+            <text x={cx} y={H - PAD.b + 28} textAnchor="middle" fill={"#888888" /* = --dim2 */} fontSize="8.5" fontFamily="monospace">
               {g.players} players · n={g.n.toLocaleString()}
             </text>
           </g>
@@ -222,7 +222,7 @@ export default function TennisExplore() {
           value={groupBy}
           onChange={(e) => setGroupBy(e.target.value)}
           className="rounded-md border bg-surface2 px-2 py-1 font-mono text-[11px] text-text focus:outline-none"
-          style={{ borderColor: "#6fb38a" }}
+          style={{ borderColor: "var(--chart-6)" }}
         >
           <optgroup label="dimensions">
             {GROUP_BY.map((g) => (
@@ -333,7 +333,7 @@ export default function TennisExplore() {
             className={`rounded-full border px-2.5 py-0.5 font-mono text-[10px] transition-colors ${
               activeQuick(q) ? "" : "border-line text-dim hover:border-accent hover:text-text"
             }`}
-            style={activeQuick(q) ? { borderColor: "#6fb38a", color: "#6fb38a" } : undefined}
+            style={activeQuick(q) ? { borderColor: "var(--chart-6)", color: "var(--chart-6)" } : undefined}
           >
             {q.label}
           </button>
@@ -350,11 +350,11 @@ export default function TennisExplore() {
               : (GROUP_BY.find((g) => g.key === groupBy)?.label ?? groupBy).toLowerCase()}
           </h3>
           {groupBy === "player_type" ? (
-            <span className="font-mono text-[10px]" style={{ color: "#6fb38a" }}>
+            <span className="font-mono text-[10px]" style={{ color: "var(--chart-6)" }}>
               segment · computed from serve/return strength
             </span>
           ) : activeCohort ? (
-            <span className="font-mono text-[10px]" style={{ color: "#6fb38a" }}>
+            <span className="font-mono text-[10px]" style={{ color: "var(--chart-6)" }}>
               segment · your cohort vs the field
             </span>
           ) : null}

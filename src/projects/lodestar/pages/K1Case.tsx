@@ -12,10 +12,10 @@
 import { useEffect, useState } from "react";
 import { getJson } from "../api/client";
 
-const OK = "#4ea96a";
-const FAIL = "#e0645b";
-const WARN = "#d9a441";
-const SEL = "#8ab4f8";
+const OK = "#6fc492"; // = --up
+const FAIL = "#e88a8a"; // = --dn
+const WARN = "#e8b765"; // = --chart-3
+const SEL = "#7ab8e8"; // = --liq
 
 interface LadderRow {
   rung: string; era: string; n: number; t2c_med: number | null; precision: number | null;
@@ -63,11 +63,11 @@ function PayoffFan({ row, horizons: allH, tone }: { row: LadderRow; horizons: nu
   const hasFan = row[`end_p10_${horizons[0]}`] != null;
   return (
     <svg width="100%" viewBox={`0 0 ${W} ${H}`} className="select-none">
-      <line x1={PAD_L} x2={W - 6} y1={y(0)} y2={y(0)} stroke="#6b7280" strokeWidth={1} strokeDasharray="3 4" />
+      <line x1={PAD_L} x2={W - 6} y1={y(0)} y2={y(0)} stroke={"#888888" /* = --dim2 */} strokeWidth={1} strokeDasharray="3 4" />
       {[-6, -3, 3, 6].map((v) => (
         <g key={v}>
-          <line x1={PAD_L} x2={W - 6} y1={y(v)} y2={y(v)} stroke="#2a2f3a" strokeWidth={0.7} opacity={0.5} />
-          <text x={2} y={y(v) + 3} fill="#6b7280" fontFamily="monospace" fontSize={8.5}>{v > 0 ? `+${v}` : v}</text>
+          <line x1={PAD_L} x2={W - 6} y1={y(v)} y2={y(v)} stroke={"#2e2e2e" /* = --line */} strokeWidth={0.7} opacity={0.5} />
+          <text x={2} y={y(v) + 3} fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={8.5}>{v > 0 ? `+${v}` : v}</text>
         </g>
       ))}
       {hasFan && <path d={band("end_p10", "end_p90")} fill={tone} opacity={0.10} />}
@@ -77,14 +77,14 @@ function PayoffFan({ row, horizons: allH, tone }: { row: LadderRow; horizons: nu
       <path d={series("worst_med")} fill="none" stroke={FAIL} strokeWidth={1.1} strokeDasharray="4 3" opacity={0.8}
             transform={`translate(0,0)`} />
       {horizons.map((h, i) => (
-        <text key={h} x={x(i)} y={H - 10} textAnchor="middle" fill="#6b7280" fontFamily="monospace" fontSize={9}>
+        <text key={h} x={x(i)} y={H - 10} textAnchor="middle" fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={9}>
           +{h}m
         </text>
       ))}
       <text x={W - 8} y={14} textAnchor="end" fill={tone} fontFamily="monospace" fontSize={10}>
         {RUNG_LABEL[row.rung] ?? row.rung}
       </text>
-      <text x={W - 8} y={26} textAnchor="end" fill="#6b7280" fontFamily="monospace" fontSize={8.5}>
+      <text x={W - 8} y={26} textAnchor="end" fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={8.5}>
         n={row.n.toLocaleString()}{row.precision != null ? ` · right ${(100 * (row.precision as number)).toFixed(0)}%` : ""}
       </text>
     </svg>
@@ -176,7 +176,7 @@ export default function K1Case() {
                       <td style={{ color: p.mean_atr >= 0 ? OK : FAIL }}>
                         {p.mean_atr >= 0 ? "+" : ""}{p.mean_atr.toFixed(3)} ATR
                       </td>
-                      <td style={{ color: p.lb > 0 ? OK : "#9aa3b2" }}>
+                      <td style={{ color: p.lb > 0 ? OK : "var(--dim)" }}>
                         [{p.lb >= 0 ? "+" : ""}{p.lb.toFixed(3)}, {p.ub >= 0 ? "+" : ""}{p.ub.toFixed(3)}]
                         {p.lb > 0 ? " ✓" : ""}
                       </td>

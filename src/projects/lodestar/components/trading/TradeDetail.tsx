@@ -13,8 +13,8 @@ import { api, type Bar, type TradeRow } from "../../api/client";
 import { ptTime, ptWeekday } from "../../lib/time";
 import CandleChart from "../../../../surfaces/charts/CandleChart";
 
-const UP = "#4ea96a";
-const DN = "#e0645b";
+const UP = "#6fc492"; // = --up
+const DN = "#e88a8a"; // = --dn
 
 
 function utcMs(ts: string): string | number {
@@ -110,7 +110,7 @@ export default function TradeDetail({
           <span
             className="rounded px-1.5 font-mono text-[10px] uppercase"
             title="edge book = the entry pockets that beat random (quiet counter / fade pop / hot-or-cold knife, first 3h of session)"
-            style={t.edge_book === "edge" ? { background: `${UP}22`, color: UP } : { background: "#8a8a9322", color: "#8a8a93" }}
+            style={t.edge_book === "edge" ? { background: `${UP}22`, color: UP } : { background: "#b4b4b422" /* = --dim + alpha */, color: "var(--dim)" }}
           >
             {t.edge_book === "edge" ? "◆ edge book" : "cloud"}
           </span>

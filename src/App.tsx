@@ -20,7 +20,7 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, listThreadViews, readThreadFile, writeThreadAnswer, appendConvention, writeThreadPost, saveTranscript, readBacklog, writeBacklog, takeBacklogInbox } from "./lib/ipc";
+import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, listThreadViews, readThreadFile, threadFilesStamp, writeThreadAnswer, appendConvention, writeThreadPost, saveTranscript, readBacklog, writeBacklog, takeBacklogInbox } from "./lib/ipc";
 import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty, isSessionDirty, serializeForPip, plainTextTerminal, getSessionWriteCount, setTerminalScreenVisible } from "./lib/terminal";
 import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing, sendPipHost } from "./lib/pipBridge";
 import { bumpSessionGeneration, addSessionInputListener, getSessionGeneration } from "./lib/terminalRegistry";
@@ -1393,6 +1393,16 @@ export default function App() {
   // would be spam). No auto-forwarding is STRUCTURAL: delivery types a
   // reference and nothing else — no path from here back to a post.
   const deliveredPostsRef = useRef(new Map<string, Set<string>>());
+  // H3 (hygiene): the pass is STAMP-GATED. One `thread_files_stamp` stat per
+  // thread per tick replaces three unconditional reads: when the max mtime of
+  // page.json / answers.json / inbox.json is unchanged since the last pass,
+  // the cached derived counts are republished and the reads (and the delivery
+  // scan — an unchanged inbox.json holds no new post) are skipped. Compared
+  // by INEQUALITY, and a failed stat caches stamp -1, which never matches —
+  // behaviour is byte-identical whenever anything actually changed.
+  const threadPassCacheRef = useRef(
+    new Map<string, { stamp: number; questions: number; unread: number }>()
+  );
   useEffect(() => {
     let cancelled = false;
     let busy = false;
@@ -1425,6 +1435,34 @@ export default function App() {
             const text = plainTextTerminal(sessionId);
             if (text !== null) scanThreadTranscript(t.id, text);
           }
+          // H3: the stamp gate — one stat per thread; when none of the three
+          // files moved since the last pass, republish the cached counts and
+          // skip the reads (an unchanged inbox.json holds no new post, so the
+          // delivery scan is skipped with them). A failed stat reads as
+          // before: stamp -1 never matches a cache entry.
+          let stamp = -1;
+          try {
+            stamp = await threadFilesStamp(t.id);
+          } catch {
+            // stat failed — fall through to the reads
+          }
+          if (cancelled) return;
+          const cached = threadPassCacheRef.current.get(t.id);
+          const isActiveThread =
+            findThreadBySessionId(activeIdRef.current ?? "")?.id === t.id;
+          if (cached && stamp !== -1 && cached.stamp === stamp) {
+            // Opening the thread still clears its chip without a file change:
+            // seen is device-local state, not one of the stamped files.
+            if (isActiveThread && cached.unread > 0) {
+              markInboxSeen(t.id);
+              cached.unread = 0;
+            }
+            if (cached.questions > 0) questions[t.id] = cached.questions;
+            if (cached.unread > 0) unread[t.id] = cached.unread;
+            continue;
+          }
+          const entry = { stamp, questions: 0, unread: 0 };
+          threadPassCacheRef.current.set(t.id, entry);
           try {
             const [pageRaw, answersRaw] = await Promise.all([
               readThreadFile(t.id, "page.json"),
@@ -1433,21 +1471,24 @@ export default function App() {
             if (cancelled) return;
             const answers = parseAnswersFile(answersRaw);
             const n = parsePageFile(pageRaw).questions.filter((q) => !(q.id in answers)).length;
+            entry.questions = n;
             if (n > 0) questions[t.id] = n;
           } catch {
-            // no page yet — no marker
+            // a real read error (missing resolves to "") — retry next tick
+            entry.stamp = -1;
           }
           let posts;
           try {
             posts = parseInboxFile(await readThreadFile(t.id, "inbox.json"));
           } catch {
+            entry.stamp = -1;
             continue;
           }
           if (cancelled) return;
           if (posts.length === 0) continue;
-          const activeThread = findThreadBySessionId(activeIdRef.current ?? "");
-          if (activeThread?.id === t.id) markInboxSeen(t.id);
+          if (isActiveThread) markInboxSeen(t.id);
           const n = countUnreadPosts(posts, loadInboxSeen(t.id));
+          entry.unread = n;
           if (n > 0) unread[t.id] = n;
           let delivered = deliveredPostsRef.current.get(t.id);
           if (!delivered) {
@@ -1465,6 +1506,11 @@ export default function App() {
               log.warn(`Inbox typed delivery failed thread=${t.id}: ${err}`)
             );
           }
+        }
+        // A deleted/archived thread's cache entry goes with it.
+        const known = new Set(threads.map((t) => t.id));
+        for (const id of [...threadPassCacheRef.current.keys()]) {
+          if (!known.has(id)) threadPassCacheRef.current.delete(id);
         }
         if (!cancelled) {
           publishThreadUnread(unread);

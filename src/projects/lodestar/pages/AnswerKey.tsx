@@ -21,17 +21,17 @@ import {
 } from "../api/client";
 import { etTime, ptDate, ptTime } from "../lib/time";
 
-const OK = "#4ea96a";
-const WARN = "#d9a441";
-const FAIL = "#e0645b";
-const SEL = "#8ab4f8";
+const OK = "#6fc492"; // = --up
+const WARN = "#e8b765"; // = --chart-3
+const FAIL = "#e88a8a"; // = --dn
+const SEL = "#7ab8e8"; // = --liq
 
 const LABEL_TONE: Record<string, string> = {
   TREND_UP: OK,
   TREND_DOWN: FAIL,
   RANGE: WARN,
-  DEAD: "#6b7280",
-  MIXED: "#a78bfa",
+  DEAD: "#888888", // = --dim2
+  MIXED: "#a99cf0", // = --chart-2
 };
 
 function Tile({ label, value, tone }: { label: string; value: string; tone?: string }) {
@@ -120,15 +120,15 @@ function SegmentChart({ seg }: { seg: AuditSegment }) {
         const p = lo + f * span;
         return (
           <g key={f}>
-            <line x1={PAD_L} x2={W - 4} y1={y(p)} y2={y(p)} stroke="#2a2f3a" strokeWidth={1} opacity={0.5} />
-            <text x={2} y={y(p) + 3} fill="#6b7280" fontFamily="monospace" fontSize={9}>{p.toFixed(2)}</text>
+            <line x1={PAD_L} x2={W - 4} y1={y(p)} y2={y(p)} stroke={"#2e2e2e" /* = --line */} strokeWidth={1} opacity={0.5} />
+            <text x={2} y={y(p) + 3} fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={9}>{p.toFixed(2)}</text>
           </g>
         );
       })}
       {bars.map((b, i) => {
         const x = xOf(i);
         const up = b.close >= b.open;
-        const color = b.suspect ? FAIL : up ? OK : "#e0645b";
+        const color = b.suspect ? FAIL : up ? OK : "#e88a8a"; // = --dn
         return (
           <g key={b.ts} opacity={b.in_segment ? 1 : 0.35}>
             <line x1={x} x2={x} y1={y(b.high)} y2={y(b.low)} stroke={color} strokeWidth={Math.min(bw * 0.5, 1)} />
@@ -138,10 +138,10 @@ function SegmentChart({ seg }: { seg: AuditSegment }) {
           </g>
         );
       })}
-      <text x={PAD_L} y={H - 8} fill="#6b7280" fontFamily="monospace" fontSize={9}>
+      <text x={PAD_L} y={H - 8} fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={9}>
         {ptDate(bars[0].ts)} {ptTime(bars[0].ts)} PT
       </text>
-      <text x={W - 4} y={H - 8} textAnchor="end" fill="#6b7280" fontFamily="monospace" fontSize={9}>
+      <text x={W - 4} y={H - 8} textAnchor="end" fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={9}>
         {ptTime(bars[bars.length - 1].ts)} PT
       </text>
     </svg>
@@ -380,9 +380,9 @@ export default function AnswerKey() {
                         title={`${it.session_date} · ${it.verdict ?? "unjudged"}`}
                         className="h-4 w-4 rounded-sm border"
                         style={{
-                          borderColor: i === idx ? SEL : "#2a2f3a",
+                          borderColor: i === idx ? SEL : "var(--line)",
                           background: it.verdict === "agree" ? OK : it.verdict === "disagree" ? FAIL
-                            : it.verdict === "unsure" ? "#6b7280" : "transparent",
+                            : it.verdict === "unsure" ? "var(--dim2)" : "transparent",
                           opacity: it.verdict ? 0.9 : 0.6,
                         }} />
               ))}

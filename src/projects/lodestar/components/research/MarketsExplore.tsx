@@ -20,9 +20,9 @@ const WINDOWS: { n: number; label: string }[] = [
   { n: 1000, label: "all" },
 ];
 const INTRADAY_TFS = ["1m", "5m", "15m"] as const;
-const UP = "#4ea96a";
-const DN = "#e0645b";
-const BLUE = "#5aa6c9";
+const UP = "#6fc492"; // = --up
+const DN = "#e88a8a"; // = --dn
+const BLUE = "#7ab8e8"; // = --liq
 
 const pct = (v: number | null): string => (v == null ? "—" : `${(v * 100).toFixed(2)}%`);
 const vol = (v: number): string =>
@@ -68,15 +68,15 @@ function TrendLine({
     <svg viewBox={`0 0 ${W} ${H}`} className="block w-full">
       {[hi, (hi + lo) / 2, lo].map((v, i) => (
         <g key={i}>
-          <line x1={PAD.l} x2={W - PAD.r} y1={y(v)} y2={y(v)} stroke="#1e1e24" strokeDasharray="2 4" />
-          <text x={PAD.l - 5} y={y(v) + 3} textAnchor="end" fill="#8a8a93" fontSize="8" fontFamily="monospace">
+          <line x1={PAD.l} x2={W - PAD.r} y1={y(v)} y2={y(v)} stroke={"#2e2e2e" /* = --line */} strokeDasharray="2 4" />
+          <text x={PAD.l - 5} y={y(v) + 3} textAnchor="end" fill={"#b4b4b4" /* = --dim */} fontSize="8" fontFamily="monospace">
             {Number.isFinite(v) ? v.toFixed(0) : "—"}
           </text>
         </g>
       ))}
       {days.map((d, i) =>
         d.date === selected ? (
-          <line key="sel" x1={x(i)} x2={x(i)} y1={PAD.t} y2={H - PAD.b} stroke="#eaeaed" strokeWidth="1" opacity="0.4" />
+          <line key="sel" x1={x(i)} x2={x(i)} y1={PAD.t} y2={H - PAD.b} stroke={"#ededed" /* = --text */} strokeWidth="1" opacity="0.4" />
         ) : null,
       )}
       <path d={path} fill="none" stroke={BLUE} strokeWidth="1.25" />
@@ -87,13 +87,13 @@ function TrendLine({
         return (
           <g key={d.date} style={{ cursor: "pointer" }} onClick={() => onSelect(d.date)}>
             <rect x={x(i) - Math.max(step / 2, 1)} y={PAD.t} width={Math.max(step, 2)} height={H - PAD.t - PAD.b} fill="transparent" />
-            <circle cx={x(i)} cy={y(d.close)} r={r} fill={on ? "#eaeaed" : color} opacity={on ? 1 : 0.7} />
+            <circle cx={x(i)} cy={y(d.close)} r={r} fill={on ? "#ededed" /* = --text */ : color} opacity={on ? 1 : 0.7} />
           </g>
         );
       })}
       {days.map((d, i) =>
         i % labelEvery === 0 ? (
-          <text key={`l${i}`} x={x(i)} y={H - PAD.b + 13} textAnchor="middle" fill="#55555e" fontSize="7.5" fontFamily="monospace">
+          <text key={`l${i}`} x={x(i)} y={H - PAD.b + 13} textAnchor="middle" fill={"#888888" /* = --dim2 */} fontSize="7.5" fontFamily="monospace">
             {long ? monthYear(d.date) : shortDate(d.date)}
           </text>
         ) : null,
@@ -108,10 +108,10 @@ const CANDLE_PAD = { l: 46, r: 10, t: 10, b: 30 };
 
 // --- indicator overlays (v1: computed client-side from the OHLCV we already have) ---
 const INDICATORS: { key: string; label: string; color: string }[] = [
-  { key: "sma", label: "SMA 20", color: "#d18f5a" },
-  { key: "ema", label: "EMA 20", color: "#5aa6c9" },
-  { key: "vwap", label: "VWAP", color: "#a78bcf" },
-  { key: "seshl", label: "Session H/L", color: "#8a8a93" },
+  { key: "sma", label: "SMA 20", color: "#e8a27a" /* = --chart-8 */ },
+  { key: "ema", label: "EMA 20", color: "#7ab8e8" /* = --liq */ },
+  { key: "vwap", label: "VWAP", color: "#a99cf0" /* = --chart-2 */ },
+  { key: "seshl", label: "Session H/L", color: "#b4b4b4" /* = --dim */ },
 ];
 const IND_LEN = 20;
 
@@ -214,8 +214,8 @@ function Candles({ bars, inds }: { bars: Bar[]; inds: Set<string> }) {
     >
       {[hi, (hi + lo) / 2, lo].map((v, i) => (
         <g key={i}>
-          <line x1={PAD.l} x2={W - PAD.r} y1={y(v)} y2={y(v)} stroke="#1e1e24" strokeDasharray="2 4" />
-          <text x={PAD.l - 5} y={y(v) + 3} textAnchor="end" fill="#8a8a93" fontSize="8" fontFamily="monospace">
+          <line x1={PAD.l} x2={W - PAD.r} y1={y(v)} y2={y(v)} stroke={"#2e2e2e" /* = --line */} strokeDasharray="2 4" />
+          <text x={PAD.l - 5} y={y(v) + 3} textAnchor="end" fill={"#b4b4b4" /* = --dim */} fontSize="8" fontFamily="monospace">
             {v.toFixed(0)}
           </text>
         </g>
@@ -234,9 +234,9 @@ function Candles({ bars, inds }: { bars: Bar[]; inds: Set<string> }) {
         );
       })}
       {/* indicator overlays */}
-      {inds.has("sma") ? <path d={linePath(sma(pts.map((b) => b.close), IND_LEN), x, y)} fill="none" stroke="#d18f5a" strokeWidth="1.1" opacity="0.9" /> : null}
-      {inds.has("ema") ? <path d={linePath(ema(pts.map((b) => b.close), IND_LEN), x, y)} fill="none" stroke="#5aa6c9" strokeWidth="1.1" opacity="0.9" /> : null}
-      {inds.has("vwap") ? <path d={linePath(vwap(pts), x, y)} fill="none" stroke="#a78bcf" strokeWidth="1.1" opacity="0.9" strokeDasharray="4 2" /> : null}
+      {inds.has("sma") ? <path d={linePath(sma(pts.map((b) => b.close), IND_LEN), x, y)} fill="none" stroke={"#e8a27a" /* = --chart-8 */} strokeWidth="1.1" opacity="0.9" /> : null}
+      {inds.has("ema") ? <path d={linePath(ema(pts.map((b) => b.close), IND_LEN), x, y)} fill="none" stroke={"#7ab8e8" /* = --liq */} strokeWidth="1.1" opacity="0.9" /> : null}
+      {inds.has("vwap") ? <path d={linePath(vwap(pts), x, y)} fill="none" stroke={"#a99cf0" /* = --chart-2 */} strokeWidth="1.1" opacity="0.9" strokeDasharray="4 2" /> : null}
       {inds.has("seshl")
         ? (() => {
             // the FULL day's extremes — useful reference lines, esp. when zoomed
@@ -246,8 +246,8 @@ function Candles({ bars, inds }: { bars: Bar[]; inds: Set<string> }) {
               <>
                 {[["H", sh], ["L", sl]].map(([lbl, v]) => (
                   <g key={String(lbl)}>
-                    <line x1={PAD.l} x2={W - PAD.r} y1={y(v as number)} y2={y(v as number)} stroke="#8a8a93" strokeWidth="0.8" strokeDasharray="3 3" opacity="0.5" />
-                    <text x={W - PAD.r - 2} y={y(v as number) - 2} textAnchor="end" fill="#8a8a93" fontSize="7.5" fontFamily="monospace">
+                    <line x1={PAD.l} x2={W - PAD.r} y1={y(v as number)} y2={y(v as number)} stroke={"#b4b4b4" /* = --dim */} strokeWidth="0.8" strokeDasharray="3 3" opacity="0.5" />
+                    <text x={W - PAD.r - 2} y={y(v as number) - 2} textAnchor="end" fill={"#b4b4b4" /* = --dim */} fontSize="7.5" fontFamily="monospace">
                       {lbl} {(v as number).toFixed(0)}
                     </text>
                   </g>
@@ -258,9 +258,9 @@ function Candles({ bars, inds }: { bars: Bar[]; inds: Set<string> }) {
         : null}
       {/* the grey drag selection */}
       {drag ? (
-        <rect x={Math.min(drag.x0, drag.x1)} y={PAD.t} width={Math.abs(drag.x1 - drag.x0)} height={H - PAD.t - PAD.b} fill="#8a8a93" opacity="0.2" />
+        <rect x={Math.min(drag.x0, drag.x1)} y={PAD.t} width={Math.abs(drag.x1 - drag.x0)} height={H - PAD.t - PAD.b} fill={"#b4b4b4" /* = --dim */} opacity="0.2" />
       ) : null}
-      <text x={PAD.l} y={H - 6} fill="#55555e" fontSize="8" fontFamily="monospace">
+      <text x={PAD.l} y={H - 6} fill={"#888888" /* = --dim2 */} fontSize="8" fontFamily="monospace">
         {pts.length} bars{zoom ? " · zoomed — double-click to reset" : " · drag to zoom"}
       </text>
     </svg>

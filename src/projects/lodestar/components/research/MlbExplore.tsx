@@ -9,8 +9,8 @@
 import { useEffect, useState } from "react";
 import { api, type SituationParams, type SituationStudy } from "../../api/client";
 
-const ORANGE = "#d18f5a";
-const GREY = "#55555e";
+const ORANGE = "#e8a27a"; // = --chart-8
+const GREY = "#888888"; // = --dim2
 const DEFAULTS: SituationParams = {
   run_threshold: 2,
   min_scoreless_before: 0,
@@ -43,9 +43,9 @@ function RateVsBaseline({ s }: { s: SituationStudy }) {
             const hi = y(Math.min(max, val + se));
             return (
               <>
-                <line x1={cx} y1={lo} x2={cx} y2={hi} stroke="#eaeaed" strokeWidth="1" />
-                <line x1={cx - 5} y1={hi} x2={cx + 5} y2={hi} stroke="#eaeaed" />
-                <line x1={cx - 5} y1={lo} x2={cx + 5} y2={lo} stroke="#eaeaed" />
+                <line x1={cx} y1={lo} x2={cx} y2={hi} stroke={"#ededed" /* = --text */} strokeWidth="1" />
+                <line x1={cx - 5} y1={hi} x2={cx + 5} y2={hi} stroke={"#ededed" /* = --text */} />
+                <line x1={cx - 5} y1={lo} x2={cx + 5} y2={lo} stroke={"#ededed" /* = --text */} />
               </>
             );
           })()
@@ -53,16 +53,16 @@ function RateVsBaseline({ s }: { s: SituationStudy }) {
       <text x={cx} y={H - PAD.b + 15} textAnchor="middle" fill={color} fontSize="11" fontFamily="monospace">
         {pct(val)}
       </text>
-      <text x={cx} y={H - PAD.b + 28} textAnchor="middle" fill="#8a8a93" fontSize="9">{label}</text>
-      <text x={cx} y={H - PAD.b + 38} textAnchor="middle" fill="#55555e" fontSize="8" fontFamily="monospace">{sub}</text>
+      <text x={cx} y={H - PAD.b + 28} textAnchor="middle" fill={"#b4b4b4" /* = --dim */} fontSize="9">{label}</text>
+      <text x={cx} y={H - PAD.b + 38} textAnchor="middle" fill={"#888888" /* = --dim2 */} fontSize="8" fontFamily="monospace">{sub}</text>
     </g>
   );
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="block w-full">
       {[0, max / 2, max].map((t, i) => (
         <g key={i}>
-          <line x1={PAD.l} x2={W - 8} y1={y(t)} y2={y(t)} stroke="#1e1e24" strokeDasharray="2 4" />
-          <text x={PAD.l - 5} y={y(t) + 3} textAnchor="end" fill="#8a8a93" fontSize="8" fontFamily="monospace">{pct(t)}</text>
+          <line x1={PAD.l} x2={W - 8} y1={y(t)} y2={y(t)} stroke={"#2e2e2e" /* = --line */} strokeDasharray="2 4" />
+          <text x={PAD.l - 5} y={y(t) + 3} textAnchor="end" fill={"#b4b4b4" /* = --dim */} fontSize="8" fontFamily="monospace">{pct(t)}</text>
         </g>
       ))}
       {bar(110, r, re, ORANGE, "conditioned", `n=${s.events}`)}
@@ -83,15 +83,15 @@ function Distribution({ dist }: { dist: Record<string, number> }) {
   const y = (v: number): number => PAD.t + (1 - v / max) * (H - PAD.t - PAD.b);
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="block w-full">
-      <line x1={PAD.l} x2={W - 10} y1={H - PAD.b} y2={H - PAD.b} stroke="#26262e" />
+      <line x1={PAD.l} x2={W - 10} y1={H - PAD.b} y2={H - PAD.b} stroke={"#2e2e2e" /* = --line */} />
       {keys.map((k, i) => {
         const cx = PAD.l + i * step + step / 2;
         const v = vals[i];
         return (
           <g key={k}>
             <rect x={cx - 22} y={y(v)} width={44} height={H - PAD.b - y(v)} rx="2" fill={ORANGE} opacity={i === 0 ? 0.8 : 0.55} />
-            <text x={cx} y={y(v) - 4} textAnchor="middle" fill="#8a8a93" fontSize="9" fontFamily="monospace">{v}</text>
-            <text x={cx} y={H - PAD.b + 14} textAnchor="middle" fill="#8a8a93" fontSize="10" fontFamily="monospace">{k}</text>
+            <text x={cx} y={y(v) - 4} textAnchor="middle" fill={"#b4b4b4" /* = --dim */} fontSize="9" fontFamily="monospace">{v}</text>
+            <text x={cx} y={H - PAD.b + 14} textAnchor="middle" fill={"#b4b4b4" /* = --dim */} fontSize="10" fontFamily="monospace">{k}</text>
           </g>
         );
       })}

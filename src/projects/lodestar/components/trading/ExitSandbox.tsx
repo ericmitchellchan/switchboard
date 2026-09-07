@@ -16,8 +16,8 @@ import {
   type TradeAnalysis,
 } from "../../api/client";
 
-const POS = "#46c08a";
-const NEG = "#e8624a";
+const POS = "#6fc492"; // = --up
+const NEG = "#e88a8a"; // = --dn
 const money = (n: number | null | undefined): string =>
   n == null ? "—" : (n < 0 ? "−$" : "+$") + Math.abs(Math.round(n)).toLocaleString("en-US");
 const pnlColor = (n: number): string => (n >= 0 ? POS : NEG);

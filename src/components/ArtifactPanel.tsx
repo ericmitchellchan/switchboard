@@ -579,6 +579,10 @@ export function ArtifactPanel({
   // whole workspace container as an overlay. Same component tree either way
   // (a style-only change; nothing remounts), Esc restores.
   const maximized = useIsPanelMaximized(sessionId);
+  // PANEL SIDE (SWIT-33) — per tab, from the store. Read HERE, above the early
+  // return, so the hook count is identical between open and closed renders
+  // (rules of hooks; the store accepts a null id and answers the default).
+  const side = usePanelSide(sessionId);
 
   // The picker belongs to the panel that opened it: a TAB SWITCH dismisses it
   // rather than leaving a modal that would open into a different tab. (A
@@ -623,12 +627,11 @@ export function ArtifactPanel({
   const overlay = layout.mode === "overlay";
   const isMax = layout.mode === "maximized";
   const { icon, crumbs, title } = describeArtifact(artifact);
-  // PANEL SIDE (SWIT-33) — per tab, from the store. The pane tree + panel row
-  // is App's flex container: `row-reverse` for a left panel, so this fragment
-  // (`[divider][aside]`) reads aside | divider | panes with no re-ordering
-  // here. What this component owns is the edge hairline, the overlay anchor
-  // and the drag direction, which all flip with the side.
-  const side = usePanelSide(sessionId);
+  // PANEL SIDE (SWIT-33): the pane tree + panel row is App's flex container —
+  // `row-reverse` for a left panel, so this fragment (`[divider][aside]`)
+  // reads aside | divider | panes with no re-ordering here. What this
+  // component owns is the edge hairline, the overlay anchor and the drag
+  // direction, which all flip with the side (read above the early return).
   const onLeft = side === "left";
 
   // Crossover to the full-width screen. Shares panelStore's `fullWidthRoute`

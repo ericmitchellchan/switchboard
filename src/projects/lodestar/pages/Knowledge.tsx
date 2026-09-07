@@ -12,7 +12,7 @@ import Markdown from "../components/Markdown";
 import { ptTime } from "../lib/time";
 import { useUiStore } from "../stores/uiStore";
 
-const AC = "#6ea8d8"; // agent accent (agent-authored comments)
+const AC = "#7dd3a8"; // = --accent (agent-authored comments)
 
 function fmtSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -31,10 +31,10 @@ function fileToBase64(file: File): Promise<string> {
 }
 const TYPES: KnowledgeType[] = ["idea", "report", "research", "link"];
 const TYPE_COLOR: Record<KnowledgeType, string> = {
-  idea: "#e0b45a",
-  report: "#6ea8d8",
-  research: "#8a8a93",
-  link: "#4ea96a",
+  idea: "#e8b765", // = --chart-3
+  report: "#7dd3a8", // = --accent
+  research: "#b4b4b4", // = --dim
+  link: "#6fc492", // = --up
 };
 
 // Collections (the left sub-nav), keyed to our doc types + our use cases.

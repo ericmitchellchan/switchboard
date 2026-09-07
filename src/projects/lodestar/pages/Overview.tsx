@@ -37,13 +37,13 @@ import { usePoll } from "../hooks/usePoll";
 import { useUiStore } from "../stores/uiStore";
 import { ptTime } from "../lib/time";
 
-const AMBER = "#d18f5a";
+const AMBER = "#e8a27a"; // = --chart-8
 
 const STREAM_DOT: Record<CaseStream, string> = {
-  trading: "#6ea8d1",
-  tennis: "#8fd16e",
+  trading: "#7ab8e8", // = --liq
+  tennis: "#a8c97e", // = --chart-6
   mlb: AMBER,
-  generic: "#8a8a8a",
+  generic: "#b4b4b4", // = --dim
 };
 
 function Section({

@@ -13,12 +13,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { getJson } from "../api/client";
 
-const OK = "#4ea96a";
-const FAIL = "#e0645b";
-const WARN = "#d9a441";
-const SEL = "#8ab4f8";
+const OK = "#6fc492"; // = --up
+const FAIL = "#e88a8a"; // = --dn
+const WARN = "#e8b765"; // = --chart-3
+const SEL = "#7ab8e8"; // = --liq
 const ERA_TONE: Record<string, string> = {
-  all: "#9aa3b2", "09-13": "#8ab4f8", "14-18": "#d9a441", "19-23": "#e0645b",
+  all: "#b4b4b4" /* = --dim */, "09-13": "#7ab8e8" /* = --liq */, "14-18": "#e8b765" /* = --chart-3 */, "19-23": "#e88a8a" /* = --dn */,
 };
 
 interface Rate { cont: number; n: number }
@@ -59,7 +59,7 @@ function ExampleChart({ ev }: { ev: ExampleEvent }) {
   return (
     <svg width="100%" viewBox={`0 0 ${W} ${H}`} className="select-none">
       {[0.25, 0.75].map((f) => (
-        <text key={f} x={2} y={y(lo + f * span) + 3} fill="#6b7280" fontFamily="monospace" fontSize={8.5}>
+        <text key={f} x={2} y={y(lo + f * span) + 3} fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={8.5}>
           {(lo + f * span).toFixed(1)}
         </text>
       ))}
@@ -95,7 +95,7 @@ function ExampleChart({ ev }: { ev: ExampleEvent }) {
       <text x={W - 4} y={16} textAnchor="end" fill={ok ? OK : FAIL} fontFamily="monospace" fontSize={11}>
         {ev.outcome}
       </text>
-      <text x={PAD_L} y={H - 8} fill="#6b7280" fontFamily="monospace" fontSize={9}>
+      <text x={PAD_L} y={H - 8} fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={9}>
         {ev.session} · {ev.side}-side touch failed · {ev.regime.replace("_", " ")} · blue = ema_avg
       </text>
     </svg>
@@ -123,11 +123,11 @@ interface TapeTally {
 }
 
 const TAPE_LINES: { key: "e20" | "e50" | "e100" | "e200" | "vwap"; color: string; dash?: string; label: string }[] = [
-  { key: "e20", color: "#d9a441", label: "ema20" },
-  { key: "e50", color: "#4ea96a", label: "ema50" },
-  { key: "e100", color: "#8ab4f8", label: "ema100" },
-  { key: "e200", color: "#c07bd8", label: "ema200" },
-  { key: "vwap", color: "#e8e8e8", dash: "5 4", label: "vwap" },
+  { key: "e20", color: "#e8b765" /* = --chart-3 */, label: "ema20" },
+  { key: "e50", color: "#6fc492" /* = --up */, label: "ema50" },
+  { key: "e100", color: "#7ab8e8" /* = --liq */, label: "ema100" },
+  { key: "e200", color: "#cf9de8" /* = --chart-7 */, label: "ema200" },
+  { key: "vwap", color: "#ededed" /* = --text */, dash: "5 4", label: "vwap" },
 ];
 
 /** The blind chart: Eric's real screen (4 EMAs + session VWAP, 1m), frozen at the cut. */
@@ -147,7 +147,7 @@ function TapeChart({ deal, revealed }: { deal: TapeDeal; revealed: boolean }) {
   return (
     <svg width="100%" viewBox={`0 0 ${W} ${H}`} className="select-none">
       {[0.25, 0.75].map((f) => (
-        <text key={f} x={2} y={y(lo + f * span) + 3} fill="#6b7280" fontFamily="monospace" fontSize={8.5}>
+        <text key={f} x={2} y={y(lo + f * span) + 3} fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={8.5}>
           {(lo + f * span).toFixed(1)}
         </text>
       ))}
@@ -168,7 +168,7 @@ function TapeChart({ deal, revealed }: { deal: TapeDeal; revealed: boolean }) {
       {TAPE_LINES.map((ln, k) => (
         <g key={ln.key}>
           <rect x={W - 420 + k * 78} y={10} width={10} height={3} fill={ln.color} />
-          <text x={W - 406 + k * 78} y={16} fill="#9aa3b2" fontFamily="monospace" fontSize={9}>{ln.label}</text>
+          <text x={W - 406 + k * 78} y={16} fill={"#b4b4b4" /* = --dim */} fontFamily="monospace" fontSize={9}>{ln.label}</text>
         </g>
       ))}
       {revealed && (
@@ -182,7 +182,7 @@ function TapeChart({ deal, revealed }: { deal: TapeDeal; revealed: boolean }) {
         </>
       )}
       {!revealed && (
-        <text x={W - 6} y={H - 8} textAnchor="end" fill="#6b7280" fontFamily="monospace" fontSize={10}>
+        <text x={W - 6} y={H - 8} textAnchor="end" fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={10}>
           future hidden — what would you do at the last bar?
         </text>
       )}
@@ -316,7 +316,7 @@ function ScrubChart({ deal, cursor, entryIdx }: { deal: ScrubDeal; cursor: numbe
   return (
     <svg width="100%" viewBox={`0 0 ${W} ${H}`} className="select-none">
       {[0.25, 0.75].map((f) => (
-        <text key={f} x={2} y={y(lo + f * span) + 3} fill="#6b7280" fontFamily="monospace" fontSize={8.5}>
+        <text key={f} x={2} y={y(lo + f * span) + 3} fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={8.5}>
           {(lo + f * span).toFixed(1)}
         </text>
       ))}
@@ -337,11 +337,11 @@ function ScrubChart({ deal, cursor, entryIdx }: { deal: ScrubDeal; cursor: numbe
       {TAPE_LINES.map((ln, k) => (
         <g key={ln.key}>
           <rect x={W - 420 + k * 78} y={10} width={10} height={3} fill={ln.color} />
-          <text x={W - 406 + k * 78} y={16} fill="#9aa3b2" fontFamily="monospace" fontSize={9}>{ln.label}</text>
+          <text x={W - 406 + k * 78} y={16} fill={"#b4b4b4" /* = --dim */} fontFamily="monospace" fontSize={9}>{ln.label}</text>
         </g>
       ))}
-      <line x1={x(deal.rth_start_idx)} x2={x(deal.rth_start_idx)} y1={6} y2={H - 22} stroke="#3a4152" strokeWidth={1} strokeDasharray="2 4" />
-      <text x={x(deal.rth_start_idx) + 3} y={H - 26} fill="#6b7280" fontFamily="monospace" fontSize={8.5}>RTH open</text>
+      <line x1={x(deal.rth_start_idx)} x2={x(deal.rth_start_idx)} y1={6} y2={H - 22} stroke={"#3a3a3a" /* = --border-subtle (global.css) */} strokeWidth={1} strokeDasharray="2 4" />
+      <text x={x(deal.rth_start_idx) + 3} y={H - 26} fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={8.5}>RTH open</text>
       {entryIdx != null && entryIdx <= cursor && (
         <>
           <line x1={x(entryIdx)} x2={x(entryIdx)} y1={6} y2={H - 22} stroke={WARN} strokeWidth={1.3} strokeDasharray="4 3" />
@@ -497,17 +497,17 @@ function EraDecayCurve({ d, tradableFrac }: { d: S2Summary; tradableFrac: number
     <svg width="100%" viewBox={`0 0 ${W} ${H}`} className="select-none">
       {[0, 0.25, 0.5, 0.75, 1].map((t) => (
         <g key={t}>
-          <line x1={PAD_L} x2={W - 4} y1={y(t)} y2={y(t)} stroke="#2a2f3a" strokeWidth={1} opacity={0.6} />
-          <text x={2} y={y(t) + 3} fill="#6b7280" fontFamily="monospace" fontSize={9}>{(t * 100).toFixed(0)}%</text>
+          <line x1={PAD_L} x2={W - 4} y1={y(t)} y2={y(t)} stroke={"#2e2e2e" /* = --line */} strokeWidth={1} opacity={0.6} />
+          <text x={2} y={y(t) + 3} fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={9}>{(t * 100).toFixed(0)}%</text>
         </g>
       ))}
-      <line x1={PAD_L} x2={W - 4} y1={y(0.5)} y2={y(0.5)} stroke="#6b7280" strokeWidth={1} strokeDasharray="3 4" />
+      <line x1={PAD_L} x2={W - 4} y1={y(0.5)} y2={y(0.5)} stroke={"#888888" /* = --dim2 */} strokeWidth={1} strokeDasharray="3 4" />
       {d.fracs.map((f, i) => (
-        <text key={f} x={x(i)} y={H - 18} textAnchor="middle" fill="#6b7280" fontFamily="monospace" fontSize={9}>
+        <text key={f} x={x(i)} y={H - 18} textAnchor="middle" fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={9}>
           {f}
         </text>
       ))}
-      <text x={(PAD_L + W) / 2} y={H - 4} textAnchor="middle" fill="#6b7280" fontFamily="monospace" fontSize={9}>
+      <text x={(PAD_L + W) / 2} y={H - 4} textAnchor="middle" fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={9}>
         continuation target — fraction of a typical day's range (vol units, fixed at the touch)
       </text>
       {tradableFrac != null && tradableFrac >= d.fracs[0] && tradableFrac <= d.fracs[d.fracs.length - 1] && (() => {
@@ -545,7 +545,7 @@ function EraDecayCurve({ d, tradableFrac }: { d: S2Summary; tradableFrac: number
       {order.map((era, k) => (
         <g key={era}>
           <rect x={W - 150} y={16 + k * 16} width={10} height={3} fill={ERA_TONE[era]} />
-          <text x={W - 134} y={22 + k * 16} fill="#9aa3b2" fontFamily="monospace" fontSize={10}>
+          <text x={W - 134} y={22 + k * 16} fill={"#b4b4b4" /* = --dim */} fontFamily="monospace" fontSize={10}>
             {era === "all" ? "pooled" : era}
           </text>
         </g>

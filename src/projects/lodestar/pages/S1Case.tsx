@@ -13,11 +13,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { getJson } from "../api/client";
 
-const OK = "#4ea96a";
-const FAIL = "#e0645b";
-const WARN = "#d9a441";
-const SEL = "#8ab4f8";
-const TEST_TONE: Record<string, string> = { "1": "#8ab4f8", "2": "#4ea96a", "3": "#d9a441", "4": "#e0645b" };
+const OK = "#6fc492"; // = --up
+const FAIL = "#e88a8a"; // = --dn
+const WARN = "#e8b765"; // = --chart-3
+const SEL = "#7ab8e8"; // = --liq
+const TEST_TONE: Record<string, string> = { "1": "#7ab8e8", "2": "#6fc492", "3": "#e8b765", "4": "#e88a8a" } // = --liq / --up / --chart-3 / --dn;
 
 interface Rate { hold: number; n: number }
 interface S1Summary {
@@ -55,7 +55,7 @@ function ExampleChart({ ev }: { ev: ExampleEvent }) {
   return (
     <svg width="100%" viewBox={`0 0 ${W} ${H}`} className="select-none">
       {[0.25, 0.75].map((f) => (
-        <text key={f} x={2} y={y(lo + f * span) + 3} fill="#6b7280" fontFamily="monospace" fontSize={8.5}>
+        <text key={f} x={2} y={y(lo + f * span) + 3} fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={8.5}>
           {(lo + f * span).toFixed(1)}
         </text>
       ))}
@@ -81,7 +81,7 @@ function ExampleChart({ ev }: { ev: ExampleEvent }) {
       <text x={W - 4} y={16} textAnchor="end" fill={ok ? OK : FAIL} fontFamily="monospace" fontSize={11}>
         {ev.outcome}
       </text>
-      <text x={PAD_L} y={H - 8} fill="#6b7280" fontFamily="monospace" fontSize={9}>
+      <text x={PAD_L} y={H - 8} fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={9}>
         {ev.session} · {ev.side} · {ev.regime.replace("_", " ")} · blue = ema_avg
       </text>
     </svg>
@@ -107,17 +107,17 @@ function ResponseCurve({ d, arm, tradableFrac }: { d: S1Summary; arm: string; tr
     <svg width="100%" viewBox={`0 0 ${W} ${H}`} className="select-none">
       {[0, 0.25, 0.5, 0.75, 1].map((t) => (
         <g key={t}>
-          <line x1={PAD_L} x2={W - 4} y1={y(t)} y2={y(t)} stroke="#2a2f3a" strokeWidth={1} opacity={0.6} />
-          <text x={2} y={y(t) + 3} fill="#6b7280" fontFamily="monospace" fontSize={9}>{(t * 100).toFixed(0)}%</text>
+          <line x1={PAD_L} x2={W - 4} y1={y(t)} y2={y(t)} stroke={"#2e2e2e" /* = --line */} strokeWidth={1} opacity={0.6} />
+          <text x={2} y={y(t) + 3} fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={9}>{(t * 100).toFixed(0)}%</text>
         </g>
       ))}
-      <line x1={PAD_L} x2={W - 4} y1={y(0.5)} y2={y(0.5)} stroke="#6b7280" strokeWidth={1} strokeDasharray="3 4" />
+      <line x1={PAD_L} x2={W - 4} y1={y(0.5)} y2={y(0.5)} stroke={"#888888" /* = --dim2 */} strokeWidth={1} strokeDasharray="3 4" />
       {d.fracs.map((f, i) => (
-        <text key={f} x={x(i)} y={H - 18} textAnchor="middle" fill="#6b7280" fontFamily="monospace" fontSize={9}>
+        <text key={f} x={x(i)} y={H - 18} textAnchor="middle" fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={9}>
           {f}
         </text>
       ))}
-      <text x={(PAD_L + W) / 2} y={H - 4} textAnchor="middle" fill="#6b7280" fontFamily="monospace" fontSize={9}>
+      <text x={(PAD_L + W) / 2} y={H - 4} textAnchor="middle" fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={9}>
         target size — fraction of a typical day's range (vol units, causal)
       </text>
       {tradableFrac != null && tradableFrac >= d.fracs[0] && tradableFrac <= d.fracs[d.fracs.length - 1] && (() => {
@@ -153,7 +153,7 @@ function ResponseCurve({ d, arm, tradableFrac }: { d: S1Summary; arm: string; tr
       {Object.keys(series).map((tb, k) => (
         <g key={tb}>
           <rect x={W - 150} y={16 + k * 16} width={10} height={3} fill={TEST_TONE[tb]} />
-          <text x={W - 134} y={22 + k * 16} fill="#9aa3b2" fontFamily="monospace" fontSize={10}>
+          <text x={W - 134} y={22 + k * 16} fill={"#b4b4b4" /* = --dim */} fontFamily="monospace" fontSize={10}>
             test {tb === "4" ? "4+" : tb}
           </text>
         </g>
@@ -345,18 +345,18 @@ export default function S1Case() {
                 return (
                   <g key={e.year}>
                     <rect x={i * bw + 3} y={92 - h} width={bw - 6} height={h}
-                          fill={e.holdout ? "#3a4152" : tradable ? OK : WARN} opacity={e.holdout ? 0.5 : 0.85}>
+                          fill={e.holdout ? "#3a3a3a" /* = --border-subtle (global.css) */ : tradable ? OK : WARN} opacity={e.holdout ? 0.5 : 0.85}>
                       <title>{`${e.year}: 1u ≈ ${e.unit_pts} pts · 0.2u ≈ ${(e.unit_pts * 0.2).toFixed(1)} pts${e.hold != null ? ` · hold@0.05u ${(e.hold * 100).toFixed(1)}% (n=${e.n})` : e.holdout ? " · HOLDOUT (locked)" : " · n<30 (thin year)"}`}</title>
                     </rect>
                     {i % 2 === 0 && (
-                      <text x={i * bw + bw / 2} y={104} textAnchor="middle" fill="#6b7280" fontFamily="monospace" fontSize={8.5}>
+                      <text x={i * bw + bw / 2} y={104} textAnchor="middle" fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={8.5}>
                         {String(e.year).slice(2)}
                       </text>
                     )}
                   </g>
                 );
               })}
-              <text x={4} y={12} fill="#6b7280" fontFamily="monospace" fontSize={9}>
+              <text x={4} y={12} fill={"#888888" /* = --dim2 */} fontFamily="monospace" fontSize={9}>
                 bar = one vol unit in points · green = a 0.2u move cleared the tradable minimum · grey = holdout (locked)
               </text>
             </svg>

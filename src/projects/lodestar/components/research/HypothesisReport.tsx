@@ -16,10 +16,10 @@ import type { BacktestResult, HypLevels, Hypothesis, InstanceAnalysis } from "..
 import InstanceAnalysisView from "./InstanceAnalysisView";
 import SetupDetail from "./SetupDetail";
 
-const UP = "#4ea96a";
-const DN = "#e0645b";
-const AC = "#6ea8d8";
-const AMBER = "#d1a05a";
+const UP = "#6fc492"; // = --up
+const DN = "#e88a8a"; // = --dn
+const AC = "#7dd3a8"; // = --accent
+const AMBER = "#e8b765"; // = --chart-3
 
 // $ per point per contract (the ACTUAL traded symbol, incl. micros)
 const POINT_VALUE: Record<string, number> = {
@@ -137,7 +137,7 @@ function Section({ n, title, children }: { n: string; title: string; children: R
   );
 }
 
-const OUT_COLOR: Record<string, string> = { win: UP, stop: DN, open: "#8a8a93" };
+const OUT_COLOR: Record<string, string> = { win: UP, stop: DN, open: "#b4b4b4" /* = --dim */ };
 
 export default function HypothesisReport({
   hypothesis,
@@ -465,7 +465,7 @@ export default function HypothesisReport({
                   const col = (k === "expectancy" || k === "exp $/trade") && bt.expectancy_r != null ? (bt.expectancy_r >= 0 ? UP : DN) : undefined;
                   return (
                     <div key={k} className="font-mono">
-                      <div className="text-[20px]" style={{ color: col ?? "var(--text,#dcdce0)" }}>{v}</div>
+                      <div className="text-[20px]" style={{ color: col ?? "var(--text)" }}>{v}</div>
                       <div className="text-[8.5px] uppercase tracking-wide text-dim">{k}</div>
                     </div>
                   );

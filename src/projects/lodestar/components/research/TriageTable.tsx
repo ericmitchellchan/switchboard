@@ -13,9 +13,9 @@ import ResearchStatusChip from "./ResearchStatusChip";
 import { api, type AnomalyMatch, type Case } from "../../api/client";
 
 const JUDGMENTS = [
-  { id: "plausible", label: "plausible", color: "#e0645b" },
-  { id: "interesting", label: "interesting", color: "#c9a75a" },
-  { id: "noise", label: "noise", color: "#57575f" },
+  { id: "plausible", label: "plausible", color: "#e88a8a" /* = --dn */ },
+  { id: "interesting", label: "interesting", color: "#e8b765" /* = --chart-3 */ },
+  { id: "noise", label: "noise", color: "#888888" /* = --dim2 */ },
 ] as const;
 
 const CALIBRATION_TITLE = "Anomaly calibration";

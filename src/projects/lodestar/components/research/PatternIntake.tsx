@@ -261,7 +261,7 @@ export default function PatternIntake({
                     })
                     .join(" ")}
                   fill="none"
-                  stroke="#7c8ce8"
+                  stroke={"#7dd3a8" /* = --accent */}
                   strokeWidth="1.5"
                 />
               </svg>

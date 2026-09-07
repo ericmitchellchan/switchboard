@@ -15,7 +15,7 @@ import { api } from "../../api/client";
 import type { BacktestResult, Hypothesis, HypCondition, HypLevels } from "../../api/client";
 import { useUiStore } from "../../stores/uiStore";
 
-const LEG_COLOR: Record<string, string> = { dump: "#e0645b", base: "#d1a05a", rip: "#4ea96a", whole: "#5aa6c9" };
+const LEG_COLOR: Record<string, string> = { dump: "#e88a8a" /* = --dn */, base: "#e8b765" /* = --chart-3 */, rip: "#6fc492" /* = --up */, whole: "#7ab8e8" /* = --liq */ };
 const OP_SYM: Record<string, string> = { ">=": "≥", "<=": "≤", "<": "<", ">": ">", "==": "=", between: "in", cross_up: "↑" };
 
 function condLabel(c: HypCondition): string {
@@ -46,10 +46,10 @@ function blankHypothesis(symbol: string, timeframe: string): Hypothesis {
 function Levels({ levels }: { levels: HypLevels }) {
   const cells: [string, number, string?][] = [
     ["swing low", levels.swing_low],
-    ["bounce est.", levels.bounce_est, "var(--accent, #6ea8d8)"],
+    ["bounce est.", levels.bounce_est, "var(--accent)"],
     ["retest low", levels.retest_low],
     ["retest high", levels.retest_high],
-    ["invalidation", levels.invalidation, "#e0645b"],
+    ["invalidation", levels.invalidation, "var(--dn)"],
   ];
   return (
     <div className="flex flex-wrap gap-4">
@@ -181,7 +181,7 @@ export default function HypothesesView({ result }: { result: Record<string, unkn
           ) : null}
           <span className="rounded border border-line px-1.5 py-0.5 font-mono text-[9px] uppercase text-dim">{active.origin}</span>
           {active.edited_by_human ? (
-            <span className="rounded border border-line px-1.5 py-0.5 font-mono text-[9px] uppercase" style={{ color: "#d1a05a" }}>edited</span>
+            <span className="rounded border border-line px-1.5 py-0.5 font-mono text-[9px] uppercase" style={{ color: "var(--chart-3)" }}>edited</span>
           ) : null}
           <button
             type="button"
@@ -279,7 +279,7 @@ export default function HypothesesView({ result }: { result: Record<string, unkn
           <button
             type="button"
             onClick={() => patch(active.id, (h) => ({ ...h, target: { ...h.target, direction: h.target.direction === "up" ? "down" : "up" } }))}
-            style={{ color: active.target.direction === "up" ? "#4ea96a" : "#e0645b" }}
+            style={{ color: active.target.direction === "up" ? "var(--up)" : "var(--dn)" }}
           >
             {active.target.direction === "up" ? "▲ long" : "▼ short"}
           </button>
@@ -370,10 +370,10 @@ export default function HypothesesView({ result }: { result: Record<string, unkn
                         ["avg max-dn", res.avg_max_dn, "%"],
                       ] as [string, number | null, string][])
                   ).map(([k, v, u]) => {
-                    const color = k === "expectancy" && v != null ? (v >= 0 ? "#4ea96a" : "#e0645b") : undefined;
+                    const color = k === "expectancy" && v != null ? (v >= 0 ? "var(--up)" : "var(--dn)") : undefined;
                     return (
                       <div key={k} className="font-mono">
-                        <div className="text-[15px]" style={{ color: color ?? "var(--text, #dcdce0)" }}>{v == null ? "—" : `${v}${u}`}</div>
+                        <div className="text-[15px]" style={{ color: color ?? "var(--text)" }}>{v == null ? "—" : `${v}${u}`}</div>
                         <div className="text-[8.5px] uppercase tracking-wide text-dim">{k}</div>
                       </div>
                     );
@@ -385,7 +385,7 @@ export default function HypothesesView({ result }: { result: Record<string, unkn
                 </div>
                 <div className="mt-2 flex flex-wrap items-center gap-1.5 font-mono text-[9px]">
                   {res.applied.map((a, i) => (
-                    <span key={`a${i}`} className="rounded px-1.5 py-0.5" style={{ border: "1px solid #4ea96a55", color: "#4ea96a" }}>
+                    <span key={`a${i}`} className="rounded px-1.5 py-0.5" style={{ border: "1px solid #6fc49255" /* = --up + alpha */, color: "var(--up)" }}>
                       {a}
                     </span>
                   ))}
@@ -413,7 +413,7 @@ export default function HypothesesView({ result }: { result: Record<string, unkn
                             <tr key={i} className={i % 2 ? "bg-surface2/20" : ""}>
                               <td className="px-2 py-1 text-dim">{s.ts.slice(0, 16).replace("T", " ")}</td>
                               <td className="px-2 py-1">{s.close}</td>
-                              <td className="px-2 py-1" style={{ color: s.fwd_ret_pct == null ? undefined : s.fwd_ret_pct >= 0 ? "#4ea96a" : "#e0645b" }}>
+                              <td className="px-2 py-1" style={{ color: s.fwd_ret_pct == null ? undefined : s.fwd_ret_pct >= 0 ? "var(--up)" : "var(--dn)" }}>
                                 {s.fwd_ret_pct == null ? "—" : `${s.fwd_ret_pct >= 0 ? "+" : ""}${s.fwd_ret_pct.toFixed(2)}%`}
                               </td>
                               <td className="px-2 py-1">{s.rsi ?? "—"}</td>
@@ -430,8 +430,8 @@ export default function HypothesesView({ result }: { result: Record<string, unkn
                       {res.setups.slice(0, 48).map((s, i) => {
                         const up = (s.fwd_ret_pct ?? 0) >= 0;
                         return (
-                          <div key={i} title={`${s.ts.slice(0, 16)} · ${s.fwd_ret_pct}%`} className="rounded border p-1 text-center font-mono text-[8px]" style={{ borderColor: up ? "#4ea96a55" : "#e0645b55" }}>
-                            <div style={{ color: up ? "#4ea96a" : "#e0645b" }}>{s.fwd_ret_pct == null ? "—" : `${up ? "+" : ""}${s.fwd_ret_pct.toFixed(1)}`}</div>
+                          <div key={i} title={`${s.ts.slice(0, 16)} · ${s.fwd_ret_pct}%`} className="rounded border p-1 text-center font-mono text-[8px]" style={{ borderColor: up ? "#6fc49255" /* = --up + alpha */ : "#e88a8a55" /* = --dn + alpha */ }}>
+                            <div style={{ color: up ? "var(--up)" : "var(--dn)" }}>{s.fwd_ret_pct == null ? "—" : `${up ? "+" : ""}${s.fwd_ret_pct.toFixed(1)}`}</div>
                             <div className="text-dim2">{s.ts.slice(5, 10)}</div>
                           </div>
                         );

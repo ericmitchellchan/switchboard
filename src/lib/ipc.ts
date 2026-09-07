@@ -98,6 +98,13 @@ export async function readThreadFile(threadId: string, name: string): Promise<st
   return invoke("read_thread_file", { threadId, name });
 }
 
+/** Change stamp over a thread's three page files: max mtime (ms) of
+ *  page.json / answers.json / inbox.json, missing = 0. The 5s pass compares
+ *  it by INEQUALITY tick-to-tick and skips the three reads when unchanged. */
+export async function threadFilesStamp(threadId: string): Promise<number> {
+  return invoke("thread_files_stamp", { threadId });
+}
+
 /** A thread's view ids, newest-first (SWIT-50). Missing dir = []. */
 export async function listThreadViews(threadId: string): Promise<string[]> {
   return invoke("list_thread_views", { threadId });

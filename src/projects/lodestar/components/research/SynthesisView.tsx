@@ -72,7 +72,7 @@ function EvidenceBlock({
   }
   const { date, tournament, main, category } = parseAnalysisMeta(pin);
   return (
-    <div className="group relative border-l-2 border-amber/50 pl-3.5" style={{ borderColor: "#d5a24a80" }}>
+    <div className="group relative border-l-2 border-amber/50 pl-3.5" style={{ borderColor: "#e8b76580" /* = --chart-3 + alpha */ }}>
       <div className="font-mono text-[9px] uppercase tracking-wide text-dim">
         ◆ evidence{date ? ` · ${date}` : ""}{tournament ? ` · ${tournament}` : ""}
       </div>

@@ -178,7 +178,7 @@ export default function ProfileDrawer({
                     <div className="h-1 w-full rounded bg-surface2">
                       <div
                         className="h-1 rounded"
-                        style={{ width: `${w}%`, background: "#e0645b" }}
+                        style={{ width: `${w}%`, background: "var(--dn)" }}
                       />
                     </div>
                   </div>

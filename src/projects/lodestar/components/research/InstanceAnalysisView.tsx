@@ -12,12 +12,12 @@
 import { useEffect, useState } from "react";
 import { api, type Bar, type InstanceAnalysis, type InstanceLeg } from "../../api/client";
 
-const UP = "#4ea96a";
-const DN = "#e0645b";
+const UP = "#6fc492"; // = --up
+const DN = "#e88a8a"; // = --dn
 const LEG: Record<string, { color: string; label: string }> = {
-  dump: { color: "#e0645b", label: "dump" },
-  base: { color: "#8a8a93", label: "base" },
-  rip: { color: "#4ea96a", label: "rip" },
+  dump: { color: "#e88a8a" /* = --dn */, label: "dump" },
+  base: { color: "#b4b4b4" /* = --dim */, label: "base" },
+  rip: { color: "#6fc492" /* = --up */, label: "rip" },
 };
 
 const ROWS: { k: keyof InstanceLeg["config"]; label: string; suffix?: string }[] = [
@@ -60,7 +60,7 @@ function AnalysisChart({ bars, legs }: { bars: Bar[]; legs: InstanceLeg[] }) {
         );
       })}
       {[hi, (hi + lo) / 2, lo].map((v, i) => (
-        <line key={i} x1={PAD.l} x2={W - PAD.r} y1={y(v)} y2={y(v)} stroke="#1e1e24" strokeDasharray="2 4" />
+        <line key={i} x1={PAD.l} x2={W - PAD.r} y1={y(v)} y2={y(v)} stroke={"#2e2e2e" /* = --line */} strokeDasharray="2 4" />
       ))}
       {bars.map((b, i) =>
         Number.isFinite(b.open) && Number.isFinite(b.close) ? (

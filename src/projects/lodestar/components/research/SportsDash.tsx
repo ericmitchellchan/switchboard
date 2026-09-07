@@ -18,7 +18,7 @@ import {
 import { useCachedFetch } from "../../lib/queryCache";
 import { ptTime, ptWeekday } from "../../lib/time";
 
-const AMBER = "#d18f5a";
+const AMBER = "#e8a27a"; // = --chart-8
 
 /** IL moves read in opposite directions — a placement costs a team a player, an
  *  activation gives one back. Polarity only, per the house rule. */

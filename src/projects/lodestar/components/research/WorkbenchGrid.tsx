@@ -104,12 +104,12 @@ function PriceChartWidget({ w }: { w: Widget }) {
               y={H - 4 - (p.volume / maxVol) * 18}
               width="2"
               height={(p.volume / maxVol) * 18}
-              fill="#5aa6c9"
+              fill={"#7ab8e8" /* = --liq */}
               opacity="0.5"
             />
           ) : null,
         )}
-        <path d={path} fill="none" stroke="#7c8ce8" strokeWidth="1.5" />
+        <path d={path} fill="none" stroke={"#7dd3a8" /* = --accent */} strokeWidth="1.5" />
       </svg>
       <div className="mt-1 flex justify-between font-mono text-[9px] text-dim">
         <span>{lo}–{hi}¢</span>
@@ -162,7 +162,7 @@ function FlowWidget({ w }: { w: Widget }) {
 
 /** Fixed categorical order (dataviz rule: color follows the entity, assigned in
  * order, never cycled or re-ranked). */
-const SERIES_COLORS = ["#7c8ce8", "#5aa6c9", "#4ea96a", "#e0645b", "#c9a75a", "#a78bcf"];
+const SERIES_COLORS = ["#7ab8e8", "#a99cf0", "#e8b765", "#6fc9c0", "#e89ab5", "#a8c97e"]; // = --chart-1 … --chart-6
 
 interface ChartSeries {
   label: string;
@@ -213,8 +213,8 @@ function CustomChartWidget({ w }: { w: Widget }) {
       <svg viewBox={`0 0 ${W} ${H}`} className="block w-full">
         {[yLo, (yLo + yHi) / 2, yHi].map((v, i) => (
           <g key={i}>
-            <line x1={PAD.l} x2={W - PAD.r} y1={sy(v)} y2={sy(v)} stroke="#1e1e22" strokeDasharray="2 4" />
-            <text x={PAD.l - 4} y={sy(v) + 3} textAnchor="end" fill="#8a8a93" fontSize="8" fontFamily="monospace">
+            <line x1={PAD.l} x2={W - PAD.r} y1={sy(v)} y2={sy(v)} stroke={"#2e2e2e" /* = --line */} strokeDasharray="2 4" />
+            <text x={PAD.l - 4} y={sy(v) + 3} textAnchor="end" fill={"#b4b4b4" /* = --dim */} fontSize="8" fontFamily="monospace">
               {Math.round(v * 100) / 100}
             </text>
           </g>
@@ -236,8 +236,8 @@ function CustomChartWidget({ w }: { w: Widget }) {
           const d = s.pts.map((pt, i) => `${i === 0 ? "M" : "L"}${sx(pt.x).toFixed(1)},${sy(pt.y).toFixed(1)}`).join(" ");
           return <path key={si} d={d} fill="none" stroke={color} strokeWidth="1.5" />;
         })}
-        <text x={PAD.l} y={H - 5} fill="#8a8a93" fontSize="8" fontFamily="monospace">{fmtX(x0)}</text>
-        <text x={W - PAD.r} y={H - 5} textAnchor="end" fill="#8a8a93" fontSize="8" fontFamily="monospace">{fmtX(x1)}</text>
+        <text x={PAD.l} y={H - 5} fill={"#b4b4b4" /* = --dim */} fontSize="8" fontFamily="monospace">{fmtX(x0)}</text>
+        <text x={W - PAD.r} y={H - 5} textAnchor="end" fill={"#b4b4b4" /* = --dim */} fontSize="8" fontFamily="monospace">{fmtX(x1)}</text>
       </svg>
       {/* legend — always present for >= 2 series; identity never color-alone */}
       <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-0.5 font-mono text-[9px] text-dim">

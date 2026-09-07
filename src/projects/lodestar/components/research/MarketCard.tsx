@@ -9,10 +9,10 @@ import { useEffect, useState } from "react";
 import { api, type HistoricalMarket, type MarketHistorySummary } from "../../api/client";
 
 function sportColor(ticker: string): string {
-  if (ticker.startsWith("KXNBA")) return "#d18f5a";
-  if (ticker.startsWith("KXMLB")) return "#c9a75a";
-  if (/^KX(ATP|WTA)/.test(ticker)) return "#6fb38a";
-  return "#a78bcf";
+  if (ticker.startsWith("KXNBA")) return "#e8a27a"; // = --chart-8
+  if (ticker.startsWith("KXMLB")) return "#e8b765"; // = --chart-3
+  if (/^KX(ATP|WTA)/.test(ticker)) return "#a8c97e"; // = --chart-6
+  return "#a99cf0"; // = --chart-2
 }
 
 function fmtDay(ts: string): string {
