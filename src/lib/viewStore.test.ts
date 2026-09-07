@@ -13,6 +13,7 @@ import {
   parseViewSpec,
   parseViewRows,
   windowRows,
+  viewRowWindow,
   rowAnchorId,
   tableColumns,
   toOhlcRows,
@@ -148,6 +149,25 @@ describe("parseViewRows / windowRows", () => {
     expect(w.total).toBe(VIEW_ROW_WINDOW + 20);
     expect(w.windowed).toBe(true);
     expect(windowRows([{ a: 1 }]).windowed).toBe(false);
+  });
+
+  it("the window guards the DOM only: table/dist/bar/report cut at the cap, the canvas kinds draw every row (a full tennis tape)", () => {
+    const rows = Array.from({ length: 13_282 }, (_, i) => ({ i }));
+    for (const kind of ["table", "dist", "bar", "report"] as const) {
+      expect(viewRowWindow(kind)).toBe(VIEW_ROW_WINDOW);
+      expect(windowRows(rows, kind)).toMatchObject({ total: 13_282, windowed: true });
+      expect(windowRows(rows, kind).rows).toHaveLength(VIEW_ROW_WINDOW);
+    }
+    for (const kind of ["candles", "line", "timeline"] as const) {
+      expect(viewRowWindow(kind)).toBe(Number.POSITIVE_INFINITY);
+      const w = windowRows(rows, kind);
+      expect(w.windowed).toBe(false);
+      expect(w.rows).toBe(rows); // the same array — nothing copied, nothing cut
+      expect(w.total).toBe(13_282);
+    }
+    // No kind = the DOM window (the old signature).
+    expect(viewRowWindow(null)).toBe(VIEW_ROW_WINDOW);
+    expect(windowRows(rows).windowed).toBe(true);
   });
 });
 
@@ -571,6 +591,7 @@ import {
   markRadius,
   tradeKey,
   timelineNote,
+  fmtCount,
   timelineSide,
   isoToMillis,
   MARK_RADIUS_MIN,
@@ -941,12 +962,20 @@ describe("T8 — timeline: the kind, sizeColumn, the spec lines", () => {
     expect(parseViewRows(JSON.stringify({ meta: {}, rows: T8_ROWS }))!.length).toBe(T8_ROWS.length);
   });
 
-  it("timelineNote: coverage + total → `N of M trades`; coverage alone → moments; nothing → a bare count that claims nothing", () => {
-    expect(timelineNote({ coverage: "flagged moments only", n_trades: 6117 }, 12)).toBe("flagged moments only · 12 of 6117 trades");
-    expect(timelineNote({ coverage: " flagged moments only ", n_trades: "6117" }, 12)).toBe("flagged moments only · 12 of 6117 trades");
+  it("timelineNote: coverage + total → `N of M trades`; every trade shown → `M trades`; coverage alone → moments; nothing → a bare count that claims nothing", () => {
+    expect(timelineNote({ coverage: "flagged moments only", n_trades: 6117 }, 12)).toBe("flagged moments only · 12 of 6,117 trades");
+    expect(timelineNote({ coverage: " flagged moments only ", n_trades: "6117" }, 12)).toBe("flagged moments only · 12 of 6,117 trades");
     expect(timelineNote({ coverage: "flagged moments only" }, 12)).toBe("flagged moments only · 12 moments");
     expect(timelineNote({ n_trades: 6117 }, 12)).toBe("12 moments");
     expect(timelineNote(null, 0)).toBe("0 moments");
+    // The `--full` export: shown === total reads as the whole tape, never `13,282 of 13,282`.
+    expect(timelineNote({ coverage: "full tape", n_trades: 13282 }, 13282)).toBe("full tape · 13,282 trades");
+    // A filter over a full tape is a subset again.
+    expect(timelineNote({ coverage: "full tape", n_trades: 13282 }, 4021)).toBe("full tape · 4,021 of 13,282 trades");
+    expect(fmtCount(999)).toBe("999");
+    expect(fmtCount(1000)).toBe("1,000");
+    expect(fmtCount(1234567)).toBe("1,234,567");
+    expect(fmtCount(12.5)).toBe("12.5");
   });
 });
 
@@ -1102,6 +1131,30 @@ describe("T8 — drillPathKey parity: scripts/export-tennis-match.py --path-key"
     expect(py[13]).toBe("_ctl");
     expect(py[14]).toBe("a".repeat(120));
     expect(py[15]).toBe(`${"b".repeat(119)}_`);
+  });
+
+  // The `--full` export's PURE helpers — the trade_stance / size_zscores ports
+  // from Lodestar's tennis_anomaly.py, the price fold, the tz-aware ISO stamp,
+  // the row shaping and the one-line DB failure — have a Python unittest file
+  // beside the script. No DB is touched; the DB-backed export is smoke-tested
+  // by hand (the report names the numbers).
+  it("scripts/test_export_tennis_match.py passes (skips with a note when python is unavailable)", () => {
+    let out: string;
+    try {
+      out = cp.execFileSync("python", ["scripts/test_export_tennis_match.py"], {
+        encoding: "utf8",
+        timeout: 30_000,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (err) {
+      if (isPythonMissing(err)) {
+        console.info("[t8 full] python unavailable — the exporter's Python unit tests were SKIPPED");
+        return;
+      }
+      throw new Error(`[t8 full] the exporter's Python unit tests failed: ${describeSpawnError(err)}`);
+    }
+    // unittest prints its summary on stderr; a zero exit is the pass. stdout is empty.
+    expect(typeof out).toBe("string");
   });
 });
 
@@ -1259,7 +1312,7 @@ describe("T8 smoke — the tennis table's drill opens the exporter's timeline fi
       expect(rowFields(row).map(([k]) => k)).toContain("games_p1");
     }
     // The toolbar's honesty line.
-    expect(timelineNote(meta, pts.xs.length)).toBe(`flagged moments only · ${exported.rows} of ${exported.trades} trades`);
+    expect(timelineNote(meta, pts.xs.length)).toBe(`flagged moments only · ${fmtCount(exported.rows)} of ${fmtCount(exported.trades)} trades`);
     if (real) {
       // Ground truth of the checkout's data: the moment table holds 12 per match;
       // the top match by score with > 500 trades is Diaz Acosta v Sanchez Izquierdo.

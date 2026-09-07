@@ -61,9 +61,11 @@
 //   · The data file may carry a `meta` object beside `rows`
 //     (`parseViewPayload`); `timelineNote` turns `meta.coverage` +
 //     `meta.n_trades` into the toolbar's honesty line — `flagged moments only
-//     · N of M trades` — because a drilled child's spec is a TEMPLATE and
-//     cannot know a per-match total. No meta → `N moments`, which claims
-//     nothing about the tape.
+//     · 12 of 6,117 trades`, or `full tape · 13,282 trades` when every trade
+//     is on screen (the exporter's `--full`) — because a drilled child's spec
+//     is a TEMPLATE and cannot know a per-match total. No meta → `N moments`,
+//     which claims nothing about the tape. The canvas kinds are exempt from
+//     the 500-row DOM window (`viewRowWindow`) so a full tape draws whole.
 
 // SWIT-70 — line charts tell the story:
 //   · `seriesLabels` (column → plain words) names the legend; the COLOUR
@@ -189,8 +191,17 @@ export const VIEW_SERIES_LABEL_CAP = 24;
 export const DRILL_KEY_CAP = 120;
 
 /** Display window: past this many rows the renderer shows the first slice
- *  and SAYS so (the Rust byte cap guards the read; this guards the DOM). */
+ *  and SAYS so (the Rust byte cap guards the read; this guards the DOM).
+ *  It guards the DOM ONLY: the canvas kinds (`candles`, `line`, `timeline`)
+ *  draw every row — a full tennis tape is ~13k trades on one uPlot, and a
+ *  timeline cut at 500 would show the first ten minutes under a coverage
+ *  line saying `full tape` (`viewRowWindow`). */
 export const VIEW_ROW_WINDOW = 500;
+/** The kinds a row count costs DOM nodes on; the rest are one canvas. */
+const DOM_ROW_KINDS: ReadonlySet<string> = new Set(["table", "dist", "bar", "report"]);
+export function viewRowWindow(kind: ViewKind | null | undefined): number {
+  return kind && !DOM_ROW_KINDS.has(kind) ? Number.POSITIVE_INFINITY : VIEW_ROW_WINDOW;
+}
 
 export type ViewRow = Record<string, unknown>;
 /** The optional `meta` object a data file carries beside its rows (T8). */
@@ -509,10 +520,12 @@ export function parseViewRows(raw: string): ViewRow[] | null {
   return parseViewPayload(raw)?.rows ?? null;
 }
 
-/** Window rows for display. Pure. */
-export function windowRows(rows: ViewRow[]): { rows: ViewRow[]; total: number; windowed: boolean } {
-  if (rows.length <= VIEW_ROW_WINDOW) return { rows, total: rows.length, windowed: false };
-  return { rows: rows.slice(0, VIEW_ROW_WINDOW), total: rows.length, windowed: true };
+/** Window rows for display — at `viewRowWindow(kind)`, so a canvas kind is
+ *  never cut (no kind = the DOM window, the pre-`--full` behaviour). Pure. */
+export function windowRows(rows: ViewRow[], kind?: ViewKind | null): { rows: ViewRow[]; total: number; windowed: boolean } {
+  const cap = viewRowWindow(kind);
+  if (rows.length <= cap) return { rows, total: rows.length, windowed: false };
+  return { rows: rows.slice(0, cap), total: rows.length, windowed: true };
 }
 
 /** The table's row-anchor value: the key column's value (or the first
@@ -900,9 +913,19 @@ export function timelineNote(meta: ViewMeta | null, shown: number): string {
   const coverage =
     meta && typeof meta.coverage === "string" && meta.coverage.trim().length > 0 ? meta.coverage.trim() : null;
   const total = meta ? numericCell(meta.n_trades) : null;
-  if (coverage && total !== null) return `${coverage} · ${shown} of ${total} trades`;
-  if (coverage) return `${coverage} · ${shown} moments`;
-  return `${shown} moments`;
+  if (coverage && total !== null) {
+    // Every trade on screen (the `--full` export): `full tape · 13,282 trades`,
+    // not `13,282 of 13,282` — "of" is for a subset.
+    if (shown === total) return `${coverage} · ${fmtCount(total)} trades`;
+    return `${coverage} · ${fmtCount(shown)} of ${fmtCount(total)} trades`;
+  }
+  if (coverage) return `${coverage} · ${fmtCount(shown)} moments`;
+  return `${fmtCount(shown)} moments`;
+}
+
+/** Thousands-separated integer (`13282` → `13,282`); a non-integer prints as is. */
+export function fmtCount(n: number): string {
+  return Number.isInteger(n) ? String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",") : String(n);
 }
 
 // ── Filters (T6): client-side slices over the loaded rows ────────────────────

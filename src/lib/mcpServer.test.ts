@@ -451,6 +451,10 @@ describe("the view tool (SWIT-50)", () => {
     expect(d).toMatch(/never imply the full tape/);
     expect(d).toMatch(/scripts\/export-tennis-match\.py/);
     expect(d).toMatch(/drill:\{kind:'timeline', title:'\{key\}', source:\{type:'file', path:'\.sb-views\/tennis\/\{key\}\.json'\}, sizeColumn:'size_z'\}/);
+    // The whole tape is one flag away, and the description says what it needs.
+    expect(d).toMatch(/`--full` to export the WHOLE trade tape with game state/);
+    expect(d).toMatch(/full tape · N trades/);
+    expect(d).toMatch(/docker start lode_shotclock_db/);
   });
 
   it("a local query url passes", () => {

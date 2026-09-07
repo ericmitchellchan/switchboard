@@ -25,3 +25,4 @@ nul
 
 # Per-thread scratch data for the agent's views (sits in the repo cwd)
 .sb-views/
+__pycache__/

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export one tennis match's flagged moments to a Switchboard `timeline` view file (T8, SWIT-62).
+"""Export one tennis match to a Switchboard `timeline` view file (T8, SWIT-62; `--full` 2026-09-07).
 
 Reads `tennis_flow_anomaly_match` + `tennis_flow_anomaly_moment` from Lodestar's
 research.duckdb and writes `{meta, rows}` JSON — the file the tennis TABLE's drill
@@ -11,6 +11,7 @@ the two on a list of awkward keys).
     python scripts/export-tennis-match.py <match_id | player-name substring> <out>
     python scripts/export-tennis-match.py --top [--min-trades 500] <out>
     python scripts/export-tennis-match.py --all <out-dir>
+    python scripts/export-tennis-match.py --full ...         # EVERY trade, with game state
     python scripts/export-tennis-match.py --path-key <key>...      # print the sanitised keys
 
 `out` is a directory (existing, or a path without a .json suffix) → the file is named
@@ -36,11 +37,47 @@ favors disagreement), so a `backs_player = 2` mark at a folded price of ~86 is a
 cheap NO-side bet against a leading player 1 - expected, not inverted (verified
 against the DB 2026-09-01: all four ticker-side x stance cells match this reading).
 
-COVERAGE: the rows are FLAGGED moments only — and a subset of those: the `_moment`
-table holds the TOP 12 flagged moments per match (verified 2026-09-01: 12 rows for
-every one of the 137 matches, while `n_flagged` counts all flagged trades). The full
-trade tape needs the backend. `meta.coverage` + `meta.n_trades` are what the view's
-toolbar prints (`flagged moments only · 12 of 6117 trades`), so it never implies more.
+COVERAGE, DEFAULT MODE: the rows are FLAGGED moments only — and a subset of those:
+the `_moment` table holds the TOP 12 flagged moments per match (verified
+2026-09-01: 12 rows for every one of the 137 matches, while `n_flagged` counts all
+flagged trades). `meta.coverage` + `meta.n_trades` are what the view's toolbar
+prints (`flagged moments only · 12 of 6,117 trades`), so it never implies more.
+
+`--full` IS THE WHOLE TAPE. Match selection and the match-level meta still come from
+research.duckdb's `_match` row (same selectors), but the ROWS come from the Shot
+Clock Postgres/TimescaleDB — `kalshi_trade` (every trade on the match's two tickers)
+ASOF-joined to `tennis_match_state` (the score at-or-before each trade) — reached
+through duckdb's `postgres` extension (ATTACH … READ_ONLY), so the script stays
+stdlib + duckdb. URL from `LODESTAR_DB_URL`, else Lodestar's default
+(historical.py:23); the DB is the Docker container `lode_shotclock_db` (5433→5432)
+and an unreachable one is ONE line naming `docker start lode_shotclock_db`, exit 2.
+Postgres `ts` is timestamptz: the connection is pinned to `TimeZone='UTC'` and the
+stamps are written as naive UTC — the form the reader takes. MEASURED 2026-09-07:
+research.duckdb's naive stamps are NOT UTC but Pacific wall-clock (UTC−8 on every
+scored match, all of which predate DST; HEIGAL's moment `09:05:13.524` is the tape's
+`17:05:13.524Z`, same ticker/price/count/state), so a default-mode file and a
+`--full` file of one match differ by 8h and the full tape's stamps are the correct
+ones; the default mode inherits Lodestar's scorer output as it is. What the full
+rows carry:
+  · `backs_player` — the trade_stance port above (`taker_side` is never null and
+    `side_inferred` is false on every tennis trade in the DB, but both are kept).
+  · `size_z` — a port of tennis_anomaly.py's size_zscores (lines 95-106): log-scale z
+    of `count` vs the SAME ticker's sized trades. The baseline here is EVERY sized
+    trade of the match on that ticker (pre-match flow included), where Lodestar's
+    scorer baselines on in-window trades only, so the values differ slightly from
+    the moment table's; `meta.size_z_baseline` says so. A `count = 0` trade (size
+    unknown — a collector artifact after ~2026-03-22) is EXCLUDED from the baseline
+    and gets `size_z: null`, and `meta.unsized` (the share) + `meta.n_unsized` are
+    written when the share is non-zero, because null radii would otherwise read
+    as small trades. The drill's `sizeColumn: size_z` therefore keeps working;
+    `count` is the other honest choice.
+  · the game state — null for trades BEFORE the first state row (pre-match; kept,
+    counted in `meta.n_no_state`), so the stepped series starts where the match does.
+  · `meta.coverage = "full tape"`, `meta.n_trades` = the row count, `meta.source`
+    names the two tables, `meta.n_trades_scored` keeps the scorer's in-window count,
+    `meta.n_same_ms` counts rows sharing a millisecond with an earlier row — the
+    reader keys marks on the ms (last wins), so that many trades draw no mark of
+    their own (a Kalshi fill across several levels is several trades at one stamp).
 
 stdlib + duckdb only.
 """
@@ -50,12 +87,19 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import math
 import os
 import re
 import sys
 
 DEFAULT_DB = "C:/Users/ericm/projects/lodestar/data/research.duckdb"
 COVERAGE = "flagged moments only"
+COVERAGE_FULL = "full tape"
+FULL_SOURCE = "shotclock kalshi_trade + tennis_match_state"
+PG_URL_ENV = "LODESTAR_DB_URL"
+DEFAULT_PG_URL = "postgresql://shotclock:shotclock@localhost:5433/shotclock"  # Lodestar historical.py:23
+PG_CONTAINER = "lode_shotclock_db"
+DB_UNREACHABLE_EXIT = 2
 
 # ── drillPathKey, ported from src/lib/viewStore.ts ───────────────────────────
 # JS: key.trim().slice(0, 120).replace(/[^A-Za-z0-9._-]/g, "_"); then "", "." and
@@ -89,20 +133,20 @@ def drill_path_key(key: str) -> str | None:
     return cleaned
 
 
-# ── the export ───────────────────────────────────────────────────────────────
-
-MATCH_COLUMNS = (
-    "match_id, ticker, level, player1_name, player2_name, winner, score, n_trades, "
-    "n_flagged, flag_rate, first_trade, last_trade"
-)
+# ── pure helpers (tested by scripts/test_export_tennis_match.py) ─────────────
 
 
 def _iso(v) -> str | None:
     if v is None:
         return None
     if isinstance(v, _dt.datetime):
-        # Naive stamps are UTC in Lodestar's tables; the reader treats a naive
-        # ISO stamp as UTC (the candle rule), so no suffix is added.
+        # A naive stamp is written as it is (the reader treats a naive ISO
+        # stamp as UTC — the candle rule); research.duckdb's are in fact
+        # Pacific wall-clock, see the module docstring. A tz-aware stamp
+        # (Postgres timestamptz) is converted to UTC and written in the same
+        # suffix-less form, so both sources print one shape.
+        if v.tzinfo is not None:
+            v = v.astimezone(_dt.timezone.utc).replace(tzinfo=None)
         return v.strftime("%Y-%m-%dT%H:%M:%S.") + f"{v.microsecond // 1000:03d}"
     return str(v)
 
@@ -115,6 +159,131 @@ def _num(v):
     if isinstance(v, (int, float)):
         return v
     return v
+
+
+def player_tickers(match_id: str) -> tuple[str, str]:
+    """Player 1's ticker is <match_id>-<code1>, code1 = the match id's tail [-6:-3]."""
+    code1, code2 = match_id[-6:-3], match_id[-3:]
+    return f"{match_id}-{code1}", f"{match_id}-{code2}"
+
+
+def fold_price(ticker: str, price, p1_ticker: str, p2_ticker: str) -> tuple[object, bool]:
+    """(player 1's yes-price, unfolded?) — `100 - price` on player 2's ticker,
+    raw on player 1's, raw + flagged on a ticker that is neither."""
+    if price is None:
+        return None, False
+    if ticker == p1_ticker:
+        return price, False
+    if ticker == p2_ticker:
+        return 100 - price, False
+    return price, True
+
+
+def ticker_side_player(ticker: str, p1_ticker: str, p2_ticker: str) -> int | None:
+    return 1 if ticker == p1_ticker else 2 if ticker == p2_ticker else None
+
+
+def trade_stance(ticker_side_player: int, taker_side) -> int | None:
+    """Port of Lodestar tennis_anomaly.py:79-84. Which player (1|2) the trade
+    backs: buying YES on player X's market backs X; buying NO backs the other
+    player. None when the taker side is unknown."""
+    if taker_side not in ("yes", "no", "YES", "NO"):
+        return None
+    return ticker_side_player if taker_side.lower() == "yes" else 3 - ticker_side_player
+
+
+def size_zscores(counts: list[int]) -> list[float]:
+    """Port of Lodestar tennis_anomaly.py:95-106. Log-scale z-scores of trade
+    sizes vs this market's own distribution; zeros when the market has too few
+    trades to have a 'usual' size."""
+    if len(counts) < 8:
+        return [0.0] * len(counts)
+    logs = [math.log1p(c) for c in counts]
+    mean = sum(logs) / len(logs)
+    var = sum((x - mean) ** 2 for x in logs) / (len(logs) - 1)
+    sd = math.sqrt(var)
+    if sd < 1e-9:
+        return [0.0] * len(logs)
+    return [(x - mean) / sd for x in logs]
+
+
+def shape_full_rows(tape: list[tuple], match_id: str) -> tuple[list[dict], dict]:
+    """The full-tape rows from `(ts, ticker, price, count, taker_side, side_inferred,
+    sets_p1, sets_p2, games_p1, games_p2)` tuples in ts order. Pure: returns the
+    rows and the counts the meta reports (`unfolded`, `n_unsized`, `n_no_state`,
+    `n_no_stance`)."""
+    p1_ticker, p2_ticker = player_tickers(match_id)
+    # size_z per ticker over its SIZED trades (count > 0); unsized → None.
+    by_ticker: dict[str, list[int]] = {}
+    for t in tape:
+        if (t[3] or 0) > 0:
+            by_ticker.setdefault(t[1], []).append(int(t[3]))
+    z_iter = {tk: iter(size_zscores(counts)) for tk, counts in by_ticker.items()}
+    stats = {"unfolded": 0, "n_unsized": 0, "n_no_state": 0, "n_no_stance": 0, "n_same_ms": 0}
+    rows = []
+    last_ts = None
+    for ts, ticker, price, count, taker_side, side_inferred, s1, s2, g1, g2 in tape:
+        folded, unfolded = fold_price(ticker, price, p1_ticker, p2_ticker)
+        stats["unfolded"] += int(unfolded)
+        sized = (count or 0) > 0
+        size_z = round(next(z_iter[ticker]), 3) if sized else None
+        stats["n_unsized"] += int(not sized)
+        side = ticker_side_player(ticker, p1_ticker, p2_ticker)
+        backs = trade_stance(side, taker_side) if side is not None else None
+        stats["n_no_stance"] += int(backs is None)
+        stats["n_no_state"] += int(s1 is None)
+        iso = _iso(ts)
+        stats["n_same_ms"] += int(iso == last_ts)
+        last_ts = iso
+        rows.append(
+            {
+                "ts": iso,
+                "price": _num(folded),
+                "price_raw": _num(price),
+                "ticker": ticker,
+                "count": _num(count),
+                "size_z": size_z,
+                "backs_player": backs,
+                "taker_side": taker_side,
+                "side_inferred": side_inferred,
+                "sets_p1": _num(s1),
+                "sets_p2": _num(s2),
+                "games_p1": _num(g1),
+                "games_p2": _num(g2),
+            }
+        )
+    return rows, stats
+
+
+def pg_label(url: str) -> str:
+    """`host:port/db` of a Postgres URL, credentials dropped (for the failure line)."""
+    m = re.match(r"^[a-z]+://(?:[^@/]*@)?([^/?#]+)(/[^?#]*)?", url)
+    return (m.group(1) + (m.group(2) or "")) if m else "<db>"
+
+
+def unreachable_line(url: str, err: Exception) -> str:
+    first = str(err).strip().splitlines()[0] if str(err).strip() else type(err).__name__
+    first = re.sub(r"://[^@/\s\"']*@", "://", first)  # duckdb echoes the URL, credentials included
+    return (
+        f"cannot reach the Shot Clock DB at {pg_label(url)} ({first}) — the container is "
+        f"{PG_CONTAINER}; if it is stopped: docker start {PG_CONTAINER}"
+    )
+
+
+# ── the export ───────────────────────────────────────────────────────────────
+
+MATCH_COLUMNS = (
+    "match_id, ticker, level, player1_name, player2_name, winner, score, n_trades, "
+    "n_flagged, flag_rate, first_trade, last_trade"
+)
+
+FULL_TAPE_SQL = """
+SELECT t.ts, t.ticker, t.price, t.count, t.taker_side, t.side_inferred,
+       s.sets_p1, s.sets_p2, s.games_p1, s.games_p2
+FROM (SELECT * FROM pg.kalshi_trade WHERE ticker LIKE $mid || '-%') t
+ASOF LEFT JOIN (SELECT * FROM pg.tennis_match_state WHERE match_id = $mid) s ON t.ts >= s.ts
+ORDER BY t.ts
+"""
 
 
 def pick_matches(con, selector: str | None, top: bool, all_matches: bool, min_trades: int):
@@ -152,30 +321,61 @@ def pick_matches(con, selector: str | None, top: bool, all_matches: bool, min_tr
     return hits
 
 
-def export_match(con, match, out_path: str) -> tuple[int, int]:
+def attach_shotclock(con, url: str) -> None:
+    """ATTACH the Shot Clock Postgres as `pg` (read-only, UTC). Unreachable → one
+    line on stderr naming the container + the docker command, exit 2 — never a
+    traceback. The `postgres` extension is loaded on first use; a machine that
+    cannot fetch it lands on the same line."""
+    import duckdb
+
+    try:
+        con.execute("SET TimeZone = 'UTC'")
+        con.execute(f"ATTACH '{url}' AS pg (TYPE postgres, READ_ONLY)")
+    except duckdb.Error as err:
+        print(unreachable_line(url, err), file=sys.stderr)
+        sys.exit(DB_UNREACHABLE_EXIT)
+
+
+def fetch_full_tape(con, match_id: str) -> list[tuple]:
+    return con.execute(FULL_TAPE_SQL, {"mid": match_id}).fetchall()
+
+
+def base_meta(match, p1_ticker: str, p2_ticker: str) -> dict:
     (match_id, ticker, level, p1, p2, winner, score, n_trades, n_flagged, flag_rate, first, last) = match
+    return {
+        "match_id": match_id,
+        "ticker": ticker,
+        "ticker_p1": p1_ticker,
+        "ticker_p2": p2_ticker,
+        "level": level,
+        "player1": p1,
+        "player2": p2,
+        "winner": _num(winner),
+        "anomaly_score": _num(score),
+        "n_flagged": _num(n_flagged),
+        "flag_rate": _num(flag_rate),
+        "price_of": p1,
+        "first_trade": _iso(first),
+        "last_trade": _iso(last),
+        "exported_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+def export_match(con, match, out_path: str) -> tuple[int, int]:
+    match_id, n_trades = match[0], match[7]
     moments = con.execute(
         "select ts, ticker, price, count, backs_player, size_z, tilt, disagreement, side_inferred, "
         "score, sets_p1, sets_p2, games_p1, games_p2 from tennis_flow_anomaly_moment "
         "where match_id = ? order by ts",
         [match_id],
     ).fetchall()
-    # Player 1's ticker is <match_id>-<code1>, code1 = the match id's tail [-6:-3].
-    code1, code2 = match_id[-6:-3], match_id[-3:]
-    p1_ticker, p2_ticker = f"{match_id}-{code1}", f"{match_id}-{code2}"
+    p1_ticker, p2_ticker = player_tickers(match_id)
     unfolded = 0
     rows = []
     for m in moments:
         (ts, m_ticker, price, count, backs, size_z, tilt, disagreement, side_inferred, m_score, s1, s2, g1, g2) = m
-        folded = None
-        if price is not None:
-            if m_ticker == p1_ticker:
-                folded = price
-            elif m_ticker == p2_ticker:
-                folded = 100 - price
-            else:
-                folded = price
-                unfolded += 1
+        folded, was_unfolded = fold_price(m_ticker, price, p1_ticker, p2_ticker)
+        unfolded += int(was_unfolded)
         rows.append(
             {
                 "ts": _iso(ts),
@@ -195,34 +395,49 @@ def export_match(con, match, out_path: str) -> tuple[int, int]:
                 "games_p2": _num(g2),
             }
         )
-    payload = {
-        "meta": {
-            "coverage": COVERAGE,
-            "source": "tennis_flow_anomaly_moment",
-            "match_id": match_id,
-            "ticker": ticker,
-            "ticker_p1": p1_ticker,
-            "ticker_p2": p2_ticker,
-            "unfolded": unfolded,
-            "level": level,
-            "player1": p1,
-            "player2": p2,
-            "winner": _num(winner),
-            "anomaly_score": _num(score),
-            "n_trades": _num(n_trades),
-            "n_flagged": _num(n_flagged),
-            "flag_rate": _num(flag_rate),
-            "price_of": p1,
-            "first_trade": _iso(first),
-            "last_trade": _iso(last),
-            "exported_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        },
-        "rows": rows,
+    meta = {
+        "coverage": COVERAGE,
+        "source": "tennis_flow_anomaly_moment",
+        **base_meta(match, p1_ticker, p2_ticker),
+        "unfolded": unfolded,
+        "n_trades": _num(n_trades),
     }
+    write_payload(out_path, meta, rows)
+    return len(rows), int(n_trades or 0)
+
+
+def export_match_full(con, match, out_path: str) -> tuple[int, int]:
+    match_id, n_trades_scored = match[0], match[7]
+    tape = fetch_full_tape(con, match_id)
+    p1_ticker, p2_ticker = player_tickers(match_id)
+    rows, stats = shape_full_rows(tape, match_id)
+    n = len(rows)
+    meta = {
+        "coverage": COVERAGE_FULL,
+        "source": FULL_SOURCE,
+        **base_meta(match, p1_ticker, p2_ticker),
+        "unfolded": stats["unfolded"],
+        "n_trades": n,
+        "n_trades_scored": _num(n_trades_scored),
+        "n_no_state": stats["n_no_state"],
+        "n_no_stance": stats["n_no_stance"],
+        "n_same_ms": stats["n_same_ms"],
+        "size_column": "size_z",
+        "size_z_baseline": "per ticker, every sized trade of the match (count > 0)",
+        "tape_first": rows[0]["ts"] if rows else None,
+        "tape_last": rows[-1]["ts"] if rows else None,
+    }
+    if stats["n_unsized"] > 0:
+        meta["n_unsized"] = stats["n_unsized"]
+        meta["unsized"] = round(stats["n_unsized"] / n, 4) if n else 0
+    write_payload(out_path, meta, rows)
+    return n, n
+
+
+def write_payload(out_path: str, meta: dict, rows: list[dict]) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False)
-    return len(rows), int(n_trades or 0)
+        json.dump({"meta": meta, "rows": rows}, f, ensure_ascii=False)
 
 
 def resolve_out(out: str, match_id: str) -> str:
@@ -241,6 +456,12 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--top", action="store_true", help="the top match by anomaly score with n_trades > --min-trades")
     ap.add_argument("--min-trades", type=int, default=500)
     ap.add_argument("--all", action="store_true", help="every match, one file each, into <out>")
+    ap.add_argument(
+        "--full",
+        action="store_true",
+        help=f"every trade of the match with game state, from the Shot Clock DB (${PG_URL_ENV} or {pg_label(DEFAULT_PG_URL)})",
+    )
+    ap.add_argument("--pg-url", default=None, help=f"override the Shot Clock DB URL (default: ${PG_URL_ENV}, else Lodestar's)")
     ap.add_argument("--path-key", nargs="+", metavar="KEY", help="print drillPathKey(KEY) per key as a JSON list and exit")
     args = ap.parse_args(argv)
 
@@ -268,10 +489,12 @@ def main(argv: list[str]) -> int:
     if not os.path.exists(args.db):
         sys.exit(f"no database at {args.db}")
     con = duckdb.connect(args.db, read_only=True)
+    if args.full:
+        attach_shotclock(con, args.pg_url or os.environ.get(PG_URL_ENV) or DEFAULT_PG_URL)
     matches = pick_matches(con, selector, args.top, args.all, args.min_trades)
     for match in matches:
         path = resolve_out(out, match[0])
-        n_rows, n_trades = export_match(con, match, path)
+        n_rows, n_trades = (export_match_full if args.full else export_match)(con, match, path)
         print(f"wrote {os.path.abspath(path)} ({n_rows} rows, {n_trades} trades)")
     return 0
 

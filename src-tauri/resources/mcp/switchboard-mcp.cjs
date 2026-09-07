@@ -683,7 +683,9 @@ const VIEW_TOOL = {
     "kind:'table', keyColumn:'match_id', columns:[match_id, player1_name, player2_name, score, " +
     "n_trades, n_flagged], drill:{kind:'timeline', title:'{key}', source:{type:'file', " +
     "path:'.sb-views/tennis/{key}.json'}, sizeColumn:'size_z'} — a click on a match then opens " +
-    "its timeline beside the terminal. The user " +
+    "its timeline beside the terminal; add `--full` to export the WHOLE trade tape with game " +
+    "state (every trade, `full tape · N trades`) when the Shot Clock DB is up (`docker start " +
+    "lode_shotclock_db`; the script says so and exits 2 when it is not). The user " +
     "can pin rows/bars/bins/marks and keep the view; you cannot make a view poll — re-running a " +
     "query is their gesture. Give a `definition` (the rule that defines the rows, in plain " +
     "words) whenever the view encodes a rule — the user reads it under `spec`. Declare a " +

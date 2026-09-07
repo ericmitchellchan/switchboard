@@ -62,9 +62,11 @@
 //     hook, so the T7 tooltip prints the trade's fields (viewStore.
 //     rowForAnchor answers `trade:`, unlike the other canvas anchors).
 //   · The toolbar states the COVERAGE beside the title from the data file's
-//     `meta` (`timelineNote`: `flagged moments only · N of M trades`) — the
-//     rows are the flagged moments on disk, and the full tape is a backend
-//     upgrade the view must not imply.
+//     `meta` (`timelineNote`: `flagged moments only · 12 of 6,117 trades`, or
+//     `full tape · 13,282 trades` from the exporter's `--full`) — the view
+//     says what the rows ARE and never implies more. The canvas kinds skip
+//     the 500-row DOM window (`windowRows(rows, kind)`): a full tape is drawn
+//     whole, and anchors resolve against the unwindowed rows as before.
 //
 // SWIT-70 — line charts tell the story: stable per-series palette
 // (charts/candles.seriesColor, keyed on the COLUMN), `seriesLabels` in the
@@ -563,7 +565,7 @@ export function ViewChrome({
     );
   }
 
-  const windowed = filteredRows ? windowRows(filteredRows) : { rows: [] as ViewRow[], total: 0, windowed: false };
+  const windowed = filteredRows ? windowRows(filteredRows, spec.kind) : { rows: [] as ViewRow[], total: 0, windowed: false };
   const filtered = filteredRows !== null && rows !== null && filteredRows.length !== rows.length;
 
   return (
