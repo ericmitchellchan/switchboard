@@ -56,9 +56,13 @@ import { serverKey } from "./devServer";
 // in a plain node environment).
 import type { IconName } from "../components/icons";
 import { log } from "./logger";
-import type { PageQuestionKind } from "./pageStore";
+import type { ConventionEntry } from "./pageStore";
 import { surfaceLabel } from "../surfaces/registry";
 import { encodeSurfaceParams, sanitizeSurfaceParams, surfaceParamsSuffix } from "./surfaceParams";
+
+/** What rides with a batch submit besides the bytes (SWIT-77 review fix):
+ *  the `convention` answers it carries, for App to append at send. */
+export type SubmitOptions = { conventions?: readonly ConventionEntry[] };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // REMOVAL AUDIT (2026-08-02)
@@ -2340,8 +2344,10 @@ export type PanelActions = {
    *  into a dead claude's shell runs as commands). Resolves when the PTY
    *  write succeeded, rejects otherwise — the caller marks notes sent only
    *  on success. Optional so a host that registers no submit path (tests)
-   *  keeps `sendToThread` alone. */
-  submitToThread?: (threadId: string, bytes: string) => Promise<void>;
+   *  keeps `sendToThread` alone. `opts.conventions` (SWIT-77 review fix):
+   *  the batch's `convention` answers, appended to conventions.md by App
+   *  AFTER the write succeeded — the decision is final when it goes. */
+  submitToThread?: (threadId: string, bytes: string, opts?: SubmitOptions) => Promise<void>;
   /** POP OUT (increment F, Decision 2): hand this artifact to the floating PiP
    *  window. App owns the window lifecycle; the store owns only the record of
    *  WHICH artifact is out there, so the panel can say so instead of drawing a
@@ -2362,17 +2368,10 @@ export type PanelActions = {
   /** ANSWER a page question (SWIT-51; SWIT-77): write answers.json and
    *  NOTHING else — answering SAVES; the agent hears every answer as ONE
    *  message when the user sends the batch from the page (`submitToThread`
-   *  above is that path). Rejection = the WRITE failed; the view keeps the
-   *  text in the box. `kind` (SWIT-58) is the question's own: a
-   *  `convention` is also appended to conventions.md by App, after the
-   *  answer is durable. */
-  answerQuestion: (
-    threadId: string,
-    questionId: string,
-    questionText: string,
-    answerText: string,
-    kind?: PageQuestionKind
-  ) => Promise<"saved">;
+   *  above is that path, and a `convention` answer reaches conventions.md
+   *  through it, at send). Rejection = the WRITE failed; the view keeps the
+   *  text in the box. */
+  answerQuestion: (threadId: string, questionId: string, answerText: string) => Promise<"saved">;
   /** Write a session's CURRENT scrollback to its mirror file, right now.
    *
    *  The linkage that makes `→ thread` mean something for a live shell: the
@@ -2404,10 +2403,10 @@ export function sendToThread(text: string): void {
  *  is not live (App applies `viewNotes.batchSendTarget`) — the affordance is
  *  gated on `useSendToThreadAvailable` + that same rule, and a rejection
  *  here is the "not sent" outcome the caller shows. */
-export function submitToThread(threadId: string, bytes: string): Promise<void> {
+export function submitToThread(threadId: string, bytes: string, opts?: SubmitOptions): Promise<void> {
   const submit = panelActions?.submitToThread;
   if (!submit) return Promise.reject(new Error("no thread to send to"));
-  return submit(threadId, bytes);
+  return submit(threadId, bytes, opts);
 }
 
 /** Is there anything to type into? Requires both the App-side handler and an
@@ -2563,16 +2562,10 @@ export function flushTerminalTranscript(sessionId: string): Promise<void> {
 
 /** Answer a question through the App bridge. Rejects when App is unwired —
  *  the view surfaces that rather than pretending. */
-export function answerQuestion(
-  threadId: string,
-  questionId: string,
-  questionText: string,
-  answerText: string,
-  kind: PageQuestionKind = "decision"
-): Promise<"saved"> {
+export function answerQuestion(threadId: string, questionId: string, answerText: string): Promise<"saved"> {
   const actions = panelActions;
   if (!actions) return Promise.reject(new Error("the app is not ready to answer"));
-  return actions.answerQuestion(threadId, questionId, questionText, answerText, kind);
+  return actions.answerQuestion(threadId, questionId, answerText);
 }
 
 /** Close the tab holding `identity` in a session's strip (SWIT-51 — the

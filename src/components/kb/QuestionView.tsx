@@ -98,7 +98,7 @@ export function QuestionView({ artifact, active }: { artifact: QuestionArtifact;
       // SWIT-77: answering SAVES; the batch goes from the ✦ page. Written on
       // the page — the tab's job is done. Close SELF (the host session's
       // strip holds this identity).
-      await answerQuestion(threadId, questionId, open.text, clean, open.kind);
+      await answerQuestion(threadId, questionId, clean);
       const host = getActiveTabSession();
       if (host) closeArtifactByIdentity(host, artifactIdentity(artifact));
       else setNote("saved on the page — send from the ✦ page");

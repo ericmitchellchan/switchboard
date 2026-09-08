@@ -879,9 +879,14 @@ export type ThreadsView = {
    *  ONLY until SWIT-52 publishes real counts; empty means no chip. */
   unreadPosts: Readonly<Record<string, number>>;
   /** OPEN page questions per thread id (SWIT-69 — words, not glyphs): the
-   *  rail's dim `· N` count with its `N open question(s)` tooltip, published
-   *  by App's 5s page pass. Empty = no marker. */
+   *  rail's dim `· N` count with its worded tooltip, published by App's 5s
+   *  page pass. Empty = no marker. */
   openQuestions: Readonly<Record<string, number>>;
+  /** Decided-but-UNSENT answers per thread id (SWIT-77 review fix): the
+   *  same marker counts them (`· N` = open + unsent, the tooltip says which
+   *  — `pageStore.questionMarkerTitle`), published by the same pass. An
+   *  unsent batch must be visible from the rail, not only on the page. */
+  unsentDecisions: Readonly<Record<string, number>>;
   /** A thread whose title should be in INLINE RENAME the moment its row
    *  renders (SWIT-56: the header `+` creates first and asks for the name
    *  second). Consumed — cleared — by the row that honours it; ALSO cleared
@@ -900,6 +905,7 @@ let activeSessionId: string | null = null;
 let menuSessions: readonly MenuSession[] = [];
 let unreadPosts: Record<string, number> = {};
 let openQuestions: Record<string, number> = {};
+let unsentDecisions: Record<string, number> = {};
 let renameRequest: string | null = null;
 
 const listeners = new Set<() => void>();
@@ -940,6 +946,7 @@ export function getThreadsView(): ThreadsView {
       menuSessions,
       unreadPosts,
       openQuestions,
+      unsentDecisions,
       renameRequest,
     };
   }
@@ -1318,10 +1325,13 @@ export function publishThreadUnread(counts: Record<string, number>): void {
   bump();
 }
 
-/** Open page questions per thread (SWIT-69): the rail row's dim `· N` count.
- *  Published by App's 5s page pass beside the unread counts. */
-export function publishThreadQuestions(counts: Record<string, number>): void {
-  openQuestions = counts;
+/** Open page questions + decided-but-unsent answers per thread (SWIT-69;
+ *  SWIT-77 review fix): the rail row's dim `· N` marker and its worded
+ *  tooltip. Published together by App's 5s page pass beside the unread
+ *  counts — both come from the same two files on the same tick. */
+export function publishThreadQuestions(open: Record<string, number>, unsent: Record<string, number>): void {
+  openQuestions = open;
+  unsentDecisions = unsent;
   bump();
 }
 
@@ -1396,6 +1406,7 @@ export function __resetThreadStoreForTests(): void {
   menuSessions = [];
   unreadPosts = {};
   openQuestions = {};
+  unsentDecisions = {};
   renameRequest = null;
   cachedView = null;
   threadActions = null;

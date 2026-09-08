@@ -20,7 +20,11 @@
 // and ONE `Send decisions ▸` that composes `decisionsMessage` through
 // composeWrite → submitToThread (the 0.10.0 live-thread seam, gated by
 // batchSendTarget — `thread not live` when it is not) and, on success,
-// stamps the answers sent (markThreadAnswersSent); a failed send is one line
+// stamps the answers sent (markThreadAnswersSent — and if Rust stamped FEWER
+// than were sent, the line says `sent, but N of M not marked sent` and
+// nothing is marked sent locally; the files decide which rows leave). The
+// batch's `convention` answers ride the submit, so App appends them to
+// conventions.md at SEND, once per question. A failed send is one line
 // beside the button and the answers stay unsent. An OPTIMISTIC OVERLAY
 // (`local` saves, `sentIds`) bridges the ≤2.5s until the poll shows the
 // files; the files win the moment they catch up.
@@ -86,6 +90,8 @@ import {
   PAGE_POLL_MS,
   answerErrorNote,
   sendErrorNote,
+  partialSentNote,
+  conventionEntries,
   decisionsMessage,
   decisionsFooter,
   recommendation,
@@ -752,7 +758,7 @@ function DecisionsBlock({
    *  draft stays in its box. */
   const saveAnswer = async (q: PageQuestion, clean: string): Promise<boolean> => {
     try {
-      await answerQuestion(threadId, q.id, q.text, clean, q.kind);
+      await answerQuestion(threadId, q.id, clean);
     } catch (err) {
       setNote(answerErrorNote(err));
       return false;
@@ -805,15 +811,27 @@ function DecisionsBlock({
       // The gate again at send time (the button can lag a store tick).
       if (target.sessionId === null) throw new Error(target.reason);
       // composeWrite: multi-line → ONE bracketed paste + ONE CR, so the
-      // batch arrives as one message.
+      // batch arrives as one message. The batch's `convention` answers ride
+      // along: App appends them to conventions.md once the write succeeded
+      // (the decision is final when it goes — review fix F6).
       const bytes = composeWrite(decisionsMessage(visible, saved));
-      await submitToThread(threadId, bytes);
+      await submitToThread(threadId, bytes, { conventions: conventionEntries(visible, saved) });
+      let marked: number;
       try {
-        await markThreadAnswersSent(threadId, ids);
+        marked = await markThreadAnswersSent(threadId, ids);
       } catch (err) {
         // The agent HAS the message; only the stamp failed. Say so and leave
         // the rows — a second send would repeat what it already heard.
         setNote(sendErrorNote(`sent, but not marked sent: ${err instanceof Error ? err.message : String(err)}`));
+        return;
+      }
+      // Review fix F7: Rust returns HOW MANY it stamped. Fewer than sent is
+      // not success — say which count, and mark NOTHING sent locally: the
+      // poll folds the stamped ones out of the batch from the files, and
+      // the rest stay listed (unsent) for the next send.
+      const partial = partialSentNote(marked, ids.length);
+      if (partial !== null) {
+        setNote(partial);
         return;
       }
       const now = Date.now();

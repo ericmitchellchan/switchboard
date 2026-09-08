@@ -253,7 +253,7 @@ describe("applyOp semantics", () => {
 
   it("item refuses a note, on add and on update, with the tidy-plan wording (SWIT-77)", () => {
     expect(server.NO_NOTE).toBe(
-      "page item: items carry no note — put status in the item's links/state and the story in a turn (op turn)"
+      "page item: items carry no note — put status in the item's state and the story in a turn (op turn)"
     );
     expect(() => server.applyOp(empty(), { op: "item", itemOp: "add", title: "t", note: "blocks R1" }, NOW)).toThrow(
       server.NO_NOTE

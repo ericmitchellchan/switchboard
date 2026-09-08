@@ -125,7 +125,7 @@ import {
   type StandingDecisions,
 } from "./lib/agentContext";
 import { runPromotionPass, promotionPassReason, PROMOTION_POLL_MS } from "./lib/threadPromotion";
-import { parsePageFile, parseAnswersFile, parseInboxFile, mergePage, conventionLine, postTimes, countUnreadTimes, nextPassEntry, loadInboxSeen, markInboxSeen, isQuestionOpen, type PageQuestionKind, type ThreadPassEntry } from "./lib/pageStore";
+import { parsePageFile, parseAnswersFile, parseInboxFile, mergePage, conventionLine, postTimes, countUnreadTimes, nextPassEntry, loadInboxSeen, markInboxSeen, countQuestionStates, type ConventionEntry, type ThreadPassEntry } from "./lib/pageStore";
 import { explorerProjects, registerExplorerActions, quickThreadTarget, sessionRepoOptions, useSessionRepos, projectKeyForDir } from "./lib/explorer";
 import {
   configureBacklogIO,
@@ -1419,7 +1419,11 @@ export default function App() {
         const unread: Record<string, number> = {};
         // SWIT-69: open-question counts ride the same pass — the rail row's
         // dim `· N` marker (the filled `?` chip is retired; words, not glyphs).
+        // SWIT-77 review fix: decided-but-UNSENT answers are counted on the
+        // same read of the same two files, so an unsent batch shows from the
+        // rail and from Home, not only on the page.
         const questions: Record<string, number> = {};
+        const unsent: Record<string, number> = {};
         for (const t of threads) {
           const sessionId = t.sessionId;
           const live =
@@ -1462,10 +1466,11 @@ export default function App() {
               unreadNow = 0;
             }
             if (decision.questions > 0) questions[t.id] = decision.questions;
+            if (decision.unsent > 0) unsent[t.id] = decision.unsent;
             if (unreadNow > 0) unread[t.id] = unreadNow;
             continue;
           }
-          const entry: ThreadPassEntry = { stamp, questions: 0, postsAt: [] };
+          const entry: ThreadPassEntry = { stamp, questions: 0, unsent: 0, postsAt: [] };
           threadPassCacheRef.current.set(t.id, entry);
           try {
             const [pageRaw, answersRaw] = await Promise.all([
@@ -1473,11 +1478,13 @@ export default function App() {
               readThreadFile(t.id, "answers.json"),
             ]);
             if (cancelled) return;
-            const answers = parseAnswersFile(answersRaw);
-            // SWIT-77: an agent-resolved question is not open either.
-            const n = parsePageFile(pageRaw).questions.filter((q) => isQuestionOpen(q, answers)).length;
-            entry.questions = n;
-            if (n > 0) questions[t.id] = n;
+            // SWIT-77: an agent-resolved question is not open either; an
+            // answered one with no (or a stale) sentAt is unsent.
+            const counts = countQuestionStates(parsePageFile(pageRaw).questions, parseAnswersFile(answersRaw));
+            entry.questions = counts.open;
+            entry.unsent = counts.unsent;
+            if (counts.open > 0) questions[t.id] = counts.open;
+            if (counts.unsent > 0) unsent[t.id] = counts.unsent;
           } catch {
             // a real read error (missing resolves to "") — retry next tick
             entry.stamp = -1;
@@ -1519,7 +1526,7 @@ export default function App() {
         }
         if (!cancelled) {
           publishThreadUnread(unread);
-          publishThreadQuestions(questions);
+          publishThreadQuestions(questions, unsent);
         }
       } finally {
         busy = false;
@@ -2064,22 +2071,56 @@ export default function App() {
   // reads the published statuses for the same rule) — and a miss REJECTS
   // with the reason, writing nothing. No tab switch: the deck must stay on
   // screen for its `sent` line, and the thread's tab is normally this one.
-  const handleSubmitToThread = useCallback(async (threadId: string, bytes: string) => {
-    const thread = getThreadById(threadId);
-    const live =
-      !!thread?.sessionId &&
-      sessionsRef.current.some((s) => s.id === thread.sessionId && s.status !== "exited");
-    const target = batchSendTarget(thread, isThreadLaunched(threadId), live);
-    if (target.sessionId === null) throw new Error(target.reason);
-    const sessionId = target.sessionId;
-    if (bytes.length === 0) return;
-    if (getNavState().route.screen !== "terminal") navigate({ screen: "terminal" });
-    log.info(`Submit to thread=${threadId} session=${sessionId}: ${bytes.length} bytes`);
-    await writeToSession(sessionId, bytes);
-    if ((effectiveActiveIdRef.current ?? activeIdRef.current) === sessionId) {
-      getTerminal(sessionId)?.terminal.focus();
-    }
-  }, []);
+  //
+  // SWIT-77 review fix (F4): a submit is a REAL user turn exactly as a
+  // composer send is, so it marks `chatStarted` the same explicit way
+  // (writeToSession bypasses the input detector on purpose — Composer's
+  // Decision 4) with the same critical-field flush; the notes batch (SWIT-75)
+  // rides the same seam and gets the fix for free. (F6): the batch's
+  // `convention` answers are appended to conventions.md HERE, after the
+  // write succeeded — the decision is final when it goes, never on each
+  // save (pick A → change → pick B used to write two lines). SECONDARY to
+  // the message, which the agent already has: a failed append is logged and
+  // toasted, never thrown.
+  const handleSubmitToThread = useCallback(
+    async (threadId: string, bytes: string, opts?: { conventions?: readonly ConventionEntry[] }) => {
+      const thread = getThreadById(threadId);
+      const live =
+        !!thread?.sessionId &&
+        sessionsRef.current.some((s) => s.id === thread.sessionId && s.status !== "exited");
+      const target = batchSendTarget(thread, isThreadLaunched(threadId), live);
+      if (target.sessionId === null) throw new Error(target.reason);
+      const sessionId = target.sessionId;
+      if (bytes.length === 0) return;
+      if (getNavState().route.screen !== "terminal") navigate({ screen: "terminal" });
+      log.info(`Submit to thread=${threadId} session=${sessionId}: ${bytes.length} bytes`);
+      await writeToSession(sessionId, bytes);
+      if (thread && !thread.chatStarted) {
+        log.info(`Batch submit — chatStarted id=${threadId}`);
+        markChatStarted(threadId);
+        // Same critical-field flush as the detector and composer paths:
+        // losing chatStarted to a crash inside the 30s periodic window
+        // would relaunch instead of resume.
+        void saveThreadsToDisk();
+      }
+      if ((effectiveActiveIdRef.current ?? activeIdRef.current) === sessionId) {
+        getTerminal(sessionId)?.terminal.focus();
+      }
+      for (const c of opts?.conventions ?? []) {
+        // SWIT-58: a standing rule is written down where the next agent (and
+        // the next mock) reads it — by the APP, through the fixed-path append
+        // in Rust; the agent never edits conventions.md for this.
+        try {
+          await appendConvention(conventionLine(c.question, c.answer, thread?.title ?? null));
+          log.info(`Convention recorded question=${c.questionId} thread=${threadId}`);
+        } catch (err) {
+          log.error(`Convention append failed question=${c.questionId} thread=${threadId}: ${err}`);
+          addToast(NO_SESSION, "Convention not recorded", String(err));
+        }
+      }
+    },
+    [addToast]
+  );
 
   // POP OUT (increment F, Decision 2) — hand the panel's active artifact to
   // the FLOATING window, which is the same window Ctrl+Shift+O mirrors a
@@ -2295,34 +2336,15 @@ export default function App() {
   // as ONE "Decisions:" message, when Eric presses `Send decisions` on the
   // page (PageView's DecisionsBlock → submitToThread, the 0.10.0 seam). A
   // rejection here = the write failed; the view keeps the text in the box.
+  // A `convention` answer is appended to conventions.md at SEND, not here
+  // (handleSubmitToThread — the decision is final when it goes).
   const handleAnswerQuestion = useCallback(
-    async (
-      threadId: string,
-      questionId: string,
-      questionText: string,
-      answerText: string,
-      kind: PageQuestionKind = "decision"
-    ): Promise<"saved"> => {
+    async (threadId: string, questionId: string, answerText: string): Promise<"saved"> => {
       await writeThreadAnswer(threadId, questionId, answerText); // throws → the view keeps the text
-      const thread = getThreadById(threadId);
-      if (kind === "convention") {
-        // SWIT-58: a standing rule is written down where the next agent (and
-        // the next mock) reads it — by the APP, through the fixed-path append
-        // in Rust; the agent never edits conventions.md for this. SECONDARY
-        // to the answer, which is already durable: a failed append is logged
-        // and toasted, never thrown, so the answer still reaches the terminal.
-        try {
-          await appendConvention(conventionLine(questionText, answerText, thread?.title ?? null));
-          log.info(`Convention recorded question=${questionId} thread=${threadId}`);
-        } catch (err) {
-          log.error(`Convention append failed question=${questionId} thread=${threadId}: ${err}`);
-          addToast(NO_SESSION, "Convention not recorded", String(err));
-        }
-      }
       log.info(`Question answered id=${questionId} thread=${threadId} — saved on the page (unsent)`);
       return "saved";
     },
-    [addToast]
+    []
   );
 
   // THE ONE LIVE VIEW of a panel terminal. Handed to ArtifactPanel, which
@@ -2427,11 +2449,11 @@ export default function App() {
   useEffect(() => {
     registerPanelActions({
       sendToThread: (text) => panelActionsRef.current?.sendToThread(text),
-      submitToThread: (threadId, bytes) =>
-        panelActionsRef.current?.submitToThread?.(threadId, bytes) ??
+      submitToThread: (threadId, bytes, opts) =>
+        panelActionsRef.current?.submitToThread?.(threadId, bytes, opts) ??
         Promise.reject(new Error("the app is not ready to send")),
-      answerQuestion: (threadId, questionId, questionText, answerText, kind) =>
-        panelActionsRef.current?.answerQuestion(threadId, questionId, questionText, answerText, kind) ??
+      answerQuestion: (threadId, questionId, answerText) =>
+        panelActionsRef.current?.answerQuestion(threadId, questionId, answerText) ??
         Promise.reject(new Error("the app is not ready to answer")),
       popOutArtifact: (artifact) => panelActionsRef.current?.popOutArtifact(artifact),
       createPanelTerminal: (tabSessionId, target) =>

@@ -50,7 +50,7 @@ const QUESTION_KINDS = ["decision", "convention", "info"];
  *  the write path refuses them. Existing notes still render (the app's
  *  parser is tolerant); nothing new is written. */
 const NO_NOTE =
-  "page item: items carry no note — put status in the item's links/state and the story in a turn (op turn)";
+  "page item: items carry no note — put status in the item's state and the story in a turn (op turn)";
 /** SWIT-78 (Ky's CC-704): `drop_evidence` names at most this many rows at
  *  once — a correction, not a bulk wipe. */
 const DROP_EVIDENCE_CAP = 20;

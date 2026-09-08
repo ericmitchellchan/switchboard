@@ -31,7 +31,11 @@ import {
   sendErrorNote,
   noteReplacesForm,
   isAnswerUnsent,
-  markAnswersSent,
+  countQuestionStates,
+  questionMarkerTitle,
+  unsentDecisionsLine,
+  conventionEntries,
+  partialSentNote,
   decisionsMessage,
   decisionsFooter,
   recommendation,
@@ -232,14 +236,63 @@ describe("the batch's pure rules (SWIT-77)", () => {
     expect(isAnswerUnsent({ text: "b", at: "2026-09-08T10:01:00Z", sentAt: "2026-09-08T10:00:05Z" })).toBe(true);
   });
 
-  it("markAnswersSent stamps listed ids only and returns the same object when nothing changed", () => {
-    const file = { q1: { text: "a", at: "t1" }, q2: { text: "b", at: "t2" } };
-    const out = markAnswersSent(file, ["q1", "q9"], "now");
-    expect(out.q1).toEqual({ text: "a", at: "t1", sentAt: "now" });
-    expect(out.q2).toEqual({ text: "b", at: "t2" });
-    expect(file.q1).toEqual({ text: "a", at: "t1" }); // pure
-    expect(markAnswersSent(file, ["q9"], "now")).toBe(file);
-    expect(markAnswersSent(file, [], "now")).toBe(file);
+  it("countQuestionStates splits open / unsent the way the merge does — a sent or agent-resolved one is neither (review fix F5)", () => {
+    const qs = [
+      { id: "open", resolved: null },
+      { id: "unsent", resolved: null },
+      { id: "changed", resolved: null },
+      { id: "sent", resolved: null },
+      { id: "settled", resolved: { answer: "a", at: "t", by: "agent" as const } },
+    ];
+    const answers = {
+      unsent: { text: "a", at: "2026-09-08T10:00:00Z" },
+      changed: { text: "b", at: "2026-09-08T10:05:00Z", sentAt: "2026-09-08T10:00:00Z" }, // re-answered after the send
+      sent: { text: "c", at: "2026-09-08T10:00:00Z", sentAt: "2026-09-08T10:00:00Z" },
+    };
+    expect(countQuestionStates(qs, answers)).toEqual({ open: 1, unsent: 2 });
+    expect(countQuestionStates([], {})).toEqual({ open: 0, unsent: 0 });
+    // The same numbers the merge would show — the rail and the page cannot disagree.
+    const page = parsePageFile(JSON.stringify({ questions: qs.map((q) => ({ id: q.id, text: "t?", askedAt: "t", ...(q.resolved ? { answer: "a", answeredAt: "t" } : {}) })) }));
+    const merged = mergePage(page, answers, []);
+    expect(countQuestionStates(page.questions, answers)).toEqual({
+      open: merged.openQuestions.length,
+      unsent: merged.unsentDecisions.length,
+    });
+  });
+
+  it("questionMarkerTitle is worded: open alone, unsent alone, both — null with nothing to mark", () => {
+    expect(questionMarkerTitle(0, 0)).toBeNull();
+    expect(questionMarkerTitle(1, 0)).toBe("1 open question");
+    expect(questionMarkerTitle(2, 0)).toBe("2 open questions");
+    expect(questionMarkerTitle(0, 1)).toBe("1 decision unsent");
+    expect(questionMarkerTitle(0, 3)).toBe("3 decisions unsent");
+    expect(questionMarkerTitle(2, 1)).toBe("2 open · 1 unsent");
+  });
+
+  it("unsentDecisionsLine is Home's one row per thread", () => {
+    expect(unsentDecisionsLine(1)).toBe("1 decision unsent · send from the page");
+    expect(unsentDecisionsLine(2)).toBe("2 decisions unsent · send from the page");
+  });
+
+  it("conventionEntries keeps only convention questions with a non-blank answer, in batch order (review fix F6)", () => {
+    const qs = [
+      { id: "q1", text: "Tabs or spaces?", kind: "convention" as const },
+      { id: "q2", text: "Ship?", kind: "decision" as const },
+      { id: "q3", text: "Colour?", kind: "convention" as const },
+      { id: "q4", text: "Blank?", kind: "convention" as const },
+    ];
+    expect(conventionEntries(qs, { q1: "spaces", q2: "yes", q3: " green ", q4: "  " })).toEqual([
+      { questionId: "q1", question: "Tabs or spaces?", answer: "spaces" },
+      { questionId: "q3", question: "Colour?", answer: "green" },
+    ]);
+    expect(conventionEntries(qs, {})).toEqual([]);
+  });
+
+  it("partialSentNote: null when every id was stamped, else the count that was not (review fix F7)", () => {
+    expect(partialSentNote(3, 3)).toBeNull();
+    expect(partialSentNote(4, 3)).toBeNull();
+    expect(partialSentNote(1, 3)).toEqual({ kind: "error", text: "sent, but 2 of 3 not marked sent" });
+    expect(partialSentNote(0, 1)).toEqual({ kind: "error", text: "sent, but 1 of 1 not marked sent" });
   });
 
   it("decisionsMessage is Ky's shape verbatim: numbered in display order, still open for the undecided, one line per answer", () => {
@@ -625,7 +678,7 @@ describe("countUnreadPosts (the chip rule, SWIT-52)", () => {
 describe("nextPassEntry (the stamp gate's cached branch, 0.9.x hygiene review fix)", () => {
   const T1 = Date.parse("2026-09-06T10:00:00Z");
   const T2 = Date.parse("2026-09-06T10:05:00Z");
-  const cached = { stamp: 1_700_000, questions: 1, postsAt: [T1, T2] };
+  const cached = { stamp: 1_700_000, questions: 1, unsent: 2, postsAt: [T1, T2] };
 
   it("re-reads with no entry, a failed stat, or a moved stamp", () => {
     expect(nextPassEntry(undefined, 1_700_000, null)).toEqual({ reread: true });
@@ -638,10 +691,10 @@ describe("nextPassEntry (the stamp gate's cached branch, 0.9.x hygiene review fi
     // Thread B shows `↓ 2`; Eric opens B (seen), clicks back to A inside the
     // same tick; inbox.json's mtime has not moved. The next tick must say 0,
     // not republish the count the entry was read with.
-    expect(nextPassEntry(cached, 1_700_000, null)).toEqual({ reread: false, questions: 1, unread: 2 });
+    expect(nextPassEntry(cached, 1_700_000, null)).toEqual({ reread: false, questions: 1, unsent: 2, unread: 2 });
     const seenAfterOpeningB = T2 + 1_000;
-    expect(nextPassEntry(cached, 1_700_000, seenAfterOpeningB)).toEqual({ reread: false, questions: 1, unread: 0 });
+    expect(nextPassEntry(cached, 1_700_000, seenAfterOpeningB)).toEqual({ reread: false, questions: 1, unsent: 2, unread: 0 });
     // A post newer than the stamp still counts — the stamp is a moment, not a reset.
-    expect(nextPassEntry(cached, 1_700_000, T1 + 1)).toEqual({ reread: false, questions: 1, unread: 1 });
+    expect(nextPassEntry(cached, 1_700_000, T1 + 1)).toEqual({ reread: false, questions: 1, unsent: 2, unread: 1 });
   });
 });

@@ -4,8 +4,11 @@
 //
 //   Needs you        → every OPEN question + user-owned item + request across
 //                      threads (the per-thread page files, one 5s poll while
-//                      Home is on screen). Answering HERE calls the same
-//                      bridge the question tab uses (acceptance 7).
+//                      Home is on screen), plus ONE row per thread with
+//                      decisions saved and not sent (SWIT-77 review fix —
+//                      the batch is sent from the page, so the row says so
+//                      and opens the thread). Answering HERE calls the same
+//                      bridge the page uses (acceptance 7).
 //   Live now         → launched threads + the latest turn's first line.
 //   Between threads  → the last hour of cross-thread posts.
 //   Listening        → announced dev servers, probed (never "healthy").
@@ -47,6 +50,7 @@ import {
   answerSuccessNote,
   answerErrorNote,
   noteReplacesForm,
+  unsentDecisionsLine,
 } from "../lib/pageStore";
 import type { AnswerNote, InboxPost, PageItem, PageQuestion, RenderedPage } from "../lib/pageStore";
 import { answerQuestion } from "../lib/panelStore";
@@ -260,7 +264,12 @@ export function Home({
   // Which sections have anything to say — an empty one folds into the quiet
   // line instead of rendering (page order preserved in both places).
   const needsCount = digests.reduce(
-    (n, d) => n + d.page.openQuestions.length + d.page.requests.length + d.page.userItems.length,
+    (n, d) =>
+      n +
+      d.page.openQuestions.length +
+      (d.page.unsentDecisions.length > 0 ? 1 : 0) +
+      d.page.requests.length +
+      d.page.userItems.length,
     0
   );
   const openBacklog = openItems(backlog.items);
@@ -358,6 +367,9 @@ function NeedsYou({ digests }: { digests: ThreadDigest[] }) {
     for (const q of d.page.openQuestions) {
       entries.push(<QuestionCard key={`q-${d.thread.id}-${q.id}`} digest={d} question={q} />);
     }
+    if (d.page.unsentDecisions.length > 0) {
+      entries.push(<UnsentRow key={`u-${d.thread.id}`} digest={d} count={d.page.unsentDecisions.length} />);
+    }
     for (const p of d.page.requests) {
       entries.push(<RequestCard key={`r-${d.thread.id}-${p.id}`} digest={d} post={p} />);
     }
@@ -396,7 +408,7 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
         // SWIT-77: answering SAVES on the page; the batch is sent from the
         // page, not from Home (a roll-up has no send button — one place
         // sends, and it is the one that shows the whole message).
-        await answerQuestion(digest.thread.id, question.id, question.text, clean, question.kind);
+        await answerQuestion(digest.thread.id, question.id, clean);
         setNote(answerSuccessNote());
       } catch (err) {
         setNote(answerErrorNote(err));
@@ -405,7 +417,7 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
         setChosen(null);
       }
     },
-    [busy, digest.thread.id, question.id, question.text, question.kind]
+    [busy, digest.thread.id, question.id]
   );
   const options = orderedOptions(question);
   return (
@@ -476,6 +488,24 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
         </div>
       )}
     </div>
+  );
+}
+
+/** Decisions saved on a thread's page and not yet sent — ONE flat row per
+ *  thread (a roll-up sends nothing; the page does), opening the thread.
+ *  Without it a decided question dropped off Home the moment it saved and
+ *  the batch was invisible until the page was opened. */
+function UnsentRow({ digest, count }: { digest: ThreadDigest; count: number }) {
+  return (
+    <Row onClick={() => getThreadActions()?.openThread(digest.thread.id)}>
+      <span style={{ minWidth: 0, flex: 1, ...TITLE }}>
+        {unsentDecisionsLine(count)}{" "}
+        <span style={{ color: "var(--text-dim)", fontSize: 9.5 }}>
+          {digest.thread.title} · {threadRepoName(digest.thread.workingDir)}
+        </span>
+      </span>
+      <span style={ROW_META}>open →</span>
+    </Row>
   );
 }
 

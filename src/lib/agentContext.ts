@@ -346,13 +346,16 @@ function buildPanelSpawnContext(
   opts: RefOptions
 ): string | null {
   if (!artifact) return null;
-  // A QUESTION tab (SWIT-51) has its own sentence — Ky's, near-verbatim: the
-  // one thing a resumed agent must know is that asking again is wrong.
+  // A QUESTION tab (SWIT-51; a legacy artifact since SWIT-67 — restored
+  // workspaces only) has its own sentence — Ky's, near-verbatim: the one
+  // thing a resumed agent must know is that asking again is wrong. SWIT-77:
+  // the answer is SAVED on the page and reaches the agent inside the
+  // `Decisions:` batch when the user sends it, not as the next message.
   if (artifact.kind === "question") {
     return sanitizeForTypedLine(
       "Workstation context: a QUESTION you asked is open in front of the user. Wait for their " +
-        "answer — it arrives as their next message and is written under the question on the " +
-        "page. Do not ask it again.",
+        "answer — it is saved on the page and arrives in a Decisions: message when they send " +
+        "the batch. Do not ask it again.",
       SPAWN_CONTEXT_MAX
     );
   }

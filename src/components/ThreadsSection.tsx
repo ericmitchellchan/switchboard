@@ -58,6 +58,7 @@ import {
 } from "../lib/threadStore";
 import type { ThreadCreateTarget } from "../lib/threadStore";
 import type { MenuSession } from "../lib/threadStore";
+import { questionMarkerTitle } from "../lib/pageStore";
 import { navigate } from "../lib/route";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
 import { getExplorerActions, useSessionRepos, quickThreadTarget } from "../lib/explorer";
@@ -159,6 +160,7 @@ export function ThreadsSection({ repos }: { repos: readonly RepoConfig[] }) {
       active={t.sessionId !== null && t.sessionId === view.activeSessionId}
       unread={view.unreadPosts[t.id] ?? 0}
       questions={view.openQuestions[t.id] ?? 0}
+      unsent={view.unsentDecisions[t.id] ?? 0}
       suffix={withSuffix ? tabRepoSuffix(t.title, threadRepoName(t.workingDir)) : null}
       renameRequested={view.renameRequest === t.id}
     />
@@ -325,6 +327,7 @@ function ThreadRow({
   active,
   unread,
   questions,
+  unsent,
   suffix,
   renameRequested,
 }: {
@@ -339,6 +342,9 @@ function ThreadRow({
   /** Open page questions (SWIT-69) — the dim `· N` count with its worded
    *  tooltip; the filled `?` glyph chip is retired. */
   questions: number;
+  /** Decided-but-unsent answers (SWIT-77 review fix): the same marker
+   *  counts them — `· N` = open + unsent, the tooltip says which. */
+  unsent: number;
   /** The dim project name after the title (flat mode), already de-duplicated
    *  against the title by tabLabel; null draws nothing (grouped mode, or a
    *  title that leads with the project). */
@@ -364,6 +370,7 @@ function ThreadRow({
   const dead = !live;
   const dotColor =
     live && status ? STATUS_CONFIGS[status].color : EXITED_COLOR;
+  const markerTitle = questionMarkerTitle(questions, unsent);
 
   const handleClick = () => {
     if (!actions) return;
@@ -452,11 +459,12 @@ function ThreadRow({
           {suffix}
         </span>
       )}
-      {/* Chips: `↓ N` (unread posts), the dim `· N` open-question count
-          (SWIT-69 — words, not glyphs: the tooltip says what N counts; the
-          filled `?` chip is retired, the waiting status lives in the dot),
-          or booting. No revive chip (SWIT-56): the dot says dead, the click
-          revives. */}
+      {/* Chips: `↓ N` (unread posts), the dim `· N` question marker
+          (SWIT-69 — words, not glyphs: N = open questions + decided-but-
+          unsent answers, and the tooltip says which — `2 open · 1 unsent`;
+          the filled `?` chip is retired, the waiting status lives in the
+          dot), or booting. No revive chip (SWIT-56): the dot says dead, the
+          click revives. */}
       {unread > 0 && (
         <span style={{ ...CHIP_STYLE, color: "var(--text-primary)", borderColor: "var(--text-secondary)" }}>
           {unread} ↓
@@ -464,12 +472,12 @@ function ThreadRow({
       )}
       {booting ? (
         <span style={CHIP_STYLE}>booting…</span>
-      ) : questions > 0 ? (
+      ) : markerTitle !== null ? (
         <span
-          title={`${questions} open question${questions === 1 ? "" : "s"}`}
+          title={markerTitle}
           style={{ flex: "none", fontSize: 9.5, color: "var(--text-dim)", whiteSpace: "nowrap" }}
         >
-          · {questions}
+          · {questions + unsent}
         </span>
       ) : null}
       {/* RESERVED SLOT, not conditional rendering: the `⋯` occupies its width

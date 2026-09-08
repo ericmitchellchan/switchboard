@@ -14,6 +14,10 @@
 //                  `at`, so a changed answer is unsent again). The agent may
 //                  settle a question itself (page op `resolve`): that lands
 //                  in page.json as answer + answeredAt + resolvedBy "agent".
+//                  An UNSENT batch is visible outside the page too: App's 5s
+//                  pass counts open + unsent per thread (`countQuestionStates`)
+//                  for the rail marker, and Home's Needs you prints one row
+//                  per thread with unsent decisions (`unsentDecisionsLine`).
 //   inbox.json   ← the app (SWIT-52): cross-thread posts, folded under Needs
 //                  You / What Happened with their origin.
 //   retracted.json ← the app (SWIT-78): the evidence rows Eric took OFF the
@@ -378,20 +382,58 @@ export function isAnswerUnsent(answer: PageAnswer | undefined): boolean {
   return !answer.sentAt || answer.sentAt < answer.at;
 }
 
-/** Stamp `sentAt` on the given ids (missing ids ignored) — the frontend
- *  mirror of Rust's `stamp_answers_sent`, for the optimistic state between
- *  a successful send and the next poll. Returns the SAME object when nothing
- *  changed. Pure. */
-export function markAnswersSent(answers: AnswersFile, ids: readonly string[], now: string): AnswersFile {
-  let changed = false;
-  const out: AnswersFile = { ...answers };
-  for (const id of ids) {
-    const a = out[id];
-    if (!a) continue;
-    out[id] = { ...a, sentAt: now };
-    changed = true;
+/** The open / unsent split of a page's questions — what App's 5s pass counts
+ *  per thread and the rail marker + Home's Needs you read (SWIT-77 review
+ *  fix: an unsent batch used to be invisible outside the page). `open` =
+ *  `isQuestionOpen`; `unsent` = answered in answers.json and not yet sent
+ *  (`isAnswerUnsent`). Pure. */
+export function countQuestionStates(
+  questions: readonly Pick<PageQuestion, "id" | "resolved">[],
+  answers: AnswersFile
+): { open: number; unsent: number } {
+  let open = 0;
+  let unsent = 0;
+  for (const q of questions) {
+    if (isQuestionOpen(q, answers)) open += 1;
+    else if (isAnswerUnsent(answers[q.id])) unsent += 1;
   }
-  return changed ? out : answers;
+  return { open, unsent };
+}
+
+/** The rail marker's WORDED tooltip for a thread's question state (the dim
+ *  `· N` prints `open + unsent`): `2 open questions` · `1 decision unsent` ·
+ *  `2 open · 1 unsent` when both. Null when there is nothing to mark. Pure. */
+export function questionMarkerTitle(open: number, unsent: number): string | null {
+  if (open <= 0 && unsent <= 0) return null;
+  if (unsent <= 0) return `${open} open question${open === 1 ? "" : "s"}`;
+  if (open <= 0) return `${unsent} decision${unsent === 1 ? "" : "s"} unsent`;
+  return `${open} open · ${unsent} unsent`;
+}
+
+/** Home's Needs you row for a thread with decisions saved and not sent:
+ *  `2 decisions unsent · send from the page` (ONE row per thread — the page
+ *  is where the batch is sent; the row opens the thread). Pure. */
+export function unsentDecisionsLine(n: number): string {
+  return `${n} decision${n === 1 ? "" : "s"} unsent · send from the page`;
+}
+
+/** SWIT-77 review fix (F6): the `convention` answers in a batch — what the
+ *  app appends to conventions.md AT SEND (the decision is final when it
+ *  goes; appending on every save wrote two lines for pick A → change → pick
+ *  B). Only questions of kind `convention` with a non-blank answer. Pure. */
+export type ConventionEntry = { questionId: string; question: string; answer: string };
+export function conventionEntries(
+  questions: readonly Pick<PageQuestion, "id" | "text" | "kind">[],
+  answers: Readonly<Record<string, string>>
+): ConventionEntry[] {
+  const out: ConventionEntry[] = [];
+  for (const q of questions) {
+    if (q.kind !== "convention") continue;
+    const answer = answers[q.id];
+    if (!answer || answer.trim().length === 0) continue;
+    out.push({ questionId: q.id, question: q.text, answer: answer.trim() });
+  }
+  return out;
 }
 
 /** THE one message the agent gets (Ky's `decisionsMessage`, verbatim shape):
@@ -738,6 +780,17 @@ export function sendErrorNote(err: unknown): AnswerNote {
   };
 }
 
+/** SWIT-77 review fix (F7): the batch WENT, but Rust stamped fewer entries
+ *  than were sent (`mark_thread_answers_sent` returns the count; an entry
+ *  missing from answers.json — a concurrent re-answer, a hand edit — is not
+ *  stamped). Null when every id was marked. The block shows this beside the
+ *  button and marks NOTHING sent locally: the poll folds out the stamped
+ *  ones from the files, and the rest stay in the batch. Pure. */
+export function partialSentNote(marked: number, total: number): AnswerNote | null {
+  if (marked >= total) return null;
+  return { kind: "error", text: `sent, but ${total - marked} of ${total} not marked sent` };
+}
+
 /** Only a SUCCESS collapses the form; an error must leave it interactive. */
 export function noteReplacesForm(note: AnswerNote | null): boolean {
   return note !== null && note.kind === "success";
@@ -854,6 +907,9 @@ export type ThreadPassEntry = {
   stamp: number;
   /** Open questions at the read — page.json + answers.json, both stamped. */
   questions: number;
+  /** Decided-but-unsent answers at the read (answers.json, stamped) — the
+   *  same pass, the same two files (`countQuestionStates`). */
+  unsent: number;
   /** The inbox's post times at the read (postTimes) — inbox.json is stamped,
    *  the seen stamp is not, so unread is re-derived from these every tick. */
   postsAt: readonly number[];
@@ -861,19 +917,25 @@ export type ThreadPassEntry = {
 
 export type PassDecision =
   | { reread: true }
-  | { reread: false; questions: number; unread: number };
+  | { reread: false; questions: number; unsent: number; unread: number };
 
 /** The cached branch's decision for one thread on one tick: reuse the entry
  *  only when the stamp just stat'ed EQUALS the one it was read under (-1 on
- *  either side never matches); the question count is republished as cached and
- *  the unread count is re-derived against the seen stamp passed in NOW. Pure. */
+ *  either side never matches); the question + unsent counts are republished
+ *  as cached and the unread count is re-derived against the seen stamp
+ *  passed in NOW. Pure. */
 export function nextPassEntry(
   cached: ThreadPassEntry | undefined,
   stamp: number,
   seenAt: number | null
 ): PassDecision {
   if (!cached || stamp === -1 || cached.stamp !== stamp) return { reread: true };
-  return { reread: false, questions: cached.questions, unread: countUnreadTimes(cached.postsAt, seenAt) };
+  return {
+    reread: false,
+    questions: cached.questions,
+    unsent: cached.unsent,
+    unread: countUnreadTimes(cached.postsAt, seenAt),
+  };
 }
 
 // ── The hook — loading policy (2.5s active-gated, refreshPins rules) ─────────
