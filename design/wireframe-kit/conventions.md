@@ -206,3 +206,15 @@ that stop being true.
   are the one source of truth: no raw hex in components (a hex survives only where
   a CSS var cannot reach — canvas chart chrome, iframe-injected markup, the xterm
   theme — and must mirror a token value, stated in a comment).
+- 2026-09-08 — DECISIONS ARE A BATCH (SWIT-77, borrowed from Ky's Decisions tab,
+  CC-688/705/710/721). Answering a question SAVES on the page and sends nothing; the
+  agent hears every answer at once, as ONE `Decisions:` message, when the user presses
+  the one `Send decisions ▸` on the ✦ page — the preview box shows the exact text, the
+  undecided go as `still open`. The page's Open questions section is that batch: cards
+  numbered oldest first, `Recommended: <option> — <why>` above the options, a typed
+  answer saved on blur (no Enter needed), a decided row folded to one line with
+  `change`. The agent settles its own questions with `resolve` (rendered `settled:`,
+  never `you:`); items carry no note (the story is a turn); Needs you is retired on
+  the page — a row waiting on the user is a To do row with its owner in amber. Home
+  answers a single question and points at the page for the send (a roll-up has no
+  send button).

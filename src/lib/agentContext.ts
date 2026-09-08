@@ -519,7 +519,12 @@ export function buildPageContractLine(decisions: StandingDecisions | null = null
   const base =
     "This thread has a PAGE beside the terminal — the one surface the user reads. " +
     "After each turn of work, record what happened with the page tool and keep its " +
-    "evidence and items current; the tool description has the rules.";
+    "evidence and items current; the tool description has the rules. " +
+    // SWIT-77: the batch. The quotes are dropped by the sanitizer anyway, so
+    // the shape is named without them.
+    "Answers to your questions arrive as ONE message (Decisions: 1. <question> → <answer>, " +
+    "undecided ones still open) when the user sends — do not re-ask; resolve settled " +
+    "questions every turn.";
   return sanitizeForTypedLine(base + standingDecisionsClause(decisions), SPAWN_CONTEXT_MAX);
 }
 

@@ -222,9 +222,10 @@ export type Artifact =
   // markdown (viewStore.inlineSpecAt). Always set together with `drill`;
   // derived at render time like the drill itself.
   | { kind: "view"; threadId: string; viewId: string; block?: number; drill?: { key: string } }
-  // A QUESTION tab (SWIT-51, R3 rule 1) — the ONE write-back channel besides
-  // the composer: the agent's ask opens it, answering writes answers.json,
-  // types the answer into the terminal as Eric's message, and closes it.
+  // A QUESTION tab (SWIT-51, R3 rule 1) — LEGACY since SWIT-67 (nothing
+  // creates it; kept for restored workspaces). Answering writes answers.json
+  // and closes it; since SWIT-77 nothing is typed — the ✦ page sends every
+  // decision as one message.
   | { kind: "question"; threadId: string; questionId: string };
 
 /** The artifact kinds that name a FILE on disk — the ones with a readable

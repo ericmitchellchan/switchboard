@@ -1,16 +1,33 @@
-// THE ✦ PAGE (SWIT-48; re-cut SWIT-67/68/69) — a thread's one living page,
+// THE ✦ PAGE (SWIT-48; re-cut SWIT-67/68/69/77) — a thread's one living page,
 // rendered from pageStore's merge. Ky's thread panel is the reference: ONE
 // page — a one-paragraph SUMMARY (theme + the newest turn's first line), an
 // optional `start here →` line (the turn's reviewFirst address), then Open
-// questions · Needs you · To do · What happened · Evidence · Questions ·
-// Done. "What happened" sits deliberately BELOW the needs-you material: the
+// questions · To do · What happened · Evidence · Decided · Done. "What
+// happened" sits deliberately BELOW the material that needs the user: the
 // reason to open the page comes first (Ky's rule, and Eric's, verbatim).
 //
-// QUESTIONS ANSWER HERE (SWIT-67): `ask` no longer opens a tab — each open
-// question renders the OptionRow list + a free-text input + the quiet
-// `answer` button, through the SAME bridge Home's Needs You uses
-// (panelStore.answerQuestion). Answering collapses it to the decided line
-// (the `decision:<id>` evidence row) on the next poll.
+// DECISIONS ARE A BATCH (SWIT-77, Ky's DecisionsArtifact + decisionsStore):
+// Open questions is the answering surface — every open question and every
+// decided-but-unsent one, NUMBERED oldest first, each a card: the question,
+// `open`/`decided` at the right, `Recommended: <option> — <why>`, the
+// OptionRow list, `or type an answer…` that SAVES ON BLUR (Enter too; the
+// block's own buttons keep focus on mousedown so a click never blurs the
+// box). Picking or typing SAVES to answers.json through the same
+// `answerQuestion` bridge Home uses — nothing reaches the agent yet. A
+// decided card folds to one line (`N · question → answer · change`). Under
+// the list: a preview box printing the exact wire text, the footer count,
+// and ONE `Send decisions ▸` that composes `decisionsMessage` through
+// composeWrite → submitToThread (the 0.10.0 live-thread seam, gated by
+// batchSendTarget — `thread not live` when it is not) and, on success,
+// stamps the answers sent (markThreadAnswersSent); a failed send is one line
+// beside the button and the answers stay unsent. An OPTIMISTIC OVERLAY
+// (`local` saves, `sentIds`) bridges the ≤2.5s until the poll shows the
+// files; the files win the moment they catch up.
+//
+// NEEDS YOU IS RETIRED HERE (SWIT-77, Ky's PlanPanel): an item waiting on
+// the user is a To do row, first, with its owner column in amber; requests
+// from other threads sit at the top of To do. Home keeps a Needs You block —
+// Home is the roll-up, the page is the page.
 //
 // TYPOGRAPHY (SWIT-68): section titles are sentence case, 12.5px
 // `--text-primary`, the count beside them in `--text-dim` — the uppercase
@@ -44,7 +61,7 @@
 // collision, a doc/file row that resolves opens beside the thread.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, ReactNode } from "react";
+import type { CSSProperties, FocusEvent, ReactNode } from "react";
 import {
   usePage,
   loadPageSeen,
@@ -54,14 +71,20 @@ import {
   SEEN_DWELL_MS,
   orderedOptions,
   PAGE_POLL_MS,
-  answerSuccessNote,
   answerErrorNote,
-  noteReplacesForm,
+  sendErrorNote,
+  decisionsMessage,
+  decisionsFooter,
+  recommendation,
+  isWaitingOnUser,
 } from "../../lib/pageStore";
-import type { AnswerNote, InboxPost, PageItem, PageQuestion } from "../../lib/pageStore";
+import type { AnswerNote, InboxPost, PageAnswer, PageItem, PageQuestion, RenderedPage, SettledQuestion } from "../../lib/pageStore";
 import { parseSurfaceAddress } from "../../lib/surfaceParams";
-import { answerQuestion, openArtifact, openInPanel, getActiveTabSession } from "../../lib/panelStore";
+import { answerQuestion, openArtifact, openInPanel, getActiveTabSession, submitToThread } from "../../lib/panelStore";
 import type { OpenableArtifact } from "../../lib/panelStore";
+import { composeWrite } from "../../lib/composer";
+import { batchSendTarget, BATCH_NOT_LIVE } from "../../lib/viewNotes";
+import { useThreadsView } from "../../lib/threadStore";
 import {
   groupEvidence,
   latchViewKey,
@@ -74,7 +97,7 @@ import { requestReportAnchor } from "../../lib/reportStore";
 import type { EvidenceGroupId, ThreadViewRow } from "../../lib/evidenceModel";
 import { useScannedEvidence } from "../../lib/evidenceScan";
 import { getCachedDocList, refreshDocList } from "../../lib/kb";
-import { explorerProjects, listThreadViews, readThreadView } from "../../lib/ipc";
+import { explorerProjects, listThreadViews, markThreadAnswersSent, readThreadView } from "../../lib/ipc";
 import { projectKeyForDir } from "../../lib/explorer";
 import { getThreads } from "../../lib/threadStore";
 import { parseViewSpec } from "../../lib/viewStore";
@@ -148,17 +171,39 @@ const FIELD: CSSProperties = {
   outline: "none",
 };
 
-/** kit: quiet button. */
-const QUIET: CSSProperties = {
-  background: "transparent",
-  border: "1px solid var(--border-subtle)",
+/** kit: primary button — ONE per surface (the batch's `Send decisions ▸`). */
+const PRIMARY: CSSProperties = {
+  background: "var(--text-primary)",
+  border: "none",
   borderRadius: 3,
-  color: "var(--text-secondary)",
+  color: "var(--bg-primary)",
   fontFamily: MONO,
   fontSize: 11,
+  fontWeight: 600,
   padding: "3px 10px",
   cursor: "pointer",
 };
+
+/** kit: text link button (a verb in a footer/header — `show 3 ▸`). */
+const TEXT_LINK: CSSProperties = {
+  background: "none",
+  border: "none",
+  padding: 0,
+  fontFamily: MONO,
+  fontSize: 10,
+  color: "var(--text-dim)",
+  cursor: "pointer",
+};
+
+/** The batch's number column (Ky's `w-4` mono 10px). */
+const NUM: CSSProperties = {
+  flex: "none",
+  width: 16,
+  fontSize: 10,
+  color: "var(--text-dim)",
+};
+/** Everything under a card's first line indents past the number column. */
+const CARD_INDENT = 22;
 
 /** kit: chip (BacklogPanel's measurements) — the Evidence group tabs; the
  *  active one carries the brighter border + text, never a fill. */
@@ -394,34 +439,13 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
         </div>
       )}
 
-      {page.openQuestions.length > 0 && (
-        <Section title="Open questions" count={page.openQuestions.length}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            {page.openQuestions.map((q) => (
-              <InlineQuestion
-                key={q.id}
-                threadId={threadId}
-                question={q}
-                isNew={isNewSince(q.askedAt, seenAt)}
-              />
-            ))}
-          </div>
-        </Section>
-      )}
+      <DecisionsBlock threadId={threadId} page={page} seenAt={seenAt} />
 
-      {(page.requests.length > 0 || page.userItems.length > 0) && (
-        <Section title="Needs you" count={page.requests.length + page.userItems.length}>
+      {(page.requests.length > 0 || page.openItems.length > 0) && (
+        <Section title="To do" count={page.requests.length + page.openItems.length}>
           {page.requests.map((p) => (
             <PostRow key={p.id} post={p} isNew={isNewSince(p.at, seenAt)} />
           ))}
-          {page.userItems.map((i) => (
-            <ItemRow key={i.id} item={i} />
-          ))}
-        </Section>
-      )}
-
-      {page.openItems.length > 0 && (
-        <Section title="To do" count={page.openItems.length}>
           {page.openItems.map((i) => (
             <ItemRow key={i.id} item={i} />
           ))}
@@ -481,19 +505,7 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
         </Section>
       )}
 
-      {page.answeredQuestions.length > 0 && (
-        <Section title="Questions" count={page.answeredQuestions.length} meta="answered">
-          {page.answeredQuestions.map(({ question, answer }) => (
-            <div key={question.id} style={{ ...DENSE_ROW, flexDirection: "column", gap: 0 }}>
-              <span style={{ color: "var(--text-muted)" }}>{question.text}</span>
-              <span style={{ color: "var(--text-secondary)" }}>
-                <span style={{ color: "var(--text-dim)" }}>you: </span>
-                {answer.text}
-              </span>
-            </div>
-          ))}
-        </Section>
-      )}
+      {page.settledQuestions.length > 0 && <DecidedSection rows={page.settledQuestions} />}
 
       {page.doneItems.length > 0 && (
         <Section
@@ -538,120 +550,405 @@ function Section({
   );
 }
 
-/** An OPEN question, answerable IN PLACE (SWIT-67): the question · the
- *  OptionRow list between hairlines · a free-text input · the quiet `answer`
- *  button — the SAME bridge Home's Needs You uses (answerQuestion), so
- *  answering here behaves exactly as from Home. On success the note stands in
- *  until the poll collapses the block to the decided line; a FAILED answer
- *  renders its error UNDER the form, which stays interactive with the draft
- *  intact (pageStore.noteReplacesForm is the rule). No box: the section is
- *  the surface (Home's card is Home's earned box). */
-function InlineQuestion({
+/** A local save the poll has not shown yet (`at` = Date.now() at the save). */
+type LocalAnswer = { text: string; at: number };
+/** Second-precision stamps from Rust vs Date.now() here: a page answer
+ *  stamped within this window of the local save is the same save. */
+const CAUGHT_UP_SLACK_MS = 1_500;
+
+/** THE BATCH (SWIT-77 — Ky's DecisionsArtifact): every open question and
+ *  every decided-but-unsent one, numbered oldest first; the preview of the
+ *  one message; the footer; one `Send decisions ▸`. Renders its own section
+ *  and nothing at all when the list is empty. See the file header. */
+function DecisionsBlock({
   threadId,
-  question,
-  isNew,
+  page,
+  seenAt,
 }: {
   threadId: string;
-  question: PageQuestion;
-  isNew: boolean;
+  page: RenderedPage;
+  seenAt: number | null;
 }) {
-  const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [chosen, setChosen] = useState<string | null>(null);
+  // The overlay between an action and the poll that shows it on the page:
+  // answers saved HERE (until the files carry them), ids SENT here (until
+  // the files say sent). The files win the moment they catch up.
+  const [local, setLocal] = useState<Record<string, LocalAnswer>>({});
+  /** id → Date.now() at the send. Hidden until the files take the question
+   *  out of the batch, or show an answer newer than the send (re-answered
+   *  elsewhere — it goes again). */
+  const [sent, setSent] = useState<Record<string, number>>({});
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  // A decided card folds to one line; `change` reopens it until the next save.
+  const [reopened, setReopened] = useState<Record<string, boolean>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+  const [picking, setPicking] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
   const [note, setNote] = useState<AnswerNote | null>(null);
-  const [fieldFocus, setFieldFocus] = useState(false);
-  const submit = useCallback(
-    async (text: string) => {
-      const clean = text.trim();
-      if (clean.length === 0 || busy) return;
-      setBusy(true);
-      setChosen(text);
-      setNote(null);
-      try {
-        const outcome = await answerQuestion(threadId, question.id, question.text, clean, question.kind);
-        setNote(answerSuccessNote(outcome));
-      } catch (err) {
-        setNote(answerErrorNote(err));
-      } finally {
-        setBusy(false);
-        setChosen(null);
+  const [focusBox, setFocusBox] = useState<string | null>(null);
+  const inputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  const pageAnswers = useMemo(() => {
+    const m: Record<string, PageAnswer> = {};
+    for (const a of page.unsentDecisions) m[a.question.id] = a.answer;
+    return m;
+  }, [page.unsentDecisions]);
+
+  useEffect(() => {
+    setLocal((prev) => {
+      let next: Record<string, LocalAnswer> | null = null;
+      for (const [id, l] of Object.entries(prev)) {
+        const listed = page.decisionQuestions.some((q) => q.id === id);
+        const onPage = pageAnswers[id];
+        const caughtUp =
+          onPage !== undefined &&
+          (onPage.text === l.text || Date.parse(onPage.at) >= l.at - CAUGHT_UP_SLACK_MS);
+        if (!listed || caughtUp) {
+          next ??= { ...prev };
+          delete next[id];
+        }
       }
-    },
-    [busy, threadId, question.id, question.text, question.kind]
+      return next ?? prev;
+    });
+    setSent((prev) => {
+      let next: Record<string, number> | null = null;
+      for (const [id, sentAt] of Object.entries(prev)) {
+        const listed = page.decisionQuestions.some((q) => q.id === id);
+        const onPage = pageAnswers[id];
+        const reanswered = onPage !== undefined && Date.parse(onPage.at) > sentAt + CAUGHT_UP_SLACK_MS;
+        if (!listed || reanswered) {
+          next ??= { ...prev };
+          delete next[id];
+        }
+      }
+      return next ?? prev;
+    });
+  }, [page.decisionQuestions, pageAnswers]);
+
+  useEffect(() => {
+    if (!focusBox) return;
+    inputRefs.current[focusBox]?.focus();
+    setFocusBox(null);
+  }, [focusBox]);
+
+  // Where the batch would go: this thread, launched and live — read from
+  // the published view so the button reads `thread not live` the moment the
+  // claude exits. App re-applies the same rule on send (its session list is
+  // the ground truth).
+  const threadsView = useThreadsView();
+  const target = useMemo(() => {
+    const thread = threadsView.threads.find((t) => t.id === threadId);
+    const status = thread?.sessionId ? threadsView.sessionStatuses[thread.sessionId] : undefined;
+    return batchSendTarget(thread, threadsView.launched.has(threadId), status !== undefined && status !== "exited");
+  }, [threadsView, threadId]);
+
+  const visible = useMemo(
+    () => page.decisionQuestions.filter((q) => !(q.id in sent)),
+    [page.decisionQuestions, sent]
   );
-  const options = orderedOptions(question);
+  const answerOf = (q: PageQuestion): string | null => local[q.id]?.text ?? pageAnswers[q.id]?.text ?? null;
+  const answers = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const q of visible) {
+      const a = local[q.id]?.text ?? pageAnswers[q.id]?.text;
+      if (a) m[q.id] = a;
+    }
+    return m;
+  }, [visible, local, pageAnswers]);
+  const decided = Object.keys(answers).length;
+  const frozen = busy !== null || sending;
+  /** Text typed into a box and not saved yet — Send saves it first. */
+  const pendingDraft = (q: PageQuestion): string => {
+    const text = (drafts[q.id] ?? "").trim();
+    return text && text !== answerOf(q) ? text : "";
+  };
+  const hasDraft = visible.some((q) => pendingDraft(q));
+
+  /** Save one answer to the page (answers.json) and hold it locally until
+   *  the poll shows it. False, with the note set, if the write failed — the
+   *  draft stays in its box. */
+  const saveAnswer = async (q: PageQuestion, clean: string): Promise<boolean> => {
+    try {
+      await answerQuestion(threadId, q.id, q.text, clean, q.kind);
+    } catch (err) {
+      setNote(answerErrorNote(err));
+      return false;
+    }
+    setLocal((p) => ({ ...p, [q.id]: { text: clean, at: Date.now() } }));
+    setDrafts((d) => ({ ...d, [q.id]: "" }));
+    setReopened((o) => ({ ...o, [q.id]: false }));
+    setNote(null);
+    return true;
+  };
+  const decideOne = async (q: PageQuestion, text: string) => {
+    const clean = text.trim();
+    if (!clean || frozen) return;
+    setBusy(q.id);
+    setPicking(q.options.includes(clean) ? clean : null);
+    try {
+      await saveAnswer(q, clean);
+    } finally {
+      setBusy(null);
+      setPicking(null);
+    }
+  };
+  /** Leaving a box saves what was typed — unless focus is moving to one of
+   *  THIS block's buttons (Tab; clicks never blur, see keepFocus): a chip
+   *  decides for itself and Send saves every box itself. */
+  const leaveBox = (q: PageQuestion, e: FocusEvent<HTMLInputElement>) => {
+    const to = e.relatedTarget;
+    if (to instanceof HTMLButtonElement && rootRef.current?.contains(to)) return;
+    const text = pendingDraft(q);
+    if (text) void decideOne(q, text);
+  };
+  const keepFocus = (e: { preventDefault: () => void }) => e.preventDefault();
+
+  const send = async () => {
+    if ((decided === 0 && !hasDraft) || frozen) return;
+    setSending(true);
+    setNote(null);
+    try {
+      // Typed answers first: every box still holding text is saved before
+      // the message is built, so nothing typed is lost (Ky's CC-721).
+      const saved: Record<string, string> = { ...answers };
+      for (const q of visible) {
+        const text = pendingDraft(q);
+        if (!text) continue;
+        if (!(await saveAnswer(q, text))) return; // the note names it; the text is still in its box
+        saved[q.id] = text;
+      }
+      const ids = visible.filter((q) => saved[q.id]).map((q) => q.id);
+      if (ids.length === 0) return;
+      // The gate again at send time (the button can lag a store tick).
+      if (target.sessionId === null) throw new Error(target.reason);
+      // composeWrite: multi-line → ONE bracketed paste + ONE CR, so the
+      // batch arrives as one message.
+      const bytes = composeWrite(decisionsMessage(visible, saved));
+      await submitToThread(threadId, bytes);
+      try {
+        await markThreadAnswersSent(threadId, ids);
+      } catch (err) {
+        // The agent HAS the message; only the stamp failed. Say so and leave
+        // the rows — a second send would repeat what it already heard.
+        setNote(sendErrorNote(`sent, but not marked sent: ${err instanceof Error ? err.message : String(err)}`));
+        return;
+      }
+      const now = Date.now();
+      setSent((prev) => {
+        const next = { ...prev };
+        for (const id of ids) next[id] = now;
+        return next;
+      });
+      setLocal((prev) => {
+        const next = { ...prev };
+        for (const id of ids) delete next[id];
+        return next;
+      });
+    } catch (err) {
+      setNote(sendErrorNote(err));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  if (visible.length === 0) return null;
+  const notLive = target.sessionId === null;
+  const cannotSend = (decided === 0 && !hasDraft) || frozen || notLive;
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      <div style={{ fontSize: 11.5, color: "var(--text-primary)", lineHeight: 1.5 }}>
-        {question.text}
-        {isNew && <span style={{ ...NEW_DOT, marginLeft: 6, verticalAlign: "middle" }} />}
-      </div>
-      {noteReplacesForm(note) ? (
-        <div style={{ color: "var(--text-muted)" }}>{note?.text}</div>
-      ) : (
-        <>
-          {options.length > 0 && (
+    <Section title="Open questions" count={visible.length}>
+      <div ref={rootRef} style={{ display: "flex", flexDirection: "column" }}>
+        {visible.map((q, i) => {
+          const chosen = answerOf(q);
+          const rec = recommendation(q);
+          const options = orderedOptions(q);
+          const isNew = isNewSince(q.askedAt, seenAt);
+          if (chosen !== null && !reopened[q.id]) {
+            return (
+              <button
+                key={q.id}
+                type="button"
+                onMouseDown={keepFocus}
+                onClick={() => {
+                  setReopened((o) => ({ ...o, [q.id]: true }));
+                  setFocusBox(q.id);
+                }}
+                title={`${chosen} — click to change`}
+                style={{
+                  display: "flex",
+                  alignItems: "baseline",
+                  gap: 8,
+                  width: "100%",
+                  padding: "6px 0",
+                  background: "none",
+                  border: "none",
+                  borderBottom: "1px solid var(--border)",
+                  fontFamily: MONO,
+                  fontSize: 11,
+                  lineHeight: 1.45,
+                  textAlign: "left",
+                  cursor: "pointer",
+                  color: "var(--text-secondary)",
+                }}
+              >
+                <span style={NUM}>{i + 1}</span>
+                <span style={{ color: "var(--text-muted)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {q.text}
+                </span>
+                <span style={{ color: "var(--text-primary)", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  → {chosen}
+                </span>
+                <span style={{ flex: "none", fontSize: 9.5, color: "var(--text-dim)" }}>change</span>
+              </button>
+            );
+          }
+          return (
             <div
-              role="listbox"
-              aria-label="Options"
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                borderTop: "1px solid var(--border)",
-                borderBottom: "1px solid var(--border)",
-                padding: "4px 0",
-              }}
-              onKeyDown={(e) => {
-                // ↑/↓ walk the rows — the kit's keyboard-selectable list.
-                if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-                const nodes = Array.from(e.currentTarget.querySelectorAll<HTMLElement>("[data-kit-row]"));
-                const i = nodes.indexOf(document.activeElement as HTMLElement);
-                const next = nodes[i + (e.key === "ArrowDown" ? 1 : -1)];
-                if (!next) return;
-                e.preventDefault();
-                next.focus();
-              }}
+              key={q.id}
+              style={{ display: "flex", flexDirection: "column", gap: 6, padding: "8px 0", borderBottom: "1px solid var(--border)" }}
             >
-              {options.map((o) => (
-                <OptionRow
-                  key={o}
-                  label={o}
-                  isDefault={o === question.defaultOption}
-                  disabled={busy}
-                  chosen={chosen === o}
-                  onPick={() => void submit(o)}
-                />
-              ))}
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                <span style={NUM}>{i + 1}</span>
+                <span style={{ flex: 1, minWidth: 0, fontSize: 11.5, color: "var(--text-primary)", lineHeight: 1.5 }}>
+                  {q.text}
+                  {isNew && <span style={{ ...NEW_DOT, marginLeft: 6, verticalAlign: "middle" }} />}
+                </span>
+                <span style={{ flex: "none", fontSize: 9.5, color: chosen ? "var(--text-primary)" : "var(--text-dim)" }}>
+                  {chosen ? "decided" : "open"}
+                </span>
+              </div>
+              {rec && (
+                <div style={{ marginLeft: CARD_INDENT, color: "var(--text-secondary)" }}>
+                  <span style={{ color: "var(--text-primary)" }}>Recommended: {rec.option}</span>
+                  {rec.why && <> — {rec.why}</>}
+                </div>
+              )}
+              {options.length > 0 && (
+                <div
+                  role="listbox"
+                  aria-label="Options"
+                  style={{
+                    marginLeft: CARD_INDENT,
+                    display: "flex",
+                    flexDirection: "column",
+                    borderTop: "1px solid var(--border)",
+                    borderBottom: "1px solid var(--border)",
+                    padding: "4px 0",
+                  }}
+                  onKeyDown={(e) => {
+                    // ↑/↓ walk the rows — the kit's keyboard-selectable list.
+                    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+                    const nodes = Array.from(e.currentTarget.querySelectorAll<HTMLElement>("[data-kit-row]"));
+                    const at = nodes.indexOf(document.activeElement as HTMLElement);
+                    const next = nodes[at + (e.key === "ArrowDown" ? 1 : -1)];
+                    if (!next) return;
+                    e.preventDefault();
+                    next.focus();
+                  }}
+                >
+                  {options.map((o) => (
+                    <OptionRow
+                      key={o}
+                      label={o}
+                      isDefault={o === q.defaultOption}
+                      disabled={frozen}
+                      chosen={chosen === o || (busy === q.id && picking === o)}
+                      keepFocus
+                      onPick={() => void decideOne(q, o)}
+                    />
+                  ))}
+                </div>
+              )}
+              {chosen !== null && !options.includes(chosen) && (
+                <div style={{ marginLeft: CARD_INDENT }}>
+                  <span style={{ color: "var(--text-dim)" }}>you: </span>
+                  {chosen}
+                </div>
+              )}
+              <input
+                ref={(el) => {
+                  inputRefs.current[q.id] = el;
+                }}
+                value={drafts[q.id] ?? ""}
+                // Only THIS question's box waits on its own save: a blur into
+                // the next box must not disable that box before focus lands.
+                disabled={busy === q.id || sending}
+                onChange={(e) => setDrafts((d) => ({ ...d, [q.id]: e.target.value }))}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (drafts[q.id] ?? "").trim()) void decideOne(q, drafts[q.id]);
+                  e.stopPropagation();
+                }}
+                onBlur={(e) => leaveBox(q, e)}
+                placeholder={chosen ? "or change your answer…" : options.length ? "or type an answer…" : "type your answer…"}
+                aria-label={`Your answer to: ${q.text}`}
+                style={{ ...FIELD, marginLeft: CARD_INDENT, width: `calc(100% - ${CARD_INDENT}px)` }}
+              />
             </div>
-          )}
-          {options.length > 0 && <div style={{ fontSize: 10, color: "var(--text-dim)" }}>or</div>}
-          <input
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onFocus={() => setFieldFocus(true)}
-            onBlur={() => setFieldFocus(false)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void submit(draft);
-              e.stopPropagation();
-            }}
-            placeholder={options.length > 0 ? "type your own…" : "type your answer…"}
-            disabled={busy}
-            style={{ ...FIELD, borderColor: fieldFocus ? "var(--text-dim)" : "var(--border-subtle)" }}
-          />
-          <div style={{ display: "flex", maxWidth: 480 }}>
-            <button
-              type="button"
-              style={{ ...QUIET, marginLeft: "auto", opacity: busy ? 0.4 : 1 }}
-              disabled={busy}
-              onClick={() => void submit(draft)}
-            >
-              answer
-            </button>
+          );
+        })}
+
+        <div
+          style={{
+            marginTop: 10,
+            padding: "8px 10px",
+            background: "var(--bg-elevated)",
+            border: "1px solid var(--border)",
+            borderRadius: 4,
+          }}
+        >
+          <div style={{ fontSize: 9.5, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--text-faint)", marginBottom: 4 }}>
+            what the agent gets — one message, when you send
           </div>
-          {note?.kind === "error" && <div style={{ color: "var(--text-muted)" }}>{note.text}</div>}
-        </>
-      )}
-    </div>
+          <div style={{ fontSize: 10.5, lineHeight: 1.6, color: "var(--text-secondary)", whiteSpace: "pre-wrap" }}>
+            {decisionsMessage(visible, answers)}
+          </div>
+        </div>
+
+        <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 10, fontSize: 10, color: "var(--text-dim)" }}>
+          <span>{decisionsFooter(decided, visible.length)}</span>
+          {note?.kind === "error" && <span style={{ color: "var(--text-muted)" }}>{note.text}</span>}
+          <button
+            type="button"
+            disabled={cannotSend}
+            onMouseDown={keepFocus}
+            onClick={() => void send()}
+            title={
+              notLive
+                ? target.reason ?? BATCH_NOT_LIVE
+                : decided === 0 && !hasDraft
+                  ? "pick an option or type an answer first"
+                  : "send every decision to the thread as one message"
+            }
+            style={{ ...PRIMARY, marginLeft: "auto", opacity: cannotSend ? 0.4 : 1, cursor: cannotSend ? "default" : "pointer" }}
+          >
+            {sending ? "Sending…" : notLive ? BATCH_NOT_LIVE : "Send decisions ▸"}
+          </button>
+        </div>
+      </div>
+    </Section>
+  );
+}
+
+/** DECIDED (SWIT-77): the settled questions, folded behind a count —
+ *  `you: <answer>` for the user's, `settled: <answer>` for the agent's. */
+function DecidedSection({ rows }: { rows: SettledQuestion[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Section title="Decided" count={rows.length}>
+      <button type="button" onClick={() => setOpen((v) => !v)} style={TEXT_LINK}>
+        {open ? "hide" : `show ${rows.length} ▸`}
+      </button>
+      {open &&
+        rows.map(({ question, answer, by }) => (
+          <div key={question.id} style={{ ...DENSE_ROW, flexDirection: "column", gap: 0 }}>
+            <span style={{ color: "var(--text-muted)" }}>{question.text}</span>
+            <span style={{ color: "var(--text-secondary)" }}>
+              <span style={{ color: "var(--text-dim)" }}>{by === "agent" ? "settled: " : "you: "}</span>
+              {answer}
+            </span>
+          </div>
+        ))}
+    </Section>
   );
 }
 
@@ -669,10 +966,14 @@ function PostRow({ post, isNew }: { post: InboxPost; isNew: boolean }) {
 }
 
 /** SWIT-69 — words, not glyphs: a CHECKBOX (`☐` open, `☑` done, in our
- *  tokens), the text, a one-word status where not obvious, the owner
- *  right-aligned dim. No colored glyph, no spinner. */
+ *  tokens), the text, a one-word status where not obvious, the OWNER column
+ *  right-aligned — dim, or AMBER semibold when the row waits on the user
+ *  (SWIT-77, Ky's PlanPanel: the colour is the state that needs you, the
+ *  only colour on the page). No colored glyph, no spinner. A legacy note
+ *  (nothing writes one since SWIT-77) still reads in the row's title. */
 function ItemRow({ item }: { item: PageItem }) {
   const word = STATE_WORD[item.state];
+  const onYou = item.state !== "done" && isWaitingOnUser(item);
   return (
     <div
       style={{ ...DENSE_ROW, whiteSpace: "nowrap", overflow: "hidden" }}
@@ -689,7 +990,7 @@ function ItemRow({ item }: { item: PageItem }) {
       >
         {item.title}
       </span>
-      <span style={ROW_META}>
+      <span style={onYou ? { ...ROW_META, color: "var(--tone-amber)", fontWeight: 600 } : ROW_META}>
         {word ? `${word} · ` : ""}
         {item.owner === "user" ? "you" : item.owner}
       </span>

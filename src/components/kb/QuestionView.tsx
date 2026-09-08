@@ -78,7 +78,15 @@ export function QuestionView({ artifact, active }: { artifact: QuestionArtifact;
   const rootRef = useRef<HTMLDivElement>(null);
 
   const open = page.openQuestions.find((q) => q.id === questionId);
-  const answered = page.answeredQuestions.find((a) => a.question.id === questionId);
+  // SWIT-77: a decided-but-unsent answer counts as answered for this legacy
+  // tab too — the send happens on the ✦ page.
+  const unsent = page.unsentDecisions.find((a) => a.question.id === questionId);
+  const settled = page.settledQuestions.find((a) => a.question.id === questionId);
+  const answered = unsent
+    ? { question: unsent.question, answer: unsent.answer.text }
+    : settled
+      ? { question: settled.question, answer: settled.answer }
+      : undefined;
 
   const submit = async (text: string) => {
     const clean = text.trim();
@@ -87,15 +95,13 @@ export function QuestionView({ artifact, active }: { artifact: QuestionArtifact;
     setChosen(text);
     setNote(null);
     try {
-      const outcome = await answerQuestion(threadId, questionId, open.text, clean, open.kind);
-      if (outcome === "sent") {
-        // Written on the page AND typed into the terminal — the tab's job is
-        // done. Close SELF (the host session's strip holds this identity).
-        const host = getActiveTabSession();
-        if (host) closeArtifactByIdentity(host, artifactIdentity(artifact));
-      } else {
-        setNote("saved on the page — no live terminal");
-      }
+      // SWIT-77: answering SAVES; the batch goes from the ✦ page. Written on
+      // the page — the tab's job is done. Close SELF (the host session's
+      // strip holds this identity).
+      await answerQuestion(threadId, questionId, open.text, clean, open.kind);
+      const host = getActiveTabSession();
+      if (host) closeArtifactByIdentity(host, artifactIdentity(artifact));
+      else setNote("saved on the page — send from the ✦ page");
     } catch (err) {
       // The WRITE failed: nothing was typed, the text stays in the box.
       setNote(`could not save: ${String(err)}`);
@@ -135,7 +141,7 @@ export function QuestionView({ artifact, active }: { artifact: QuestionArtifact;
         </span>
         <span style={{ color: "var(--text-primary)" }}>
           <span style={{ color: "var(--text-dim)" }}>you: </span>
-          {answered.answer.text}
+          {answered.answer}
         </span>
       </Centered>
     );

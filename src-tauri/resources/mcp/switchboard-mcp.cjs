@@ -40,10 +40,17 @@ const QUESTION_CAP = 20;
 const TEXT_CAP = 500; // any single text field — a page line is a sentence, not a document
 const OPTION_CAP = 60; // an ask option is a short choice, not a paragraph (SWIT-69)
 const REVIEW_FIRST_CAP = 300; // a turn's reviewFirst is an ADDRESS, not prose (SWIT-67)
+const WHY_CAP = 240; // an ask's `why` is ONE line on the recommendation (SWIT-77, Ky's cap)
 /** SWIT-58: what an `ask` wants back. decision = a choice that shapes this
  *  work; convention = a standing rule (the app appends the answer to the
  *  design conventions file); info = a fact only the user knows. */
 const QUESTION_KINDS = ["decision", "convention", "info"];
+/** SWIT-77 (Ky's CC-691 rule, adapted): an item is one action and its
+ *  subject; free-text notes under items were the main source of clutter, so
+ *  the write path refuses them. Existing notes still render (the app's
+ *  parser is tolerant); nothing new is written. */
+const NO_NOTE =
+  "page item: items carry no note — put status in the item's links/state and the story in a turn (op turn)";
 
 // ── Pure core ────────────────────────────────────────────────────────────────
 
@@ -104,6 +111,12 @@ function nextId(list, prefix) {
 function applyOp(page, args, now, answeredIds = new Set()) {
   const at = new Date(now).toISOString();
   const op = args && args.op;
+  // SWIT-77: a question is SETTLED by the user's answer (answers.json, the
+  // app's file, read-only here) OR by the agent's own `resolve` (answeredAt
+  // on the question in this file). Both close it for the cap and for the
+  // re-ask refusal.
+  const settled = (q) =>
+    !!q && (answeredIds.has(q.id) || (typeof q.answeredAt === "string" && q.answeredAt.length > 0));
   switch (op) {
     case "theme": {
       const t = text(args.text, "text");
@@ -195,37 +208,71 @@ function applyOp(page, args, now, answeredIds = new Set()) {
           throw new OpError(`default must be one of the options (${options.length === 0 ? "none were given" : options.map((o) => `"${o}"`).join(", ")})`);
         }
       }
+      // SWIT-77 (Ky's `why`): ONE line on why the recommendation is the one —
+      // the page prints `Recommended: <option> — <why>` above the options.
+      let why = null;
+      if (args.why !== undefined && args.why !== null) {
+        why = text(args.why, "why");
+        if (why.length > WHY_CAP) {
+          throw new OpError(`why is too long (${why.length} chars; the cap is ${WHY_CAP}) — one line on the recommendation, not the reasoning`);
+        }
+      }
       const id = typeof args.id === "string" && args.id.trim().length > 0
         ? args.id.trim()
         : nextId(page.questions, "q");
       const existingIndex = page.questions.findIndex((q) => q && q.id === id);
+      const asked = { id, text: t, options, askedAt: at, kind, default: dflt, why };
+      const arrives =
+        `Their answers arrive as ONE message — "Decisions:" numbering every open question with its answer or "still open" — when they send; it also becomes evidence row decision:${id}.`;
       if (existingIndex >= 0) {
         // SWIT-67 (supersede): re-asking an OPEN id REPLACES the question in
-        // place — the older text is superseded, no duplicate row. An ANSWERED
+        // place — the older text is superseded, no duplicate row. A SETTLED
         // id refuses: the decision already exists.
-        if (answeredIds.has(id)) {
-          throw new OpError(`question ${id} was already answered — its answer is evidence row decision:${id}; reuse it instead of re-asking`);
+        if (settled(page.questions[existingIndex])) {
+          throw new OpError(`question ${id} was already settled — its answer is evidence row decision:${id}; reuse it instead of re-asking`);
         }
-        const questions = page.questions.map((q, i) =>
-          i === existingIndex ? { id, text: t, options, askedAt: at, kind, default: dflt } : q
-        );
+        const questions = page.questions.map((q, i) => (i === existingIndex ? asked : q));
         return {
           page: { ...page, questions },
-          message: `Question ${id} replaced on the page (superseded). Wait for the user's answer — it arrives as their next message and becomes evidence row decision:${id}.`,
+          message: `Question ${id} replaced on the page (superseded). ${arrives}`,
         };
       }
-      const open = page.questions.filter((q) => q && !answeredIds.has(q.id)).length;
+      const open = page.questions.filter((q) => q && !settled(q)).length;
       if (open >= QUESTION_CAP) {
         throw new OpError(`${QUESTION_CAP} questions are already OPEN on the page — wait for answers before asking more`);
       }
-      const questions = [{ id, text: t, options, askedAt: at, kind, default: dflt }, ...page.questions];
+      const questions = [asked, ...page.questions];
       return {
         page: { ...page, questions },
-        message: `Question ${id} recorded on the page. Wait for the user's answer — it arrives as their next message and becomes evidence row decision:${id}. Do not ask it again.`,
+        message: `Question ${id} recorded on the page. ${arrives} Do not ask it again.`,
+      };
+    }
+    case "resolve": {
+      // SWIT-77 (Ky's CC-705): the agent SETTLES a question the user did not
+      // answer on the page — answered in chat, decided elsewhere, moot. The
+      // answer and the stamp land on the question itself (this file); the
+      // page renders it under Decided as `settled: <answer>`.
+      const id = text(args.id, "id");
+      const answer = text(args.answer, "answer");
+      const index = page.questions.findIndex((q) => q && q.id === id);
+      if (index < 0) throw new OpError(`no question with id ${id} — the page lists the open ones`);
+      if (answeredIds.has(id)) {
+        throw new OpError(`question ${id} was answered by the user — their answer is evidence row decision:${id}; nothing to resolve`);
+      }
+      const questions = page.questions.map((q, i) =>
+        i === index ? { ...q, answer, answeredAt: at, resolvedBy: "agent" } : q
+      );
+      const stillOpen = questions.filter((q) => q && !settled(q)).length;
+      return {
+        page: { ...page, questions },
+        message: `Question ${id} resolved (evidence row decision:${id}, status settled). ${stillOpen} still open on the page.`,
       };
     }
     case "item": {
       const itemOp = args.itemOp;
+      // SWIT-77: NO NOTES. Refused on add and update alike — a visible error
+      // the agent can act on, never a silently dropped field.
+      if (args.note !== undefined && args.note !== null) throw new OpError(NO_NOTE);
       if (itemOp === "add") {
         const title = text(args.title, "title");
         const owner = args.owner === "user" || args.owner === "team" ? args.owner : "agent";
@@ -234,12 +281,8 @@ function applyOp(page, args, now, answeredIds = new Set()) {
             ? args.state
             : "todo";
         const id = nextId(page.items, "i");
-        const note =
-          typeof args.note === "string" && args.note.trim().length > 0
-            ? text(args.note, "note")
-            : null;
         return {
-          page: { ...page, items: [...page.items, { id, title, owner, state, note }] },
+          page: { ...page, items: [...page.items, { id, title, owner, state, note: null }] },
           message: `Item ${id} added.`,
         };
       }
@@ -264,9 +307,6 @@ function applyOp(page, args, now, answeredIds = new Set()) {
           ) {
             nextItem.state = args.state;
           }
-          if (typeof args.note === "string") {
-            nextItem.note = args.note.trim().length > 0 ? text(args.note, "note") : null;
-          }
         }
         const items = page.items.map((i, j) => (j === index ? nextItem : i));
         return {
@@ -277,7 +317,7 @@ function applyOp(page, args, now, answeredIds = new Set()) {
       throw new OpError('itemOp must be "add", "update" or "close"');
     }
     default:
-      throw new OpError('op must be one of "theme", "turn", "evidence", "ask", "item"');
+      throw new OpError('op must be one of "theme", "turn", "evidence", "ask", "resolve", "item"');
   }
 }
 
@@ -1103,28 +1143,44 @@ const PAGE_TOOL = {
     "surface:lodestar/trading?instrument=NQ&date=2026-06-05 — the row opens that page in that " +
     "state beside the thread). Track the plan with op " +
     "item (owner agent|user|team, state todo|in_progress|waiting|done; status changes go in " +
-    "the item's note or state, never a new turn). Something only the user can answer: op " +
-    "ask (prefer 2–4 short options, each ≤ 60 chars) — it renders under Open questions on the " +
-    "page, answerable in place; the answer " +
-    "arrives as their next message, so never ask the same question twice (re-asking an open " +
-    "id replaces that question). Asking is HELP ME " +
+    "the item's state, never a new turn; items carry NO note — the story is a turn). TIDY THE " +
+    "PLAN EVERY TURN: close what finished, retitle a row into its replacement rather than " +
+    "adding a second one, never file a 'later' bucket row. Something only the user can " +
+    "answer: op ask (prefer 2–4 short options, each ≤ 60 chars, YOUR recommendation first or " +
+    "named as default, plus why: one line on that recommendation) — it renders under Open " +
+    "questions on the page, answerable in place. Answers arrive as ONE message when the user " +
+    "sends — \"Decisions:\" numbering every open question with its answer or \"still open\" — " +
+    "so never ask the same question twice (re-asking an open id replaces that question), and " +
+    "do not re-ask a \"still open\" one; the user chose to leave it. Asking is HELP ME " +
     "HELP YOU: ask only when the answer changes the work; batch related questions into one " +
     "ask; always propose a default (one of the options — the user confirms it in one " +
     "click); say what kind of answer you need (kind decision | convention | info — a " +
     "convention is a standing rule the app records in the design conventions file, so " +
     "nobody has to state it twice). Every answer becomes an evidence row decision:<id> " +
     "with status decided — check Evidence for an existing decision: row BEFORE asking, and " +
-    "reuse it instead of asking. Set op theme once to one line saying what this thread is " +
-    "working on. Never open anything for an answer — the page IS where your findings go.",
+    "reuse it instead of asking. op resolve {id, answer} closes a question YOU settled " +
+    "(what settled it, or one line on why it went moot — status settled). AT THE END OF " +
+    "EVERY TURN, resolve every question that is settled — answered in chat, decided " +
+    "elsewhere, or moot — or it stays open forever; the page lists the open ones. Set op " +
+    "theme once to one line saying what this thread is working on. Never open anything for " +
+    "an answer — the page IS where your findings go.",
   inputSchema: {
     type: "object",
     properties: {
       op: {
         type: "string",
-        enum: ["theme", "turn", "evidence", "ask", "item"],
+        enum: ["theme", "turn", "evidence", "ask", "resolve", "item"],
         description: "Which page operation to perform.",
       },
       text: { type: "string", description: "theme: the one-line theme. ask: the question." },
+      why: {
+        type: "string",
+        description: "ask: ONE line (≤ 240 chars) on why your recommendation (the default, else the first option) is the one — shown beside the question.",
+      },
+      answer: {
+        type: "string",
+        description: "resolve: what settled the question — the answer the user gave in chat, or one line on why it no longer needs one.",
+      },
       lines: {
         type: "array",
         items: { type: "string" },
@@ -1160,11 +1216,10 @@ const PAGE_TOOL = {
         description: "ask: your proposal — must be one of options. Listed first and marked as the default; the user confirms it in one click.",
       },
       itemOp: { type: "string", enum: ["add", "update", "close"], description: "item: which item operation." },
-      id: { type: "string", description: "item update/close: the item id. ask: optional stable question id." },
+      id: { type: "string", description: "item update/close: the item id. resolve: the question id. ask: optional stable question id." },
       title: { type: "string", description: "item: a few plain words." },
       owner: { type: "string", enum: ["agent", "user", "team"], description: "item: who owns it." },
       state: { type: "string", enum: ["todo", "in_progress", "waiting", "done"], description: "item: its state." },
-      note: { type: "string", description: "item: a short note (status detail lives here)." },
     },
     required: ["op"],
   },
@@ -1363,6 +1418,8 @@ module.exports = {
   VIEW_TOOL,
   OpError,
   QUESTION_KINDS,
+  NO_NOTE,
+  WHY_CAP,
   TURN_CAP,
   TURN_LINE_CAP,
   EVIDENCE_CAP,

@@ -2359,20 +2359,20 @@ export type PanelActions = {
   /** Close a panel terminal's tab. App asks first when the process is alive
    *  (keep running / promote / kill); the store never kills anything. */
   closePanelTerminal: (tabSessionId: string, sessionId: string) => void;
-  /** ANSWER a page question (SWIT-51): write answers.json (durability first),
-   *  then — when the thread has a live terminal — type the answer in as
-   *  Eric's message and resolve "sent"; with no live terminal resolve
-   *  "saved" (the tab stays and says so). Rejection = the WRITE failed and
-   *  nothing was typed; the view keeps the text in the box. `kind` (SWIT-58)
-   *  is the question's own: a `convention` is also appended to
-   *  conventions.md by App, after the answer is durable. */
+  /** ANSWER a page question (SWIT-51; SWIT-77): write answers.json and
+   *  NOTHING else — answering SAVES; the agent hears every answer as ONE
+   *  message when the user sends the batch from the page (`submitToThread`
+   *  above is that path). Rejection = the WRITE failed; the view keeps the
+   *  text in the box. `kind` (SWIT-58) is the question's own: a
+   *  `convention` is also appended to conventions.md by App, after the
+   *  answer is durable. */
   answerQuestion: (
     threadId: string,
     questionId: string,
     questionText: string,
     answerText: string,
     kind?: PageQuestionKind
-  ) => Promise<"sent" | "saved">;
+  ) => Promise<"saved">;
   /** Write a session's CURRENT scrollback to its mirror file, right now.
    *
    *  The linkage that makes `→ thread` mean something for a live shell: the
@@ -2569,7 +2569,7 @@ export function answerQuestion(
   questionText: string,
   answerText: string,
   kind: PageQuestionKind = "decision"
-): Promise<"sent" | "saved"> {
+): Promise<"saved"> {
   const actions = panelActions;
   if (!actions) return Promise.reject(new Error("the app is not ready to answer"));
   return actions.answerQuestion(threadId, questionId, questionText, answerText, kind);

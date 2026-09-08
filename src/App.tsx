@@ -125,7 +125,7 @@ import {
   type StandingDecisions,
 } from "./lib/agentContext";
 import { runPromotionPass, promotionPassReason, PROMOTION_POLL_MS } from "./lib/threadPromotion";
-import { parsePageFile, parseAnswersFile, parseInboxFile, mergePage, conventionLine, postTimes, countUnreadTimes, nextPassEntry, loadInboxSeen, markInboxSeen, type PageQuestionKind, type ThreadPassEntry } from "./lib/pageStore";
+import { parsePageFile, parseAnswersFile, parseInboxFile, mergePage, conventionLine, postTimes, countUnreadTimes, nextPassEntry, loadInboxSeen, markInboxSeen, isQuestionOpen, type PageQuestionKind, type ThreadPassEntry } from "./lib/pageStore";
 import { explorerProjects, registerExplorerActions, quickThreadTarget, sessionRepoOptions, useSessionRepos, projectKeyForDir } from "./lib/explorer";
 import {
   configureBacklogIO,
@@ -164,7 +164,7 @@ import {
 } from "./lib/workspace";
 import { remapSessionIds, getMaxPaneIdNumber, setPaneIdCounter, closePane, getVisibleSessionIds } from "./lib/paneLayout";
 import type { PaneNode } from "./lib/paneLayout";
-import { toggleComposer, composeWrite, isComposerVisible } from "./lib/composer";
+import { toggleComposer, isComposerVisible } from "./lib/composer";
 import { initTaskDetector, destroyTaskDetector } from "./lib/taskDetector";
 import { startUpdater, registerPreRelaunchFlush } from "./lib/updater";
 import { log, initLogger } from "./lib/logger";
@@ -1474,7 +1474,8 @@ export default function App() {
             ]);
             if (cancelled) return;
             const answers = parseAnswersFile(answersRaw);
-            const n = parsePageFile(pageRaw).questions.filter((q) => !(q.id in answers)).length;
+            // SWIT-77: an agent-resolved question is not open either.
+            const n = parsePageFile(pageRaw).questions.filter((q) => isQuestionOpen(q, answers)).length;
             entry.questions = n;
             if (n > 0) questions[t.id] = n;
           } catch {
@@ -2288,11 +2289,12 @@ export default function App() {
     [closeConfirm, destroySession, handlePromotePanelTerminal]
   );
 
-  // ── ANSWER a page question (SWIT-51) — the function Home calls too (T8) ──
-  // Durability FIRST: the answer is written to answers.json before anything
-  // is typed, so a failed terminal write never loses what Eric typed (the
-  // gate on this ticket). "sent" = it also went into the live terminal as
-  // his message; "saved" = recorded on the page, the tab stays and says so.
+  // ── ANSWER a page question (SWIT-51; SWIT-77 the batch) — Home calls it too ──
+  // Answering SAVES, never sends: the answer is written to answers.json (the
+  // app's file) and NOTHING is typed — the agent hears every answer at once,
+  // as ONE "Decisions:" message, when Eric presses `Send decisions` on the
+  // page (PageView's DecisionsBlock → submitToThread, the 0.10.0 seam). A
+  // rejection here = the write failed; the view keeps the text in the box.
   const handleAnswerQuestion = useCallback(
     async (
       threadId: string,
@@ -2300,7 +2302,7 @@ export default function App() {
       questionText: string,
       answerText: string,
       kind: PageQuestionKind = "decision"
-    ): Promise<"sent" | "saved"> => {
+    ): Promise<"saved"> => {
       await writeThreadAnswer(threadId, questionId, answerText); // throws → the view keeps the text
       const thread = getThreadById(threadId);
       if (kind === "convention") {
@@ -2317,27 +2319,8 @@ export default function App() {
           addToast(NO_SESSION, "Convention not recorded", String(err));
         }
       }
-      const sessionId = thread?.sessionId ?? null;
-      const live =
-        sessionId !== null &&
-        isThreadLaunched(threadId) &&
-        sessionsRef.current.some((s) => s.id === sessionId && s.status !== "exited");
-      if (!live || sessionId === null) return "saved";
-      // The composer's wire format (multi-line answers go as ONE paste) and
-      // the composer's chatStarted rule — this IS a composer send in spirit.
-      const wire = composeWrite(`Answer to your question "${questionText}": ${answerText}`);
-      if (wire.length === 0) return "saved";
-      try {
-        await writeToSession(sessionId, wire);
-        markChatStarted(threadId);
-        void saveThreadsToDisk();
-        log.info(`Question answered id=${questionId} thread=${threadId} — sent to the terminal`);
-        return "sent";
-      } catch (err) {
-        // The answer is already durable; only the delivery failed.
-        log.error(`Question answer typed-send failed thread=${threadId}: ${err}`);
-        return "saved";
-      }
+      log.info(`Question answered id=${questionId} thread=${threadId} — saved on the page (unsent)`);
+      return "saved";
     },
     [addToast]
   );

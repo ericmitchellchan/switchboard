@@ -160,6 +160,13 @@ export async function writeThreadAnswer(
   return invoke("write_thread_answer", { threadId, questionId, text });
 }
 
+/** SWIT-77: the decisions batch reached the thread — stamp `sentAt` on the
+ *  answers it carried (the app is still answers.json's sole writer). Call
+ *  ONLY after the PTY write succeeded; resolves to how many were stamped. */
+export async function markThreadAnswersSent(threadId: string, questionIds: string[]): Promise<number> {
+  return invoke("mark_thread_answers_sent", { threadId, questionIds });
+}
+
 /** Append ONE dated line to the design conventions file (SWIT-58) — the
  *  app's record of a `convention` answer. The target is FIXED in Rust (the
  *  switchboard repo's `design/wireframe-kit/conventions.md`, by registry

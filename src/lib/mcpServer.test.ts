@@ -36,6 +36,8 @@ const server = require("../../src-tauri/resources/mcp/switchboard-mcp.cjs") as {
   VIEW_TOOL: { name: string; description: string; inputSchema: unknown };
   OpError: new (message: string) => Error;
   QUESTION_KINDS: string[];
+  NO_NOTE: string;
+  WHY_CAP: number;
   TURN_CAP: number;
   TURN_LINE_CAP: number;
   EVIDENCE_CAP: number;
@@ -207,6 +209,64 @@ describe("applyOp semantics", () => {
     ).toThrow(/default must be one of the options/);
   });
 
+  it("ask carries why (≤ 240, a visible error beyond) and says the answers arrive as ONE message (SWIT-77)", () => {
+    expect(server.WHY_CAP).toBe(240);
+    const { page, message } = server.applyOp(
+      empty(),
+      { op: "ask", text: "Which?", options: ["a", "b"], why: "  cheapest to undo " },
+      NOW
+    );
+    const q = (page.questions as Array<Record<string, unknown>>)[0];
+    expect(q.why).toBe("cheapest to undo");
+    expect(message).toContain("Decisions:");
+    expect(message).toContain("still open");
+    expect((server.applyOp(empty(), { op: "ask", text: "Which?" }, NOW).page.questions as Array<Record<string, unknown>>)[0].why).toBeNull();
+    expect(() =>
+      server.applyOp(empty(), { op: "ask", text: "Which?", options: ["a"], why: "w".repeat(241) }, NOW)
+    ).toThrow(/cap is 240/);
+    expect(() => server.applyOp(empty(), { op: "ask", text: "Which?", why: "   " }, NOW)).toThrow(/why must be/);
+  });
+
+  it("resolve settles a question the agent closed: answer + answeredAt + resolvedBy agent; unknown / user-answered ids refuse (SWIT-77)", () => {
+    const asked = run([
+      { op: "ask", id: "q1", text: "A?", options: ["x"] },
+      { op: "ask", id: "q2", text: "B?" },
+    ]);
+    const { page, message } = server.applyOp(asked, { op: "resolve", id: "q1", answer: " decided in chat " }, NOW);
+    const q1 = (page.questions as Array<Record<string, unknown>>).find((q) => q.id === "q1")!;
+    expect(q1).toMatchObject({ answer: "decided in chat", answeredAt: new Date(NOW).toISOString(), resolvedBy: "agent" });
+    expect(q1.text).toBe("A?"); // the rest of the question is untouched
+    expect(message).toContain("decision:q1");
+    expect(message).toContain("1 still open");
+    expect(() => server.applyOp(asked, { op: "resolve", id: "q9", answer: "x" }, NOW)).toThrow(/no question with id q9/);
+    expect(() => server.applyOp(asked, { op: "resolve", id: "q1" }, NOW)).toThrow(/answer must be/);
+    expect(() => server.applyOp(asked, { op: "resolve", id: "q1", answer: "x" }, NOW, new Set(["q1"]))).toThrow(
+      /answered by the user/
+    );
+    // A resolved id is SETTLED: re-asking it refuses like an answered one, and it no longer counts against the cap.
+    expect(() => server.applyOp(page, { op: "ask", id: "q1", text: "again" }, NOW)).toThrow(/already settled/);
+    let full = page;
+    for (let i = 0; i < server.QUESTION_CAP - 1; i++) full = server.applyOp(full, { op: "ask", text: `q ${i}` }, NOW).page;
+    expect(() => server.applyOp(full, { op: "ask", text: "one more" }, NOW)).toThrow(/already OPEN/);
+  });
+
+  it("item refuses a note, on add and on update, with the tidy-plan wording (SWIT-77)", () => {
+    expect(server.NO_NOTE).toBe(
+      "page item: items carry no note — put status in the item's links/state and the story in a turn (op turn)"
+    );
+    expect(() => server.applyOp(empty(), { op: "item", itemOp: "add", title: "t", note: "blocks R1" }, NOW)).toThrow(
+      server.NO_NOTE
+    );
+    const added = server.applyOp(empty(), { op: "item", itemOp: "add", title: "t" }, NOW).page;
+    expect(() => server.applyOp(added, { op: "item", itemOp: "update", id: "i1", note: "x" }, NOW)).toThrow(server.NO_NOTE);
+    expect(() => server.applyOp(added, { op: "item", itemOp: "update", id: "i1", note: "" }, NOW)).toThrow(server.NO_NOTE);
+    // A legacy note on an existing item survives an update untouched (read side tolerant).
+    const legacy = server.parsePage(JSON.stringify({ items: [{ id: "i1", title: "t", owner: "agent", state: "todo", note: "old" }] }));
+    const updated = server.applyOp(legacy, { op: "item", itemOp: "update", id: "i1", state: "done" }, NOW).page;
+    expect((updated.items as Array<Record<string, unknown>>)[0].note).toBe("old");
+    expect(parsePageFile(JSON.stringify(updated)).items[0].note).toBe("old");
+  });
+
   it("a hand-corrupted page (nulls in the arrays) does not break ask / item add (review)", () => {
     const corrupted = server.parsePage(
       JSON.stringify({ questions: [null, { id: "q2", text: "t" }], items: [null] })
@@ -234,9 +294,11 @@ describe("ROUND-TRIP: the server's writes parse through pageStore (the seam)", (
       { op: "turn", lines: ["Second turn.", "Two lines."] },
       { op: "evidence", address: "SWIT-49", label: "the server", status: "in progress" },
       { op: "evidence", address: "switchboard #61", label: "the PR", status: "open" },
-      { op: "ask", text: "Same set or per-market?", options: ["same set", "per-market"], default: "per-market", kind: "convention" },
+      { op: "ask", text: "Same set or per-market?", options: ["same set", "per-market"], default: "per-market", kind: "convention", why: "one file to read" },
+      { op: "ask", id: "q2", text: "Keep the old keys?", options: ["yes", "no"] },
+      { op: "resolve", id: "q2", answer: "moot — the keys are gone" },
       { op: "item", itemOp: "add", title: "Publish anchors", state: "in_progress" },
-      { op: "item", itemOp: "add", title: "Check the pins", owner: "user", note: "blocks R1" },
+      { op: "item", itemOp: "add", title: "Check the pins", owner: "user" },
       { op: "item", itemOp: "add", title: "Old thing" },
       { op: "item", itemOp: "close", id: "i3" },
     ]);
@@ -245,24 +307,40 @@ describe("ROUND-TRIP: the server's writes parse through pageStore (the seam)", (
     expect(parsed.turns).toHaveLength(2);
     expect(parsed.turns[0].lines).toEqual(["Second turn.", "Two lines."]); // newest first
     expect(parsed.evidence.map((e) => e.address)).toEqual(["switchboard #61", "SWIT-49"]);
-    expect(parsed.questions).toHaveLength(1);
-    expect(parsed.questions[0].kind).toBe("convention");
-    expect(parsed.questions[0].defaultOption).toBe("per-market");
+    expect(parsed.questions).toHaveLength(2);
+    const q1 = parsed.questions.find((q) => q.id === "q1")!;
+    expect(q1.kind).toBe("convention");
+    expect(q1.defaultOption).toBe("per-market");
+    expect(q1.why).toBe("one file to read");
+    expect(parsed.questions.find((q) => q.id === "q2")!.resolved).toEqual({
+      answer: "moot — the keys are gone",
+      at: new Date(NOW).toISOString(),
+      by: "agent",
+    });
     expect(parsed.items).toHaveLength(3);
 
-    const merged = mergePage(parsed, { q1: { text: "same set", at: "2026-08-31T10:05:00Z" } }, []);
+    // The user's answer, saved and not yet sent (SWIT-77): out of Open
+    // questions, in the batch list, already a decided evidence row.
+    const merged = mergePage(parsed, { q1: { text: "same set", at: "2026-08-31T10:05:00Z", resolvedBy: "user" } }, []);
     expect(merged.isEmpty).toBe(false);
     expect(merged.theme).toBe("Give every market an anchor");
-    expect(merged.openQuestions).toHaveLength(0); // answered
-    expect(merged.answeredQuestions[0].answer.text).toBe("same set");
-    // The answer surfaces as a decided evidence row beside the agent's rows.
-    expect(merged.evidence.map((e) => e.address)).toEqual(["decision:q1", "switchboard #61", "SWIT-49"]);
+    expect(merged.openQuestions).toHaveLength(0);
+    expect(merged.decisionQuestions.map((q) => q.id)).toEqual(["q1"]); // q2 is settled, not in the batch
+    expect(merged.unsentDecisions[0].answer.text).toBe("same set");
+    expect(merged.settledQuestions).toEqual([
+      { question: parsed.questions.find((q) => q.id === "q2"), answer: "moot — the keys are gone", at: new Date(NOW).toISOString(), by: "agent" },
+    ]);
+    // Both surface as decision rows beside the agent's rows — newest first
+    // (every server op here shares NOW, so the settled row ties the agent's
+    // rows and the stable sort keeps the decision rows ahead).
+    expect(merged.evidence.map((e) => e.address)).toEqual(["decision:q1", "decision:q2", "switchboard #61", "SWIT-49"]);
     expect(merged.evidence[0].status).toBe("decided");
+    expect(merged.evidence[1].status).toBe("settled");
+    expect(merged.evidence[2].status).toBe("open");
     expect(merged.userItems.map((i) => i.title)).toEqual(["Check the pins"]);
-    expect(merged.openItems).toHaveLength(1); // needs-you items render ONCE (SWIT-69)
+    expect(merged.openItems.map((i) => i.title)).toEqual(["Check the pins", "Publish anchors"]); // waiting on the user first (SWIT-77)
     expect(merged.doneItems).toHaveLength(1);
     expect(merged.latestTurn?.lines[0]).toBe("Second turn.");
-    expect(merged.evidence[1].status).toBe("open");
   });
 
   it("timestamps the server writes are ISO strings pageStore's dot rule can parse", () => {
@@ -288,13 +366,25 @@ describe("ROUND-TRIP: the server's writes parse through pageStore (the seam)", (
       "propose a default",
       "decision | convention | info",
       "check Evidence for an existing decision: row BEFORE asking",
+      // SWIT-77 — the batch, resolve, why, the tidy contract, no notes.
+      "Answers arrive as ONE message when the user sends",
+      '"still open"',
+      "plus why: one line on that recommendation",
+      "op resolve {id, answer}",
+      "AT THE END OF EVERY TURN, resolve every question that is settled — answered in chat, decided elsewhere, or moot — or it stays open forever; the page lists the open ones",
+      "TIDY THE PLAN EVERY TURN: close what finished, retitle a row into its replacement rather than adding a second one, never file a 'later' bucket row",
+      "items carry NO note",
     ]) {
       expect(server.PAGE_TOOL.description).toContain(rule);
     }
     const props = (server.PAGE_TOOL.inputSchema as { properties: Record<string, { enum?: string[] }> }).properties;
     expect(props.kind.enum).toEqual(["decision", "convention", "info"]);
+    expect(props.op.enum).toEqual(["theme", "turn", "evidence", "ask", "resolve", "item"]);
     expect(props.default).toBeDefined();
     expect(props.reviewFirst).toBeDefined();
+    expect(props.why).toBeDefined();
+    expect(props.answer).toBeDefined();
+    expect(props.note).toBeUndefined(); // gone from the schema, refused by the op
   });
 });
 

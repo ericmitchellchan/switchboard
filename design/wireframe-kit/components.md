@@ -214,45 +214,72 @@ it says so (a chip that toggles is a quiet button at chip size).
   SWIT-69 (words, not glyphs) — a thread's open questions are a dim 9.5px `· N` count
   with a worded `title` (`1 open question`); the waiting state lives in the status dot.
 
-## The question block
+## The question block — decisions as a batch (SWIT-77)
 
-Where a question is ANSWERED: the ✦ page's Open questions section (`PageView.InlineQuestion`,
-SWIT-67 — `ask` no longer opens a tab) and Home's Needs-you card. The shape everywhere:
-the question · options as a plain list · one input · one action. Nothing else — no glyph
-box, no note about where the answer goes (that is the spec's sentence, `requirements.md`
-R4). `QuestionView.tsx` (the old `? question` tab) keeps the same shape for restored
-workspaces only.
+Where questions are ANSWERED: the ✦ page's Open questions section (`PageView.DecisionsBlock`)
+holds EVERY open question and every decided-but-unsent one as ONE numbered list with ONE
+send; Home's Needs-you card answers a single question and points at the page for the send.
+Answering SAVES (answers.json, at once); the agent hears every answer as one message when
+the user presses the one button. Nothing narrates that mechanism on the surface — the
+preview box SHOWS it. `QuestionView.tsx` (the old `? question` tab) keeps the single-question
+shape for restored workspaces only.
 
-- **Ky:** `ky/chat/ChatTerminal.tsx` composer + permission strip (~1305–1330): the
-  prompt as one line, `✓ Approve ↵` / `✕ Deny esc` as two buttons in a row, the
-  textarea below; `ky/todos/TodoPanel.tsx` for the list-of-rows + one input shape.
-- **Ours:** body padding `14px`, `gap: 12px`, column. (1) Question: 12.5px
-  `--text-primary`, `line-height: 1.5`. (2) Options: the OPTION ROW
-  (`components/kb/OptionRow.tsx`, shared with Home's Needs-you block) — one LIST ROW per
-  option, 11px (the ramp's option size), padding `5px 8px`, with the 14px leading glyph column drawing a text
-  RADIO: `○` in `--text-dim` resting, `●` in `--text-primary` on hover / focus and on
-  the option being sent; the option text itself `--text-primary`; `default` after the
-  agent's proposal in 9.5px `--text-dim`. The list sits between two 1px `--border`
-  hairlines (`padding: 4px 0`) so the choice reads as one block. Keyboard: Tab/↑/↓
-  move, Enter, Space or click picks; the focused row draws the active bar + `--bg-active`.
-  The row IS the target: no bordered pill, no `<input type=radio>` — the glyph is what
-  says "multiple choice" (post-0.5.0: rows with no glyph read as a paragraph).
-  (3) A dim `or` line (10px `--text-dim`) then the input: the kit textarea, 2 rows,
-  placeholder `type your own…` (`type your answer…` with no options); Enter sends.
-  (4) Action: ONE quiet button `answer`, right-aligned under the input, drawn at full
-  strength while the box is empty (an empty submit is a no-op; `opacity: .4` made it
-  read as absent) and dimmed only while a send is in flight. Outcome states are one
-  plain line in `--text-muted` on the SAME row, to the LEFT of the button — the failure
-  text, or `saved on the page — no live terminal` — never a bordered note.
-- Resolved states (answered / gone) are the same voice centred: the question in
-  `--text-secondary` and `you: <answer>` in `--text-primary`; or the one line `This
-  question is no longer on the page.`
+- **Ky:** `ky/plan/DecisionsArtifact.tsx` (CC-688/710/721) — numbered cards oldest-first,
+  `open`/`decided` word at the right, `Recommended: <first> — <why>`, option chips (the
+  recommendation bordered, the chosen one filled), `or type an answer…` saving on blur, a
+  decided row folded to `N · question → answer · change`, the preview box `what the agent
+  gets — one message, when you send`, footer `M of N decided · undecided ones go as "still
+  open"`, one `Send decisions ▸`; `ky/plan/decisionsStore.ts` for the wire format.
+- **Ours — the card:** a dense row block (`padding: 8px 0`, 1px `--border` hairline under
+  each) in a column. (1) First line: the NUMBER column (16px, 10px `--text-dim`) · the
+  question 11.5px `--text-primary` · the state WORD at the right, 9.5px — `open` in
+  `--text-dim`, `decided` in `--text-primary`. Everything below indents 22px past the
+  number. (2) `Recommended: <option>` in `--text-primary` then ` — <why>` in
+  `--text-secondary` (11px) — rendered only when the agent gave a default or a why; the
+  recommended option is the default, else the first option (Ky's rule). (3) Options: the
+  OPTION ROW (`components/kb/OptionRow.tsx`, shared with Home) — one LIST ROW per option,
+  11px, padding `5px 8px`, the 14px glyph column drawing a text RADIO: `○` `--text-dim`
+  resting, `●` `--text-primary` on hover / focus / the option being saved / the answer the
+  page holds; `default` after the proposal in 9.5px `--text-dim`; the list between two 1px
+  `--border` hairlines. The row IS the target — no bordered pill, no `<input type=radio>`.
+  Rows take `keepFocus` (mousedown preventDefault) so a click never blurs the text box.
+  (4) A typed answer that is not an option prints as `you: <answer>` (dim label). (5) The
+  input: the kit field, placeholder `or type an answer…` / `or change your answer…` /
+  `type your answer…` (no options); Enter saves, LEAVING THE BOX saves (Ky's CC-721) —
+  Tabbing to one of the block's own buttons is the one blur that does not.
+- **Ours — the folded row:** a decided-unsent card collapses to one LIST ROW button
+  (`6px 0`, hairline under): number · question in `--text-muted` (ellipsis) · `→ <answer>`
+  in `--text-primary` (`flex: 1`, ellipsis) · `change` 9.5px `--text-dim`. Click reopens
+  the card with the cursor in its box; the next save folds it again.
+- **Ours — the preview box** (an earned box: it holds the exact thing the send does):
+  `--bg-elevated`, 1px `--border`, radius 4, padding `8px 10px`, 10px above the footer.
+  Label 9.5px uppercase `letter-spacing: .08em` `--text-faint`: `what the agent gets — one
+  message, when you send`; body 10.5px / 1.6 `--text-secondary`, `pre-wrap`, the wire
+  text verbatim: `Decisions:` then `N. <question>` / `   → <answer | still open>`.
+- **Ours — the footer:** one row, 10px `--text-dim`: `M of N decided` (+ ` · undecided ones
+  go as "still open"` only when both kinds are present) · the outcome line in
+  `--text-muted` when a save or a send failed (`could not save: …` / `not sent — …`; the
+  form stays, the answers stay unsent) · the ONE primary button `Send decisions ▸` at the
+  right (`--text-primary` fill, `--bg-primary` text, 11px 600, `3px 10px`, radius 3;
+  `opacity: .4` disabled — no decision yet, a save in flight, or the thread not live, when
+  its label reads `thread not live`; `Sending…` while it goes).
+- **Home's card** keeps the single-question shape (question · OptionRow list · `or` · one
+  input) inside THE earned box; its outcome line reads `saved · send from the page`, and
+  the card drops off Home on the next poll. No send button on Home.
+- Resolved states: on the page, DECIDED is a folded section (`show N ▸`) of `question` in
+  `--text-muted` over `you: <answer>` / `settled: <answer>` (the agent's `resolve`) in
+  `--text-secondary` with the label dim; the legacy tab centres the same voice, or the one
+  line `This question is no longer on the page.`
 
 ## The page sections
 
-The ✦ page (`PageView.tsx`, re-cut SWIT-67/68/69): summary · open questions · needs you ·
-to do · what happened · evidence · questions · done. Every section is a title + list
-rows; no section is a box. Ky's thread panel is the reference: ONE page, everything on it.
+The ✦ page (`PageView.tsx`, re-cut SWIT-67/68/69/77): summary · open questions (the batch,
+entry above) · to do · what happened · evidence · decided (folded) · done. Every section is
+a title + list rows; the only boxes are the batch's preview box. Ky's thread panel is the
+reference: ONE page, everything on it. NEEDS YOU IS RETIRED on the page (SWIT-77, Ky's
+PlanPanel): a row waiting on the user is a To do row, listed first, with its OWNER column
+in `--tone-amber` semibold (`waiting · you`) — the one colour on the page; requests from
+other threads sit at the top of To do as post rows. Home keeps its Needs you block.
 
 - **Ky:** `ky/todos/TodoPanel.tsx` (header + rows + one input), `ky/thread/LedgerPanel.tsx`
   for the ledger's section-then-rows rhythm, `ky/components/InfoNote.tsx` for the rule
@@ -265,12 +292,12 @@ rows; no section is a box. Ky's thread panel is the reference: ONE page, everyth
   TITLE: sentence case, 12.5px `--text-primary`, upright — the count beside it in
   11px `--text-dim` (`Open questions 1` · `To do 4`); the uppercase faint band-header
   voice is RETIRED on this page (Home keeps its rule-with-label headers). An open
-  question renders the FULL question block in place (options as OptionRows between
-  hairlines, input, quiet `answer`) — option text stays `--text-primary`, brighter
-  than body. ITEM ROW (words, not glyphs): a checkbox `☐`/`☑` in the 14px glyph
-  column, title with ellipsis, then `waiting · you` style trailing meta — a one-word
-  status only where not obvious, owner right-aligned 9.5px `--text-dim`; no colored
-  glyph, no spinner. A cross-thread post: a 9.5px `--text-dim` origin line
+  question is a numbered CARD in the batch (the question block entry) — option text
+  stays `--text-primary`, brighter than body. ITEM ROW (words, not glyphs): a checkbox
+  `☐`/`☑` in the 14px glyph column, title with ellipsis, then `waiting · you` style
+  trailing meta — a one-word status only where not obvious, owner right-aligned 9.5px
+  `--text-dim`, or `--tone-amber` 600 when the row waits on the user; no colored glyph,
+  no spinner. A cross-thread post: a 9.5px `--text-dim` origin line
   (`↓ <thread>`) then the text. What happened: the latest turn as plain lines,
   `earlier (N) ▸` as a text link button. Evidence: address `--text-primary` · label
   `--text-muted` · status `--text-dim`, 1px `--border` hairline under each; the

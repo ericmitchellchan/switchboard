@@ -519,13 +519,21 @@ describe("launchCommand + spawn context", () => {
 // ─── Anchored pins + surfaces (Inc 3d — SWIT-38) ─────────────────────────────
 
 describe("buildPageContractLine + standing decisions (SWIT-58)", () => {
-  it("with no decisions the line is the page contract alone — one line, no clause", () => {
+  it("with no decisions the line is the page contract alone — one line, no standing clause", () => {
     const line = buildPageContractLine();
     expect(line).toContain("This thread has a PAGE");
-    expect(line).not.toContain("decision");
+    expect(line).not.toContain("already made");
     expect(buildPageContractLine(null)).toBe(line);
     expect(buildPageContractLine({ count: 0, labels: [] })).toBe(line);
     expect(line.split("\n")).toHaveLength(1);
+  });
+
+  it("names the batch (SWIT-77): answers arrive as ONE Decisions: message, do not re-ask, resolve every turn", () => {
+    const line = buildPageContractLine();
+    expect(line).toContain("arrive as ONE message (Decisions: 1. <question> → <answer>, undecided ones still open)");
+    expect(line).toContain("do not re-ask");
+    expect(line).toContain("resolve settled questions every turn");
+    expect(line.length).toBeLessThanOrEqual(SPAWN_CONTEXT_MAX);
   });
 
   it("names the count and the newest three labels, plain text", () => {

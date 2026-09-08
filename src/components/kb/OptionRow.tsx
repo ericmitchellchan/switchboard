@@ -14,6 +14,11 @@
 //
 // Keys: the host walks rows with ↑/↓; Enter (native button activation) and
 // Space (handled here on keydown so the row does not wait for keyup) pick.
+//
+// SWIT-77 (Ky's CC-721): `keepFocus` makes a CLICK on the row leave focus
+// where it is (mousedown preventDefault) — the page's batch saves a typed
+// answer on blur, and a chip click must not blur the box under it. The row
+// still lights on hover; only the focus bar needs the keyboard then.
 
 import { useState } from "react";
 import type { CSSProperties } from "react";
@@ -51,13 +56,17 @@ export function OptionRow({
   isDefault,
   disabled,
   chosen = false,
+  keepFocus = false,
   onPick,
 }: {
   label: string;
   isDefault: boolean;
   disabled: boolean;
-  /** The option being sent right now — draws `●` while the host is busy. */
+  /** The option being sent right now, or the one the page holds as the
+   *  answer — draws `●`. */
   chosen?: boolean;
+  /** A click must not move focus (the host saves a text box on blur). */
+  keepFocus?: boolean;
   onPick: () => void;
 }) {
   const [hover, setHover] = useState(false);
@@ -71,6 +80,7 @@ export function OptionRow({
       data-kit-row=""
       disabled={disabled}
       onClick={onPick}
+      onMouseDown={keepFocus ? (e) => e.preventDefault() : undefined}
       onKeyDown={(e) => {
         if (e.key === " ") {
           e.preventDefault();

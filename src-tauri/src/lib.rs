@@ -419,13 +419,128 @@ mod thread_stamp_tests {
     }
 }
 
-// ── Question answers (SWIT-51) ───────────────────────────────────────────────
+// ── Question answers (SWIT-51; SWIT-77 the batch) ────────────────────────────
 // The APP is answers.json's SOLE writer (one-writer-per-file: page.json is
 // the MCP server's, this file is ours). Read-modify-write server-side,
 // atomic via tmp+rename so the server's read-only glance and the app's own
 // 2.5s poll never see a torn file. Single app instance; a lock is overkill.
+//
+// SWIT-77: an entry is `{text, at, resolvedBy: "user", sentAt?}`. Answering
+// SAVES (the entry is REPLACED, so a changed answer drops its `sentAt` and is
+// unsent again); `mark_thread_answers_sent` stamps `sentAt` once the batch
+// message reached the thread. The unsent rule is the frontend's
+// (pageStore.isAnswerUnsent: no sentAt, or sentAt older than at). The two
+// extra fields are optional, so an answers.json from before this ticket
+// parses unchanged — that is why the unsent set lives HERE and not in a
+// second file the allowlist would have to grow for.
 
 const ANSWER_TEXT_CAP: usize = 4000;
+/// A batch send names at most the page's open questions (QUESTION_CAP).
+const ANSWERS_SENT_CAP: usize = 64;
+
+/// Pure half of `mark_thread_answers_sent`: stamp `sentAt = now` on every
+/// listed id that holds an object entry; unknown ids and non-object entries
+/// are skipped (a send names what the page showed, and the page may have
+/// moved). Returns how many were stamped.
+fn stamp_answers_sent(
+    answers: &mut serde_json::Map<String, serde_json::Value>,
+    ids: &[String],
+    now: &str,
+) -> usize {
+    let mut n = 0;
+    for id in ids {
+        if let Some(serde_json::Value::Object(entry)) = answers.get_mut(id) {
+            entry.insert("sentAt".to_string(), serde_json::Value::String(now.to_string()));
+            n += 1;
+        }
+    }
+    n
+}
+
+fn read_answers_map(file: &std::path::Path) -> serde_json::Map<String, serde_json::Value> {
+    // Tolerant read: junk degrades to an empty record rather than blocking
+    // the one path that must never lose Eric's typed answer.
+    std::fs::read_to_string(file)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+fn write_answers_map(
+    dir: &std::path::Path,
+    answers: serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    let file = dir.join("answers.json");
+    let payload = serde_json::to_string_pretty(&serde_json::Value::Object(answers))
+        .map_err(|e| e.to_string())?;
+    let tmp = dir.join("answers.json.tmp");
+    std::fs::write(&tmp, payload).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &file).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// SWIT-77: the batch went out — stamp `sentAt` on the answers it carried.
+/// Called ONLY after the PTY write succeeded; a failed send leaves the
+/// answers unsent, which is what keeps the button honest.
+#[tauri::command]
+async fn mark_thread_answers_sent(
+    thread_id: String,
+    question_ids: Vec<String>,
+) -> Result<usize, String> {
+    if !valid_thread_id(&thread_id) {
+        return Err("invalid thread id".into());
+    }
+    if question_ids.is_empty() {
+        return Ok(0);
+    }
+    if question_ids.len() > ANSWERS_SENT_CAP {
+        return Err(format!("too many question ids (cap {})", ANSWERS_SENT_CAP));
+    }
+    if let Some(bad) = question_ids.iter().find(|id| !valid_question_id(id)) {
+        return Err(format!("invalid question id: {}", bad));
+    }
+    let dir = threads_data_dir()?.join(&thread_id);
+    let file = dir.join("answers.json");
+    let mut answers = read_answers_map(&file);
+    let n = stamp_answers_sent(&mut answers, &question_ids, &chrono_like_now_iso());
+    if n == 0 {
+        return Ok(0); // nothing to stamp — no write, no new file
+    }
+    write_answers_map(&dir, answers)?;
+    Ok(n)
+}
+
+#[cfg(test)]
+mod answers_sent_tests {
+    use super::stamp_answers_sent;
+
+    #[test]
+    fn stamps_only_listed_object_entries_and_counts_them() {
+        let mut answers: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+            r#"{"q1":{"text":"a","at":"2026-09-08T10:00:00Z"},"q2":{"text":"b","at":"t"},"q3":"junk"}"#,
+        )
+        .unwrap();
+        let n = stamp_answers_sent(
+            &mut answers,
+            &["q1".to_string(), "q3".to_string(), "q9".to_string()],
+            "2026-09-08T10:00:05Z",
+        );
+        assert_eq!(n, 1);
+        assert_eq!(answers["q1"]["sentAt"], "2026-09-08T10:00:05Z");
+        assert_eq!(answers["q1"]["text"], "a"); // the rest of the entry is untouched
+        assert!(answers["q2"].get("sentAt").is_none());
+        assert_eq!(answers["q3"], "junk");
+    }
+
+    #[test]
+    fn empty_id_list_stamps_nothing() {
+        let mut answers: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"q1":{"text":"a","at":"t"}}"#).unwrap();
+        assert_eq!(stamp_answers_sent(&mut answers, &[], "now"), 0);
+        assert!(answers["q1"].get("sentAt").is_none());
+    }
+}
 
 fn valid_question_id(id: &str) -> bool {
     !id.is_empty()
@@ -455,24 +570,15 @@ async fn write_thread_answer(
     let dir = threads_data_dir()?.join(&thread_id);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let file = dir.join("answers.json");
-    // Tolerant read: junk degrades to an empty record rather than blocking
-    // the one path that must never lose Eric's typed answer.
-    let mut answers: serde_json::Map<String, serde_json::Value> = std::fs::read_to_string(&file)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default();
+    let mut answers = read_answers_map(&file);
     let now_iso = chrono_like_now_iso();
+    // REPLACED, not merged: a re-answer has no `sentAt`, so it is unsent
+    // again and the next batch carries the new text (SWIT-77).
     answers.insert(
         question_id,
-        serde_json::json!({ "text": trimmed, "at": now_iso }),
+        serde_json::json!({ "text": trimmed, "at": now_iso, "resolvedBy": "user" }),
     );
-    let payload = serde_json::to_string_pretty(&serde_json::Value::Object(answers))
-        .map_err(|e| e.to_string())?;
-    let tmp = dir.join("answers.json.tmp");
-    std::fs::write(&tmp, payload).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &file).map_err(|e| e.to_string())?;
-    Ok(())
+    write_answers_map(&dir, answers)
 }
 
 /// SWIT-58 — the ONE file the app appends `convention` answers to. Fixed
@@ -2141,6 +2247,7 @@ fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         read_view_data,
         write_view_notes,
         write_thread_answer,
+        mark_thread_answers_sent,
         append_convention,
         save_thread_attachment,
         save_transcript,

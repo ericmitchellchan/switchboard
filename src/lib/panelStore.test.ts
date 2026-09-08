@@ -2211,7 +2211,7 @@ describe("popped-out artifact", () => {
       popOutArtifact: (a) => calls.push(a),
       createPanelTerminal: () => {},
       flushTerminalTranscript: () => Promise.resolve(),
-      answerQuestion: () => Promise.resolve("sent" as const),
+      answerQuestion: () => Promise.resolve("saved" as const),
       promotePanelTerminal: () => {},
       closePanelTerminal: () => {},
     });
@@ -2462,7 +2462,7 @@ describe("session artifacts (increment H)", () => {
       popOutArtifact: (a) => calls.push(a),
       createPanelTerminal: () => {},
       flushTerminalTranscript: () => Promise.resolve(),
-      answerQuestion: () => Promise.resolve("sent" as const),
+      answerQuestion: () => Promise.resolve("saved" as const),
       promotePanelTerminal: () => {},
       closePanelTerminal: () => {},
     });

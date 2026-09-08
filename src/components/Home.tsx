@@ -373,9 +373,11 @@ function NeedsYou({ digests }: { digests: ThreadDigest[] }) {
   );
 }
 
-/** An open question, answerable IN PLACE — the same bridge the question tab
- *  uses, so answering from Home behaves exactly as from the page. THE one
- *  earned box on Home: it asks Eric to act, so it gets the elevated card;
+/** An open question, answerable IN PLACE — the same bridge the page uses,
+ *  so answering from Home SAVES exactly as from the page (SWIT-77: the
+ *  answer goes to the agent with the batch, sent from the page — the note
+ *  says so and the card drops off Home on the next poll). THE one earned
+ *  box on Home: it asks Eric to act, so it gets the elevated card;
  *  informational rows never do. */
 function QuestionCard({ digest, question }: { digest: ThreadDigest; question: PageQuestion }) {
   const [draft, setDraft] = useState("");
@@ -391,8 +393,11 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
       setChosen(text);
       setNote(null);
       try {
-        const outcome = await answerQuestion(digest.thread.id, question.id, question.text, clean, question.kind);
-        setNote(answerSuccessNote(outcome));
+        // SWIT-77: answering SAVES on the page; the batch is sent from the
+        // page, not from Home (a roll-up has no send button — one place
+        // sends, and it is the one that shows the whole message).
+        await answerQuestion(digest.thread.id, question.id, question.text, clean, question.kind);
+        setNote(answerSuccessNote());
       } catch (err) {
         setNote(answerErrorNote(err));
       } finally {
