@@ -3,19 +3,26 @@
 // After a turn the panel used to open one preview per view the agent showed
 // and nothing else said which of them came first. Now the page names ONE next
 // thing, and the turn end opens at most that one tab:
-//   1. open questions → the ✦ page's Open questions block, in front (the
-//      agent is waiting on you — no new tab, the page scrolls to the block);
+//   0. the agent's own pointer — the newest turn's `reviewFirst` — wins when
+//      it named one: `start here → <address>`, opened BEHIND the page when
+//      the address is openable (a ticket key or a `decision:` row is printed
+//      and opens nothing);
+//   1. else open questions → the ✦ page's Open questions block, in front
+//      (the agent is waiting on you — no new tab, the page scrolls to it);
 //   2. else the first To do row (waiting-on-you first — the page's own order)
 //      whose title carries an OPENABLE address — the spec, the view, the page
 //      the plan is working on — opened BEHIND the page, not focused;
 //   3. else nothing: the page itself is the place to be.
 // Pure over the rendered page; the turn-end hook (App) and the page's own
-// `next →` line both read it, so they can never disagree.
+// `start here →` / `next →` line both read it, so they cannot disagree about
+// WHAT is next — the hook only differs in what it can DO (open behind vs. a
+// click's focused open; it stands down for a preview being read).
 //
 // OFFERED ONCE PER KEY: the same set of open questions on a repaint does not
 // raise the page again; a NEW question does (the key is the sorted open ids).
-// A To do open is keyed by the artifact's identity. The map is runtime-only
-// (like threadStore's `prepared`) — a restart offers afresh, which is right.
+// A To do / reviewFirst open is keyed by the artifact's identity. The map is
+// runtime-only (like threadStore's `prepared`) — a restart offers afresh,
+// which is right; a deleted thread's entry is pruned.
 //
 // Addresses are the Evidence vocabulary (evidenceModel): `view:<id>[#anchor]`,
 // `surface:<project>/<page>[?k=v]`, a KB doc path that EXISTS, a repo-relative
@@ -37,6 +44,16 @@ export type NextThingContext = {
 };
 
 export type NextThing =
+  | {
+      why: "review";
+      /** The turn's reviewFirst, verbatim — the page prints it as `start here →`. */
+      address: string;
+      /** Null when the address names nothing openable (a ticket, a decision). */
+      artifact: Artifact | null;
+      anchor: string | null;
+      label: string;
+      offerKey: string;
+    }
   | { why: "questions"; count: number; label: string; offerKey: string }
   | {
       why: "todo";
@@ -85,6 +102,18 @@ export function questionsOfferKey(openIds: readonly string[]): string {
 
 export function nextThingFor(page: RenderedPage | null | undefined, ctx: NextThingContext): NextThing | null {
   if (!page) return null;
+  const reviewFirst = page.latestTurn?.reviewFirst ?? null;
+  if (reviewFirst !== null && reviewFirst.length > 0) {
+    const hit = openableAddressIn(reviewFirst, ctx);
+    return {
+      why: "review",
+      address: reviewFirst,
+      artifact: hit?.artifact ?? null,
+      anchor: hit?.anchor ?? null,
+      label: reviewFirst,
+      offerKey: hit ? `review:${artifactIdentity(hit.artifact)}` : `review:${reviewFirst}`,
+    };
+  }
   const open = page.openQuestions.length;
   if (open > 0) {
     return {

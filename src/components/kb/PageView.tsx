@@ -109,6 +109,7 @@ import {
   subscribePageFocus,
   pageFocusNonce,
   takePageFocus,
+  peekPageFocus,
 } from "../../lib/pageStore";
 import { nextThingFor } from "../../lib/nextThing";
 import type { AnswerNote, InboxPost, PageAnswer, PageItem, PageQuestion, RenderedPage, SettledQuestion } from "../../lib/pageStore";
@@ -434,10 +435,11 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
   }, [threadId, active, revision]);
 
   // THE NEXT THING (SWIT-79, Ky's CC-710): the ONE line under the summary —
+  // `start here → <address>` (the agent's reviewFirst, when it named one) /
   // `next → answer 2 questions` / `next → <address> · <item>` — from the
   // same pure rule the turn-end hook reads (lib/nextThing), so the page and
-  // the hook can never disagree. `start here →` (the agent's reviewFirst)
-  // wins when the agent named one: the agent's pointer over the derived one.
+  // the hook cannot disagree about WHAT is next; a click here opens it
+  // focused where the hook opens it behind.
   const nextThing = useMemo(
     () => nextThingFor(page, { threadId, kbDocs, projectKey }),
     [page, threadId, kbDocs, projectKey]
@@ -449,11 +451,18 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
   }, []);
   // A focus REQUEST raised by the turn-end hook (pageStore.requestPageFocus)
   // — taken here, once, by the page that shows this thread; observable, so a
-  // page already on screen scrolls now.
+  // page already on screen scrolls now. PEEK BEFORE TAKE: a page that was not
+  // the active tab mounts empty (revision 0, no blocks yet), and taking the
+  // request then would consume it with nothing to scroll to — so the request
+  // is taken only once the block exists; the `revision` dep re-runs this when
+  // the page loads.
   const focusNonce = useSyncExternalStore(subscribePageFocus, pageFocusNonce);
   useEffect(() => {
-    const target = takePageFocus(threadId);
-    if (target === "decisions") scrollToBlock("decisions");
+    const pending = peekPageFocus(threadId);
+    if (pending === null) return;
+    const el = rootRef.current?.querySelector<HTMLElement>(`[data-page-block="${pending}"]`);
+    if (!el) return;
+    if (takePageFocus(threadId) === pending) scrollToBlock(pending);
   }, [focusNonce, threadId, revision, scrollToBlock]);
 
   if (page.isEmpty && evidence.length === 0) {
@@ -481,7 +490,6 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
   }
 
   const summary = pageSummary(page);
-  const reviewFirst = page.latestTurn?.reviewFirst ?? null;
 
   const renderAddress = (address: string) => {
     // SWIT-73: `view:<id>#h:<slug>` names a heading INSIDE a report — the
@@ -520,17 +528,17 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
         gap: 26,
       }}
     >
-      {(summary || reviewFirst || nextThing) && (
+      {(summary || nextThing) && (
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           {summary && (
             <div style={{ fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.5 }}>
               {summary}
             </div>
           )}
-          {reviewFirst ? (
+          {nextThing?.why === "review" ? (
             <div style={{ display: "flex", gap: 6, alignItems: "baseline", minWidth: 0 }}>
               <span style={{ flex: "none", color: "var(--text-dim)" }}>start here →</span>
-              {renderAddress(reviewFirst)}
+              {renderAddress(nextThing.address)}
             </div>
           ) : nextThing ? (
             <div style={{ display: "flex", gap: 6, alignItems: "baseline", minWidth: 0 }}>

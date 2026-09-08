@@ -1692,11 +1692,24 @@ export function openInPanel(
   // `focus: false` (SWIT-79): the tab that was active stays active, found
   // again BY CONTENT after the strip changes under it. Only meaningful when
   // there is a strip to stay in — a fresh strip's one tab is active anyway.
+  // When the active tab itself VANISHED (it was the preview and this open
+  // replaced it), "behind" cannot mean the new preview: focus goes to the
+  // old active index's neighbour (the tab before it, else after), so the
+  // opened artifact is never in front under `focus: false`. The turn-end
+  // hook does not even get here — it stands down while the preview is the
+  // active tab (`isPreviewActive`) — so this is the store's own honesty.
   const keepActive = opts.focus === false && current ? current.artifacts[current.activeIndex] ?? null : null;
+  const previousActive = current?.activeIndex ?? 0;
   const withFocusRule = (state: PanelState): PanelState => {
     if (!keepActive) return state;
     const at = indexOfArtifact(state.artifacts, keepActive);
-    return at >= 0 && at !== state.activeIndex ? { ...state, activeIndex: at } : state;
+    const target =
+      at >= 0
+        ? at
+        : previousActive > 0
+          ? previousActive - 1
+          : Math.min(previousActive + 1, state.artifacts.length - 1);
+    return target !== state.activeIndex ? { ...state, activeIndex: target } : state;
   };
 
   // THE PREVIEW REPLACE (SWIT-47). Applies only when the artifact is NOT
@@ -1765,6 +1778,20 @@ export function previewIdentityFor(sessionId: string | null): string {
 
 export function usePreviewIdentity(sessionId: string | null): string {
   return useSyncExternalStore(subscribe, () => previewIdentityFor(sessionId));
+}
+
+/** Is the preview the strip's ACTIVE tab (a LIVE strip only — a hidden strip
+ *  is not being read)? The turn-end hook's stand-down (SWIT-79 review): an
+ *  "open behind" would REPLACE that preview, and nothing is behind a tab the
+ *  user is looking at. */
+export function isPreviewActive(sessionId: string | null): boolean {
+  if (!sessionId) return false;
+  const state = panels.get(ownerKeyFor(sessionId));
+  if (!state) return false;
+  const active = state.artifacts[state.activeIndex];
+  if (!active) return false;
+  const previewId = previewIdentityFor(sessionId);
+  return previewId !== "" && artifactIdentity(active) === previewId;
 }
 
 /** PIN the preview tab (double-click it, per the wireframe): the tab stays,

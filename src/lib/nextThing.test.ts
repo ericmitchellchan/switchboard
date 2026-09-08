@@ -16,6 +16,7 @@ import {
   parsePageFile,
   requestPageFocus,
   takePageFocus,
+  peekPageFocus,
   subscribePageFocus,
   pageFocusNonce,
   __resetPageFocusForTests,
@@ -68,6 +69,29 @@ describe("openableAddressIn", () => {
 });
 
 describe("nextThingFor", () => {
+  it("the turn's reviewFirst wins over questions and To do — openable or not", () => {
+    const withReview = (reviewFirst: string) =>
+      mergePage(
+        { ...parsePageFile(""), questions: [question("q1")], items: [item("i1", "read view:v1")], turns: [{ at: "2026-09-08T10:00:00Z", lines: ["done"], reviewFirst }] },
+        {},
+        []
+      );
+    const next = nextThingFor(withReview("view:v3#h:results"), ctx)!;
+    expect(next.why).toBe("review");
+    if (next.why !== "review") return;
+    expect(next.address).toBe("view:v3#h:results");
+    expect(next.artifact).toEqual({ kind: "view", threadId: "th1", viewId: "v3" });
+    expect(next.anchor).toBe("h:results");
+    expect(next.offerKey).toBe("review:view:th1:v3");
+    // A pointer at something with no surface (a ticket) is still the line —
+    // and opens nothing.
+    const ticket = nextThingFor(withReview("SWIT-79"), ctx)!;
+    expect(ticket.why).toBe("review");
+    if (ticket.why !== "review") return;
+    expect(ticket.artifact).toBeNull();
+    expect(ticket.label).toBe("SWIT-79");
+  });
+
   it("open questions win: `answer N question(s)`, keyed by the sorted open ids", () => {
     const page = rendered([question("q2"), question("q1")], [item("i1", "read view:v1")]);
     const next = nextThingFor(page, ctx)!;
@@ -125,8 +149,13 @@ describe("the page-focus one-shot", () => {
     expect(notified).toBe(1);
     expect(pageFocusNonce()).toBe(before + 1);
     expect(takePageFocus("th2")).toBeNull();
+    // Peek does not consume — the page peeks until its block is mounted.
+    expect(peekPageFocus("th1")).toBe("decisions");
+    expect(peekPageFocus("th1")).toBe("decisions");
+    expect(peekPageFocus("th2")).toBeNull();
     expect(takePageFocus("th1")).toBe("decisions");
     expect(takePageFocus("th1")).toBeNull();
+    expect(peekPageFocus("th1")).toBeNull();
     unsubscribe();
     requestPageFocus("th1", "decisions");
     expect(notified).toBe(1);

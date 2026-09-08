@@ -1069,6 +1069,13 @@ export function pageFocusNonce(): number {
   return focusNonce;
 }
 
+/** Read the pending request for one thread WITHOUT taking it — the page
+ *  peeks until the block it would scroll to is actually mounted (a page that
+ *  was not the active tab mounts empty at revision 0), then takes. */
+export function peekPageFocus(threadId: string): PageFocusTarget | null {
+  return pendingFocus.get(threadId) ?? null;
+}
+
 /** Take (and clear) the pending request for one thread. */
 export function takePageFocus(threadId: string): PageFocusTarget | null {
   const target = pendingFocus.get(threadId);

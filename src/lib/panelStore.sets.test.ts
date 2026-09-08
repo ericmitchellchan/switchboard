@@ -22,6 +22,7 @@ import {
   activatePageTab,
   togglePanel,
   previewIdentityFor,
+  isPreviewActive,
   isLocalhostUrlOpen,
   setPanelThreadResolver,
   ensurePageTab,
@@ -178,6 +179,34 @@ describe("focus: false (open behind)", () => {
     ensurePageTab("tab1");
     openInPanel("tab1", doc("spec.md"), { preview: true });
     expect(panelStateFor("tab1")!.activeIndex).toBe(1);
+  });
+
+  it("when the ACTIVE tab is the preview being replaced (activeIndex ≠ 0), focus goes to its neighbour — never the new preview", () => {
+    ensurePageTab("tab1");
+    openInPanel("tab1", doc("pin.md")); // pinned, index 1
+    openInPanel("tab1", doc("spec.md"), { preview: true }); // the preview, index 2, ACTIVE
+    expect(panelStateFor("tab1")!.activeIndex).toBe(2);
+    expect(isPreviewActive("tab1")).toBe(true);
+    openInPanel("tab1", doc("other.md"), { preview: true, focus: false });
+    const state = panelStateFor("tab1")!;
+    expect(state.artifacts.map((a) => (a.kind === "kb-doc" ? a.path : a.kind))).toEqual(["page", "pin.md", "other.md"]);
+    expect(state.activeIndex).toBe(1);
+    expect(previewIdentityFor("tab1")).toBe(artifactIdentity(doc("other.md")));
+    expect(isPreviewActive("tab1")).toBe(false);
+  });
+
+  it("isPreviewActive: the preview must be the LIVE strip's active tab", () => {
+    expect(isPreviewActive("tab1")).toBe(false);
+    ensurePageTab("tab1");
+    openInPanel("tab1", doc("spec.md"), { preview: true });
+    expect(isPreviewActive("tab1")).toBe(true);
+    activateArtifact("tab1", 0);
+    expect(isPreviewActive("tab1")).toBe(false);
+    activateArtifact("tab1", 1);
+    expect(isPreviewActive("tab1")).toBe(true);
+    togglePanel("tab1"); // hidden = not being read
+    expect(isPreviewActive("tab1")).toBe(false);
+    expect(isPreviewActive(null)).toBe(false);
   });
 });
 

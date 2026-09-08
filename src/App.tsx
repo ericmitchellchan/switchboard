@@ -111,6 +111,7 @@ import {
   // SWIT-79: sets + the turn-end next thing.
   showingArtifact,
   activatePageTab,
+  isPreviewActive,
   type NewPanelTerminal,
   type PanelActions,
   type SessionLabel,
@@ -130,7 +131,7 @@ import {
 import { runPromotionPass, promotionPassReason, PROMOTION_POLL_MS } from "./lib/threadPromotion";
 import { parsePageFile, parseAnswersFile, parseInboxFile, parseRetractedFile, mergePage, conventionLine, postTimes, countUnreadTimes, nextPassEntry, loadInboxSeen, markInboxSeen, countQuestionStates, requestPageFocus, type ConventionEntry, type ThreadPassEntry } from "./lib/pageStore";
 import { nextThingFor, offerNextThing, clearNextThingOffer } from "./lib/nextThing";
-import { getCachedDocList } from "./lib/kb";
+import { getCachedDocList, refreshDocList } from "./lib/kb";
 import { requestReportAnchor } from "./lib/reportStore";
 import { parseSetsFile, setArtifactFor } from "./lib/artifactSets";
 import { explorerProjects, registerExplorerActions, quickThreadTarget, sessionRepoOptions, useSessionRepos, projectKeyForDir } from "./lib/explorer";
@@ -662,6 +663,9 @@ export default function App() {
     // disposeTerminal; calling the stale remover is a harmless no-op.
     chatDetectorRemoversRef.current.get(id)?.();
     chatDetectorRemoversRef.current.delete(id);
+    // The turn-end seam's previous-status entry dies with the session too
+    // (ids are never reused; a leftover would only grow the map).
+    prevStatusRef.current.delete(id);
     void saveThreadsToDisk();
   }, [removeSession]);
 
@@ -1276,6 +1280,7 @@ export default function App() {
     log.info(`Delete thread id=${threadId}`);
     deleteThread(threadId);
     pruneThreadScan(threadId);
+    clearNextThingOffer(threadId);
     void saveThreadsToDisk();
   }, []);
 
@@ -1809,13 +1814,18 @@ export default function App() {
   // unchanged and the once-per-key rule makes it a no-op.
   //
   // The page is reloaded FIRST (Ky's rule: a stale copy with no questions
-  // would miss the block the agent just wrote), then: open questions → the
-  // page's decisions block, in front (no new tab); else the first To do row
-  // with an openable address → opened BEHIND the page in the preview slot;
-  // else nothing. Offered ONCE per key (lib/nextThing). A view the agent
-  // showed in the same turn is the intent poll's to open, and it wins: when
-  // that poll opened something within INTENT_GRACE_MS the To do open stands
-  // down (not recorded, so the next settle may still offer it).
+  // would miss the block the agent just wrote), then lib/nextThing's rule:
+  // the turn's reviewFirst → opened BEHIND the page when it is openable; else
+  // open questions → the page's decisions block, in front (no new tab); else
+  // the first To do row with an openable address → opened BEHIND the page in
+  // the preview slot; else nothing. Offered ONCE per key (lib/nextThing).
+  // TWO STAND-DOWNS, neither recorded (so the next settle may still offer):
+  // (1) the preview is the strip's ACTIVE tab — an open-behind would REPLACE
+  // the thing being read, in front (`isPreviewActive`); (2) a view the agent
+  // showed in the same turn is the intent poll's to open, and it wins for
+  // INTENT_GRACE_MS. The KB doc list is refreshed when the cache is still
+  // cold (no PageView has mounted yet) — one IPC, once, so a KB address is
+  // never mis-read as a repo file.
   const prevStatusRef = useRef(new Map<string, AgentStatus>());
   const settleTurn = useCallback(async (sessionId: string) => {
     const thread = findThreadBySessionId(sessionId);
@@ -1840,7 +1850,8 @@ export default function App() {
       } catch {
         // no registry — a repo path stays plain text, the rest still resolves
       }
-      const next = nextThingFor(page, { threadId, kbDocs: getCachedDocList(), projectKey });
+      const kbDocs = getCachedDocList() ?? (await refreshDocList().catch(() => null));
+      const next = nextThingFor(page, { threadId, kbDocs, projectKey });
       if (!next) {
         clearNextThingOffer(threadId);
         return;
@@ -1853,6 +1864,13 @@ export default function App() {
         log.info(`Next thing: thread=${threadId} — ${next.label}`);
         requestPageFocus(threadId, "decisions");
         activatePageTab(host);
+        return;
+      }
+      // A reviewFirst that names nothing openable (a ticket key) is the
+      // page's line to print; there is nothing for the hook to open.
+      if (next.artifact === null) return;
+      if (isPreviewActive(host)) {
+        log.info(`Next thing: thread=${threadId} — ${next.label} (stood down: the preview is being read)`);
         return;
       }
       const lastIntent = lastIntentOpenRef.current.get(threadId) ?? 0;
