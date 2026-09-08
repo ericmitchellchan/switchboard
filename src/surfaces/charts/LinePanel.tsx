@@ -28,11 +28,21 @@
 //   · `regions` shade time bands (one neutral tone at low alpha, label small
 //     at the band's top); `xRange` pins the x scale so small multiples share
 //     one time domain.
+//
+// SWIT-75 — `levels`: horizontal price rules (solid | dashed) and `zone`
+// bands (between `price` and `price2`), drawn UNDER the series in the same
+// neutral tone as the zero rule's family, labels small at the RIGHT edge
+// (over the series, so a label is never hidden by a line). With levels and
+// no fixed `yRange` the y scale is WIDENED to hold them — a put wall below
+// the day's range is exactly the level worth seeing, and auto-ranging on
+// the data alone would leave it off the canvas. A fixed `yRange` (small
+// multiples) is honoured as given.
 
 import { useEffect, useMemo, useRef } from "react";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
-import { LEVEL_COLORS, isoToUtcSeconds, levelColor, seriesColor } from "./candles";
+import { LEVEL_COLORS, isoToUtcSeconds, levelColor, levelRange, seriesColor } from "./candles";
+import type { ChartLevel } from "./candles";
 import { useSurfaceAnchorRegistry } from "../page-api";
 import type { SurfaceAnchorProvider } from "../page-api";
 
@@ -68,7 +78,13 @@ export type LinePanelProps = {
   /** Fixed x range in UTC seconds (SWIT-70: small multiples share one time
    *  domain); omit for auto. */
   xRange?: [number, number];
+  /** Horizontal levels (SWIT-75): a rule at `price` (solid default,
+   *  `dashed`), or a `zone` band between `price` and `price2`; label at the
+   *  right edge. */
+  levels?: readonly LineLevel[];
 };
+
+export type LineLevel = ChartLevel;
 
 const CHROME = {
   text: "#b4b4b4",
@@ -79,6 +95,10 @@ const CHROME = {
   /** Region bands: --text-secondary (#b4b4b4) at low alpha — neutral, never
    *  a series tone. */
   region: "rgba(180, 180, 180, 0.07)",
+  /** Level rules (SWIT-75): --text-secondary at half alpha — read as
+   *  context under the series, brighter than the zero rule (a level names a
+   *  price; zero is a baseline). Zone bands reuse `region`. */
+  level: "rgba(180, 180, 180, 0.5)",
   font: "10px 'JetBrains Mono', 'Cascadia Code', 'SF Mono', Consolas, monospace",
 };
 
@@ -96,6 +116,7 @@ export default function LinePanel({
   markers,
   regions,
   xRange,
+  levels,
 }: LinePanelProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
@@ -107,8 +128,14 @@ export default function LinePanel({
   markersRef.current = markers;
   const regionsRef = useRef(regions);
   regionsRef.current = regions;
+  const levelsRef = useRef(levels);
+  levelsRef.current = levels;
   const xsRef = useRef(xs);
   xsRef.current = xs;
+  // The y extent the levels need — part of the OPTIONS signature (a level
+  // moving the range is a rebuild, not a redraw; they change with the spec,
+  // not the tick).
+  const levelExtent = useMemo(() => levelRange(levels), [levels]);
 
   const data = useMemo<uPlot.AlignedData>(
     () => [Array.from(xs), ...series.map((s) => Array.from(s.values))] as uPlot.AlignedData,
@@ -125,8 +152,9 @@ export default function LinePanel({
   const optionsKey = useMemo(
     () =>
       JSON.stringify(series.map((s) => [s.label, s.color, s.width, s.dashed])) +
-      `|${height}|${intraday}|${yRange?.join(",") ?? ""}|${xRange?.join(",") ?? ""}|${formatY ? "fy" : ""}`,
-    [series, height, intraday, yRange, xRange, formatY]
+      `|${height}|${intraday}|${yRange?.join(",") ?? ""}|${xRange?.join(",") ?? ""}|${formatY ? "fy" : ""}` +
+      `|${levelExtent?.join(",") ?? ""}`,
+    [series, height, intraday, yRange, xRange, formatY, levelExtent]
   );
 
   useEffect(() => {
@@ -158,14 +186,32 @@ export default function LinePanel({
       ],
       scales: {
         ...(xRange ? { x: { range: xRange } } : {}),
-        ...(yRange ? { y: { range: yRange } } : {}),
+        ...(yRange
+          ? { y: { range: yRange } }
+          : levelExtent
+            ? {
+                // SWIT-75: widen the auto range to hold every level, then
+                // uPlot's own padding rule over the union (rangeNum with
+                // its default 10% soft pad) so the extremes stay off the frame.
+                y: {
+                  range: (_u: uPlot, dataMin: number, dataMax: number) =>
+                    uPlot.rangeNum(
+                      Math.min(dataMin, levelExtent[0]),
+                      Math.max(dataMax, levelExtent[1]),
+                      0.1,
+                      true
+                    ) as [number, number],
+                },
+              }
+            : {}),
       },
       hooks: {
-        // Under the series: region bands + the zero rule (drawClear fires
-        // after the canvas is cleared, before axes and series).
-        drawClear: [(u) => drawUnder(u, regionsRef.current)],
-        // Over the series: marker rules + labels, region labels.
-        draw: [(u) => drawOver(u, markersRef.current, regionsRef.current)],
+        // Under the series: region bands + level rules/zones + the zero rule
+        // (drawClear fires after the canvas is cleared, before axes and
+        // series).
+        drawClear: [(u) => drawUnder(u, regionsRef.current, levelsRef.current)],
+        // Over the series: marker rules + labels, region labels, level labels.
+        draw: [(u) => drawOver(u, markersRef.current, regionsRef.current, levelsRef.current)],
       },
       series: [
         { label: intraday ? "time" : "date" },
@@ -199,11 +245,12 @@ export default function LinePanel({
     plotRef.current?.setData(data);
   }, [data]);
 
-  // Markers + regions live on the canvas; a change means one redraw, not a
-  // rebuild.
+  // Markers + regions + levels live on the canvas; a change means one
+  // redraw, not a rebuild (a level that moves the RANGE rebuilds through the
+  // options key above).
   useEffect(() => {
     plotRef.current?.redraw(false, true);
-  }, [markers, regions]);
+  }, [markers, regions, levels]);
 
   // ── Anchors (T7): publish `pt:<iso>` while `points` is given ─────────────
   const registry = useSurfaceAnchorRegistry();
@@ -261,13 +308,46 @@ function cutLabel(label: string): string {
   return label.length > LABEL_MAX ? `${label.slice(0, LABEL_MAX - 1)}…` : label;
 }
 
-/** UNDER the series (SWIT-70, drawClear): region bands, then a 1px rule at 0
- *  when the drawn y scale spans zero — the story's baseline, one step
- *  brighter than the grid so it reads as "zero", not as a tick. */
-function drawUnder(u: uPlot, regions: readonly { from: string; to: string; label?: string }[] | undefined): void {
+/** UNDER the series (SWIT-70, drawClear): region bands, level rules and
+ *  zone bands (SWIT-75), then a 1px rule at 0 when the drawn y scale spans
+ *  zero — the story's baseline, one step brighter than the grid so it reads
+ *  as "zero", not as a tick. */
+function drawUnder(
+  u: uPlot,
+  regions: readonly { from: string; to: string; label?: string }[] | undefined,
+  levels: readonly LineLevel[] | undefined
+): void {
   const ctx = u.ctx;
   const dpr = devicePixelRatio || 1;
+  const right = u.bbox.left + u.bbox.width;
+  const bottom = u.bbox.top + u.bbox.height;
   ctx.save();
+  if (levels) {
+    for (const l of levels) {
+      if (!Number.isFinite(l.price)) continue;
+      if (l.style === "zone") {
+        if (typeof l.price2 !== "number" || !Number.isFinite(l.price2)) continue;
+        const y1 = u.valToPos(Math.max(l.price, l.price2), "y", true);
+        const y2 = u.valToPos(Math.min(l.price, l.price2), "y", true);
+        const top = Math.max(u.bbox.top, y1);
+        const bot = Math.min(bottom, y2);
+        if (bot <= top) continue;
+        ctx.fillStyle = CHROME.region;
+        ctx.fillRect(u.bbox.left, top, u.bbox.width, bot - top);
+        continue;
+      }
+      const py = u.valToPos(l.price, "y", true);
+      if (py < u.bbox.top || py > bottom) continue;
+      ctx.strokeStyle = CHROME.level;
+      ctx.lineWidth = Math.max(1, Math.round(dpr));
+      ctx.setLineDash(l.style === "dashed" ? [4 * dpr, 3 * dpr] : []);
+      ctx.beginPath();
+      ctx.moveTo(u.bbox.left, py);
+      ctx.lineTo(right, py);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
   if (regions) {
     for (const r of regions) {
       const a = isoToUtcSeconds(r.from);
@@ -302,14 +382,34 @@ function drawUnder(u: uPlot, regions: readonly { from: string; to: string; label
 function drawOver(
   u: uPlot,
   markers: readonly { ts: string; label: string }[] | undefined,
-  regions: readonly { from: string; to: string; label?: string }[] | undefined
+  regions: readonly { from: string; to: string; label?: string }[] | undefined,
+  levels: readonly LineLevel[] | undefined
 ): void {
   const ctx = u.ctx;
   const dpr = devicePixelRatio || 1;
   const right = u.bbox.left + u.bbox.width;
+  const bottom = u.bbox.top + u.bbox.height;
   ctx.save();
   ctx.font = `${Math.round(9 * dpr)}px 'JetBrains Mono', 'Cascadia Code', 'SF Mono', Consolas, monospace`;
   ctx.textBaseline = "top";
+  if (levels) {
+    // Level labels at the RIGHT edge (SWIT-75), just above the rule (a
+    // zone's above its upper edge); one that would leave the plot area is
+    // pushed down under the rule instead.
+    ctx.fillStyle = CHROME.text;
+    ctx.textAlign = "right";
+    for (const l of levels) {
+      if (!l.label || !Number.isFinite(l.price)) continue;
+      const top =
+        l.style === "zone" && typeof l.price2 === "number" && Number.isFinite(l.price2)
+          ? Math.max(l.price, l.price2)
+          : l.price;
+      const py = u.valToPos(top, "y", true);
+      if (py < u.bbox.top || py > bottom) continue;
+      const above = py - 11 * dpr;
+      ctx.fillText(cutLabel(l.label), right - 3 * dpr, above >= u.bbox.top ? above : py + 2 * dpr);
+    }
+  }
   if (regions) {
     ctx.fillStyle = CHROME.text;
     ctx.textAlign = "left";

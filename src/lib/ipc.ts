@@ -122,6 +122,14 @@ export async function readViewData(threadId: string, relPath: string): Promise<s
   return invoke("read_view_data", { threadId, relPath });
 }
 
+/** Write a deck's `notes.json` (SWIT-75) into `<relDir>` under the thread's
+ *  working dir — the dir must already exist (the deck the exporter wrote),
+ *  the file name is fixed server-side, the body is shape-checked and capped
+ *  at 1 MB in Rust. `""` = the working dir itself. */
+export async function writeViewNotes(threadId: string, relDir: string, data: string): Promise<void> {
+  return invoke("write_view_notes", { threadId, relDir, data });
+}
+
 /** Deliver a cross-thread post into a TARGET thread's inbox (SWIT-52) — the
  *  app-side writer behind the composer's `@thread …` form. Same record shape
  *  the MCP server's `post` tool appends. */

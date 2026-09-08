@@ -34,8 +34,20 @@ import {
   isLocalBackendUrl,
   drillFallbackSentence,
   specLines,
+  // SWIT-75
+  parseViewLevels,
+  VIEW_LEVEL_CAP,
+  VIEW_MARKER_CAP,
+  markersFromColumns,
+  effectiveMarkers,
+  deckKeyColumn,
+  deckKeys,
+  adjacentDrillKey,
+  deckPosition,
+  notesDirOf,
 } from "./viewStore";
 import type { ViewSpec } from "./viewStore";
+import { formatBatch } from "./viewNotes";
 import { viewPinTargetFor } from "./pins";
 
 // ── python-backed smoke/parity helpers ───────────────────────────────────────
@@ -1487,5 +1499,221 @@ describe("SWIT-70 — lineDomains (shared axes for small multiples)", () => {
     expect(lineDomains([a]).y).toBeNull();
     const b = chart([300], [{ label: "close", values: [null] }]);
     expect(lineDomains([a, b]).y).not.toBeNull();
+  });
+});
+
+// ── SWIT-75: the chart review loop — levels, marker columns, the deck ───────
+
+describe("parseViewLevels (SWIT-75) — tolerant, a zone is two prices", () => {
+  it("keeps finite prices, the three styles, trims labels; a zone without price2 drops; capped", () => {
+    expect(
+      parseViewLevels([
+        { price: 25471.4, label: " flip " },
+        { price: "25443.8", style: "dashed", label: "call wall" },
+        { price: 25233.5, price2: "25260", style: "zone", label: "put zone" },
+        { price: 1, style: "zone" }, // no price2 — not a band
+        { price: 2, style: "dotted" }, // unknown style → solid
+        { price: "abc" },
+        { label: "no price" },
+        { price: 3, price2: 4 }, // price2 on a rule is ignored
+        "junk",
+      ])
+    ).toEqual([
+      { price: 25471.4, label: "flip" },
+      { price: 25443.8, style: "dashed", label: "call wall" },
+      { price: 25233.5, style: "zone", price2: 25260, label: "put zone" },
+      { price: 2 },
+      { price: 3 },
+    ]);
+    expect(parseViewLevels(Array.from({ length: 20 }, (_, i) => ({ price: i })))).toHaveLength(VIEW_LEVEL_CAP);
+    expect(parseViewLevels("nope")).toEqual([]);
+  });
+
+  it("rides the spec AND the drill, and resolveDrill hands them to the child with markers + markerColumns", () => {
+    const spec = parseViewSpec(
+      JSON.stringify({
+        id: "deck",
+        kind: "table",
+        title: "gamma deck",
+        source: { type: "file", path: ".sb-views/gamma/deck/index.json" },
+        keyColumn: "day",
+        levels: [{ price: 5 }],
+        markerColumns: ["entry"],
+        drill: {
+          kind: "line",
+          title: "{key}",
+          source: { type: "file", path: ".sb-views/gamma/deck/days/{key}.json" },
+          series: ["nq_close"],
+          levels: [{ price: 25471.4, label: "flip" }, { price: 1, style: "zone" }],
+          markers: [{ ts: "2026-02-19T14:30:00Z", label: "open" }, { nope: 1 }],
+          markerColumns: ["eric_long_entry", "eric_short_entry", "eric_exit", 7],
+        },
+      })
+    ).spec!;
+    expect(spec.levels).toEqual([{ price: 5 }]);
+    expect(spec.markerColumns).toEqual(["entry"]);
+    expect(spec.drill?.levels).toEqual([{ price: 25471.4, label: "flip" }]);
+    expect(spec.drill?.markers).toEqual([{ ts: "2026-02-19T14:30:00Z", label: "open" }]);
+    expect(spec.drill?.markerColumns).toEqual(["eric_long_entry", "eric_short_entry", "eric_exit"]);
+    const child = resolveDrill(spec, "2026-02-19").spec!;
+    expect(child.levels).toEqual(spec.drill?.levels);
+    expect(child.markers).toEqual(spec.drill?.markers);
+    expect(child.markerColumns).toEqual(spec.drill?.markerColumns);
+    expect(specLines(child)).toContain("marks     eric_long_entry · eric_short_entry · eric_exit");
+    expect(specLines(child)).toContain("levels    flip 25471.4");
+    expect(specLines(child)).toContain("markers   1");
+  });
+});
+
+describe("markersFromColumns / effectiveMarkers / lineSeriesColumns (SWIT-75)", () => {
+  const rows = [
+    { time: "2026-02-19T04:22:00-0500", nq_close: 25480, flip: 25471.4, eric_long_entry: null, eric_short_entry: null, eric_exit: null },
+    { time: "2026-02-19T04:23:00-0500", nq_close: 25489.75, flip: 25471.4, eric_long_entry: null, eric_short_entry: 25489.75, eric_exit: null },
+    { time: "2026-02-19T04:26:00-0500", nq_close: 25464, flip: 25471.4, eric_long_entry: null, eric_short_entry: null, eric_exit: 25464 },
+    { time: "2026-02-19T04:27:00-0500", nq_close: 25470, flip: 25471.4, eric_long_entry: "", eric_short_entry: null, eric_exit: null },
+  ];
+  const base = (extra: Partial<ViewSpec>): ViewSpec => ({
+    id: "d",
+    kind: "line",
+    title: "day",
+    source: { type: "file", path: "day.json" },
+    builtAt: "",
+    builtBy: "agent",
+    ...extra,
+  });
+
+  it("a non-null cell is a marker at the row's time, labelled by the column; empty strings are not", () => {
+    expect(markersFromColumns(rows, ["eric_long_entry", "eric_short_entry", "eric_exit"])).toEqual([
+      { ts: "2026-02-19T04:23:00-0500", label: "eric_short_entry", id: "eric_short_entry@2026-02-19T04:23:00-0500" },
+      { ts: "2026-02-19T04:26:00-0500", label: "eric_exit", id: "eric_exit@2026-02-19T04:26:00-0500" },
+    ]);
+    expect(markersFromColumns(rows, undefined)).toEqual([]);
+    expect(markersFromColumns([{ nq_close: 1, entry: 2 }], ["entry"])).toEqual([]); // no time
+  });
+
+  it("effectiveMarkers is the spec's list then the column ones, one union, capped; same array when none", () => {
+    const spec = base({
+      markers: [{ ts: "2026-02-19T09:30:00-0500", label: "open" }],
+      markerColumns: ["eric_exit"],
+    });
+    expect(effectiveMarkers(rows, spec).map((m) => m.label)).toEqual(["open", "eric_exit"]);
+    const none = base({});
+    expect(effectiveMarkers(rows, none)).toBe(effectiveMarkers(rows, none));
+    const many = Array.from({ length: 300 }, (_, i) => ({ time: `2026-02-19T${String(10 + (i % 10)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}Z`, e: 1 }));
+    expect(effectiveMarkers(many, base({ markerColumns: ["e"] })).length).toBeLessThanOrEqual(VIEW_MARKER_CAP);
+  });
+
+  it("series inference EXCLUDES marker columns; an explicit series list is untouched", () => {
+    expect(lineSeriesColumns(rows, base({ markerColumns: ["eric_short_entry", "eric_exit"] }))).toEqual(["nq_close", "flip"]);
+    expect(lineSeriesColumns(rows, base({}))).toEqual(["nq_close", "flip", "eric_short_entry", "eric_exit"]);
+    expect(lineSeriesColumns(rows, base({ series: ["nq_close"], markerColumns: ["nq_close"] }))).toEqual(["nq_close"]);
+    // The click path names the column marker on its point.
+    const spec = base({ series: ["nq_close"], markerColumns: ["eric_exit"] });
+    expect(drillKeyForAnchor("pt:2026-02-19T04:26:00-0500", { rows, spec })).toEqual({
+      key: "eric_exit@2026-02-19T04:26:00-0500",
+      label: "eric_exit",
+    });
+  });
+});
+
+describe("the deck (SWIT-75) — adjacentDrillKey / deckPosition in file order, notesDirOf", () => {
+  const rows = [
+    { day: "2026-02-19", n: 2 },
+    { day: "2026-02-20", n: 0 },
+    { day: "2026-02-20", n: 1 }, // duplicate key — the FIRST occurrence is the card
+    { day: " 2026-02-23 ", n: 3 },
+    { day: null, n: 4 },
+    { day: "", n: 5 },
+  ];
+
+  it("walks the key column, deduped, no wrap; null off the deck", () => {
+    expect(deckKeys(rows, "day")).toEqual(["2026-02-19", "2026-02-20", "2026-02-23"]);
+    expect(adjacentDrillKey(rows, "day", "2026-02-19", 1)).toBe("2026-02-20");
+    expect(adjacentDrillKey(rows, "day", "2026-02-20", 1)).toBe("2026-02-23");
+    expect(adjacentDrillKey(rows, "day", "2026-02-20", -1)).toBe("2026-02-19");
+    expect(adjacentDrillKey(rows, "day", "2026-02-19", -1)).toBeNull();
+    expect(adjacentDrillKey(rows, "day", "2026-02-23", 1)).toBeNull();
+    expect(adjacentDrillKey(rows, "day", "2099-01-01", 1)).toBeNull();
+    expect(deckPosition(rows, "day", "2026-02-20")).toEqual({ index: 2, total: 3 });
+    expect(deckPosition(rows, "day", "nope")).toBeNull();
+    // No key column: each row's first key (rowAnchorId's fallback).
+    expect(deckKeys([{ a: "x", b: 1 }, { b: 2, a: "y" }], null)).toEqual(["x", "2"]);
+    expect(deckKeyColumn({ keyColumn: "day" })).toBe("day");
+    expect(deckKeyColumn({ columns: ["c1", "c2"] })).toBe("c1");
+    expect(deckKeyColumn({})).toBeNull();
+  });
+
+  it("the notes dir is the parent SOURCE's directory; a query has none", () => {
+    expect(notesDirOf({ type: "file", path: ".sb-views/gamma/deck/index.json" })).toBe(".sb-views/gamma/deck");
+    expect(notesDirOf({ type: "file", path: ".sb-views\\gamma\\deck\\index.json" })).toBe(".sb-views/gamma/deck");
+    expect(notesDirOf({ type: "file", path: "index.json" })).toBe("");
+    expect(notesDirOf({ type: "query", url: "http://127.0.0.1:8799/rows" })).toBeNull();
+  });
+});
+
+// ── SWIT-75 smoke: the REAL gamma deck (lodestar's export, copied into the
+// gitignored .sb-views/gamma/deck/) — 86 days, a 1320-row day file. Skipped
+// with a note when the copy is absent; never synthetic.
+describe("SWIT-75 smoke — the gamma deck: next/prev across 86 days, markers out of a real day file", () => {
+  const nodeRequire = createRequire(import.meta.url);
+  const fs = nodeRequire("node:fs") as {
+    existsSync: (p: string) => boolean;
+    readFileSync: (p: string, e: string) => string;
+  };
+  const pathMod = nodeRequire("node:path") as { join: (...p: string[]) => string; resolve: (...p: string[]) => string };
+  const deckDir = pathMod.resolve(".sb-views", "gamma", "deck");
+  const present = fs.existsSync(pathMod.join(deckDir, "index.json"));
+
+  it.skipIf(!present)("the table's drill walks the deck in file order and the day file yields entry/exit markers, not series", () => {
+    const parent = parseViewSpec(
+      JSON.stringify({
+        id: "gamma-deck",
+        kind: "table",
+        title: "gamma deck",
+        source: { type: "file", path: ".sb-views/gamma/deck/index.json" },
+        keyColumn: "day",
+        columns: ["day", "weekday", "prior_close_state", "n_trades", "eric_pnl_pts"],
+        builtAt: "2026-09-08T10:00:00Z",
+        builtBy: "agent",
+        drill: {
+          kind: "line",
+          title: "{key}",
+          source: { type: "file", path: ".sb-views/gamma/deck/days/{key}.json" },
+          series: ["nq_close"],
+          markerColumns: ["eric_long_entry", "eric_short_entry", "eric_exit"],
+          levels: [{ price: 25471.4, label: "flip" }, { price: 25233.5, price2: 25443.8, style: "zone", label: "walls" }],
+        },
+      })
+    ).spec!;
+    const rows = parseViewRows(fs.readFileSync(pathMod.join(deckDir, "index.json"), "utf8"))!;
+    expect(rows.length).toBeGreaterThan(10);
+    const col = deckKeyColumn(parent);
+    const keys = deckKeys(rows, col);
+    expect(keys).toHaveLength(rows.length);
+    // Walk the whole deck forward and back: every step is the file's next row.
+    let key = keys[0];
+    for (let i = 1; i < keys.length; i++) {
+      key = adjacentDrillKey(rows, col, key, 1)!;
+      expect(key).toBe(keys[i]);
+      expect(deckPosition(rows, col, key)).toEqual({ index: i + 1, total: keys.length });
+    }
+    expect(adjacentDrillKey(rows, col, key, 1)).toBeNull();
+    expect(adjacentDrillKey(rows, col, keys[0], -1)).toBeNull();
+    expect(notesDirOf(parent.source)).toBe(".sb-views/gamma/deck");
+    // The first day, through the drill: markers come from the sparse columns
+    // and the series inference never draws them.
+    const child = resolveDrill(parent, keys[0]).spec!;
+    const dayRows = parseViewRows(fs.readFileSync(pathMod.resolve((child.source as { path: string }).path), "utf8"))!;
+    expect(dayRows.length).toBeGreaterThan(500);
+    const markers = effectiveMarkers(dayRows, child);
+    expect(markers.length).toBeGreaterThan(0);
+    for (const m of markers) expect(["eric_long_entry", "eric_short_entry", "eric_exit"]).toContain(m.label);
+    expect(lineSeriesColumns(dayRows, child)).toEqual(["nq_close"]);
+    expect(lineSeriesColumns(dayRows, { ...child, series: undefined })).not.toContain("eric_exit");
+    expect(child.levels).toHaveLength(2);
+    // The batch for two notes reads as one message.
+    expect(formatBatch(parent.title, [{ key: keys[0], text: "chase" }, { key: keys[1], text: "held" }])).toBe(
+      `Chart notes on gamma deck (2):\n- ${keys[0]}: chase\n- ${keys[1]}: held`
+    );
   });
 });

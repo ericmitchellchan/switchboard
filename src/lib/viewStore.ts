@@ -95,6 +95,26 @@
 //     `useView(…, drillKey, block)` reads the report spec, reads the
 //     markdown, finds block <n>'s inline spec, and resolves the drill
 //     against THAT — nothing is ever written to disk for it.
+//
+// SWIT-75 — the chart review loop (a DECK of drilled children):
+//   · `levels` [{price, label?, style?: solid|dashed|zone, price2?}] on a spec
+//     AND on a drill — horizontal rules on `candles` and `line`; `zone` is
+//     the band between `price` and `price2` (a zone is TWO prices; a zone
+//     with no `price2` drops — a single price is a line). Capped at
+//     `VIEW_LEVEL_CAP`, mirrored in the server.
+//   · `markerColumns` — columns of the rows whose non-null cells are MARKERS
+//     at that row's time, labelled by the column name (`markersFromColumns`);
+//     this is how a sparse entry/exit series stops being a fake line.
+//     `lineSeriesColumns`' inference EXCLUDES them, and `effectiveMarkers`
+//     is the one union (spec markers + column markers) every renderer and
+//     `drillKeyForAnchor` read. A drill may also carry static `markers`.
+//   · The DECK: a drilled child's siblings are the parent's rows in FILE
+//     ORDER (`deckKeys` — the parent's key column, first occurrence wins,
+//     the table's own anchor rule; the parent's sort/filter are component
+//     state of an instance that is no longer mounted and are deliberately
+//     not consulted). `adjacentDrillKey` / `deckPosition` are the toolbar's
+//     `←` `→` and `12 / 86`. `notesDirOf` names where the deck's notes file
+//     lives — the PARENT SOURCE's directory (lib/viewNotes.ts owns the file).
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { readThreadView, readViewData } from "./ipc";
@@ -131,6 +151,14 @@ export type ViewRegion = { from: string; to: string; label?: string };
  *  panel's, and is refused. */
 export type ViewPanel = { title: string; source: ViewSource };
 
+export const VIEW_LEVEL_STYLES = ["solid", "dashed", "zone"] as const;
+export type ViewLevelStyle = (typeof VIEW_LEVEL_STYLES)[number];
+
+/** A horizontal LEVEL on a price chart (SWIT-75): a rule at `price`
+ *  (`solid` default | `dashed`), or a `zone` — the band between `price` and
+ *  `price2`. The label sits at the right edge. */
+export type ViewLevel = { price: number; label?: string; style?: ViewLevelStyle; price2?: number };
+
 /** What is behind an anchor (T6): a child view whose source strings carry
  *  `{key}` — replaced by the anchor's key value at resolve time. */
 export type ViewDrill = {
@@ -145,6 +173,11 @@ export type ViewDrill = {
   /** timeline: the column a mark's radius comes from (T8). */
   sizeColumn?: string;
   definition?: string;
+  /** SWIT-75: the child's levels, static markers, and the columns whose
+   *  cells become markers. */
+  levels?: ViewLevel[];
+  markers?: ViewMarker[];
+  markerColumns?: string[];
 };
 
 export type ViewSpec = {
@@ -176,6 +209,10 @@ export type ViewSpec = {
   regions?: ViewRegion[];
   /** line (SWIT-70): small multiples beside the main chart. */
   panels?: ViewPanel[];
+  /** candles / line (SWIT-75): horizontal levels. */
+  levels?: ViewLevel[];
+  /** candles / line (SWIT-75): columns whose non-null cells are markers. */
+  markerColumns?: string[];
 };
 
 /** Caps, mirrored from the MCP server (the writer) — the reader trims to the
@@ -187,6 +224,10 @@ export const VIEW_FILTER_CAP = 4;
 export const VIEW_REGION_CAP = 12;
 export const VIEW_PANEL_CAP = 6;
 export const VIEW_SERIES_LABEL_CAP = 24;
+/** SWIT-75: levels per chart, and the marker cap the column-derived markers
+ *  share with the spec's static list — mirrored in the MCP server. */
+export const VIEW_LEVEL_CAP = 12;
+export const VIEW_MARKER_CAP = 200;
 /** Longest anchor key value a drill accepts (rowAnchorId's own cap). */
 export const DRILL_KEY_CAP = 120;
 
@@ -329,6 +370,51 @@ export function parseViewPanels(raw: unknown): ViewPanel[] {
   return out;
 }
 
+/** Tolerant levels parse (SWIT-75): a finite `price`; `style` one of
+ *  solid/dashed/zone (absent = solid); a `zone` needs a finite `price2` or
+ *  it drops (two prices make a band — one price is a line, and drawing a
+ *  fake band around it would claim a width the agent never stated); a
+ *  `price2` on a non-zone is ignored. Labels are trimmed and capped. Capped
+ *  at VIEW_LEVEL_CAP. Pure. */
+export function parseViewLevels(raw: unknown): ViewLevel[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ViewLevel[] = [];
+  for (const l of raw) {
+    if (!isRecord(l)) continue;
+    const price = numericCell(l.price);
+    if (price === null) continue;
+    const style: ViewLevelStyle =
+      typeof l.style === "string" && (VIEW_LEVEL_STYLES as readonly string[]).includes(l.style)
+        ? (l.style as ViewLevelStyle)
+        : "solid";
+    const level: ViewLevel = { price };
+    if (style !== "solid") level.style = style;
+    if (style === "zone") {
+      const price2 = numericCell(l.price2);
+      if (price2 === null) continue;
+      level.price2 = price2;
+    }
+    if (typeof l.label === "string" && l.label.trim().length > 0) level.label = l.label.trim().slice(0, 40);
+    out.push(level);
+    if (out.length >= VIEW_LEVEL_CAP) break;
+  }
+  return out;
+}
+
+/** Tolerant markers parse: `ts` required, label optional, id optional;
+ *  malformed entries drop alone. Shared by the spec and the drill. Pure. */
+function parseMarkers(raw: unknown): ViewMarker[] | null {
+  if (!Array.isArray(raw)) return null;
+  return raw
+    .filter((m): m is Record<string, unknown> => isRecord(m) && typeof m.ts === "string")
+    .map((m) => ({
+      ts: m.ts as string,
+      label: typeof m.label === "string" ? m.label : "",
+      ...(typeof m.id === "string" && m.id.length > 0 ? { id: m.id } : {}),
+    }))
+    .slice(0, VIEW_MARKER_CAP);
+}
+
 /** A list of column names, or null when absent/empty (non-strings drop). */
 function parseColumnList(raw: unknown): string[] | null {
   if (!Array.isArray(raw)) return null;
@@ -366,6 +452,13 @@ export function parseViewDrill(raw: unknown): ViewDrill | null {
   if (typeof raw.definition === "string" && raw.definition.trim().length > 0) {
     drill.definition = raw.definition.trim().slice(0, VIEW_DEFINITION_CAP);
   }
+  // SWIT-75 — the review loop's three fields, each tolerated as ABSENT.
+  const levels = parseViewLevels(raw.levels);
+  if (levels.length > 0) drill.levels = levels;
+  const markers = parseMarkers(raw.markers);
+  if (markers && markers.length > 0) drill.markers = markers;
+  const markerColumns = parseColumnList(raw.markerColumns);
+  if (markerColumns) drill.markerColumns = markerColumns;
   return drill;
 }
 
@@ -433,15 +526,13 @@ export function parseViewSpec(raw: string): { spec: ViewSpec | null; specError: 
   if (regions.length > 0) spec.regions = regions;
   const panels = parseViewPanels(data.panels);
   if (panels.length > 0) spec.panels = panels;
-  if (Array.isArray(data.markers)) {
-    spec.markers = data.markers
-      .filter((m): m is Record<string, unknown> => isRecord(m) && typeof m.ts === "string")
-      .map((m) => ({
-        ts: m.ts as string,
-        label: typeof m.label === "string" ? m.label : "",
-        ...(typeof m.id === "string" && m.id.length > 0 ? { id: m.id } : {}),
-      }));
-  }
+  const markers = parseMarkers(data.markers);
+  if (markers) spec.markers = markers;
+  // SWIT-75 — levels and marker columns, each tolerated as ABSENT.
+  const levels = parseViewLevels(data.levels);
+  if (levels.length > 0) spec.levels = levels;
+  const markerColumns = parseColumnList(data.markerColumns);
+  if (markerColumns) spec.markerColumns = markerColumns;
   return { spec, specError: null };
 }
 
@@ -672,20 +763,57 @@ function numericCell(v: unknown): number | null {
 
 /** The line kind's series columns (T7): the spec's `series` when declared,
  *  else every non-time column whose FIRST non-empty cell is numeric, in
- *  first-seen order. Pure; [] when nothing qualifies. */
+ *  first-seen order — EXCLUDING the spec's `markerColumns` (SWIT-75: a
+ *  sparse entry column is a set of moments, not a series, and inferring it
+ *  as one is exactly the fake-series workaround the field retires). Pure;
+ *  [] when nothing qualifies. */
 export function lineSeriesColumns(rows: ViewRow[], spec: ViewSpec): string[] {
   if (spec.series && spec.series.length > 0) return spec.series;
+  const excluded = new Set<string>(spec.markerColumns ?? []);
   const out: string[] = [];
   const decided = new Set<string>();
   for (const row of rows) {
     for (const [k, v] of Object.entries(row)) {
-      if (decided.has(k) || TIME_COLUMNS.includes(k)) continue;
+      if (decided.has(k) || TIME_COLUMNS.includes(k) || excluded.has(k)) continue;
       if (v === null || v === undefined || v === "") continue;
       decided.add(k);
       if (numericCell(v) !== null) out.push(k);
     }
   }
   return out;
+}
+
+/** Markers OUT OF COLUMNS (SWIT-75): for each row with a time, each named
+ *  column whose cell is non-null / non-empty becomes a marker at that time
+ *  labelled by the COLUMN NAME (the id is `<column>@<iso>`, so a click on
+ *  the point names the marker, not the bare stamp). File order, capped at
+ *  VIEW_MARKER_CAP. Pure; [] with no columns. */
+export function markersFromColumns(rows: readonly ViewRow[], columns: readonly string[] | undefined): ViewMarker[] {
+  if (!columns || columns.length === 0) return [];
+  const out: ViewMarker[] = [];
+  for (const row of rows) {
+    const iso = rowTimeIso(row);
+    if (iso === null) continue;
+    for (const col of columns) {
+      const v = row[col];
+      if (v === null || v === undefined || v === "") continue;
+      out.push({ ts: iso, label: col, id: `${col}@${iso}` });
+      if (out.length >= VIEW_MARKER_CAP) return out;
+    }
+  }
+  return out;
+}
+
+/** THE markers a chart draws (SWIT-75): the spec's static list, then the
+ *  column-derived ones — one union every renderer and `drillKeyForAnchor`
+ *  read, capped together. Returns the SAME empty array when there are none
+ *  so a memo keyed on it stays quiet. Pure. */
+const NO_MARKERS: ViewMarker[] = [];
+export function effectiveMarkers(rows: readonly ViewRow[], spec: ViewSpec): ViewMarker[] {
+  const fromColumns = markersFromColumns(rows, spec.markerColumns);
+  const fixed = spec.markers ?? NO_MARKERS;
+  if (fromColumns.length === 0) return fixed;
+  return [...fixed, ...fromColumns].slice(0, VIEW_MARKER_CAP);
 }
 
 export type LinePoints = {
@@ -1043,7 +1171,7 @@ export function drillKeyForAnchor(
     const bars: { ts: string }[] = anchorKey.startsWith("pt:")
       ? toLinePoints(ctx.rows, ctx.spec).ts.map((ts) => ({ ts }))
       : toOhlcRows(ctx.rows);
-    const marker = markerAtBar(bars, ctx.spec.markers ?? [], iso);
+    const marker = markerAtBar(bars, effectiveMarkers(ctx.rows, ctx.spec), iso);
     if (marker) return { key: marker.id ?? marker.ts, label: marker.label || marker.ts };
     return { key: iso, label: iso };
   }
@@ -1159,7 +1287,84 @@ export function resolveDrill(
   if (drill.valueColumn) spec.valueColumn = drill.valueColumn;
   if (drill.sizeColumn) spec.sizeColumn = drill.sizeColumn;
   if (drill.definition) spec.definition = drill.definition;
+  // SWIT-75: the child draws the drill's levels + markers (static and by
+  // column) — the same fields a standalone spec carries, so the renderers
+  // need no child/parent branch.
+  if (drill.levels) spec.levels = drill.levels;
+  if (drill.markers) spec.markers = drill.markers;
+  if (drill.markerColumns) spec.markerColumns = drill.markerColumns;
   return { spec, error: null };
+}
+
+// ── The deck (SWIT-75): a drilled child's siblings ──────────────────────────
+
+/** The column a parent's drill keys on — `rowAnchorId`'s rule minus the
+ *  per-row fallback: the spec's `keyColumn`, else its first declared column,
+ *  else null (the row's first key, decided per row). Pure. */
+export function deckKeyColumn(spec: Pick<ViewSpec, "keyColumn" | "columns">): string | null {
+  return spec.keyColumn ?? spec.columns?.[0] ?? null;
+}
+
+/** The deck's keys in FILE ORDER: each row's key-column value as the table
+ *  anchors it (trimmed, capped), duplicates keeping the FIRST occurrence —
+ *  the table's own dedupe rule, so `next` walks exactly the rows a click
+ *  could have opened. The parent's sort and filter are NOT consulted: they
+ *  are component state of an instance that is no longer mounted once the
+ *  child replaced it, and a deck that silently followed a stale sort would
+ *  be worse than one that says "file order". Pure. */
+export function deckKeys(rows: readonly ViewRow[], keyColumn: string | null): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const col = keyColumn ?? Object.keys(row)[0];
+    if (!col) continue;
+    const v = row[col];
+    if (v === null || v === undefined) continue;
+    const s = String(v).trim().slice(0, DRILL_KEY_CAP);
+    if (s.length === 0 || seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
+/** The key one step from `key` in deck order (`dir` +1 = next, -1 = prev);
+ *  null at either end or when `key` is not in the deck (no wrap — the end
+ *  of a deck is a fact worth feeling). Pure. */
+export function adjacentDrillKey(
+  rows: readonly ViewRow[],
+  keyColumn: string | null,
+  key: string,
+  dir: 1 | -1
+): string | null {
+  const keys = deckKeys(rows, keyColumn);
+  const i = keys.indexOf(key);
+  if (i < 0) return null;
+  const j = i + dir;
+  return j >= 0 && j < keys.length ? keys[j] : null;
+}
+
+/** `12 / 86` — the 1-based position of `key` in the deck and the deck's
+ *  size; null when the key is not in the deck. Pure. */
+export function deckPosition(
+  rows: readonly ViewRow[],
+  keyColumn: string | null,
+  key: string
+): { index: number; total: number } | null {
+  const keys = deckKeys(rows, keyColumn);
+  const i = keys.indexOf(key);
+  return i < 0 ? null : { index: i + 1, total: keys.length };
+}
+
+/** Where a deck's NOTES file lives (SWIT-75): the directory of the PARENT
+ *  spec's FILE source, forward-slashed, relative to the thread cwd — `""`
+ *  when the parent file sits at the cwd root. A QUERY-sourced parent has no
+ *  directory and answers null: notes need a file-backed deck. Pure. */
+export function notesDirOf(source: ViewSource): string | null {
+  if (source.type !== "file") return null;
+  const p = source.path.replace(/\\/g, "/").replace(/\/+$/, "");
+  const cut = p.lastIndexOf("/");
+  return cut < 0 ? "" : p.slice(0, cut);
 }
 
 /** The `→ thread` sentence when a view declares NO drill (R6). Pure. */
@@ -1181,6 +1386,14 @@ export function specLines(spec: ViewSpec): string[] {
   if (spec.valueColumn) lines.push(`value     ${spec.valueColumn}`);
   if (spec.kind === "timeline") lines.push(`size      ${spec.sizeColumn ?? TIMELINE_SIZE_DEFAULT}`);
   if (spec.markers && spec.markers.length > 0) lines.push(`markers   ${spec.markers.length}`);
+  if (spec.markerColumns && spec.markerColumns.length > 0) lines.push(`marks     ${spec.markerColumns.join(" · ")}`);
+  if (spec.levels && spec.levels.length > 0) {
+    lines.push(
+      `levels    ${spec.levels
+        .map((l) => `${l.label ?? l.price}${l.style === "zone" ? ` ${l.price}–${l.price2}` : l.label ? ` ${l.price}` : ""}`)
+        .join(" · ")}`
+    );
+  }
   if (spec.filters && spec.filters.length > 0) {
     lines.push(`filters   ${spec.filters.map((f) => `${f.label ?? f.column} (${f.kind})`).join(" · ")}`);
   }

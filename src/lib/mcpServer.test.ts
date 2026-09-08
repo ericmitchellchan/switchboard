@@ -40,6 +40,7 @@ const server = require("../../src-tauri/resources/mcp/switchboard-mcp.cjs") as {
   TURN_LINE_CAP: number;
   EVIDENCE_CAP: number;
   QUESTION_CAP: number;
+  VIEW_LEVEL_CAP: number;
 };
 
 const NOW = Date.parse("2026-08-31T10:00:00Z");
@@ -796,5 +797,86 @@ describe("the view tool — seriesLabels / regions / panels (SWIT-70)", () => {
     expect(props.seriesLabels).toBeDefined();
     expect(props.regions).toBeDefined();
     expect(props.panels).toBeDefined();
+  });
+});
+
+describe("the view tool — levels / markerColumns / drill markers (SWIT-75, the review loop)", () => {
+  const deck = {
+    op: "show",
+    kind: "table",
+    title: "gamma deck",
+    source: { type: "file", path: ".sb-views/gamma/deck/index.json" },
+    keyColumn: "day",
+  };
+  const drill = {
+    kind: "line",
+    title: "{key}",
+    source: { type: "file", path: ".sb-views/gamma/deck/days/{key}.json" },
+    series: ["nq_close"],
+    markerColumns: ["eric_long_entry", "eric_short_entry", "eric_exit"],
+    markers: [{ ts: "2026-02-19T14:30:00Z", label: "open" }],
+    levels: [
+      { price: 25471.4, label: " flip " },
+      { price: 25443.8, label: "call wall", style: "dashed" },
+      { price: 25233.5, price2: 25260, label: "put zone", style: "zone" },
+    ],
+  };
+  const build = (extra: Record<string, unknown>, base: Record<string, unknown> = deck) =>
+    server.buildViewSpec({ ...base, ...extra }, [], NOW);
+
+  it("the gamma deck's drill carries levels, markers and markerColumns, and round-trips through viewStore", () => {
+    const spec = build({ drill });
+    const d = spec.drill as Record<string, unknown>;
+    expect(d.levels).toEqual([
+      { price: 25471.4, label: "flip" },
+      { price: 25443.8, label: "call wall", style: "dashed" },
+      { price: 25233.5, style: "zone", price2: 25260, label: "put zone" },
+    ]);
+    expect(d.markers).toEqual([{ ts: "2026-02-19T14:30:00Z", label: "open" }]);
+    expect(d.markerColumns).toEqual(["eric_long_entry", "eric_short_entry", "eric_exit"]);
+    const parsed = parseViewSpec(JSON.stringify(spec));
+    expect(parsed.specError).toBeNull();
+    expect(parsed.spec?.drill?.levels).toEqual(d.levels);
+    expect(parsed.spec?.drill?.markers).toEqual(d.markers);
+    expect(parsed.spec?.drill?.markerColumns).toEqual(d.markerColumns);
+  });
+
+  it("levels and markerColumns apply to a standalone spec too", () => {
+    const spec = build(
+      { levels: [{ price: 100 }], markerColumns: ["entry"] },
+      { ...deck, kind: "line", source: { type: "file", path: "day.json" } }
+    );
+    expect(spec.levels).toEqual([{ price: 100 }]);
+    expect(spec.markerColumns).toEqual(["entry"]);
+    expect(parseViewSpec(JSON.stringify(spec)).spec?.levels).toEqual([{ price: 100 }]);
+  });
+
+  it("rejects malformed levels as visible errors — a zone needs price2, styles are the three, the cap is named", () => {
+    expect(() => build({ levels: { price: 1 } })).toThrow(/levels must be an array/);
+    expect(() => build({ levels: [{ price: "abc" }] })).toThrow(/finite number/);
+    expect(() => build({ levels: [{ price: 1, style: "dotted" }] })).toThrow(/solid, dashed, zone/);
+    expect(() => build({ levels: [{ price: 1, style: "zone" }] })).toThrow(/needs a finite price2/);
+    expect(() => build({ levels: Array.from({ length: 13 }, (_, i) => ({ price: i })) })).toThrow(/cap is 12/);
+    expect(() => build({ drill: { ...drill, levels: [{ price: 1, style: "zone" }] } })).toThrow(/drill\.levels\[0\]/);
+    expect(server.VIEW_LEVEL_CAP).toBe(12);
+  });
+
+  it("the tool description states the loop: deck next/prev, levels, markerColumns, the notes file, one message", () => {
+    for (const rule of [
+      "next/prev",
+      "`levels`",
+      "`markerColumns`",
+      "never encode a level as a constant column",
+      "notes.json",
+      "sentAt",
+      "ONE message",
+      "Chart notes on <title> (N):",
+    ]) {
+      expect(server.VIEW_TOOL.description).toContain(rule);
+    }
+    const props = (server.VIEW_TOOL.inputSchema as { properties: Record<string, unknown> }).properties;
+    expect(props.levels).toBeDefined();
+    expect(props.markerColumns).toBeDefined();
+    expect(String((props.drill as { description: string }).description)).toContain("markerColumns?");
   });
 });

@@ -299,6 +299,13 @@ function applyOp(page, args, now, answeredIds = new Set()) {
 // tolerant parser (this server cannot see inside the file) — a broken block
 // shows an error card in place and the rest of the report renders. A report
 // cannot be a drill target and cannot embed a report.
+// SWIT-75: the chart review loop — `levels` [{price, label?, style?, price2?}]
+// (candles / line, and on a drill) draw horizontal rules; a `zone` needs
+// `price2`. `markerColumns` (spec and drill) names columns whose non-null
+// cells are markers labelled by the column name; a drill may also carry a
+// static `markers` list. The shell adds deck next/prev over a drilled
+// child, a per-card note (`<deck dir>/notes.json`, written by the app) and
+// a batch send; this server validates the fields and states the loop.
 
 const VIEW_KINDS = ["table", "candles", "dist", "line", "bar", "timeline", "report"];
 const VIEW_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -313,6 +320,9 @@ const VIEW_DRILL_TITLE_CAP = 120;
 const VIEW_REGION_CAP = 12;
 const VIEW_PANEL_CAP = 6;
 const VIEW_SERIES_LABEL_CAP = 24;
+// SWIT-75: levels per chart — mirrored in viewStore.ts.
+const VIEW_LEVEL_CAP = 12;
+const VIEW_LEVEL_STYLES = ["solid", "dashed", "zone"];
 
 function validViewSourcePath(p) {
   if (typeof p !== "string" || p.trim().length === 0) return false;
@@ -414,12 +424,61 @@ function columnList(raw) {
   return list.length > 0 ? list : undefined;
 }
 
+/** `levels` (SWIT-75): horizontal rules on candles / line. A `zone` is the
+ *  band between `price` and `price2` — two prices, or it is an error (a
+ *  single price is a line; say so). Pure; throws OpError. */
+function buildLevels(raw, field) {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) throw new OpError(`${field} must be an array of {price, label?, style?, price2?}`);
+  if (raw.length > VIEW_LEVEL_CAP) {
+    throw new OpError(`${field} has ${raw.length} entries; the cap is ${VIEW_LEVEL_CAP}`);
+  }
+  const out = raw.map((l, i) => {
+    if (typeof l !== "object" || l === null) throw new OpError(`${field}[${i}] must be {price, label?, style?, price2?}`);
+    const price = Number(l.price);
+    if (l.price === null || l.price === undefined || l.price === "" || !Number.isFinite(price)) {
+      throw new OpError(`${field}[${i}].price must be a finite number`);
+    }
+    const style = l.style === undefined || l.style === null ? "solid" : l.style;
+    if (!VIEW_LEVEL_STYLES.includes(style)) {
+      throw new OpError(`${field}[${i}].style must be one of ${VIEW_LEVEL_STYLES.join(", ")}`);
+    }
+    const level = { price };
+    if (style !== "solid") level.style = style;
+    if (style === "zone") {
+      const price2 = Number(l.price2);
+      if (l.price2 === null || l.price2 === undefined || l.price2 === "" || !Number.isFinite(price2)) {
+        throw new OpError(`${field}[${i}] is a zone and needs a finite price2 (a zone is the band between two prices; one price is a line)`);
+      }
+      level.price2 = price2;
+    }
+    if (typeof l.label === "string" && l.label.trim().length > 0) level.label = l.label.trim().slice(0, 40);
+    return level;
+  });
+  return out.length > 0 ? out : undefined;
+}
+
+/** `markers` [{ts, label, id?}] — the spec's static list, and a drill's
+ *  (SWIT-75). Malformed entries drop; capped. Pure. */
+function buildMarkers(raw) {
+  if (!Array.isArray(raw)) return undefined;
+  const out = raw
+    .filter((m) => m && typeof m === "object" && typeof m.ts === "string" && m.ts.length > 0)
+    .map((m) => ({
+      ts: m.ts,
+      label: typeof m.label === "string" ? m.label.slice(0, 80) : "",
+      ...(typeof m.id === "string" && m.id.length > 0 ? { id: m.id.slice(0, 64) } : {}),
+    }))
+    .slice(0, VIEW_MARKER_CAP);
+  return out;
+}
+
 /** `drill` (T6): what is behind an anchor — a child view whose source strings
  *  carry `{key}`. Pure. */
 function buildDrill(raw) {
   if (raw === undefined || raw === null) return undefined;
   if (typeof raw !== "object") {
-    throw new OpError("drill must be {kind, title, source, columns?, keyColumn?, series?, valueColumn?, sizeColumn?, definition?}");
+    throw new OpError("drill must be {kind, title, source, columns?, keyColumn?, series?, valueColumn?, sizeColumn?, definition?, levels?, markers?, markerColumns?}");
   }
   if (!VIEW_KINDS.includes(raw.kind)) {
     throw new OpError(`drill.kind must be one of ${VIEW_KINDS.join(", ")}`);
@@ -446,6 +505,13 @@ function buildDrill(raw) {
   if (sizeColumn !== undefined) drill.sizeColumn = sizeColumn;
   const definition = buildDefinition(raw.definition, "drill.definition");
   if (definition !== undefined) drill.definition = definition;
+  // SWIT-75: the child's levels, static markers, marker columns.
+  const levels = buildLevels(raw.levels, "drill.levels");
+  if (levels !== undefined) drill.levels = levels;
+  const markers = buildMarkers(raw.markers);
+  if (markers !== undefined && markers.length > 0) drill.markers = markers;
+  const markerColumns = columnList(raw.markerColumns);
+  if (markerColumns !== undefined) drill.markerColumns = markerColumns;
   return drill;
 }
 
@@ -589,16 +655,13 @@ function buildViewSpec(args, existingIds, now) {
   // T8 (SWIT-62): the timeline's size column.
   const sizeColumn = buildSizeColumn(args.sizeColumn, "sizeColumn");
   if (sizeColumn !== undefined) spec.sizeColumn = sizeColumn;
-  if (Array.isArray(args.markers)) {
-    spec.markers = args.markers
-      .filter((m) => m && typeof m === "object" && typeof m.ts === "string" && m.ts.length > 0)
-      .map((m) => ({
-        ts: m.ts,
-        label: typeof m.label === "string" ? m.label.slice(0, 80) : "",
-        ...(typeof m.id === "string" && m.id.length > 0 ? { id: m.id.slice(0, 64) } : {}),
-      }))
-      .slice(0, VIEW_MARKER_CAP);
-  }
+  const markers = buildMarkers(args.markers);
+  if (markers !== undefined) spec.markers = markers;
+  // SWIT-75: levels and marker columns.
+  const levels = buildLevels(args.levels, "levels");
+  if (levels !== undefined) spec.levels = levels;
+  const markerColumns = columnList(args.markerColumns);
+  if (markerColumns !== undefined) spec.markerColumns = markerColumns;
   // T6 (SWIT-60): the view explains itself and opens downward.
   const definition = buildDefinition(args.definition, "definition");
   if (definition !== undefined) spec.definition = definition;
@@ -712,7 +775,17 @@ const VIEW_TOOL = {
     "code. op 'update' re-renders the open report (every block reloads " +
     "its data); the markdown itself is re-read while the tab is active. A report's headings " +
     "are addressable from page evidence as view:<id>#h:<heading-slug>. Prefer one report over " +
-    "several views when narrative belongs between the charts.",
+    "several views when narrative belongs between the charts. THE REVIEW LOOP (a deck): a " +
+    "table with a drill is a deck the user steps through with next/prev in the panel; give the " +
+    "drill `levels` [{price, label?, style?:'solid'|'dashed'|'zone', price2?}] (<=12; a zone is " +
+    "the band between price and price2) for horizontal levels, and `markerColumns` " +
+    "['entry','exit'] so a sparse column's non-null cells become markers at that row's time " +
+    "(labelled by the column name; those columns are never drawn as series) — never encode a " +
+    "level as a constant column or an entry as a series. The user writes a one-line note per " +
+    "card, autosaved to `<deck dir>/notes.json` beside the deck's index file (Read it: " +
+    "{version:1, notes:{[key]:{text, updatedAt, sentAt?}}}), and `send N notes` delivers every " +
+    "unsent note to you as ONE message: `Chart notes on <title> (N):` then `- <key>: <note>` " +
+    "per line.",
   inputSchema: {
     type: "object",
     properties: {
@@ -776,10 +849,22 @@ const VIEW_TOOL = {
         description:
           "line only: small multiples [{title, source}] (<=6, {key} not allowed) — a 2-up grid with the main chart, shared time axis, shared value axis when the series sets match. Anchors/pins publish from the main chart only.",
       },
+      levels: {
+        type: "array",
+        items: { type: "object" },
+        description:
+          "candles / line: horizontal levels [{price, label?, style?:'solid'|'dashed'|'zone', price2?}] (<=12) — flip, walls, zones. A zone is the band between price and price2. Label at the right edge.",
+      },
+      markerColumns: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "candles / line: columns whose non-null cells become markers at that row's time, labelled by the column name (entries/exits). Excluded from series inference.",
+      },
       drill: {
         type: "object",
         description:
-          "What is behind an opened row/bin/bar/marker: {kind, title, source:{type:'file', path:'per/{key}.json'} | {type:'query', url:'http://127.0.0.1:…?k={key}', body?}, columns?, keyColumn?, series?, valueColumn?, sizeColumn?, definition?}. {key} = the anchor's key value (file: one path component, [A-Za-z0-9._-], else _; query: URL-encoded).",
+          "What is behind an opened row/bin/bar/marker: {kind, title, source:{type:'file', path:'per/{key}.json'} | {type:'query', url:'http://127.0.0.1:…?k={key}', body?}, columns?, keyColumn?, series?, valueColumn?, sizeColumn?, definition?, levels?, markers?, markerColumns?}. {key} = the anchor's key value (file: one path component, [A-Za-z0-9._-], else _; query: URL-encoded). A table with a drill is a DECK: the user steps its children with next/prev and notes each one.",
       },
     },
     required: ["op", "kind", "title", "source"],
@@ -1260,6 +1345,7 @@ module.exports = {
   VIEW_REGION_CAP,
   VIEW_PANEL_CAP,
   VIEW_SERIES_LABEL_CAP,
+  VIEW_LEVEL_CAP,
   parsePage,
   applyOp,
   performOp,

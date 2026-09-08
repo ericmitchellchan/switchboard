@@ -81,6 +81,9 @@ export const LEVEL_COLORS: Readonly<Record<string, string>> = {
   dn: "#e88a8a",
   liq: "#7ab8e8",
   accent: "#7dd3a8",
+  /** SWIT-75: a view's `levels` — --text-secondary (#b4b4b4), the tone the
+   *  zero rule / region labels use: a level is CONTEXT, never a series. */
+  neutral: "#b4b4b4",
 };
 
 export function levelColor(tone: string | undefined): string {
@@ -116,10 +119,55 @@ export function seriesColor(name: string): string {
   return SERIES_PALETTE[(h >>> 0) % SERIES_PALETTE.length];
 }
 
-/** A horizontal level line (gamma flip, walls, vol trigger). */
-export type PriceLevel = { price: number; label: string; tone: string };
+/** A horizontal level line (gamma flip, walls, vol trigger). `style`
+ *  (SWIT-75) picks solid over the dashed default — a view's `levels` name
+ *  it; Lodestar's pages never set it and draw as before. */
+export type PriceLevel = { price: number; label: string; tone: string; style?: "solid" | "dashed" };
 
 /** Levels that can be drawn: finite price, non-empty label. */
 export function drawableLevels(levels: readonly PriceLevel[] | undefined): PriceLevel[] {
   return (levels ?? []).filter((l) => Number.isFinite(l.price) && l.label.trim().length > 0);
+}
+
+/** A view's level as the LINE chart draws it (SWIT-75): a rule at `price`
+ *  (solid | dashed) or a `zone` band between `price` and `price2`. Same
+ *  shape as viewStore's ViewLevel, declared here so the chart module owns
+ *  its own props. */
+export type ChartLevel = { price: number; label?: string; style?: "solid" | "dashed" | "zone"; price2?: number };
+
+/** The y extent a set of levels needs — [min, max] over every price (and
+ *  `price2` on zones); null with no finite level. LinePanel widens its auto
+ *  y range to this so a level outside the data is still on the canvas. */
+export function levelRange(levels: readonly ChartLevel[] | undefined): [number, number] | null {
+  let lo = Number.POSITIVE_INFINITY;
+  let hi = Number.NEGATIVE_INFINITY;
+  for (const l of levels ?? []) {
+    for (const p of [l.price, l.style === "zone" ? l.price2 : undefined]) {
+      if (typeof p !== "number" || !Number.isFinite(p)) continue;
+      if (p < lo) lo = p;
+      if (p > hi) hi = p;
+    }
+  }
+  return lo <= hi ? [lo, hi] : null;
+}
+
+/** A view's levels as CANDLE price lines (SWIT-75): one neutral line per
+ *  rule, labelled by its label or its price (the library shows the title on
+ *  the line); a `zone` becomes its TWO EDGES, both dashed and both titled —
+ *  lightweight-charts has no band primitive, and two honest edges beat a
+ *  fake fill. Pure. */
+export function candleLevelLines(levels: readonly ChartLevel[] | undefined): PriceLevel[] {
+  const out: PriceLevel[] = [];
+  for (const l of levels ?? []) {
+    if (!Number.isFinite(l.price)) continue;
+    const label = l.label && l.label.trim().length > 0 ? l.label.trim() : String(l.price);
+    if (l.style === "zone") {
+      if (typeof l.price2 !== "number" || !Number.isFinite(l.price2)) continue;
+      out.push({ price: l.price, label, tone: "neutral", style: "dashed" });
+      out.push({ price: l.price2, label, tone: "neutral", style: "dashed" });
+      continue;
+    }
+    out.push({ price: l.price, label, tone: "neutral", style: l.style === "dashed" ? "dashed" : "solid" });
+  }
+  return out;
 }

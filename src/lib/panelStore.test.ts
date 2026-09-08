@@ -54,6 +54,7 @@ import {
   notePanelThreadBinding,
   previewIdentityFor,
   openDrillInPanel,
+  stepPreview,
   previewBackAvailableFor,
   goPreviewBack,
   pinPreview,
@@ -2788,5 +2789,64 @@ describe("openDrillInPanel (T6) — the child takes the preview slot; back lands
     // design — the header's back renders only while the active tab IS the
     // preview. Stated here so the truncation is a decision, not a surprise.
     expect(previewBackAvailableFor("s1")).toBe(false);
+  });
+});
+
+describe("stepPreview (SWIT-75) — the deck's next/prev swaps the preview in place; back still lands on the table", () => {
+  const PARENT: Artifact = { kind: "view", threadId: "t1", viewId: "deck" };
+  const card = (key: string): Artifact => ({ kind: "view", threadId: "t1", viewId: "deck", drill: { key } });
+
+  it("eighty steps, one back: the stack never grows", () => {
+    openInPanel("s1", PARENT, { preview: true });
+    openDrillInPanel("s1", PARENT, card("2026-02-19"));
+    for (let i = 20; i < 100; i++) expect(stepPreview("s1", card(`2026-03-${i}`))).toBe(true);
+    expect(panelStateFor("s1")?.artifacts).toEqual([card("2026-03-99")]);
+    expect(previewIdentityFor("s1")).toBe(artifactIdentity(card("2026-03-99")));
+    expect(previewBackAvailableFor("s1")).toBe(true);
+    goPreviewBack("s1");
+    expect(artifactFor("s1")).toEqual(PARENT);
+    expect(previewBackAvailableFor("s1")).toBe(false);
+  });
+
+  it("beside a pinned parent the step keeps the parent's tab and the back target", () => {
+    openInPanel("s1", PARENT);
+    openDrillInPanel("s1", PARENT, card("a"));
+    expect(stepPreview("s1", card("b"))).toBe(true);
+    expect(panelStateFor("s1")?.artifacts).toEqual([PARENT, card("b")]);
+    expect(artifactFor("s1")).toEqual(card("b"));
+    goPreviewBack("s1");
+    expect(panelStateFor("s1")?.artifacts).toEqual([PARENT]);
+  });
+
+  it("returns false with no preview to swap (a pinned child) — the caller opens a drill instead", () => {
+    openInPanel("s1", PARENT);
+    openInPanel("s1", card("a")); // pinned
+    expect(stepPreview("s1", card("b"))).toBe(false);
+    expect(panelStateFor("s1")?.artifacts).toEqual([PARENT, card("a")]);
+    openDrillInPanel("s1", PARENT, card("b"));
+    expect(panelStateFor("s1")?.artifacts).toEqual([PARENT, card("a"), card("b")]);
+    expect(previewIdentityFor("s1")).toBe(artifactIdentity(card("b")));
+  });
+
+  it("a sibling already a tab is activated, never duplicated, and the preview stays", () => {
+    openInPanel("s1", PARENT, { preview: true });
+    openInPanel("s1", card("a")); // pinned card
+    openDrillInPanel("s1", PARENT, card("b"));
+    expect(panelStateFor("s1")?.artifacts).toEqual([card("b"), card("a")]);
+    expect(stepPreview("s1", card("a"))).toBe(true);
+    expect(panelStateFor("s1")?.artifacts).toEqual([card("b"), card("a")]);
+    expect(artifactFor("s1")).toEqual(card("a"));
+    expect(previewIdentityFor("s1")).toBe(artifactIdentity(card("b")));
+    expect(stepPreview("s1", { kind: "view", threadId: "", viewId: "" })).toBe(false);
+  });
+
+  it("the swap is audited as preview-step", () => {
+    const lines: string[] = [];
+    __setPanelAuditSink((line) => lines.push(line));
+    openInPanel("s1", PARENT, { preview: true });
+    openDrillInPanel("s1", PARENT, card("a"));
+    stepPreview("s1", card("b"));
+    __setPanelAuditSink(null);
+    expect(lines.some((l) => l.includes("reason=preview-step") && l.includes("to=view:"))).toBe(true);
   });
 });

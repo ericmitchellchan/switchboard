@@ -234,7 +234,9 @@ export default function CandleChart({
         price: l.price,
         color: levelColor(l.tone),
         lineWidth: 1,
-        lineStyle: LineStyle.Dashed,
+        // Dashed unless the level says solid (SWIT-75); Lodestar's levels
+        // never say, so they draw as they always did.
+        lineStyle: l.style === "solid" ? LineStyle.Solid : LineStyle.Dashed,
         axisLabelVisible: true,
         title: l.label,
       })

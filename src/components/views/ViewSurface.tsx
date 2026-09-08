@@ -82,9 +82,35 @@
 // same toolbar, same anchors/pins/hover/drill, the block's `#b<n>` pin-scope
 // prefix and its `block` field on a drilled child's artifact being the only
 // differences an embedded instance carries.
+//
+// SWIT-75 — THE CHART REVIEW LOOP (Eric, on the gamma thread: "toggle
+// through things, annotate, give you notes … an input on the panel for each
+// chart … click next, and then send the whole batch"):
+//   · A DRILLED CHILD is one card of a DECK — its siblings are the parent's
+//     rows in file order (viewStore.deckKeys; the parent's sort/filter are
+//     not consulted, stated there). The toolbar carries `←  12 / 86  →`, and
+//     `[` / `]` step while focus is inside the chrome (the root is focusable
+//     and takes focus on click — a panel-scoped key, never a window one).
+//     A step REPLACES the preview in place (panelStore.stepPreview) so `back`
+//     still lands on the table after eighty steps; a child Eric PINNED steps
+//     by opening the sibling as a fresh drill beside it.
+//   · ONE NOTE PER CARD: a kit input under the toolbar, autosaved (400ms)
+//     to `<deck dir>/notes.json` in the thread cwd (lib/viewNotes — the
+//     deck dir is the parent SOURCE's directory). Enter in the box = next.
+//   · `send N notes → thread` composes ONE message (viewNotes.formatBatch)
+//     and SUBMITS it through `composeWrite` — one bracketed paste, one CR —
+//     because Eric asked to send the batch, unlike the typed `→ thread`
+//     reference that leaves Enter to him. Notes are marked sent only when
+//     the PTY write resolved.
+//   · `levels` draw on candles (price lines) and line (LinePanel rules /
+//     zones); markers are `effectiveMarkers` — the spec's list plus the
+//     `markerColumns` cells — on both, and on the click path.
+//   The parent's rows come from a second `useView` of the parent spec,
+//   gated on being a drilled child, so a standalone or embedded view costs
+//   nothing for it.
 
 import { Suspense, lazy, memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, MouseEvent as ReactMouseEvent, MutableRefObject } from "react";
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, MutableRefObject } from "react";
 
 import type { Artifact } from "../../types";
 import {
@@ -109,19 +135,38 @@ import {
   timelineNote,
   useViewPanels,
   lineDomains,
+  effectiveMarkers,
+  deckKeyColumn,
+  deckKeys,
+  adjacentDrillKey,
+  deckPosition,
+  notesDirOf,
 } from "../../lib/viewStore";
 import type { ActiveFilters, LinePoints, ViewMeta, ViewRow, ViewSpec } from "../../lib/viewStore";
+import {
+  useViewNotes,
+  getViewNotes,
+  editViewNote,
+  flushViewNotes,
+  markViewNotesSent,
+  noteFor,
+  unsentNotes,
+  formatBatch,
+} from "../../lib/viewNotes";
+import { composeWrite } from "../../lib/composer";
 // candles.ts is pure helpers (its lightweight-charts import is type-only,
 // erased at build) — importing seriesColor here pulls no chart library into
 // the main chunk; the vite-build gate checks that.
-import { seriesColor } from "../../surfaces/charts/candles";
+import { candleLevelLines, seriesColor } from "../../surfaces/charts/candles";
 import { viewPinTargetFor } from "../../lib/pins";
 import { getThreadById, threadRepoName } from "../../lib/threadStore";
 import {
   artifactIdentity,
   getActiveTabSession,
   openDrillInPanel,
+  stepPreview,
   sendToThread,
+  submitToThread,
   useSendToThreadAvailable,
 } from "../../lib/panelStore";
 import { sanitizeForTypedLine, REF_MAX } from "../../lib/agentContext";
@@ -188,6 +233,39 @@ const FILTER_SELECT: CSSProperties = {
   maxWidth: 140,
   outline: "none",
 };
+
+/** The deck's note row (SWIT-75): the kit input at toolbar scale, one line,
+ *  transparent so it takes the panel's surface. */
+const NOTE_ROW_STYLE: CSSProperties = {
+  flex: "none",
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  padding: "4px 10px",
+  borderBottom: "1px solid var(--border)",
+  fontFamily: MONO,
+  fontSize: 10,
+  color: "var(--text-muted)",
+};
+
+const NOTE_INPUT_STYLE: CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  background: "transparent",
+  border: "1px solid var(--border-subtle)",
+  borderRadius: 3,
+  padding: "3px 8px",
+  fontFamily: MONO,
+  fontSize: 11,
+  lineHeight: 1.5,
+  color: "var(--text-primary)",
+  outline: "none",
+};
+
+/** The parent kinds whose rows form a DECK — the DOM kinds, where a drill
+ *  key IS a row's key-column value (the table's anchor rule). A candle or
+ *  line parent drills by marker, which is not a sequence to step through. */
+const DECK_PARENT_KINDS: ReadonlySet<string> = new Set(["table", "dist", "bar"]);
 
 const SPEC_STYLE: CSSProperties = {
   flex: "none",
@@ -356,6 +434,26 @@ export function ViewChrome({
   );
   const canSend = useSendToThreadAvailable();
 
+  // ── The deck (SWIT-75): a drilled child's siblings, position and notes ─────
+  // A second read of the PARENT spec + rows, gated on this being a drilled
+  // child (inert — never polls, never loads — for a standalone or embedded
+  // view). The parent's file order is the deck order (viewStore.deckKeys).
+  const isDeckChild = drillKey !== null;
+  const parent = useView(threadId, viewId, active && isDeckChild, null, block);
+  const deckSpec = isDeckChild && parent.spec && DECK_PARENT_KINDS.has(parent.spec.kind) ? parent.spec : null;
+  const deckRows = deckSpec ? parent.rows : null;
+  const deckColumn = deckSpec ? deckKeyColumn(deckSpec) : null;
+  const deck = useMemo(() => (deckRows ? deckKeys(deckRows, deckColumn) : []), [deckRows, deckColumn]);
+  const position = useMemo(
+    () => (deckRows && drillKey !== null ? deckPosition(deckRows, deckColumn, drillKey) : null),
+    [deckRows, deckColumn, drillKey]
+  );
+  const notesDir = deckSpec ? notesDirOf(deckSpec.source) : null;
+  const notes = useViewNotes(threadId, notesDir, active && isDeckChild);
+  const noteText = drillKey !== null ? noteFor(notes.file, drillKey) : "";
+  const unsent = useMemo(() => (isDeckChild ? unsentNotes(notes.file, deck) : []), [isDeckChild, notes.file, deck]);
+  const [sending, setSending] = useState(false);
+
   // The project a view's pins + keeps file under: the thread's repo name.
   const project = useMemo(() => {
     const thread = getThreadById(threadId);
@@ -507,6 +605,78 @@ export function ViewChrome({
     pointerRef.current = { x: e.clientX, y: e.clientY };
   }, []);
 
+  // ── Step the deck (SWIT-75): `←`/`→`, `[`/`]`, Enter in the note box ──────
+  // A pending note write survives the remount (the store keeps it), so a
+  // step never has to wait for the disk.
+  const step = useCallback(
+    (dir: 1 | -1) => {
+      if (!deckRows || drillKey === null) return;
+      const key = adjacentDrillKey(deckRows, deckColumn, drillKey, dir);
+      if (key === null) return;
+      const sessionId = getActiveTabSession();
+      if (!sessionId) {
+        flashNote("no thread to open it beside");
+        return;
+      }
+      const sibling: ViewArtifact = {
+        kind: "view",
+        threadId,
+        viewId,
+        ...(block !== null ? { block } : {}),
+        drill: { key },
+      };
+      // In place when this child is the preview; a PINNED child steps by
+      // opening the sibling as a fresh drill beside it (back → the table).
+      if (!stepPreview(sessionId, sibling)) {
+        openDrillInPanel(sessionId, { kind: "view", threadId, viewId }, sibling);
+      }
+    },
+    [deckRows, deckColumn, drillKey, threadId, viewId, block, flashNote]
+  );
+  const onRootKeyDown = useCallback(
+    (e: ReactKeyboardEvent) => {
+      if (!isDeckChild || e.ctrlKey || e.metaKey || e.altKey) return;
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (e.key === "[" || e.key === "]") {
+        e.preventDefault();
+        step(e.key === "]" ? 1 : -1);
+      }
+    },
+    [isDeckChild, step]
+  );
+  // The root takes focus on a click that lands on nothing focusable, so the
+  // deck keys work right after clicking a chart (SurfaceHost's rule).
+  const chromeRootRef = useRef<HTMLDivElement | null>(null);
+  const onRootMouseDown = useCallback(() => {
+    const el = chromeRootRef.current;
+    const focused = document.activeElement;
+    if (el && (focused === null || focused === document.body || !el.contains(focused))) {
+      el.focus({ preventScroll: true });
+    }
+  }, []);
+
+  // ── The batch (SWIT-75): every unsent note, one message, one submit ────────
+  const sendBatch = useCallback(async () => {
+    if (!deckSpec || notesDir === null || sending) return;
+    setSending(true);
+    try {
+      await flushViewNotes(threadId, notesDir);
+      const entries = unsentNotes(getViewNotes(threadId, notesDir).file, deck);
+      if (entries.length === 0) return;
+      // composeWrite: multi-line → ONE bracketed paste + ONE CR (the
+      // composer's wire format), so the batch arrives as one message.
+      const bytes = composeWrite(formatBatch(deckSpec.title, entries));
+      await submitToThread(bytes);
+      await markViewNotesSent(threadId, notesDir, entries.map((e) => e.key));
+      flashNote(`sent ${entries.length} ${entries.length === 1 ? "note" : "notes"}`);
+    } catch (err) {
+      flashNote(`not sent — ${String(err instanceof Error ? err.message : err)}`);
+    } finally {
+      setSending(false);
+    }
+  }, [deckSpec, notesDir, sending, threadId, deck, flashNote]);
+
   // ── keep → the scratchpad (decided Q4) ─────────────────────────────────────
   const [keeping, setKeeping] = useState(false);
   const keep = useCallback(async () => {
@@ -571,15 +741,43 @@ export function ViewChrome({
   return (
     <SurfaceAnchorContext.Provider value={registry}>
       <div
+        ref={chromeRootRef}
+        tabIndex={-1}
+        onKeyDown={onRootKeyDown}
         style={
           embedded
-            ? { minWidth: 0, display: "flex", flexDirection: "column" }
-            : { flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }
+            ? { minWidth: 0, display: "flex", flexDirection: "column", outline: "none" }
+            : { flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", outline: "none" }
         }
       >
         <div style={TOOLBAR_STYLE}>
           <span style={{ color: "var(--text-primary)", flex: "none" }}>{spec.kind}</span>
           <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{spec.title}</span>
+          {position && (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 4, flex: "none" }}>
+              <button
+                type="button"
+                style={TOOL_BTN}
+                onClick={() => step(-1)}
+                disabled={position.index <= 1}
+                title={`Previous in ${deckSpec?.title ?? "the deck"} ([)`}
+              >
+                ←
+              </button>
+              <span style={{ color: "var(--text-secondary)" }}>
+                {position.index} / {position.total}
+              </span>
+              <button
+                type="button"
+                style={TOOL_BTN}
+                onClick={() => step(1)}
+                disabled={position.index >= position.total}
+                title={`Next in ${deckSpec?.title ?? "the deck"} (])`}
+              >
+                →
+              </button>
+            </span>
+          )}
           {spec.kind === "timeline" && (
             <span style={{ color: "var(--text-dim)", flex: "none" }}>{timelineNote(meta, windowed.total)}</span>
           )}
@@ -618,6 +816,17 @@ export function ViewChrome({
                     filtered ? ` · ${filteredRows?.length ?? 0} of ${rows?.length ?? 0} rows` : ""
                   }${windowed.windowed ? ` · showing ${windowed.rows.length} of ${windowed.total} rows` : ""}`)}
           </span>
+          {isDeckChild && unsent.length > 0 && (
+            <button
+              type="button"
+              style={{ ...TOOL_BTN, color: "var(--text-secondary)", borderColor: "var(--border-subtle)" }}
+              onClick={() => void sendBatch()}
+              disabled={!canSend || sending}
+              title={`Send the ${unsent.length} unsent ${unsent.length === 1 ? "note" : "notes"} to the thread as one message — it submits`}
+            >
+              {sending ? "…" : `send ${unsent.length} ${unsent.length === 1 ? "note" : "notes"} → thread`}
+            </button>
+          )}
           {spec.kind === "candles" && (
             <button
               type="button"
@@ -678,6 +887,38 @@ export function ViewChrome({
           </button>
         </div>
         {showSpec && <pre style={SPEC_STYLE}>{specLines(spec).join("\n")}</pre>}
+        {isDeckChild && drillKey !== null && (
+          <div style={NOTE_ROW_STYLE}>
+            <input
+              type="text"
+              value={noteText}
+              placeholder={`note for ${drillKey}…`}
+              disabled={notesDir === null || !notes.loaded}
+              onChange={(e) => {
+                if (notesDir !== null) editViewNote(threadId, notesDir, drillKey, e.target.value);
+              }}
+              onKeyDown={(e) => {
+                // Enter = next card (the loop: write, next, write, next…);
+                // the pending write rides in the store across the remount.
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  step(1);
+                }
+              }}
+              title={
+                notesDir === null
+                  ? "Notes need a file-backed deck (the parent's source is a query)"
+                  : `Autosaves to ${notesDir.length > 0 ? `${notesDir}/` : ""}notes.json in the thread's working directory · Enter = next`
+              }
+              style={NOTE_INPUT_STYLE}
+            />
+            {notes.error && (
+              <span style={{ color: "var(--text-dim)", flex: "none", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis" }}>
+                not saved — {notes.error}
+              </span>
+            )}
+          </div>
+        )}
         <div
           ref={scrollerRef}
           style={
@@ -691,6 +932,7 @@ export function ViewChrome({
             ref={setRoot}
             onClickCapture={pins.onCapture}
             onClick={onBodyClick}
+            onMouseDownCapture={isDeckChild ? onRootMouseDown : undefined}
             onMouseMove={onPointerMove}
             onMouseLeave={() => {
               pointerRef.current = null;
@@ -833,7 +1075,8 @@ const ViewBody = memo(function ViewBody({
           <div style={{ padding: "8px 10px" }}>
             <CandleChart
               bars={toOhlcRows(rows)}
-              markers={(spec.markers ?? []).map((m) => ({ ts: m.ts, label: m.label }))}
+              markers={effectiveMarkers(rows, spec).map((m) => ({ ts: m.ts, label: m.label }))}
+              levels={candleLevelLines(spec.levels)}
               height={360}
               intraday
               priceMode={priceMode}
@@ -1139,8 +1382,10 @@ function LineView({
       })),
     [points, labels]
   );
-  const markers = useMemo(() => (spec.markers ?? []).map((m) => ({ ts: m.ts, label: m.label })), [spec.markers]);
+  // SWIT-75: the spec's markers plus the `markerColumns` cells — one union.
+  const markers = useMemo(() => effectiveMarkers(rows, spec).map((m) => ({ ts: m.ts, label: m.label })), [rows, spec]);
   const regions = spec.regions;
+  const levels = spec.levels;
   const panelData = useViewPanels(threadId, spec, active);
   const panelPoints = useMemo(
     () => panelData.map((p) => (p.rows ? toLinePoints(p.rows, spec) : null)),
@@ -1182,6 +1427,7 @@ function LineView({
           points={points.ts}
           markers={markers}
           regions={regions}
+          levels={levels}
           height={300}
           intraday={intraday}
         />
@@ -1207,6 +1453,7 @@ function LineView({
             points={points.ts}
             markers={markers}
             regions={regions}
+            levels={levels}
             height={cellHeight}
             intraday={intraday}
             xRange={domains.x ?? undefined}

@@ -122,7 +122,11 @@ export type PanelRemovalReason =
   /** `goPreviewBack` (T6) whose back target was ALREADY A TAB: the preview
    *  is CLOSED and that tab activated rather than restored in place, because
    *  one artifact may not be listed twice. A gesture (the header's `←`). */
-  | "preview-back-close";
+  | "preview-back-close"
+  /** `stepPreview` (SWIT-75): the deck's `←`/`→` swapped the preview for a
+   *  sibling IN PLACE — the back stack untouched, so `back` still lands on
+   *  the deck's table. A gesture. */
+  | "preview-step";
 
 export interface PanelRemoval {
   reason: PanelRemovalReason;
@@ -1735,6 +1739,40 @@ export function openDrillInPanel(sessionId: string, parent: Artifact, child: Art
   bump();
 }
 
+/** STEP the preview sideways (SWIT-75 — the deck's `←`/`→`): replace the
+ *  strip's preview artifact with `next` IN PLACE, leaving the back stack as
+ *  it is, so a walk through eighty siblings still returns to the table in
+ *  ONE `back` — `openInPanel(…, {preview:true})` would push every sibling
+ *  onto the stack instead. Returns false when the strip has no preview (the
+ *  caller then opens the sibling as a drill beside the pinned child) or
+ *  `next` is invalid. A sibling ALREADY a tab is activated, never
+ *  duplicated (the dedupe rule is senior), and the preview is left alone. */
+export function stepPreview(sessionId: string, next: Artifact): boolean {
+  const key = ownerKeyFor(sessionId);
+  const clean = sanitizeArtifact(next);
+  if (!clean) return false;
+  const state = panels.get(key);
+  const currentId = previewIdentityFor(sessionId);
+  if (!state || currentId === "") return false;
+  const index = state.artifacts.findIndex((a) => artifactIdentity(a) === currentId);
+  if (index < 0) return false;
+  const existing = indexOfArtifact(state.artifacts, clean);
+  if (existing >= 0) {
+    activateArtifact(sessionId, existing);
+    return true;
+  }
+  audit("preview-step", key, state.artifacts[index], `to=${auditName(clean)}`);
+  previews = new Map(previews);
+  previews.set(key, artifactIdentity(clean));
+  panels = new Map(panels);
+  panels.set(key, {
+    artifacts: state.artifacts.map((a, i) => (i === index ? clean : a)),
+    activeIndex: index,
+  });
+  bump();
+  return true;
+}
+
 /** Clear a strip's preview mark + stack (the preview tab was closed). */
 function clearPreview(key: string): void {
   if (!previews.has(key) && !previewBacks.has(key)) return;
@@ -2292,6 +2330,14 @@ export type PanelActions = {
   /** TYPE text into the focused terminal. The implementation MUST NOT append
    *  a trailing \r — the Enter that sends it is the user's keystroke. */
   sendToThread: (text: string) => void;
+  /** SUBMIT a composed message (SWIT-75 — the deck's `send N notes`): the
+   *  bytes come from `composer.composeWrite`, so the CR is INSIDE the wire
+   *  format (one bracketed paste, one submit — the composer's rule) and
+   *  the message is sent the way Eric asked for the batch to be sent.
+   *  Resolves when the PTY write succeeded, rejects otherwise — the caller
+   *  marks notes sent only on success. Optional so a host that registers
+   *  no submit path (tests) keeps `sendToThread` alone. */
+  submitToThread?: (bytes: string) => Promise<void>;
   /** POP OUT (increment F, Decision 2): hand this artifact to the floating PiP
    *  window. App owns the window lifecycle; the store owns only the record of
    *  WHICH artifact is out there, so the panel can say so instead of drawing a
@@ -2347,6 +2393,16 @@ export function registerPanelActions(actions: PanelActions | null): void {
  *  than silently doing nothing. */
 export function sendToThread(text: string): void {
   panelActions?.sendToThread(text);
+}
+
+/** SUBMIT composed bytes (SWIT-75). Rejects when nothing is registered or
+ *  the host has no submit path — the affordance is gated on
+ *  `useSendToThreadAvailable` like the typed seam, and a rejection here is
+ *  the "not sent" outcome the caller shows. */
+export function submitToThread(bytes: string): Promise<void> {
+  const submit = panelActions?.submitToThread;
+  if (!submit) return Promise.reject(new Error("no thread to send to"));
+  return submit(bytes);
 }
 
 /** Is there anything to type into? Requires both the App-side handler and an

@@ -47,6 +47,11 @@ Ctrl+Shift+P is a true toggle: it closes an open panel and reopens the last arti
 that tab showed. It does nothing on a tab that has never had one — the status-bar
 `Ctrl+Shift+P panel` hint appears only when the chord would actually do something.
 
+Panel-scoped, not a global chord: inside a drilled view (one card of a deck — a table
+row's chart), `[` / `]` step to the previous / next card, and Enter in the card's note
+box steps to the next one. They work while focus is inside the view — click the chart
+first.
+
 The **composer** is the prose input at the bottom of a terminal pane: Enter sends,
 Shift+Enter makes a newline, ↑/↓ walk recent sends. It appears by itself on a pane whose
 session is holding a live claude conversation; Ctrl+Shift+M (or the `×` on the box)

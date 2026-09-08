@@ -2045,6 +2045,21 @@ export default function App() {
       .catch((err) => log.error(`Failed to type reference into session=${sessionId}: ${err}`));
   }, []);
 
+  // SUBMIT a composed message (SWIT-75 — the deck's `send N notes → thread`):
+  // the same target and reveal as the typed seam above, but the bytes come
+  // from composeWrite (the CR is inside the wire format — one bracketed
+  // paste, one submit, the composer's rule) and the outcome is RETURNED, so
+  // the caller marks its notes sent only when the PTY write succeeded.
+  const handleSubmitToThread = useCallback(async (bytes: string) => {
+    const sessionId = effectiveActiveIdRef.current ?? activeIdRef.current;
+    if (!sessionId) throw new Error("no thread to send to");
+    if (bytes.length === 0) return;
+    if (getNavState().route.screen !== "terminal") navigate({ screen: "terminal" });
+    log.info(`Submit to thread session=${sessionId}: ${bytes.length} bytes`);
+    await writeToSession(sessionId, bytes);
+    getTerminal(sessionId)?.terminal.focus();
+  }, []);
+
   // POP OUT (increment F, Decision 2) — hand the panel's active artifact to
   // the FLOATING window, which is the same window Ctrl+Shift+O mirrors a
   // terminal into. One window lifecycle, two host modes:
@@ -2398,6 +2413,7 @@ export default function App() {
   const panelActionsRef = useRef<PanelActions | null>(null);
   panelActionsRef.current = {
     sendToThread: handleSendToThread,
+    submitToThread: handleSubmitToThread,
     answerQuestion: handleAnswerQuestion,
     popOutArtifact: (artifact) => void handlePopOutArtifact(artifact),
     createPanelTerminal: handleCreatePanelTerminal,
@@ -2408,6 +2424,9 @@ export default function App() {
   useEffect(() => {
     registerPanelActions({
       sendToThread: (text) => panelActionsRef.current?.sendToThread(text),
+      submitToThread: (bytes) =>
+        panelActionsRef.current?.submitToThread?.(bytes) ??
+        Promise.reject(new Error("the app is not ready to send")),
       answerQuestion: (threadId, questionId, questionText, answerText, kind) =>
         panelActionsRef.current?.answerQuestion(threadId, questionId, questionText, answerText, kind) ??
         Promise.reject(new Error("the app is not ready to answer")),

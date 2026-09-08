@@ -898,6 +898,180 @@ async fn read_view_data(thread_id: String, rel_path: String) -> Result<String, S
     std::fs::read_to_string(&canon).map_err(|e| e.to_string())
 }
 
+// ── Deck notes (SWIT-75) ─────────────────────────────────────────────────────
+// The chart review loop's ONE write into the thread cwd: `<deck dir>/notes.json`
+// — one note per drilled child, written by the APP (the agent Reads it). The
+// guard is `read_view_data`'s posture narrowed to a directory: the rel dir is
+// component-validated, must already EXIST (canonicalize — this command never
+// creates a directory, only the file inside a deck the exporter wrote), lies
+// inside the canonical root, and the FILE NAME IS FIXED — nothing about it is
+// client data. The body is shape-checked and capped; refused, never repaired.
+
+const VIEW_NOTES_FILE: &str = "notes.json";
+const VIEW_NOTES_CAP: usize = 1024 * 1024;
+
+/// Everything about the write EXCEPT the write: the target path for a deck
+/// dir under a working-dir root. `""` names the root itself. Pure over the
+/// filesystem it is given, so the guard tests run in a temp dir.
+fn view_notes_target(root: &std::path::Path, rel_dir: &str) -> Result<std::path::PathBuf, String> {
+    if rel_dir.len() > 512 {
+        return Err("invalid notes dir".into());
+    }
+    // Layer 1: the RAW relative dir, component-wise (read_view_data's rule).
+    if !rel_dir.is_empty() {
+        for component in rel_dir.split(['/', '\\']) {
+            if component.is_empty() || component == "." || component == ".." || component.contains(':') {
+                return Err("notes dir must be relative, inside the thread's working directory".into());
+            }
+        }
+    }
+    let root_canon = std::fs::canonicalize(root)
+        .map_err(|e| format!("thread working dir unresolvable: {}", e))?;
+    let candidate = if rel_dir.is_empty() {
+        root_canon.clone()
+    } else {
+        root_canon.join(rel_dir.replace('/', std::path::MAIN_SEPARATOR_STR))
+    };
+    // Layer 2: containment of the CANONICALIZED dir — canonicalize requires
+    // existence, which is also the "never creates a directory" rule.
+    let canon = std::fs::canonicalize(&candidate)
+        .map_err(|e| format!("notes dir does not exist: {}", e))?;
+    if !canon.starts_with(&root_canon) {
+        return Err("notes dir escapes the thread's working directory".into());
+    }
+    let meta = std::fs::metadata(&canon).map_err(|e| e.to_string())?;
+    if !meta.is_dir() {
+        return Err("notes dir is not a directory".into());
+    }
+    Ok(canon.join(VIEW_NOTES_FILE))
+}
+
+/// The file's shape: `{version: 1, notes: {<key>: {text: string, …}}}` and
+/// under the cap. Mirrors lib/viewNotes.ts's parse, as a REFUSAL.
+fn validate_view_notes(data: &str) -> Result<(), String> {
+    if data.len() > VIEW_NOTES_CAP {
+        return Err(format!("notes file is {} bytes; the cap is {}", data.len(), VIEW_NOTES_CAP));
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(data).map_err(|e| format!("notes file is not JSON: {}", e))?;
+    let obj = v.as_object().ok_or("notes file must be an object")?;
+    if obj.get("version").and_then(|x| x.as_u64()) != Some(1) {
+        return Err("notes file version must be 1".into());
+    }
+    let notes = obj
+        .get("notes")
+        .and_then(|n| n.as_object())
+        .ok_or("notes file needs a notes object")?;
+    for (key, note) in notes {
+        if key.is_empty() {
+            return Err("a note key cannot be empty".into());
+        }
+        let n = note.as_object().ok_or("each note must be an object")?;
+        if n.get("text").and_then(|t| t.as_str()).is_none() {
+            return Err(format!("note {} has no text", key));
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn write_view_notes(thread_id: String, rel_dir: String, data: String) -> Result<(), String> {
+    if !valid_thread_id(&thread_id) {
+        return Err("invalid thread id".into());
+    }
+    validate_view_notes(&data)?;
+    let root = thread_working_dir(&thread_id)?;
+    let path = view_notes_target(&root, &rel_dir)?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, data.as_bytes()).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod view_notes_guard_tests {
+    use super::{validate_view_notes, view_notes_target, VIEW_NOTES_CAP};
+    use std::path::PathBuf;
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "switchboard-notes-test-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(p.join("deck").join("days")).unwrap();
+        std::fs::write(p.join("deck").join("index.json"), "[]").unwrap();
+        p
+    }
+
+    #[test]
+    fn a_deck_dir_lands_on_its_fixed_file_name() {
+        let root = temp_root("good");
+        let p = view_notes_target(&root, "deck").unwrap();
+        assert_eq!(p.file_name().unwrap(), "notes.json");
+        assert!(p.ends_with(PathBuf::from("deck").join("notes.json")));
+        // Either separator, a nested dir, and the root itself.
+        assert!(view_notes_target(&root, "deck\\days").is_ok());
+        assert!(view_notes_target(&root, "deck/days").is_ok());
+        assert_eq!(view_notes_target(&root, "").unwrap().file_name().unwrap(), "notes.json");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn traversal_absolute_and_drive_forms_refused() {
+        let root = temp_root("trav");
+        for bad in ["../x", "deck/..", "deck/../..", "..", "./deck", "deck//days", "C:deck", "/deck", "\\deck"] {
+            assert!(view_notes_target(&root, bad).is_err(), "{bad}");
+        }
+        let long = "a/".repeat(300);
+        assert!(view_notes_target(&root, &long).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_dir_that_does_not_exist_is_refused_never_created() {
+        let root = temp_root("missing");
+        let err = view_notes_target(&root, "deck/nope").unwrap_err();
+        assert!(err.contains("does not exist"), "{err}");
+        assert!(!root.join("deck").join("nope").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_file_is_not_a_notes_dir_and_the_name_cannot_be_chosen() {
+        let root = temp_root("file");
+        // Naming the index file, or a would-be notes file, as the dir: refused.
+        assert!(view_notes_target(&root, "deck/index.json").is_err());
+        assert!(view_notes_target(&root, "deck/notes.json").is_err());
+        assert!(view_notes_target(&root, "deck/other.json").is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn body_shape_and_cap_are_refused_not_repaired() {
+        assert!(validate_view_notes(r#"{"version":1,"notes":{}}"#).is_ok());
+        assert!(validate_view_notes(
+            r#"{"version":1,"notes":{"2026-02-19":{"text":"chase","updatedAt":"2026-09-08T10:00:00Z"}}}"#
+        )
+        .is_ok());
+        for bad in [
+            "",
+            "not json",
+            "[]",
+            r#"{"version":2,"notes":{}}"#,
+            r#"{"version":1}"#,
+            r#"{"version":1,"notes":[]}"#,
+            r#"{"version":1,"notes":{"":{"text":"x"}}}"#,
+            r#"{"version":1,"notes":{"a":{"updatedAt":"x"}}}"#,
+            r#"{"version":1,"notes":{"a":"x"}}"#,
+        ] {
+            assert!(validate_view_notes(bad).is_err(), "{bad}");
+        }
+        let big = format!(r#"{{"version":1,"notes":{{"a":{{"text":"{}"}}}}}}"#, "x".repeat(VIEW_NOTES_CAP));
+        assert!(validate_view_notes(&big).is_err());
+    }
+}
+
 /// Prepare a thread's LAUNCH (SWIT-49): create its data dir and write the
 /// per-spawn `--mcp-config` file pointing claude at Switchboard's own MCP
 /// server (a dependency-free Node script shipped as a resource). Regenerated
@@ -1919,6 +2093,7 @@ fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         list_thread_views,
         read_thread_view,
         read_view_data,
+        write_view_notes,
         write_thread_answer,
         append_convention,
         save_thread_attachment,

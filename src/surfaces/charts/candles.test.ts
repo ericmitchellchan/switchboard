@@ -4,9 +4,11 @@ import { describe, it, expect } from "vitest";
 import {
   SERIES_PALETTE,
   barAnchorKey,
+  candleLevelLines,
   drawableLevels,
   isoToUtcSeconds,
   levelColor,
+  levelRange,
   nearestCandle,
   seriesColor,
   toCandlePoints,
@@ -104,5 +106,36 @@ describe("seriesColor — the stable per-name palette (SWIT-70)", () => {
   it("separates the pairs that ride one chart together", () => {
     expect(seriesColor("close")).not.toBe(seriesColor("volume"));
     expect(seriesColor("gamma")).not.toBe(seriesColor("vega"));
+  });
+});
+
+// ── SWIT-75: levels on the two price charts ─────────────────────────────────
+
+describe("levelRange / candleLevelLines (SWIT-75)", () => {
+  it("levelRange spans every price and a zone's price2; null with none", () => {
+    expect(levelRange([{ price: 25471.4 }, { price: 25233.5, price2: 25443.8, style: "zone" }, { price: NaN }])).toEqual([
+      25233.5, 25471.4,
+    ]);
+    expect(levelRange([{ price: 1, price2: 9 }])).toEqual([1, 1]); // price2 counts on a zone only
+    expect(levelRange([])).toBeNull();
+    expect(levelRange(undefined)).toBeNull();
+  });
+
+  it("candleLevelLines: neutral tone, the label or the price as title, a zone as two dashed edges", () => {
+    expect(
+      candleLevelLines([
+        { price: 25471.4, label: "flip" },
+        { price: 25443.8, style: "dashed" },
+        { price: 25233.5, price2: 25260, style: "zone", label: "put zone" },
+        { price: 1, style: "zone" }, // no price2 → nothing
+        { price: Number.NaN, label: "x" },
+      ])
+    ).toEqual([
+      { price: 25471.4, label: "flip", tone: "neutral", style: "solid" },
+      { price: 25443.8, label: "25443.8", tone: "neutral", style: "dashed" },
+      { price: 25233.5, label: "put zone", tone: "neutral", style: "dashed" },
+      { price: 25260, label: "put zone", tone: "neutral", style: "dashed" },
+    ]);
+    expect(levelColor("neutral")).toBe("#b4b4b4");
   });
 });
