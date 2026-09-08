@@ -176,3 +176,33 @@ html, body, #root {
   background-color: rgba(232, 183, 101, 0.5) !important;
   outline: 1px solid rgba(232, 183, 101, 0.6);
 }
+
+/* The ✦ page's evidence rows (SWIT-78, Ky's CC-703): the `×` that takes a
+   row off the page is faint and hover/focus-only — sweeping the list must
+   not read as a list of delete buttons — and rose only under the pointer
+   (the kit's destructive-only use of the tone). The row is a plain div in
+   PageView; the affordance is the ONE class pair the shell's inline styles
+   cannot express (a group-hover). */
+.page-evidence-x {
+  flex: none;
+  padding: 0 3px;
+  background: none;
+  border: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-faint);
+  cursor: pointer;
+  opacity: 0;
+}
+.page-evidence-row:hover .page-evidence-x,
+.page-evidence-x:focus-visible {
+  opacity: 1;
+}
+.page-evidence-x:hover {
+  color: var(--tone-rose);
+}
+.page-evidence-x:disabled {
+  opacity: 0.4;
+  cursor: default;
+}

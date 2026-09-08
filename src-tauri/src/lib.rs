@@ -274,7 +274,7 @@ async fn clear_session_scrollback(session_id: String) -> Result<(), String> {
 // ── Per-thread data dirs (SWIT-48, the coaching-platform page) ───────────────
 // `%LOCALAPPDATA%/switchboard/threads/<threadId>/` holds the thread's page
 // files: page.json (written by the MCP server, SWIT-49), answers.json +
-// inbox.json (written by the app, SWIT-51/52). ONE WRITER PER FILE is the
+// inbox.json + retracted.json (written by the app, SWIT-51/52/78). ONE WRITER PER FILE is the
 // design; the shell only READS here, and the guard posture mirrors kb.rs:
 // the thread id is validated component-wise (uuid alphabet only — no
 // separators, so no traversal is expressible) and the file name comes from a
@@ -286,8 +286,9 @@ fn threads_data_dir() -> Result<std::path::PathBuf, String> {
 }
 
 /// The files a thread dir may hold in this increment. SWIT-50 extends this
-/// with the views/ listing through its own guarded command.
-const THREAD_FILES: [&str; 3] = ["page.json", "answers.json", "inbox.json"];
+/// with the views/ listing through its own guarded command. SWIT-78 adds
+/// retracted.json — the app's overlay of evidence rows taken off the page.
+const THREAD_FILES: [&str; 4] = ["page.json", "answers.json", "inbox.json", "retracted.json"];
 
 /// Thread ids are frontend-minted uuids (threadStore.mintUuid). Anything
 /// outside the uuid alphabet is refused outright — there is no path form to
@@ -332,11 +333,11 @@ async fn read_thread_file(thread_id: String, name: String) -> Result<String, Str
     }
 }
 
-/// A change stamp over a thread's three page files: the max mtime (ms since
-/// epoch) of page.json / answers.json / inbox.json, a missing file counting 0.
-/// The frontend's 5s pass compares it tick-to-tick and skips the three reads
-/// when nothing moved — a per-thread stat instead of three reads per thread
-/// per tick. Same guard posture as read_thread_file: the id is validated and
+/// A change stamp over a thread's page files: the max mtime (ms since epoch)
+/// of page.json / answers.json / inbox.json / retracted.json, a missing file
+/// counting 0. The frontend's 5s pass compares it tick-to-tick and skips the
+/// reads when nothing moved — a per-thread stat instead of three reads per
+/// thread per tick. Same guard posture as read_thread_file: the id is validated and
 /// the names come from the fixed THREAD_FILES set, so nothing caller-named
 /// reaches the filesystem. Compared by INEQUALITY on the frontend (a stamp is
 /// a change signal, not a clock — a restored older file must still re-read).
@@ -416,6 +417,132 @@ mod thread_stamp_tests {
         assert!(valid_thread_id("3f1c2a9e-0b7d-4c1e-9a55-1234567890ab"));
         assert!(!valid_thread_id("../escape"));
         assert!(!valid_thread_id(""));
+    }
+
+    #[test]
+    fn retracted_json_is_in_the_fixed_file_set() {
+        // SWIT-78: the overlay is readable through read_thread_file and moves
+        // the stamp like the other three — nothing caller-named joins the set.
+        assert!(THREAD_FILES.contains(&"retracted.json"));
+        assert_eq!(THREAD_FILES.len(), 4);
+    }
+}
+
+// ── Retracted evidence (SWIT-78 — the correctable record) ────────────────────
+// A `×` on an Evidence row takes it off the page. page.json is the MCP
+// server's file, so the APP never edits the row: it records `{address, at}` in
+// retracted.json (this file's sole writer is the app; same tmp+rename posture
+// as answers.json) and the frontend merge hides the row until the agent
+// re-posts it with a newer stamp (pageStore.applyRetractions). The list is
+// newest-first, one entry per address (a re-retraction moves its stamp — so a
+// row that came back can go again), capped so a hand-edited file cannot grow
+// without bound. RETRACTED_CAP mirrors pageStore.RETRACTED_CAP.
+
+const RETRACTED_CAP: usize = 200;
+/// An address is a page-evidence address (server TEXT_CAP is 500) — a ticket
+/// key, a path, a `surface:` state, a `view:` id. Control characters refused.
+const RETRACTED_ADDRESS_CAP: usize = 500;
+
+fn valid_evidence_address(address: &str) -> bool {
+    !address.is_empty()
+        && address.len() <= RETRACTED_ADDRESS_CAP
+        && !address.chars().any(|c| c.is_control())
+}
+
+/// Pure half of `retract_thread_evidence`: the new list — `{address, at}`
+/// FIRST, any older entry for the same address gone, non-object / addressless
+/// junk dropped, the oldest beyond the cap dropped. Returns the list.
+fn retract_evidence_address(
+    existing: &[serde_json::Value],
+    address: &str,
+    now: &str,
+) -> Vec<serde_json::Value> {
+    let mut out = Vec::with_capacity(existing.len() + 1);
+    out.push(serde_json::json!({ "address": address, "at": now }));
+    for entry in existing {
+        let Some(obj) = entry.as_object() else { continue };
+        match obj.get("address").and_then(|a| a.as_str()) {
+            Some(a) if !a.is_empty() && a != address => out.push(entry.clone()),
+            _ => {}
+        }
+    }
+    out.truncate(RETRACTED_CAP);
+    out
+}
+
+fn read_retracted_list(file: &std::path::Path) -> Vec<serde_json::Value> {
+    // Tolerant read: junk degrades to an empty list — the one path that must
+    // never lose the retraction Eric just made.
+    std::fs::read_to_string(file)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| {
+            v.get("evidence")
+                .and_then(|e| e.as_array().cloned())
+                .or_else(|| v.as_array().cloned())
+        })
+        .unwrap_or_default()
+}
+
+/// SWIT-78: take an evidence row off the page. Resolves to the retraction
+/// count after the write.
+#[tauri::command]
+async fn retract_thread_evidence(thread_id: String, address: String) -> Result<usize, String> {
+    if !valid_thread_id(&thread_id) {
+        return Err("invalid thread id".into());
+    }
+    let trimmed = address.trim();
+    if !valid_evidence_address(trimmed) {
+        return Err("invalid evidence address".into());
+    }
+    let dir = threads_data_dir()?.join(&thread_id);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let file = dir.join("retracted.json");
+    let list = retract_evidence_address(&read_retracted_list(&file), trimmed, &chrono_like_now_iso());
+    let n = list.len();
+    let payload = serde_json::to_string_pretty(&serde_json::json!({ "version": 1, "evidence": list }))
+        .map_err(|e| e.to_string())?;
+    let tmp = dir.join("retracted.json.tmp");
+    std::fs::write(&tmp, payload).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &file).map_err(|e| e.to_string())?;
+    Ok(n)
+}
+
+#[cfg(test)]
+mod retracted_evidence_tests {
+    use super::{retract_evidence_address, valid_evidence_address, RETRACTED_CAP};
+
+    #[test]
+    fn newest_first_one_entry_per_address_junk_dropped() {
+        let existing: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[{"address":"SWIT-1","at":"t1"},{"address":"docs/a.md","at":"t0"},"junk",{"at":"no address"},{"address":"","at":"t"}]"#,
+        )
+        .unwrap();
+        let list = retract_evidence_address(&existing, "docs/a.md", "t2");
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0]["address"], "docs/a.md");
+        assert_eq!(list[0]["at"], "t2"); // the re-retraction MOVES the stamp
+        assert_eq!(list[1]["address"], "SWIT-1");
+    }
+
+    #[test]
+    fn caps_by_dropping_the_oldest() {
+        let existing: Vec<serde_json::Value> = (0..RETRACTED_CAP)
+            .map(|i| serde_json::json!({ "address": format!("A-{i}"), "at": "t" }))
+            .collect();
+        let list = retract_evidence_address(&existing, "NEW-1", "t9");
+        assert_eq!(list.len(), RETRACTED_CAP);
+        assert_eq!(list[0]["address"], "NEW-1");
+        assert_eq!(list[RETRACTED_CAP - 1]["address"], format!("A-{}", RETRACTED_CAP - 2));
+    }
+
+    #[test]
+    fn address_guard() {
+        assert!(valid_evidence_address("SWIT-78"));
+        assert!(valid_evidence_address("surface:lodestar/trading?instrument=NQ"));
+        assert!(!valid_evidence_address(""));
+        assert!(!valid_evidence_address("a\nb"));
+        assert!(!valid_evidence_address(&"x".repeat(501)));
     }
 }
 
@@ -2248,6 +2375,7 @@ fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         write_view_notes,
         write_thread_answer,
         mark_thread_answers_sent,
+        retract_thread_evidence,
         append_convention,
         save_thread_attachment,
         save_transcript,

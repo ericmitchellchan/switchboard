@@ -37,6 +37,7 @@ const server = require("../../src-tauri/resources/mcp/switchboard-mcp.cjs") as {
   OpError: new (message: string) => Error;
   QUESTION_KINDS: string[];
   NO_NOTE: string;
+  DROP_EVIDENCE_CAP: number;
   WHY_CAP: number;
   TURN_CAP: number;
   TURN_LINE_CAP: number;
@@ -372,19 +373,111 @@ describe("ROUND-TRIP: the server's writes parse through pageStore (the seam)", (
       "plus why: one line on that recommendation",
       "op resolve {id, answer}",
       "AT THE END OF EVERY TURN, resolve every question that is settled — answered in chat, decided elsewhere, or moot — or it stays open forever; the page lists the open ones",
-      "TIDY THE PLAN EVERY TURN: close what finished, retitle a row into its replacement rather than adding a second one, never file a 'later' bucket row",
+      "TIDY THE PLAN EVERY TURN: close what finished, drop what no longer applies, retitle a row into its replacement rather than adding a second one, never file a 'later' bucket row",
       "items carry NO note",
     ]) {
       expect(server.PAGE_TOOL.description).toContain(rule);
     }
     const props = (server.PAGE_TOOL.inputSchema as { properties: Record<string, { enum?: string[] }> }).properties;
     expect(props.kind.enum).toEqual(["decision", "convention", "info"]);
-    expect(props.op.enum).toEqual(["theme", "turn", "evidence", "ask", "resolve", "item"]);
+    expect(props.op.enum).toEqual(["theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item"]);
     expect(props.default).toBeDefined();
     expect(props.reviewFirst).toBeDefined();
     expect(props.why).toBeDefined();
     expect(props.answer).toBeDefined();
     expect(props.note).toBeUndefined(); // gone from the schema, refused by the op
+  });
+});
+
+describe("the correctable record (SWIT-78 — Ky's CC-703/704)", () => {
+  it("drop_evidence removes the named rows from page.json, ignores unknown addresses, and the message counts what went", () => {
+    const page = run([
+      { op: "evidence", address: "SWIT-1", label: "wrong", status: "open" },
+      { op: "evidence", address: "SWIT-2", label: "right", status: "open" },
+      { op: "evidence", address: "docs/a.md", label: "a doc" },
+    ]);
+    const { page: after, message } = server.applyOp(
+      page,
+      { op: "drop_evidence", addresses: ["SWIT-1", " docs/a.md ", "NOPE-9"] },
+      NOW
+    );
+    expect((after.evidence as Array<{ address: string }>).map((e) => e.address)).toEqual(["SWIT-2"]);
+    expect(message).toBe("Dropped 2 evidence rows.");
+    expect(server.applyOp(page, { op: "drop_evidence", addresses: ["SWIT-2"] }, NOW).message).toBe("Dropped 1 evidence row.");
+    expect(server.applyOp(page, { op: "drop_evidence", addresses: ["NOPE-9"] }, NOW).message).toMatch(/Dropped 0 evidence rows/);
+    // The rest of the page is untouched; the dropped row simply is not there
+    // for pageStore either (no "superseded" row stacked on it).
+    expect(parsePageFile(JSON.stringify(after)).evidence.map((e) => e.address)).toEqual(["SWIT-2"]);
+  });
+
+  it("drop_evidence refuses an empty / missing list, a non-string address and more than the cap — visible errors", () => {
+    expect(server.DROP_EVIDENCE_CAP).toBe(20);
+    expect(() => server.applyOp(empty(), { op: "drop_evidence" }, NOW)).toThrow(/addresses must be a non-empty array/);
+    expect(() => server.applyOp(empty(), { op: "drop_evidence", addresses: [] }, NOW)).toThrow(/addresses must be a non-empty array/);
+    expect(() => server.applyOp(empty(), { op: "drop_evidence", addresses: ["", "x"] }, NOW)).toThrow(/an address must be a non-empty string/);
+    const tooMany = Array.from({ length: server.DROP_EVIDENCE_CAP + 1 }, (_, i) => `A-${i}`);
+    expect(() => server.applyOp(empty(), { op: "drop_evidence", addresses: tooMany }, NOW)).toThrow(/at most 20 addresses/);
+    // A hand-corrupted page (nulls in evidence) does not break the drop.
+    const corrupted = server.parsePage(JSON.stringify({ evidence: [null, { address: "SWIT-1", label: "x" }] }));
+    expect(() => server.applyOp(corrupted, { op: "drop_evidence", addresses: ["SWIT-1"] }, NOW)).not.toThrow();
+  });
+
+  it("item drop sets state dropped (distinct from close = done); closedAt is stamped by both and cleared on reopen; the state enum cannot reach dropped", () => {
+    const at = new Date(NOW).toISOString();
+    let page = run([
+      { op: "item", itemOp: "add", title: "one" },
+      { op: "item", itemOp: "add", title: "two" },
+      { op: "item", itemOp: "add", title: "three", state: "done" },
+    ]);
+    let items = page.items as Array<Record<string, unknown>>;
+    expect(items[0].closedAt).toBeUndefined();
+    expect(items[2].closedAt).toBe(at); // added as done → stamped at once
+    const dropped = server.applyOp(page, { op: "item", itemOp: "drop", id: "i1" }, NOW);
+    expect(dropped.message).toBe("Item i1 dropped.");
+    page = server.applyOp(dropped.page, { op: "item", itemOp: "close", id: "i2" }, NOW).page;
+    items = page.items as Array<Record<string, unknown>>;
+    expect(items[0]).toMatchObject({ state: "dropped", closedAt: at });
+    expect(items[1]).toMatchObject({ state: "done", closedAt: at });
+    // `dropped` is not a value `update` accepts: the close-vs-drop distinction is the op.
+    const sneaky = server.applyOp(page, { op: "item", itemOp: "update", id: "i2", state: "dropped" }, NOW).page;
+    expect((sneaky.items as Array<Record<string, unknown>>)[1].state).toBe("done");
+    // Reopening clears the stamp; re-closing later re-stamps.
+    const reopened = server.applyOp(page, { op: "item", itemOp: "update", id: "i2", state: "in_progress" }, NOW).page;
+    expect((reopened.items as Array<Record<string, unknown>>)[1].closedAt).toBeUndefined();
+    const later = server.applyOp(reopened, { op: "item", itemOp: "update", id: "i2", state: "done" }, NOW + 60_000).page;
+    expect((later.items as Array<Record<string, unknown>>)[1].closedAt).toBe(new Date(NOW + 60_000).toISOString());
+    // A second close of an already-closed item keeps its original stamp.
+    const again = server.applyOp(later, { op: "item", itemOp: "close", id: "i2" }, NOW + 120_000).page;
+    expect((again.items as Array<Record<string, unknown>>)[1].closedAt).toBe(new Date(NOW + 60_000).toISOString());
+    expect(() => server.applyOp(page, { op: "item", itemOp: "drop", id: "i9" }, NOW)).toThrow(/no item/);
+    expect(() => server.applyOp(page, { op: "item", itemOp: "vanish", id: "i1" }, NOW)).toThrow(/"add", "update", "close" or "drop"/);
+  });
+
+  it("ROUND-TRIP: a dropped item lands under droppedItems in the merge and nowhere else; the tool table states close vs drop", () => {
+    const page = run([
+      { op: "item", itemOp: "add", title: "keep", owner: "user" },
+      { op: "item", itemOp: "add", title: "never the right row", owner: "user" },
+      { op: "item", itemOp: "drop", id: "i2" },
+    ]);
+    const merged = mergePage(parsePageFile(JSON.stringify(page)), {}, []);
+    expect(merged.openItems.map((i) => i.title)).toEqual(["keep"]);
+    expect(merged.userItems.map((i) => i.title)).toEqual(["keep"]);
+    expect(merged.doneItems).toEqual([]);
+    expect(merged.droppedItems.map((i) => i.title)).toEqual(["never the right row"]);
+    expect(merged.droppedItems[0].closedAt).toBe(new Date(NOW).toISOString());
+    for (const rule of [
+      "op drop_evidence {addresses} removes rows written against the wrong thing",
+      'use it instead of a second row labelled "superseded"',
+      "itemOp close = the work happened; itemOp drop = the row was never the right row",
+      "dropped rows leave the live plan and stay under Dropped",
+      "TIDY THE PLAN EVERY TURN: close what finished, drop what no longer applies",
+    ]) {
+      expect(server.PAGE_TOOL.description).toContain(rule);
+    }
+    const props = (server.PAGE_TOOL.inputSchema as { properties: Record<string, { enum?: string[] }> }).properties;
+    expect(props.itemOp.enum).toEqual(["add", "update", "close", "drop"]);
+    expect(props.state.enum).toEqual(["todo", "in_progress", "waiting", "done"]); // dropped only through the op
+    expect(props.addresses).toBeDefined();
   });
 });
 

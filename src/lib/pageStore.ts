@@ -16,6 +16,15 @@
 //                  in page.json as answer + answeredAt + resolvedBy "agent".
 //   inbox.json   ← the app (SWIT-52): cross-thread posts, folded under Needs
 //                  You / What Happened with their origin.
+//   retracted.json ← the app (SWIT-78): the evidence rows Eric took OFF the
+//                  page (`×` on a row). page.json stays the agent's file, so a
+//                  retraction is an OVERLAY — `{address, at}` — folded out at
+//                  read time (`applyRetractions`): the agent's row is hidden
+//                  UNLESS its `updatedAt` is newer than the retraction, so
+//                  re-posting the address brings it back on purpose. A
+//                  scrollback-scanned row is hidden by address alone (PageView
+//                  applies `isRetracted` with no stamp): a sighting in the
+//                  buffer is not the agent re-posting.
 //
 // One-writer-per-file is the editor.ts / pinsStore lesson made structural:
 // no file here can ever race two writers, so no conflict machinery exists.
@@ -31,7 +40,7 @@
 // RUNNING repaints the panel body and only the panel body (the freeze rule is
 // unreachable from here by construction; the test asserts the import graph).
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { readThreadFile } from "./ipc";
 
 // ── Caps (R2 edge cases: the page is not a chat) ─────────────────────────────
@@ -92,14 +101,25 @@ export type PageQuestion = {
   resolved: { answer: string; at: string; by: "agent" | "user" } | null;
 };
 export type PageItemOwner = "agent" | "user" | "team";
-export type PageItemState = "todo" | "in_progress" | "waiting" | "done";
+/** SWIT-78 (Ky's plan tool): `done` = the work happened; `dropped` = the row
+ *  was never the right row (superseded, taken over, a "later" bucket). Both
+ *  leave the live list; only `done` is an accomplishment. */
+export type PageItemState = "todo" | "in_progress" | "waiting" | "done" | "dropped";
 export type PageItem = {
   id: string;
   title: string;
   owner: PageItemOwner;
   state: PageItemState;
   note: string | null;
+  /** SWIT-78: when the item left the live list (close OR drop). Null while
+   *  open, or on an item closed before the stamp existed. */
+  closedAt: string | null;
 };
+
+/** An item still on the live list — neither done nor dropped. Pure. */
+export function isOpenItem(item: Pick<PageItem, "state">): boolean {
+  return item.state !== "done" && item.state !== "dropped";
+}
 
 /** page.json — the agent's half, newest-first arrays. */
 export type PageFile = {
@@ -124,6 +144,13 @@ export const EMPTY_PAGE: PageFile = Object.freeze({
  *  page.json) — carried so a reader of the file alone can tell. */
 export type PageAnswer = { text: string; at: string; sentAt?: string; resolvedBy?: "user" };
 export type AnswersFile = Record<string, PageAnswer>;
+
+/** retracted.json — an evidence row Eric took off the page (SWIT-78): the
+ *  address and WHEN, so a row the agent re-posts later (newer `updatedAt`)
+ *  comes back. The app is this file's one writer (Rust
+ *  `retract_thread_evidence`); the cap mirrors its RETRACTED_CAP. */
+export type RetractedEvidence = { address: string; at: string };
+export const RETRACTED_CAP = 200;
 
 /** inbox.json — cross-thread posts delivered TO this thread (SWIT-52). */
 export type InboxPost = {
@@ -241,10 +268,10 @@ export function parsePageFile(raw: string): PageFile {
       seenItemIds.add(id);
       const owner = i.owner === "user" || i.owner === "team" ? i.owner : "agent";
       const state =
-        i.state === "in_progress" || i.state === "waiting" || i.state === "done"
+        i.state === "in_progress" || i.state === "waiting" || i.state === "done" || i.state === "dropped"
           ? i.state
           : "todo";
-      items.push({ id, title, owner, state, note: str(i.note) });
+      items.push({ id, title, owner, state, note: str(i.note), closedAt: str(i.closedAt) });
     }
   }
 
@@ -272,6 +299,70 @@ export function parseAnswersFile(raw: string): AnswersFile {
     out[id] = answer;
   }
   return out;
+}
+
+/** Tolerant parse of retracted.json: `{version, evidence: [{address, at}]}`
+ *  (a bare array is taken too). A malformed entry drops alone; a repeated
+ *  address keeps its FIRST (newest-first file) entry; capped. */
+export function parseRetractedFile(raw: string): RetractedEvidence[] {
+  if (raw.trim().length === 0) return [];
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  const list = isRecord(data) && Array.isArray(data.evidence) ? data.evidence : Array.isArray(data) ? data : [];
+  const out: RetractedEvidence[] = [];
+  const seen = new Set<string>();
+  for (const r of list) {
+    if (!isRecord(r)) continue;
+    const address = str(r.address);
+    if (!address || seen.has(address)) continue;
+    seen.add(address);
+    out.push({ address, at: str(r.at) ?? "" });
+    if (out.length >= RETRACTED_CAP) break;
+  }
+  return out;
+}
+
+// ── Retractions (SWIT-78 — the correctable record) ───────────────────────────
+// Ky's CC-703: a `×` on an evidence row takes it off the page. page.json is
+// the agent's file, so the app never edits the row — it records the address
+// in retracted.json and the MERGE hides it. The rule has one exception, on
+// purpose: an agent row whose `updatedAt` is NEWER than the retraction shows
+// again, because re-posting an address is the agent saying "no, this one
+// belongs" (its `drop_evidence` op is how it takes a row back for good).
+
+/** Is a row at `address` hidden by the retractions? With `updatedAt` (an
+ *  agent row), a stamp newer than the retraction's un-hides it; with NULL
+ *  (a scrollback-scanned row — the scan's clock is a sighting, not a claim)
+ *  the address alone decides. An unparseable stamp on either side counts as
+ *  NOT newer — a retraction stands until the agent demonstrably re-posts.
+ *  Pure. */
+export function isRetracted(
+  address: string,
+  updatedAt: string | null,
+  retracted: readonly RetractedEvidence[]
+): boolean {
+  const hit = retracted.find((r) => r.address === address);
+  if (!hit) return false;
+  if (updatedAt === null) return true;
+  const rowAt = Date.parse(updatedAt);
+  const retractedAt = Date.parse(hit.at);
+  if (!Number.isFinite(rowAt) || !Number.isFinite(retractedAt)) return true;
+  return rowAt <= retractedAt;
+}
+
+/** Fold the retractions out of a row list (agent-clock rows: `updatedAt` is
+ *  consulted). Returns the SAME array when nothing is hidden. Pure. */
+export function applyRetractions<T extends Pick<PageEvidence, "address" | "updatedAt">>(
+  rows: readonly T[],
+  retracted: readonly RetractedEvidence[]
+): T[] {
+  if (retracted.length === 0) return rows as T[];
+  const kept = rows.filter((r) => !isRetracted(r.address, r.updatedAt, retracted));
+  return kept.length === rows.length ? (rows as T[]) : kept;
 }
 
 // ── The batch (SWIT-77, Ky's decisionsStore) ─────────────────────────────────
@@ -470,6 +561,13 @@ export type RenderedPage = {
   /** DONE — folded past DONE_FOLD. */
   doneItems: PageItem[];
   doneFolded: number;
+  /** DROPPED (SWIT-78) — items that were never the right row; a collapsed
+   *  disclosure BELOW Done. Excluded from To do, from Home and from every
+   *  count. */
+  droppedItems: PageItem[];
+  /** SWIT-78: the retractions the merge applied — PageView needs them again
+   *  for the rows it synthesizes AFTER the merge (scanned + view rows). */
+  retractedEvidence: RetractedEvidence[];
   /** Nothing anywhere — the agent has not written yet. */
   isEmpty: boolean;
 };
@@ -498,7 +596,14 @@ function byOldestAsked(a: PageQuestion, b: PageQuestion): number {
   return na - nb;
 }
 
-export function mergePage(page: PageFile, answers: AnswersFile, inbox: InboxPost[]): RenderedPage {
+const NO_RETRACTIONS: RetractedEvidence[] = [];
+
+export function mergePage(
+  page: PageFile,
+  answers: AnswersFile,
+  inbox: InboxPost[],
+  retracted: readonly RetractedEvidence[] = NO_RETRACTIONS
+): RenderedPage {
   const openQuestions = page.questions.filter((q) => isQuestionOpen(q, answers));
   // PRECEDENCE (SWIT-77): the user's answer in answers.json is ground truth
   // over the agent's resolution of the same question — the agent settles
@@ -516,7 +621,10 @@ export function mergePage(page: PageFile, answers: AnswersFile, inbox: InboxPost
       .filter((q) => !(q.id in answers) && q.resolved !== null)
       .map((q) => ({ question: q, answer: q.resolved!.answer, at: q.resolved!.at, by: q.resolved!.by })),
   ].sort((a, b) => newestFirst(a.at, b.at));
-  const openAll = page.items.filter((i) => i.state !== "done");
+  // SWIT-78: `dropped` leaves the live list exactly as `done` does — so it
+  // is out of To do, out of `userItems` (Home's Needs you) and out of every
+  // count — but it is not an accomplishment, so it never joins Done.
+  const openAll = page.items.filter(isOpenItem);
   // SWIT-77 (Ky's PlanPanel): Needs you is retired on the page — an item
   // waiting on the user is a To do row with its owner column lit, listed
   // FIRST. `userItems` stays the roll-up's (Home) subset.
@@ -524,6 +632,7 @@ export function mergePage(page: PageFile, answers: AnswersFile, inbox: InboxPost
   const openItems = [...userItems, ...openAll.filter((i) => !isWaitingOnUser(i))];
   const doneAll = page.items.filter((i) => i.state === "done");
   const doneItems = doneAll.slice(0, DONE_FOLD);
+  const droppedItems = page.items.filter((i) => i.state === "dropped");
   const requests = inbox.filter((p) => p.kind === "request");
   const updates = inbox.filter((p) => p.kind === "update");
   const decisions: PageEvidence[] = [
@@ -545,10 +654,13 @@ export function mergePage(page: PageFile, answers: AnswersFile, inbox: InboxPost
   // A decided row wins over an agent-written row at the same address (the
   // answer is ground truth); the rest merge newest-first, which keeps the
   // agent's own newest-first order among themselves (stable sort).
+  // SWIT-78: the retractions fold out of the AGENT's rows here (newer
+  // `updatedAt` un-hides — a re-post brings a row back); decision rows are
+  // never retracted — a decision is corrected on its question (`change`).
   const decidedAddresses = new Set(decisions.map((d) => d.address));
   const evidence = [
     ...decisions,
-    ...page.evidence.filter((e) => !decidedAddresses.has(e.address)),
+    ...applyRetractions(page.evidence, retracted).filter((e) => !decidedAddresses.has(e.address)),
   ].sort(byNewest);
   const merged: RenderedPage = {
     theme: page.theme,
@@ -566,6 +678,8 @@ export function mergePage(page: PageFile, answers: AnswersFile, inbox: InboxPost
     settledQuestions,
     doneItems,
     doneFolded: Math.max(0, doneAll.length - DONE_FOLD),
+    droppedItems,
+    retractedEvidence: retracted as RetractedEvidence[],
     isEmpty:
       page.theme === null &&
       page.turns.length === 0 &&
@@ -766,22 +880,28 @@ export function nextPassEntry(
 
 export const PAGE_POLL_MS = 2_500;
 
-const THREAD_FILE_NAMES = ["page.json", "answers.json", "inbox.json"] as const;
+const THREAD_FILE_NAMES = ["page.json", "answers.json", "inbox.json", "retracted.json"] as const;
 
 export type PageRead = {
   page: RenderedPage;
   /** Bumps when content actually changed — a render key for "new" chips. */
   revision: number;
+  /** SWIT-78: re-read NOW (after an app write like a retraction) instead of
+   *  waiting out the poll — the page still re-renders from the merged files,
+   *  never from local hide state. A no-op while inactive or mid-read. */
+  refresh: () => void;
 };
 
 /** Read + merge a thread's page, re-reading every PAGE_POLL_MS while
  *  `active`. Unchanged raw content is a NO-OP (no state write, no re-render);
  *  a failed read keeps the last good page — degraded, never blanked. */
 export function usePage(threadId: string, active: boolean): PageRead {
-  const [state, setState] = useState<PageRead>(() => ({
+  const [state, setState] = useState<Omit<PageRead, "refresh">>(() => ({
     page: mergePage(EMPTY_PAGE, {}, []),
     revision: 0,
   }));
+  // The current poll's tick, for `refresh` — null while inactive.
+  const tickRef = useRef<(() => Promise<void>) | null>(null);
   // The last raw content seen, concatenated — the no-op compare. A ref, not
   // state: it must not trigger renders and must be current inside the async
   // read callback.
@@ -804,17 +924,18 @@ export function usePage(threadId: string, active: boolean): PageRead {
       if (busyRef.current) return;
       busyRef.current = true;
       try {
-        const [pageRaw, answersRaw, inboxRaw] = await Promise.all(
+        const [pageRaw, answersRaw, inboxRaw, retractedRaw] = await Promise.all(
           THREAD_FILE_NAMES.map((name) => readThreadFile(threadId, name))
         );
         if (cancelled) return;
-        const combined = `${pageRaw} ${answersRaw} ${inboxRaw}`;
+        const combined = `${pageRaw} ${answersRaw} ${inboxRaw} ${retractedRaw}`;
         if (combined === lastRawRef.current) return; // unchanged — no re-render
         lastRawRef.current = combined;
         const page = mergePage(
           parsePageFile(pageRaw),
           parseAnswersFile(answersRaw),
-          parseInboxFile(inboxRaw)
+          parseInboxFile(inboxRaw),
+          parseRetractedFile(retractedRaw)
         );
         setState((prev) => ({ page, revision: prev.revision + 1 }));
       } catch {
@@ -824,13 +945,19 @@ export function usePage(threadId: string, active: boolean): PageRead {
         busyRef.current = false;
       }
     };
+    tickRef.current = tick;
     void tick();
     const id = window.setInterval(() => void tick(), PAGE_POLL_MS);
     return () => {
       cancelled = true;
+      tickRef.current = null;
       window.clearInterval(id);
     };
   }, [threadId, active]);
 
-  return state;
+  const refresh = useCallback(() => {
+    void tickRef.current?.();
+  }, []);
+
+  return { ...state, refresh };
 }

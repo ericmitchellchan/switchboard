@@ -38,8 +38,13 @@ import {
   isWaitingOnUser,
   isQuestionOpen,
   WHY_CAP,
+  parseRetractedFile,
+  isRetracted,
+  applyRetractions,
+  isOpenItem,
+  RETRACTED_CAP,
 } from "./pageStore";
-import type { PageQuestion } from "./pageStore";
+import type { PageQuestion, RetractedEvidence } from "./pageStore";
 
 const PAGE = {
   theme: "Give every market an anchor",
@@ -447,6 +452,116 @@ describe("mergePage", () => {
     expect(
       mergePage(EMPTY_PAGE, {}, [{ id: "p", from: "a", kind: "update", text: "t", at: "" }]).isEmpty
     ).toBe(false);
+  });
+});
+
+describe("the correctable record (SWIT-78)", () => {
+  const T0 = "2026-09-08T10:00:00Z";
+  const T1 = "2026-09-08T11:00:00Z";
+  const T2 = "2026-09-08T12:00:00Z";
+
+  it("parseRetractedFile is tolerant: the {version, evidence} shape or a bare array; junk drops alone; first entry per address; capped", () => {
+    expect(parseRetractedFile("")).toEqual([]);
+    expect(parseRetractedFile("{not json")).toEqual([]);
+    expect(parseRetractedFile("42")).toEqual([]);
+    expect(
+      parseRetractedFile(
+        JSON.stringify({
+          version: 1,
+          evidence: [
+            { address: "SWIT-1", at: T1 },
+            "junk",
+            { at: "no address" },
+            { address: "" },
+            { address: "docs/a.md" }, // no stamp → "" (never newer than a row)
+            { address: "SWIT-1", at: T0 }, // repeat → the FIRST (newest-first file) wins
+          ],
+        })
+      )
+    ).toEqual([
+      { address: "SWIT-1", at: T1 },
+      { address: "docs/a.md", at: "" },
+    ]);
+    expect(parseRetractedFile(JSON.stringify([{ address: "x", at: T0 }]))).toEqual([{ address: "x", at: T0 }]);
+    const many = Array.from({ length: RETRACTED_CAP + 5 }, (_, i) => ({ address: `A-${i}`, at: T0 }));
+    expect(parseRetractedFile(JSON.stringify({ evidence: many }))).toHaveLength(RETRACTED_CAP);
+  });
+
+  it("isRetracted: an agent row is hidden unless its updatedAt is NEWER than the retraction; a scanned row (no stamp) is hidden by address alone", () => {
+    const retracted: RetractedEvidence[] = [{ address: "SWIT-1", at: T1 }];
+    expect(isRetracted("SWIT-2", T2, retracted)).toBe(false); // not retracted at all
+    expect(isRetracted("SWIT-1", T0, retracted)).toBe(true); // older row → hidden
+    expect(isRetracted("SWIT-1", T1, retracted)).toBe(true); // same second → still hidden (must be demonstrably newer)
+    expect(isRetracted("SWIT-1", T2, retracted)).toBe(false); // the agent re-posted → back
+    expect(isRetracted("SWIT-1", null, retracted)).toBe(true); // scanned: the address decides
+    // Unparseable stamps on either side = NOT newer: the retraction stands.
+    expect(isRetracted("SWIT-1", "yesterday", retracted)).toBe(true);
+    expect(isRetracted("SWIT-1", T2, [{ address: "SWIT-1", at: "" }])).toBe(true);
+    expect(isRetracted("SWIT-1", T2, [])).toBe(false);
+  });
+
+  it("applyRetractions returns the SAME array when nothing hides (the no-re-render contract)", () => {
+    const rows = [
+      { address: "SWIT-1", label: "a", status: null, updatedAt: T2 },
+      { address: "SWIT-2", label: "b", status: null, updatedAt: T0 },
+    ];
+    expect(applyRetractions(rows, [])).toBe(rows);
+    expect(applyRetractions(rows, [{ address: "SWIT-9", at: T1 }])).toBe(rows);
+    expect(applyRetractions(rows, [{ address: "SWIT-1", at: T1 }])).toBe(rows); // newer than the retraction
+    expect(applyRetractions(rows, [{ address: "SWIT-2", at: T1 }]).map((r) => r.address)).toEqual(["SWIT-1"]);
+  });
+
+  it("mergePage folds the retractions out of the agent's rows and carries them for the post-merge union; decision rows are never retracted", () => {
+    const page = parsePageFile(
+      JSON.stringify({
+        evidence: [
+          { address: "SWIT-1", label: "wrong ticket", status: "open", updatedAt: T0 },
+          { address: "SWIT-2", label: "right ticket", status: "open", updatedAt: T0 },
+          { address: "SWIT-3", label: "re-posted", status: "open", updatedAt: T2 },
+        ],
+        questions: [{ id: "q1", text: "Q?", askedAt: T0 }],
+      })
+    );
+    const retracted: RetractedEvidence[] = [
+      { address: "SWIT-1", at: T1 },
+      { address: "SWIT-3", at: T1 },
+      { address: "decision:q1", at: T2 },
+    ];
+    const merged = mergePage(page, { q1: { text: "yes", at: T1 } }, [], retracted);
+    expect(merged.evidence.map((e) => e.address)).toEqual(["SWIT-3", "decision:q1", "SWIT-2"]);
+    expect(merged.retractedEvidence).toBe(retracted);
+    // The default (no fourth argument) hides nothing (the merge still orders newest first).
+    expect(mergePage(page, {}, []).evidence.map((e) => e.address)).toEqual(["SWIT-3", "SWIT-1", "SWIT-2"]);
+    expect(mergePage(page, {}, []).retractedEvidence).toEqual([]);
+  });
+
+  it("dropped items leave the live list everywhere — To do, userItems (Home), Done — and land in droppedItems; closedAt parses", () => {
+    const page = parsePageFile(
+      JSON.stringify({
+        items: [
+          { id: "i1", title: "live", owner: "agent", state: "todo" },
+          { id: "i2", title: "waiting on you but dropped", owner: "user", state: "dropped", closedAt: T1 },
+          { id: "i3", title: "done", owner: "agent", state: "done", closedAt: T1 },
+          { id: "i4", title: "dropped, no stamp", owner: "agent", state: "dropped" },
+          { id: "i5", title: "waiting on you", owner: "user", state: "todo" },
+        ],
+      })
+    );
+    expect(page.items.map((i) => i.state)).toEqual(["todo", "dropped", "done", "dropped", "todo"]);
+    expect(page.items[1].closedAt).toBe(T1);
+    expect(page.items[3].closedAt).toBeNull();
+    expect(page.items[0].closedAt).toBeNull();
+    const merged = mergePage(page, {}, []);
+    expect(merged.openItems.map((i) => i.id)).toEqual(["i5", "i1"]);
+    expect(merged.userItems.map((i) => i.id)).toEqual(["i5"]); // i2 is dropped — Home never lists it
+    expect(merged.doneItems.map((i) => i.id)).toEqual(["i3"]); // a drop is not an accomplishment
+    expect(merged.droppedItems.map((i) => i.id)).toEqual(["i2", "i4"]);
+    expect(merged.doneFolded).toBe(0);
+    expect(isOpenItem({ state: "dropped" })).toBe(false);
+    expect(isOpenItem({ state: "done" })).toBe(false);
+    expect(isOpenItem({ state: "waiting" })).toBe(true);
+    // An unknown state still degrades to todo, never to dropped.
+    expect(parsePageFile(JSON.stringify({ items: [{ id: "x", title: "t", state: "gone" }] })).items[0].state).toBe("todo");
   });
 });
 

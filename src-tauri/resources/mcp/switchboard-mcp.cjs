@@ -51,6 +51,13 @@ const QUESTION_KINDS = ["decision", "convention", "info"];
  *  parser is tolerant); nothing new is written. */
 const NO_NOTE =
   "page item: items carry no note — put status in the item's links/state and the story in a turn (op turn)";
+/** SWIT-78 (Ky's CC-704): `drop_evidence` names at most this many rows at
+ *  once — a correction, not a bulk wipe. */
+const DROP_EVIDENCE_CAP = 20;
+/** SWIT-78 (Ky's plan tool): the states an item may be SET to. `dropped` is
+ *  reached only through itemOp drop — the distinction from close (done) is
+ *  the point, so it is never a value you can slip into an update. */
+const ITEM_STATES = ["todo", "in_progress", "waiting", "done"];
 
 // ── Pure core ────────────────────────────────────────────────────────────────
 
@@ -173,6 +180,28 @@ function applyOp(page, args, now, answeredIds = new Set()) {
         message: existing ? `Evidence row ${address} updated.` : `Evidence row ${address} added.`,
       };
     }
+    case "drop_evidence": {
+      // SWIT-78 (Ky's CC-704): take rows written against the wrong thing BACK
+      // instead of stacking a "superseded" row on them. This file is ours, so
+      // the rows simply go; unknown addresses are ignored (the page may have
+      // moved) and the count says what actually happened.
+      if (!Array.isArray(args.addresses) || args.addresses.length === 0) {
+        throw new OpError("addresses must be a non-empty array of evidence addresses (each row's address says which to remove)");
+      }
+      if (args.addresses.length > DROP_EVIDENCE_CAP) {
+        throw new OpError(`drop_evidence takes at most ${DROP_EVIDENCE_CAP} addresses at once (${args.addresses.length} given)`);
+      }
+      const targets = new Set(args.addresses.map((a) => text(a, "an address")));
+      const evidence = page.evidence.filter((e) => !e || !targets.has(e.address));
+      const dropped = page.evidence.length - evidence.length;
+      return {
+        page: { ...page, evidence },
+        message:
+          dropped === 0
+            ? "Dropped 0 evidence rows — none of those addresses are on the page."
+            : `Dropped ${dropped} evidence row${dropped === 1 ? "" : "s"}.`,
+      };
+    }
     case "ask": {
       const t = text(args.text, "text");
       const options = Array.isArray(args.options)
@@ -276,17 +305,17 @@ function applyOp(page, args, now, answeredIds = new Set()) {
       if (itemOp === "add") {
         const title = text(args.title, "title");
         const owner = args.owner === "user" || args.owner === "team" ? args.owner : "agent";
-        const state =
-          args.state === "in_progress" || args.state === "waiting" || args.state === "done"
-            ? args.state
-            : "todo";
+        const state = ITEM_STATES.includes(args.state) ? args.state : "todo";
         const id = nextId(page.items, "i");
+        const added = { id, title, owner, state, note: null };
+        // An item ADDED as done left the live list at once — stamp it too.
+        if (state === "done") added.closedAt = at;
         return {
-          page: { ...page, items: [...page.items, { id, title, owner, state, note: null }] },
+          page: { ...page, items: [...page.items, added] },
           message: `Item ${id} added.`,
         };
       }
-      if (itemOp === "update" || itemOp === "close") {
+      if (itemOp === "update" || itemOp === "close" || itemOp === "drop") {
         const id = text(args.id, "id");
         const index = page.items.findIndex((i) => i && i.id === id);
         if (index < 0) throw new OpError(`no item with id ${id}`);
@@ -294,30 +323,36 @@ function applyOp(page, args, now, answeredIds = new Set()) {
         const nextItem = { ...prev };
         if (itemOp === "close") {
           nextItem.state = "done";
+        } else if (itemOp === "drop") {
+          // SWIT-78 (Ky's plan tool): close = the work happened; drop = the
+          // row was never the right row. Both leave the live list; the page
+          // files a dropped row under its own collapsed disclosure, never
+          // under Done.
+          nextItem.state = "dropped";
         } else {
           if (typeof args.title === "string") nextItem.title = text(args.title, "title");
           if (args.owner === "agent" || args.owner === "user" || args.owner === "team") {
             nextItem.owner = args.owner;
           }
-          if (
-            args.state === "todo" ||
-            args.state === "in_progress" ||
-            args.state === "waiting" ||
-            args.state === "done"
-          ) {
-            nextItem.state = args.state;
-          }
+          if (ITEM_STATES.includes(args.state)) nextItem.state = args.state;
         }
+        // SWIT-78: `closedAt` marks WHEN an item left the live list (done OR
+        // dropped) and goes away when it is reopened — one stamp, one meaning.
+        const wasOpen = prev.state !== "done" && prev.state !== "dropped";
+        const isOpen = nextItem.state !== "done" && nextItem.state !== "dropped";
+        if (isOpen) delete nextItem.closedAt;
+        else if (wasOpen || !nextItem.closedAt) nextItem.closedAt = at;
         const items = page.items.map((i, j) => (j === index ? nextItem : i));
+        const verb = itemOp === "close" ? "closed" : itemOp === "drop" ? "dropped" : "updated";
         return {
           page: { ...page, items },
-          message: itemOp === "close" ? `Item ${id} closed.` : `Item ${id} updated.`,
+          message: `Item ${id} ${verb}.`,
         };
       }
-      throw new OpError('itemOp must be "add", "update" or "close"');
+      throw new OpError('itemOp must be "add", "update", "close" or "drop"');
     }
     default:
-      throw new OpError('op must be one of "theme", "turn", "evidence", "ask", "resolve", "item"');
+      throw new OpError('op must be one of "theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item"');
   }
 }
 
@@ -1141,11 +1176,17 @@ const PAGE_TOOL = {
     "again UPDATES its row — omit status to keep the previous one; to point Eric at a page " +
     "state, write the address as surface:<project>/<page>?key=value, e.g. " +
     "surface:lodestar/trading?instrument=NQ&date=2026-06-05 — the row opens that page in that " +
-    "state beside the thread). Track the plan with op " +
+    "state beside the thread). op drop_evidence {addresses} removes rows written against the " +
+    "wrong thing (pass their addresses); use it instead of a second row labelled " +
+    "\"superseded\". Track the plan with op " +
     "item (owner agent|user|team, state todo|in_progress|waiting|done; status changes go in " +
-    "the item's state, never a new turn; items carry NO note — the story is a turn). TIDY THE " +
-    "PLAN EVERY TURN: close what finished, retitle a row into its replacement rather than " +
-    "adding a second one, never file a 'later' bucket row. Something only the user can " +
+    "the item's state, never a new turn; items carry NO note — the story is a turn). itemOp " +
+    "close = the work happened; itemOp drop = the row was never the right row (superseded, " +
+    "another thread took it over, a 'later' bucket that should not have been filed) — dropped " +
+    "rows leave the live plan and stay under Dropped. TIDY THE " +
+    "PLAN EVERY TURN: close what finished, drop what no longer applies, retitle a row into " +
+    "its replacement rather than adding a second one, never file a 'later' bucket row. " +
+    "Something only the user can " +
     "answer: op ask (prefer 2–4 short options, each ≤ 60 chars, YOUR recommendation first or " +
     "named as default, plus why: one line on that recommendation) — it renders under Open " +
     "questions on the page, answerable in place. Answers arrive as ONE message when the user " +
@@ -1169,8 +1210,13 @@ const PAGE_TOOL = {
     properties: {
       op: {
         type: "string",
-        enum: ["theme", "turn", "evidence", "ask", "resolve", "item"],
+        enum: ["theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item"],
         description: "Which page operation to perform.",
+      },
+      addresses: {
+        type: "array",
+        items: { type: "string" },
+        description: "drop_evidence: the addresses of the rows to remove (≤ 20). Unknown addresses are ignored.",
       },
       text: { type: "string", description: "theme: the one-line theme. ask: the question." },
       why: {
@@ -1215,8 +1261,12 @@ const PAGE_TOOL = {
         type: "string",
         description: "ask: your proposal — must be one of options. Listed first and marked as the default; the user confirms it in one click.",
       },
-      itemOp: { type: "string", enum: ["add", "update", "close"], description: "item: which item operation." },
-      id: { type: "string", description: "item update/close: the item id. resolve: the question id. ask: optional stable question id." },
+      itemOp: {
+        type: "string",
+        enum: ["add", "update", "close", "drop"],
+        description: "item: which item operation. close = done (the work happened); drop = never the right row (leaves the plan, not an accomplishment).",
+      },
+      id: { type: "string", description: "item update/close/drop: the item id. resolve: the question id. ask: optional stable question id." },
       title: { type: "string", description: "item: a few plain words." },
       owner: { type: "string", enum: ["agent", "user", "team"], description: "item: who owns it." },
       state: { type: "string", enum: ["todo", "in_progress", "waiting", "done"], description: "item: its state." },
@@ -1419,6 +1469,7 @@ module.exports = {
   OpError,
   QUESTION_KINDS,
   NO_NOTE,
+  DROP_EVIDENCE_CAP,
   WHY_CAP,
   TURN_CAP,
   TURN_LINE_CAP,

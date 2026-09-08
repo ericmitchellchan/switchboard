@@ -148,6 +148,14 @@ The ROW is the click target; nothing inside it is a second button except the res
   hover / focus-within / menu-open, so sweeping the list never re-flows a title.
 - Dense rows (page items, evidence): `padding: 2px 0`, no hover fill; evidence rows
   carry a 1px `--border` bottom hairline because they are a table without a table.
+- Row REMOVAL (SWIT-78, Ky `PlanPanel.tsx` evidence rows: `×` `opacity-0
+  group-hover:opacity-100 focus:opacity-100 hover:text-[color:var(--rose)]`, title
+  `Take this row off the page`): a trailing `×` at the row's right end, mono 11px
+  `--text-faint`, `opacity: 0` until the ROW is hovered or the button itself has
+  keyboard focus (`.page-evidence-row` / `.page-evidence-x` in global.css — the one
+  group-hover the inline styles cannot express), `--tone-rose` under the pointer,
+  `opacity: 0.4` while its write is in flight. The row does not shift when it appears
+  (it sits after the status meta; `margin-left: auto` only when there is no meta).
 
 ## Button
 
@@ -273,8 +281,12 @@ shape for restored workspaces only.
 
 ## The page sections
 
-The ✦ page (`PageView.tsx`, re-cut SWIT-67/68/69/77): summary · open questions (the batch,
-entry above) · to do · what happened · evidence · decided (folded) · done. Every section is
+The ✦ page (`PageView.tsx`, re-cut SWIT-67/68/69/77/78): summary · open questions (the batch,
+entry above) · to do · what happened · evidence · decided (folded) · done · dropped
+(SWIT-78, Ky's CC-703: the agent's never-the-right-row items, collapsed behind a
+`show N ▸` / `hide` text link exactly as Decided is — history never competes with the
+rows that still matter; its rows are the same ITEM ROW in `--text-dim`, unchecked, never
+amber). Every section is
 a title + list rows; the only boxes are the batch's preview box. Ky's thread panel is the
 reference: ONE page, everything on it. NEEDS YOU IS RETIRED on the page (SWIT-77, Ky's
 PlanPanel): a row waiting on the user is a To do row, listed first, with its OWNER column
@@ -302,7 +314,10 @@ other threads sit at the top of To do as post rows. Home keeps its Needs you blo
   `earlier (N) ▸` as a text link button. Evidence: address `--text-primary` · label
   `--text-muted` · status `--text-dim`, 1px `--border` hairline under each; the
   thread's VIEWS appear here too (`view:<id>` rows, label = the view title) and open
-  in the preview slot. NEW dot: 6px `--text-primary` circle after the item or title.
+  in the preview slot; every row but a `decision:` row ends in the hover-only `×`
+  (list row entry, Row REMOVAL). NEW dot: 6px `--text-primary` circle after the item
+  or title. A decided-but-unsent answer in the batch carries `not sent yet` in 9.5px
+  `--tone-amber` (Ky's `plan-question-unsent`) on its folded row and its card.
 - Empty page: the `✦` glyph 14px `--text-muted` over ONE line, `No page yet.` Nothing
   about who writes it or when.
 - **Home (`Home.tsx`, SWIT-54 hierarchy pass)** is the same content at screen scale

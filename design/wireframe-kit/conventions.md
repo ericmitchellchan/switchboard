@@ -218,3 +218,12 @@ that stop being true.
   the page — a row waiting on the user is a To do row with its owner in amber. Home
   answers a single question and points at the page for the send (a roll-up has no
   send button).
+- 2026-09-08 — THE RECORD IS CORRECTABLE (SWIT-78, borrowed from Ky's CC-703/704/705).
+  A wrong row never stays and never gets a "superseded" row stacked on it: an Evidence
+  row carries a hover/focus-only `×` (faint; `--tone-rose` under the pointer — the
+  tone's destructive-only use; title `Take this row off the page`) that hides it
+  through the merge, never through local state; the agent takes its own rows back
+  with `drop_evidence`, and DROPS an item that was never the right row (`Dropped N`
+  below Done, collapsed behind `show N`) instead of closing it — close means the work
+  happened. A decided answer that has not reached the agent says `not sent yet` in
+  amber beside the answer; `you:` vs `settled:` says who decided.

@@ -92,15 +92,24 @@ export async function threadsRoot(): Promise<string> {
   return invoke("threads_root");
 }
 
-/** Read one of a thread's page files (page.json / answers.json / inbox.json).
- *  A missing file resolves to "" — "no page yet" is the ordinary state. */
+/** Read one of a thread's page files (page.json / answers.json / inbox.json /
+ *  retracted.json). A missing file resolves to "" — "no page yet" is the
+ *  ordinary state. */
 export async function readThreadFile(threadId: string, name: string): Promise<string> {
   return invoke("read_thread_file", { threadId, name });
 }
 
-/** Change stamp over a thread's three page files: max mtime (ms) of
- *  page.json / answers.json / inbox.json, missing = 0. The 5s pass compares
- *  it by INEQUALITY tick-to-tick and skips the three reads when unchanged. */
+/** SWIT-78: take an evidence row OFF the page — records `{address, at}` in
+ *  the thread's retracted.json (the app's file; page.json is untouched). The
+ *  merge hides the row until the agent re-posts it with a newer stamp.
+ *  Resolves to the retraction count after the write. */
+export async function retractThreadEvidence(threadId: string, address: string): Promise<number> {
+  return invoke("retract_thread_evidence", { threadId, address });
+}
+
+/** Change stamp over a thread's page files: max mtime (ms) of page.json /
+ *  answers.json / inbox.json / retracted.json, missing = 0. The 5s pass
+ *  compares it by INEQUALITY tick-to-tick and skips the reads when unchanged. */
 export async function threadFilesStamp(threadId: string): Promise<number> {
   return invoke("thread_files_stamp", { threadId });
 }

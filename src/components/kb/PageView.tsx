@@ -1,8 +1,8 @@
-// THE ✦ PAGE (SWIT-48; re-cut SWIT-67/68/69/77) — a thread's one living page,
-// rendered from pageStore's merge. Ky's thread panel is the reference: ONE
-// page — a one-paragraph SUMMARY (theme + the newest turn's first line), an
-// optional `start here →` line (the turn's reviewFirst address), then Open
-// questions · To do · What happened · Evidence · Decided · Done. "What
+// THE ✦ PAGE (SWIT-48; re-cut SWIT-67/68/69/77/78) — a thread's one living
+// page, rendered from pageStore's merge. Ky's thread panel is the reference:
+// ONE page — a one-paragraph SUMMARY (theme + the newest turn's first line),
+// an optional `start here →` line (the turn's reviewFirst address), then Open
+// questions · To do · What happened · Evidence · Decided · Done · Dropped. "What
 // happened" sits deliberately BELOW the material that needs the user: the
 // reason to open the page comes first (Ky's rule, and Eric's, verbatim).
 //
@@ -14,7 +14,8 @@
 // block's own buttons keep focus on mousedown so a click never blurs the
 // box). Picking or typing SAVES to answers.json through the same
 // `answerQuestion` bridge Home uses — nothing reaches the agent yet. A
-// decided card folds to one line (`N · question → answer · change`). Under
+// decided card folds to one line (`N · question → answer · not sent yet ·
+// change` — the amber word is SWIT-78's, Ky's CC-705). Under
 // the list: a preview box printing the exact wire text, the footer count,
 // and ONE `Send decisions ▸` that composes `decisionsMessage` through
 // composeWrite → submitToThread (the 0.10.0 live-thread seam, gated by
@@ -59,6 +60,18 @@
 // counts (`recent` default) over rows merged from the agent's page.json AND
 // the scrollback scan (evidenceScan, union) — an agent row wins an address
 // collision, a doc/file row that resolves opens beside the thread.
+//
+// THE CORRECTABLE RECORD (SWIT-78, Ky's CC-703/704): every evidence row (bar
+// the synthesized `decision:` rows) carries a hover/focus-only `×` at its
+// right end — `Take this row off the page`. The click writes the address to
+// the thread's retracted.json (Rust, the app's file) and asks the poll to
+// re-read NOW; the row disappears because the MERGE hides it
+// (pageStore.applyRetractions), never because of local hide state — the only
+// component state is which address's write is in flight. Scanned rows are
+// hidden by address alone (`isRetracted(address, null, …)`); an agent row
+// comes back if the agent re-posts it with a newer stamp. Items the agent
+// DROPPED (itemOp drop — never the right row) sit under a collapsed
+// `Dropped N` disclosure below Done, excluded from every count.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, FocusEvent, ReactNode } from "react";
@@ -77,6 +90,9 @@ import {
   decisionsFooter,
   recommendation,
   isWaitingOnUser,
+  isRetracted,
+  applyRetractions,
+  isOpenItem,
 } from "../../lib/pageStore";
 import type { AnswerNote, InboxPost, PageAnswer, PageItem, PageQuestion, RenderedPage, SettledQuestion } from "../../lib/pageStore";
 import { parseSurfaceAddress } from "../../lib/surfaceParams";
@@ -97,11 +113,12 @@ import { requestReportAnchor } from "../../lib/reportStore";
 import type { EvidenceGroupId, ThreadViewRow } from "../../lib/evidenceModel";
 import { useScannedEvidence } from "../../lib/evidenceScan";
 import { getCachedDocList, refreshDocList } from "../../lib/kb";
-import { explorerProjects, listThreadViews, markThreadAnswersSent, readThreadView } from "../../lib/ipc";
+import { explorerProjects, listThreadViews, markThreadAnswersSent, readThreadView, retractThreadEvidence } from "../../lib/ipc";
 import { projectKeyForDir } from "../../lib/explorer";
 import { getThreads } from "../../lib/threadStore";
 import { parseViewSpec } from "../../lib/viewStore";
 import { OptionRow } from "./OptionRow";
+import { log } from "../../lib/logger";
 
 const MONO = "var(--font-mono)";
 
@@ -195,6 +212,18 @@ const TEXT_LINK: CSSProperties = {
   cursor: "pointer",
 };
 
+/** SWIT-78 (Ky's CC-705 `not sent yet`): a decided-but-unsent answer says so
+ *  in amber — the one colour on the page, reserved for what still needs you.
+ *  Every answer still in the batch is unsent by construction (a sent one
+ *  leaves it), so the word rides the decided card and its folded row. */
+const UNSENT_WORD = "not sent yet";
+const UNSENT_TITLE = "decided on the page; the agent hears it when you send";
+const UNSENT: CSSProperties = {
+  flex: "none",
+  fontSize: 9.5,
+  color: "var(--tone-amber)",
+};
+
 /** The batch's number column (Ky's `w-4` mono 10px). */
 const NUM: CSSProperties = {
   flex: "none",
@@ -231,7 +260,7 @@ const STATE_WORD: Partial<Record<PageItem["state"], string>> = {
 };
 
 export function PageView({ threadId, active }: { threadId: string; active: boolean }) {
-  const { page, revision } = usePage(threadId, active);
+  const { page, revision, refresh } = usePage(threadId, active);
   // The stamp AGAINST WHICH dots are judged — loaded once per thread visit
   // and held while the page is open, so the dots don't vanish the instant the
   // dwell timer advances the stored stamp.
@@ -297,11 +326,33 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
   // address collision; page.json is never written by the app — the same
   // one-writer pattern as the synthesized `decision:` rows), then folded into
   // fixed kind groups the chips below the band header switch between.
-  // SWIT-69 adds the view rows through the same union.
+  // SWIT-69 adds the view rows through the same union. SWIT-78: the
+  // retractions fold out of the whole union — the merge already hid the
+  // agent's rows; scanned rows go by ADDRESS alone (a sighting in the buffer
+  // is not the agent re-posting, so the scan's seen-set can never resurrect
+  // one), and a view row comes back only with a newer build, like an agent row.
   const scanned = useScannedEvidence(threadId);
-  const evidence = useMemo(
-    () => mergeViewEvidence(mergeScannedEvidence(page.evidence, scanned), threadViews),
-    [page.evidence, scanned, threadViews]
+  const retracted = page.retractedEvidence;
+  const evidence = useMemo(() => {
+    const scannedVisible = scanned.filter((s) => !isRetracted(s.address, null, retracted));
+    return applyRetractions(mergeViewEvidence(mergeScannedEvidence(page.evidence, scannedVisible), threadViews), retracted);
+  }, [page.evidence, scanned, threadViews, retracted]);
+  // The one address whose retraction write is in flight — NOT a hidden set:
+  // the row leaves when the merged files say so.
+  const [retracting, setRetracting] = useState<string | null>(null);
+  const retract = useCallback(
+    async (address: string) => {
+      setRetracting(address);
+      try {
+        await retractThreadEvidence(threadId, address);
+        refresh();
+      } catch (err) {
+        log.warn(`Could not take ${address} off the page: ${err}`);
+      } finally {
+        setRetracting(null);
+      }
+    },
+    [threadId, refresh]
   );
   const groups = useMemo(() => groupEvidence(evidence), [evidence]);
   const [groupId, setGroupId] = useState<EvidenceGroupId>("recent");
@@ -486,6 +537,7 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
           {(activeGroup?.rows ?? []).map((e) => (
             <div
               key={e.address}
+              className="page-evidence-row"
               style={{
                 ...DENSE_ROW,
                 gap: 10,
@@ -500,6 +552,20 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
                 {e.label}
               </span>
               {e.status && <span style={{ ...ROW_META, fontSize: 10 }}>{e.status}</span>}
+              {/* A decision row is corrected on its question (`change`), not taken off. */}
+              {!e.address.startsWith("decision:") && (
+                <button
+                  type="button"
+                  className="page-evidence-x"
+                  disabled={retracting !== null}
+                  onClick={() => void retract(e.address)}
+                  title="Take this row off the page"
+                  aria-label={`Take ${e.address} off the page`}
+                  style={e.status ? undefined : { marginLeft: "auto" }}
+                >
+                  ×
+                </button>
+              )}
             </div>
           ))}
         </Section>
@@ -518,7 +584,24 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
           ))}
         </Section>
       )}
+
+      {page.droppedItems.length > 0 && <DroppedSection rows={page.droppedItems} />}
     </div>
+  );
+}
+
+/** DROPPED (SWIT-78, Ky's CC-703): rows that were never the right row —
+ *  history, collapsed by default so they never compete with the rows that
+ *  still matter. Same disclosure shape as Decided. */
+function DroppedSection({ rows }: { rows: PageItem[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Section title="Dropped" count={rows.length}>
+      <button type="button" onClick={() => setOpen((v) => !v)} style={TEXT_LINK}>
+        {open ? "hide" : `show ${rows.length} ▸`}
+      </button>
+      {open && rows.map((i) => <ItemRow key={i.id} item={i} />)}
+    </Section>
   );
 }
 
@@ -798,6 +881,7 @@ function DecisionsBlock({
                 <span style={{ color: "var(--text-primary)", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   → {chosen}
                 </span>
+                <span style={UNSENT} title={UNSENT_TITLE}>{UNSENT_WORD}</span>
                 <span style={{ flex: "none", fontSize: 9.5, color: "var(--text-dim)" }}>change</span>
               </button>
             );
@@ -816,6 +900,7 @@ function DecisionsBlock({
                 <span style={{ flex: "none", fontSize: 9.5, color: chosen ? "var(--text-primary)" : "var(--text-dim)" }}>
                   {chosen ? "decided" : "open"}
                 </span>
+                {chosen && <span style={UNSENT} title={UNSENT_TITLE}>{UNSENT_WORD}</span>}
               </div>
               {rec && (
                 <div style={{ marginLeft: CARD_INDENT, color: "var(--text-secondary)" }}>
@@ -973,7 +1058,8 @@ function PostRow({ post, isNew }: { post: InboxPost; isNew: boolean }) {
  *  (nothing writes one since SWIT-77) still reads in the row's title. */
 function ItemRow({ item }: { item: PageItem }) {
   const word = STATE_WORD[item.state];
-  const onYou = item.state !== "done" && isWaitingOnUser(item);
+  // SWIT-78: a dropped row is off the live list too — never amber, never checked.
+  const onYou = isOpenItem(item) && isWaitingOnUser(item);
   return (
     <div
       style={{ ...DENSE_ROW, whiteSpace: "nowrap", overflow: "hidden" }}
@@ -985,7 +1071,7 @@ function ItemRow({ item }: { item: PageItem }) {
           minWidth: 0,
           overflow: "hidden",
           textOverflow: "ellipsis",
-          color: item.state === "done" ? "var(--text-dim)" : "var(--text-secondary)",
+          color: isOpenItem(item) ? "var(--text-secondary)" : "var(--text-dim)",
         }}
       >
         {item.title}
