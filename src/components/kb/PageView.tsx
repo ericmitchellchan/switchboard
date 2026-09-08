@@ -83,7 +83,7 @@
 // DROPPED (itemOp drop — never the right row) sit under a collapsed
 // `Dropped N` disclosure below Done, excluded from every count.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties, FocusEvent, ReactNode } from "react";
 import {
   usePage,
@@ -106,7 +106,11 @@ import {
   applyRetractions,
   isOpenItem,
   DECISION_ADDRESS_PREFIX,
+  subscribePageFocus,
+  pageFocusNonce,
+  takePageFocus,
 } from "../../lib/pageStore";
+import { nextThingFor } from "../../lib/nextThing";
 import type { AnswerNote, InboxPost, PageAnswer, PageItem, PageQuestion, RenderedPage, SettledQuestion } from "../../lib/pageStore";
 import { parseSurfaceAddress } from "../../lib/surfaceParams";
 import { answerQuestion, openArtifact, openInPanel, getActiveTabSession, submitToThread } from "../../lib/panelStore";
@@ -429,6 +433,29 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
     return () => window.clearTimeout(id);
   }, [threadId, active, revision]);
 
+  // THE NEXT THING (SWIT-79, Ky's CC-710): the ONE line under the summary —
+  // `next → answer 2 questions` / `next → <address> · <item>` — from the
+  // same pure rule the turn-end hook reads (lib/nextThing), so the page and
+  // the hook can never disagree. `start here →` (the agent's reviewFirst)
+  // wins when the agent named one: the agent's pointer over the derived one.
+  const nextThing = useMemo(
+    () => nextThingFor(page, { threadId, kbDocs, projectKey }),
+    [page, threadId, kbDocs, projectKey]
+  );
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const scrollToBlock = useCallback((block: string) => {
+    const el = rootRef.current?.querySelector<HTMLElement>(`[data-page-block="${block}"]`);
+    el?.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, []);
+  // A focus REQUEST raised by the turn-end hook (pageStore.requestPageFocus)
+  // — taken here, once, by the page that shows this thread; observable, so a
+  // page already on screen scrolls now.
+  const focusNonce = useSyncExternalStore(subscribePageFocus, pageFocusNonce);
+  useEffect(() => {
+    const target = takePageFocus(threadId);
+    if (target === "decisions") scrollToBlock("decisions");
+  }, [focusNonce, threadId, revision, scrollToBlock]);
+
   if (page.isEmpty && evidence.length === 0) {
     return (
       <div
@@ -478,6 +505,7 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
 
   return (
     <div
+      ref={rootRef}
       style={{
         flex: 1,
         minHeight: 0,
@@ -492,19 +520,43 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
         gap: 26,
       }}
     >
-      {(summary || reviewFirst) && (
+      {(summary || reviewFirst || nextThing) && (
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           {summary && (
             <div style={{ fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.5 }}>
               {summary}
             </div>
           )}
-          {reviewFirst && (
+          {reviewFirst ? (
             <div style={{ display: "flex", gap: 6, alignItems: "baseline", minWidth: 0 }}>
               <span style={{ flex: "none", color: "var(--text-dim)" }}>start here →</span>
               {renderAddress(reviewFirst)}
             </div>
-          )}
+          ) : nextThing ? (
+            <div style={{ display: "flex", gap: 6, alignItems: "baseline", minWidth: 0 }}>
+              <span style={{ flex: "none", color: "var(--text-dim)" }}>next →</span>
+              {nextThing.why === "questions" ? (
+                <AddressButton
+                  text={nextThing.label}
+                  title="Go to the open questions"
+                  onOpen={() => scrollToBlock("decisions")}
+                />
+              ) : (
+                <AddressButton
+                  text={nextThing.label}
+                  title="Open it beside this thread"
+                  onOpen={() => {
+                    const host = getActiveTabSession();
+                    if (!host) return;
+                    if (nextThing.artifact.kind === "view" && nextThing.anchor) {
+                      requestReportAnchor(threadId, nextThing.artifact.viewId, nextThing.anchor);
+                    }
+                    openInPanel(host, nextThing.artifact, { preview: true });
+                  }}
+                />
+              )}
+            </div>
+          ) : null}
         </div>
       )}
 
@@ -629,16 +681,19 @@ function Section({
   count,
   meta,
   isNew = false,
+  block,
   children,
 }: {
   title: string;
   count?: number;
   meta?: string;
   isNew?: boolean;
+  /** SWIT-79: a scroll target name (`data-page-block`) for a focus request. */
+  block?: string;
   children: ReactNode;
 }) {
   return (
-    <div>
+    <div data-page-block={block}>
       <div style={SECTION_TITLE}>
         {title}
         {count !== undefined && (
@@ -870,7 +925,7 @@ function DecisionsBlock({
   const cannotSend = (decided === 0 && !hasDraft) || frozen || notLive;
 
   return (
-    <Section title="Open questions" count={visible.length}>
+    <Section title="Open questions" count={visible.length} block="decisions">
       <div ref={rootRef} style={{ display: "flex", flexDirection: "column" }}>
         {visible.map((q, i) => {
           const chosen = answerOf(q);

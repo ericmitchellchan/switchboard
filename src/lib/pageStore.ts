@@ -1034,3 +1034,53 @@ export function usePage(threadId: string, active: boolean): PageRead {
 
   return { ...state, refresh };
 }
+
+// ── Page focus requests (SWIT-79 — the turn-end rule) ────────────────────────
+// "Open questions → the page's decisions block, in front." App raises the
+// request when a turn settles; the PageView showing that thread takes it and
+// scrolls its block into view. Observable the way reportStore's anchor
+// one-shot is: each request bumps a nonce + notifies, so an already-open page
+// consumes a fresh request now, not on some later re-render. One pending
+// request per thread; a page that is not mounted takes it when it next is.
+
+export type PageFocusTarget = "decisions";
+
+let pendingFocus = new Map<string, PageFocusTarget>();
+let focusNonce = 0;
+const focusListeners = new Set<() => void>();
+
+export function requestPageFocus(threadId: string, target: PageFocusTarget): void {
+  pendingFocus = new Map(pendingFocus);
+  pendingFocus.set(threadId, target);
+  focusNonce += 1;
+  for (const listener of focusListeners) listener();
+}
+
+/** Subscribe to focus REQUESTS (useSyncExternalStore's subscribe half). */
+export function subscribePageFocus(listener: () => void): () => void {
+  focusListeners.add(listener);
+  return () => {
+    focusListeners.delete(listener);
+  };
+}
+
+/** The request counter (useSyncExternalStore's snapshot half). */
+export function pageFocusNonce(): number {
+  return focusNonce;
+}
+
+/** Take (and clear) the pending request for one thread. */
+export function takePageFocus(threadId: string): PageFocusTarget | null {
+  const target = pendingFocus.get(threadId);
+  if (target === undefined) return null;
+  pendingFocus = new Map(pendingFocus);
+  pendingFocus.delete(threadId);
+  return target;
+}
+
+/** Tests: forget every request. */
+export function __resetPageFocusForTests(): void {
+  pendingFocus = new Map();
+  focusNonce = 0;
+  focusListeners.clear();
+}

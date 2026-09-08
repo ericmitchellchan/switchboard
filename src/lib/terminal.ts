@@ -394,6 +394,21 @@ export function forceViewportScrollSync(sessionId: string): void {
 }
 
 /**
+ * The terminal's CSS cell WIDTH (px per column), or null while unmeasured
+ * (no instance, or the renderer has not laid out yet). SWIT-79: what the
+ * panel's default width is computed against — the widest panel that leaves
+ * the grid TERMINAL_COLS wide (panelStore.defaultPanelWidth). Same core
+ * access as forceViewportScrollSync's cell height.
+ */
+export function terminalCellWidth(sessionId: string): number | null {
+  const instance = getTerminal(sessionId);
+  if (!instance) return null;
+  const core = (instance.terminal as any)._core;
+  const w = core?._renderService?.dimensions?.css?.cell?.width;
+  return typeof w === "number" && Number.isFinite(w) && w > 0 ? w : null;
+}
+
+/**
  * Clear the texture atlas on all terminals that still have a live WebGL
  * context.  This fixes the Chromium/Nvidia bug where glyph textures
  * become corrupt after OS resume (the WebGL context is NOT lost, but

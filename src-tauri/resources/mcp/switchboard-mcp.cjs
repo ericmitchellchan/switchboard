@@ -765,9 +765,71 @@ function listViewIds(viewsDir) {
   }
 }
 
+// ── Sets (SWIT-79, Ky's set tabs) ───────────────────────────────────────────
+// `show` with `set: {label, ids}` opens SEVERAL views already written this
+// thread as ONE tab the panel steps through, instead of N tabs. The server
+// writes `sets.json` in the thread dir (`{version:1, sets:[{id, label, ids,
+// builtAt}]}`, newest first, capped) and the app's view-intent poll reads it
+// beside the views/ listing. Caps mirror src/lib/artifactSets.ts.
+
+const SET_CAP = 20; // sets kept in sets.json
+const SET_ITEM_CAP = 50; // views per set
+const SET_LABEL_CAP = 80;
+
+/** Validate a `set` argument against the views on disk. Pure. */
+function buildViewSet(raw, existingIds, existingSetIds, now) {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new OpError("set must be {label, ids: [viewId…]}");
+  }
+  const label = text(raw.label, "set.label").slice(0, SET_LABEL_CAP);
+  if (!Array.isArray(raw.ids)) throw new OpError("set.ids must be an array of view ids written this thread");
+  const ids = [];
+  for (const id of raw.ids) {
+    if (typeof id !== "string" || !VIEW_ID_RE.test(id.trim())) {
+      throw new OpError(`set.ids entry ${JSON.stringify(id)} is not a view id ([A-Za-z0-9_-])`);
+    }
+    const clean = id.trim();
+    if (!existingIds.includes(clean)) {
+      throw new OpError(`set.ids names ${clean}, which is not a view of this thread — show it first`);
+    }
+    if (!ids.includes(clean)) ids.push(clean);
+  }
+  if (ids.length < 2) throw new OpError("set.ids needs at least two distinct views — one view is one tab already");
+  if (ids.length > SET_ITEM_CAP) throw new OpError(`set.ids has ${ids.length} views; the cap is ${SET_ITEM_CAP}`);
+  let n = 0;
+  for (const e of existingSetIds) {
+    const m = e.match(/^s(\d+)$/);
+    if (m) n = Math.max(n, Number(m[1]));
+  }
+  return { id: `s${n + 1}`, label, ids, builtAt: new Date(now).toISOString() };
+}
+
+function readSetsFile(file) {
+  try {
+    const data = JSON.parse(fs.readFileSync(file, "utf8"));
+    return Array.isArray(data && data.sets) ? data.sets.filter((s) => s && typeof s.id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 function performViewOp(threadDir, args, now) {
   const viewsDir = path.join(threadDir, "views");
   const existing = listViewIds(viewsDir);
+  if (args.set !== undefined && args.set !== null) {
+    if (args.op !== "show") throw new OpError('a set goes with op "show"');
+    const file = path.join(threadDir, "sets.json");
+    const sets = readSetsFile(file);
+    const set = buildViewSet(args.set, existing, sets.map((s) => s.id), now);
+    const next = { version: 1, sets: [set, ...sets].slice(0, SET_CAP) };
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(next, null, 2));
+    fs.renameSync(tmp, file);
+    return {
+      set,
+      message: `Set ${set.id} (${set.label}) of ${set.ids.length} views is opening as ONE tab beside the terminal — the user steps through it.`,
+    };
+  }
   if (args.op === "update") {
     const id = typeof args.id === "string" ? args.id.trim() : "";
     if (!existing.includes(id)) {
@@ -860,11 +922,19 @@ const VIEW_TOOL = {
     "card, autosaved to `<deck dir>/notes.json` beside the deck's index file (Read it: " +
     "{version:1, notes:{[key]:{text, updatedAt, sentAt?}}}), and `send N notes` delivers every " +
     "unsent note to you as ONE message: `Chart notes on <title> (N):` then `- <key>: <note>` " +
-    "per line.",
+    "per line. SETS: several views of one kind go in as ONE tab — the panel steps through " +
+    "them — instead of opening N tabs: show each view, then `show` with " +
+    "set:{label:'3 gamma views', ids:['v1','v2','v3']} (views already written this thread, " +
+    "2–50) opens them as one tab; no kind/title/source on that call.",
   inputSchema: {
     type: "object",
     properties: {
       op: { type: "string", enum: ["show", "update"], description: "show = create/open; update = refresh an existing id." },
+      set: {
+        type: "object",
+        description:
+          "show only: {label, ids:[viewId…]} — open these already-shown views as ONE tab the user steps through (← → / [ ]) instead of N tabs. With `set`, kind/title/source are not needed.",
+      },
       id: { type: "string", description: "View id ([A-Za-z0-9_-]). Omit on show to mint one; required on update." },
       kind: {
         type: "string",
@@ -942,7 +1012,9 @@ const VIEW_TOOL = {
           "What is behind an opened row/bin/bar/marker: {kind, title, source:{type:'file', path:'per/{key}.json'} | {type:'query', url:'http://127.0.0.1:…?k={key}', body?}, columns?, keyColumn?, series?, valueColumn?, sizeColumn?, definition?, levels?, markers?, markerColumns?}. {key} = the anchor's key value (file: one path component, [A-Za-z0-9._-], else _; query: URL-encoded). A table with a drill is a DECK: the user steps its children with next/prev and notes each one.",
       },
     },
-    required: ["op", "kind", "title", "source"],
+    // SWIT-79: kind/title/source are required for a VIEW and checked in code
+    // (buildViewSpec) — a `set` call carries none of them.
+    required: ["op"],
   },
 };
 
@@ -1455,7 +1527,10 @@ module.exports = {
   applyOp,
   performOp,
   buildViewSpec,
+  buildViewSet,
   performViewOp,
+  SET_CAP,
+  SET_ITEM_CAP,
   resolvePostTarget,
   appendPost,
   performPostOp,

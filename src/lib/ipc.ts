@@ -93,8 +93,8 @@ export async function threadsRoot(): Promise<string> {
 }
 
 /** Read one of a thread's page files (page.json / answers.json / inbox.json /
- *  retracted.json). A missing file resolves to "" — "no page yet" is the
- *  ordinary state. */
+ *  retracted.json / sets.json). A missing file resolves to "" — "no page yet"
+ *  is the ordinary state. */
 export async function readThreadFile(threadId: string, name: string): Promise<string> {
   return invoke("read_thread_file", { threadId, name });
 }

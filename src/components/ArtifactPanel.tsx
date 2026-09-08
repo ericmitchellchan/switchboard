@@ -104,9 +104,16 @@ import {
   usePoppedOutIdentity,
   DIVIDER_WIDTH,
   usePanelsView,
+  // SWIT-79: sets + the 100-column default width.
+  foldActiveKind,
+  unfoldSetAt,
+  showingArtifact,
+  effectivePanelWidth,
   type ArtifactCrumb,
   type PanelSide,
 } from "../lib/panelStore";
+import { foldableCount, setNounFor } from "../lib/artifactSets";
+import { terminalCellWidth } from "../lib/terminal";
 import { buildSendReference, refOptions } from "../lib/agentContext";
 import { useDirtyKeys } from "../lib/editor";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
@@ -623,7 +630,13 @@ export function ArtifactPanel({
     ) : null;
   }
 
-  const layout = panelLayoutFor(containerWidth, panelWidth, maximized);
+  // THE DEFAULT WIDTH KEEPS 100 COLUMNS (SWIT-79, Ky's 629px): while the
+  // stored width is the untouched default, the panel asks for the widest
+  // width that leaves this tab's terminal TERMINAL_COLS wide at its measured
+  // cell width; a width the user dragged is the user's. Pure rule in the
+  // store; the measurement is the tab's own xterm.
+  const requestedWidth = effectivePanelWidth(panelWidth, containerWidth, terminalCellWidth(sessionId));
+  const layout = panelLayoutFor(containerWidth, requestedWidth, maximized);
   const overlay = layout.mode === "overlay";
   const isMax = layout.mode === "maximized";
   const { icon, crumbs, title } = describeArtifact(artifact);
@@ -657,17 +670,23 @@ export function ArtifactPanel({
   // matters — flush, then type — so the file the agent is pointed at already
   // holds what Eric was looking at when he clicked. The flush resolves even on
   // failure, so the send is never swallowed.
-  const reference = buildSendReference(artifact, null, {
+  // A SET references the member it is SHOWING (SWIT-79) — the frame is not
+  // what is on screen, its current item is.
+  const shown = showingArtifact(artifact);
+  const reference = buildSendReference(shown, null, {
     ...refOptions(),
-    sessionName: artifactShortTitle(artifact),
+    sessionName: artifactShortTitle(shown),
   });
   const sendReference = () => {
-    if (artifact.kind === "session") {
-      void flushTerminalTranscript(artifact.sessionId).then(() => sendToThread(reference));
+    if (shown.kind === "session") {
+      void flushTerminalTranscript(shown.sessionId).then(() => sendToThread(reference));
       return;
     }
     sendToThread(reference);
   };
+  // SETS (SWIT-79): fold N same-kind tabs into one, split one back out.
+  const foldable = foldableCount(state);
+  const isSet = artifact.kind === "set";
   // A session with no resolvable scrollback root has no ref at all (the root
   // lookup failed at boot) — the action would type nothing, so it is hidden
   // rather than offered.
@@ -814,6 +833,36 @@ export function ArtifactPanel({
                 ←
               </button>
             )}
+          {/* SETS (SWIT-79, Ky's set tabs): `⧉ N` folds every tab of the
+              active tab's kind into ONE set tab (rendered only while there
+              are two or more — never a dead affordance); on a set, `split`
+              restores them. Words, not narration: the count is the whole
+              label, the tooltip says what the click does. */}
+          {!isSet && foldable >= 2 && (
+            <button
+              type="button"
+              onClick={() => foldActiveKind(sessionId)}
+              title={`Fold the ${foldable} ${setNounFor(artifact.kind, foldable)} into one tab — step through them with ← → ([ ])`}
+              aria-label={`Fold ${foldable} tabs into one set`}
+              style={ACTION_STYLE}
+              onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-primary)")}
+              onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-dim)")}
+            >
+              ⧉ {foldable}
+            </button>
+          )}
+          {isSet && (
+            <button
+              type="button"
+              onClick={() => unfoldSetAt(sessionId, state.artifacts.indexOf(artifact))}
+              title="Split into one tab per item"
+              style={ACTION_STYLE}
+              onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-primary)")}
+              onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-dim)")}
+            >
+              split
+            </button>
+          )}
           {/* SIDE SWAP (SWIT-33) — Ky's SplitView "Swap", here: flips THIS
               TAB's panel to the other side of the pane tree. Per tab, kept
               with the workspace. Shown for every artifact kind — the side is
@@ -876,7 +925,7 @@ export function ArtifactPanel({
             → thread
           </button>
           )}
-          {!isSession && artifact.kind !== "view" && (
+          {!isSession && artifact.kind !== "view" && !isSet && (
           <>
           {/* POP OUT (increment F, Decision 2) — hand this artifact to the
               floating PiP window. The same window the Ctrl+Shift+O terminal

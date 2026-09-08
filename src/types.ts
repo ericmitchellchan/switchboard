@@ -226,7 +226,16 @@ export type Artifact =
   // creates it; kept for restored workspaces). Answering writes answers.json
   // and closes it; since SWIT-77 nothing is typed — the ✦ page sends every
   // decision as one message.
-  | { kind: "question"; threadId: string; questionId: string };
+  | { kind: "question"; threadId: string; questionId: string }
+  // A SET (SWIT-79, Ky's set tabs CC-677) — ONE tab for a collection of
+  // same-kind artifacts the panel steps through (`← n / N →`, `[` / `]`)
+  // instead of N tabs. IDENTITY IS MEMBERSHIP (artifactIdentity sorts the
+  // member identities; the label is a caption, not a key). Members are
+  // never sets (a nested set FLATTENS at the load gate) and never sessions
+  // (one live view — a shell is not a glance), ≤ SET_ITEM_CAP of them. The
+  // position inside a set is runtime-only: on reopen a set starts at its
+  // first item, the reviewing posture.
+  | { kind: "set"; label: string; items: Artifact[] };
 
 /** The artifact kinds that name a FILE on disk — the ones with a readable
  *  `path` and therefore a renderable BODY (docKind switch, pins sidecar,

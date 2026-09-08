@@ -41,12 +41,19 @@ import {
   useEditorState,
 } from "../../lib/editor";
 import { Icon } from "../icons";
-import { MarkdownDoc } from "./MarkdownDoc";
-import { pinTargetFor } from "../../lib/pins";
+import { MarkdownDoc, MarkdownBody, MarkdownDocStyles } from "./MarkdownDoc";
+import { pinTargetFor, pinsForDoc, surfacePinAnchor } from "../../lib/pins";
+import { usePinsFile } from "../../lib/pinsStore";
 import { artifactIdentity } from "../../lib/panelStore";
 import { domAnchorProvider } from "../../surfaces/anchors";
 import { useAnchoredPins } from "../../surfaces/SurfacePins";
 import type { AnchoredPinTarget } from "../../surfaces/SurfacePins";
+// SWIT-79: the doc pane — the tick rail beside the document, the facts row
+// under its title. Pure rules in lib/docRail + lib/facts.
+import { DocTickRail } from "./DocTickRail";
+import { FactsRow } from "./FactsRow";
+import { splitFacts } from "../../lib/facts";
+import { countByAnchor } from "../../lib/docRail";
 
 const BAR_STYLE: CSSProperties = {
   height: 24,
@@ -174,6 +181,21 @@ export function MarkdownSurface({
     if (outcome === "nothing-here") setPinFlash("nothing pinnable there — click a heading or a table row");
   }, []);
   const pins = useAnchoredPins(pinTarget, anchorProvider, docEl, pinMode, onPlaced, active);
+
+  // THE DOC PANE (SWIT-79, Ky's ReviewPage): the tick rail's pin counts per
+  // heading come from the SAME shared pins record the marks read (one
+  // subscription per sidecar, refcounted), folded by `h:` anchor key; the
+  // scroller is handed to the rail so it can read the scroll top and jump.
+  const pinsFile = usePinsFile(pinTarget.sidecarPath);
+  const pinsByAnchor = useMemo(
+    () => countByAnchor((pinsFile ? pinsForDoc(pinsFile, pinTarget.docKey) : []).map(surfacePinAnchor)),
+    [pinsFile, pinTarget.docKey]
+  );
+  const [scrollerEl, setScrollerEl] = useState<HTMLDivElement | null>(null);
+  // THE FACTS ROW: the front-matter paragraph split out for display in VIEW
+  // mode only — the file is untouched and the editor shows the line as
+  // written. Two fragments through the ONE markdown pipeline around a <dl>.
+  const facts = useMemo(() => splitFacts(content), [content]);
 
   const save = useCallback(() => {
     void saveBuffer(key, artifact).then(() => {
@@ -377,11 +399,15 @@ export function MarkdownSurface({
           />
         ) : (
           <>
+            {/* The tick rail (SWIT-79): 34px left of the document, ticks
+                measured from the stamped headings; hover slides its overlay
+                OVER the content, never a reserved column. */}
+            <DocTickRail docEl={docEl} scrollerEl={scrollerEl} pinsByAnchor={pinsByAnchor} />
             {/* The doc scrolls on its own so the pins rail beside it stays put.
                 The inner wrapper is the anchor root, the marks' coordinate
                 space and the armed-click capture target (same contract as
                 SurfaceHost's content wrapper). */}
-            <div style={{ flex: 1, minWidth: 0, overflowY: "auto" }}>
+            <div ref={setScrollerEl} style={{ flex: 1, minWidth: 0, overflowY: "auto" }}>
               <div
                 ref={setDocEl}
                 onClickCapture={pins.onCapture}
@@ -392,7 +418,16 @@ export function MarkdownSurface({
                   background: pinMode ? "rgba(228, 228, 231, 0.04)" : "transparent",
                 }}
               >
-                <MarkdownDoc content={content} />
+                {facts ? (
+                  <>
+                    <MarkdownDocStyles />
+                    <MarkdownBody content={facts.before} style={{ paddingBottom: 0 }} />
+                    <FactsRow facts={facts.facts} />
+                    <MarkdownBody content={facts.after} style={{ paddingTop: 0 }} />
+                  </>
+                ) : (
+                  <MarkdownDoc content={content} />
+                )}
                 <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>{pins.marks}</div>
               </div>
             </div>

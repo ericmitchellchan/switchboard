@@ -339,6 +339,67 @@ other threads sit at the top of To do as post rows. Home keeps its Needs you blo
   ones fold into ONE quiet line at the page bottom, 9.5px `--text-dim`:
   `needs you · live now · … — all quiet` (omitted when nothing is empty).
 
+## Set frame (SWIT-79)
+
+ONE tab for a collection: a switcher row over the member's ordinary surface. Nothing
+about the member changes because it is inside a set.
+
+- **Ky:** `ky/thread/SetFrame.tsx` (CC-677) — `flex items-center gap-2 px-3 py-1.5 border-b`
+  over `bg-bg-pane`; `←` / `→` `px-1.5 text-[12px] text-txt-faint hover:text-txt`; the
+  counter `text-[10.5px] text-txt-faint` (`3 / 9`); the current item's name
+  `text-[12.5px] text-txt hover:underline` with a `▾` opening a `listbox` of the items
+  (`px-3 py-1 text-[12.5px]`, the current in `text-txt`, the rest `text-txt-dim`, a
+  `text-[10px] text-txt-faint` number before each); `split` `text-[10px]` at the right.
+- **Ours** (`components/kb/SetFrame.tsx`): the 24px toolbar row (1px `--border` under,
+  padding `0 8px 0 10px`, 10.5px `--text-dim`): `←` `n / N` `→` (glyphs 12px `--text-dim`
+  → `--text-primary` on hover; the counter `--text-secondary`), the showing member's
+  short title 11px `--text-primary` + a dim `▾` (click = the LIST ROW list, `5px 8px`,
+  hover `--bg-elevated`, a 16px number column 10px `--text-dim`, the current row
+  `--text-primary`), the set's caption at the right end 9.5px `--text-faint`. `split`
+  is the PANEL HEADER's action (it acts on the strip), next to `⧉ N` — the fold, shown
+  only with ≥ 2 tabs of the active kind. `[` / `]` step on the frame's focusable root.
+  The tab prints `⧉ <caption>` (`⧉ 3 views`).
+
+## Doc tick rail (SWIT-79)
+
+Position in a document at a glance, the outline on demand — over the content, never a
+reserved column.
+
+- **Ky:** `ky/components/ReviewPage.tsx` `TocTickRail` (CC-702) — a `pl-3 pt-6` column of
+  `h-[2px] rounded-full` ticks, `gap-[7px]`, H1 `w-3.5`, deeper `w-2 ml-1`, the active
+  one `bg-accent`, the rest `bg-txt-faint/40`; `group-hover` / `group-focus-within`
+  slides an `absolute left-0 w-[220px]` overlay (`bg-bg-pane border-r shadow-2xl`,
+  `-translate-x-2 → 0`, 100ms) of `h-[14px]` rows: the tick + the heading `font-mono
+  text-[10px]` (`text-txt` active, `text-txt-faint hover:text-txt-dim`) + `💬N` comment
+  counts in `text-amber` `text-[9px]`.
+- **Ours** (`components/kb/DocTickRail.tsx`, geometry `lib/docRail.ts`): the rail is
+  34px wide, ticks 2px high in a column with a 7px gap, `padding: 24px 0 0 12px`; H1
+  14px flush, deeper 8px indented 4; active `--accent` at opacity 1, the rest
+  `--text-faint` at 0.4. The overlay is 220px, `--bg-elevated`, 1px `--border` right
+  hairline, `translateX(-8px) → 0` + opacity over 100ms; rows 14px high, `gap: 3px`:
+  the tick, the heading name 10px mono (`--text-primary` active, `--text-dim` →
+  `--text-secondary` on hover), and a `📌N` pin count 9px `--tone-amber` (the pins
+  keyed to that `h:` anchor). The heading's `title` is its text; the count's is
+  `N pins`. No shadow (ours are hairlines), no `Introduction` row (a doc with no
+  headings draws no rail at all).
+
+## Facts row (SWIT-79)
+
+A spec's front-matter line — `**Owner:** … · **Status:** … · **Tickets:** …` — as a
+definition list under the title instead of a bold run-on paragraph. Display only.
+
+- **Ky:** `ky/components/FactsRow.tsx` (CC-702) — `<dl class="flex flex-wrap gap-x-6
+  gap-y-2">`; `<dt>` `font-mono text-[9.5px] uppercase tracking-[0.08em] text-txt-faint`,
+  `<dd>` `font-sans text-[12.5px] text-txt`; a list-shaped key (`tickets|issues|links|
+  prs|refs`) becomes a label over a `<ul class="pl-4 text-txt-dim leading-relaxed">`.
+- **Ours** (`components/kb/FactsRow.tsx`, rule `lib/facts.ts`): `margin: 0 24px 16px`
+  (the doc's gutter), `<dl>` flex-wrap `gap: 8px 24px`; label 9.5px mono uppercase
+  `letter-spacing: 0.08em` `--text-faint`; value 12.5px / 1.5 `--text-primary`, PLAIN
+  TEXT (no inline markdown — a third pipeline mount for a bold ticket key is not worth
+  a second innerHTML injection); list values 12.5px `--text-secondary`, `padding-left:
+  16px`. Sits between `MarkdownBody(before)` and `MarkdownBody(after)`; the paragraph
+  is looked for in the first two sections only, and edit mode shows the line as written.
+
 ## Tooltip
 
 Native `title` for HINTS. The shell has no hint-tooltip component and does not want one.

@@ -40,6 +40,7 @@ import { PageView } from "./PageView";
 import { QuestionView } from "./QuestionView";
 import { ViewSurface } from "../views/ViewSurface";
 import { SurfaceHost } from "../../surfaces/SurfaceHost";
+import { SetFrame } from "./SetFrame";
 
 export function ArtifactSurface({
   artifact,
@@ -108,6 +109,14 @@ export function ArtifactSurface({
           {/* Keyed by identity: two questions share an element type, and the
               draft in the box is per-question. */}
           <QuestionView key={artifactIdentity(artifact)} artifact={artifact} active={active} />
+        </div>
+      );
+    case "set":
+      return (
+        <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+          {/* SWIT-79: the switcher over the member's own surface — this very
+              switch, one level down. Keyed by membership. */}
+          <SetFrame key={artifactIdentity(artifact)} set={artifact} active={active} />
         </div>
       );
     case "session":

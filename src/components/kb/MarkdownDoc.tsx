@@ -32,7 +32,7 @@
 // re-established before keeping the innerHTML injection.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { MouseEvent as ReactMouseEvent } from "react";
+import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
 import { open } from "@tauri-apps/plugin-shell";
 import { unified } from "unified";
 import remarkParse from "remark-parse";
@@ -136,8 +136,10 @@ export function MarkdownDocStyles() {
 
 /** One rendered markdown fragment — the pipeline + anchor stamps + link
  *  policy, without the style block. Exported for the report surface
- *  (SWIT-73); everything else goes through MarkdownDoc. */
-export function MarkdownBody({ content }: { content: string }) {
+ *  (SWIT-73) and the facts split (SWIT-79 — two fragments around a `<dl>`,
+ *  `style` trimming the padding where they meet); everything else goes
+ *  through MarkdownDoc. */
+export function MarkdownBody({ content, style }: { content: string; style?: CSSProperties }) {
   const [html, setHtml] = useState("");
   const renderSeq = useRef(0);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -197,6 +199,7 @@ export function MarkdownBody({ content }: { content: string }) {
     <div
       ref={bodyRef}
       className="kb-doc"
+      style={style}
       onClick={handleLinkActivation}
       onAuxClick={handleLinkActivation}
       dangerouslySetInnerHTML={{ __html: html }}

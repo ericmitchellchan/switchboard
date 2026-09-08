@@ -59,6 +59,17 @@ import { log } from "./logger";
 import type { ConventionEntry } from "./pageStore";
 import { surfaceLabel } from "../surfaces/registry";
 import { encodeSurfaceParams, sanitizeSurfaceParams, surfaceParamsSuffix } from "./surfaceParams";
+// SETS (SWIT-79) — the pure fold/split/position rules; this store applies
+// them and keeps the per-set position map. artifactSets imports nothing back.
+import {
+  SET_ITEM_CAP,
+  SET_LABEL_CAP,
+  flattenArtifacts,
+  foldPlan,
+  setPosition,
+  unfoldPlan,
+  type SetArtifact,
+} from "./artifactSets";
 
 /** What rides with a batch submit besides the bytes (SWIT-77 review fix):
  *  the `convention` answers it carries, for App to append at send. */
@@ -130,7 +141,10 @@ export type PanelRemovalReason =
   /** `stepPreview` (SWIT-75): the deck's `←`/`→` swapped the preview for a
    *  sibling IN PLACE — the back stack untouched, so `back` still lands on
    *  the deck's table. A gesture. */
-  | "preview-step";
+  | "preview-step"
+  /** `foldActiveKind` (SWIT-79): N same-kind tabs left the strip INTO one
+   *  set tab — nothing is lost, `split` brings them back. A gesture. */
+  | "set-fold";
 
 export interface PanelRemoval {
   reason: PanelRemovalReason;
@@ -157,6 +171,7 @@ export function auditName(raw: unknown): string {
           ? raw.sessionId
           : "?";
   const project = typeof raw.project === "string" ? `${raw.project}/` : "";
+  if (kind === "set" && Array.isArray(raw.items)) return `set:${raw.items.length} items`;
   return `${kind}:${project}${field}`;
 }
 
@@ -386,6 +401,49 @@ export function panelWidthFromDrag(
   return clampPanelWidth(Math.min(raw, cap));
 }
 
+// ── The default width keeps 100 columns (SWIT-79, Ky's 629px) ───────────────
+// Ky's surface width is 629 because on a maximized window that leaves the
+// chat pane exactly wide enough for the terminal's pinned 100 columns
+// (threadLayoutStore CC-673). Our width is global and draggable, so the rule
+// applies ONLY while the stored width is still the untouched default: then
+// the panel takes the WIDEST width that leaves the pane tree ≥ TERMINAL_COLS
+// at the terminal's measured cell width, clamped like any width. A width the
+// user dragged is the user's and is never recomputed. With no measurement
+// (no terminal yet, a hidden screen) the old constant stands, and when the
+// window cannot afford 100 columns the clamp floor wins — the grow-only grid
+// then starts narrower and the visible horizontal scrollbar is the fallback.
+
+/** The column count the default width protects. */
+export const TERMINAL_COLS = 100;
+
+/** Pixels the terminal host adds beside the grid: the 5px viewport scrollbar
+ *  plus fit slack (a fit rounds down to whole cells). */
+export const TERMINAL_GUTTER = 8;
+
+/** Is the stored width still the untouched default? (The width the default
+ *  rule may replace; a dragged width — even one dragged to 420 — is
+ *  indistinguishable here, which loadWorkspaceFromStorage already treats the
+ *  same way: the default IS "not set".) */
+export function isDefaultPanelWidth(width: number): boolean {
+  return width === DEFAULT_PANEL_WIDTH;
+}
+
+/** The widest panel that leaves the pane tree ≥ TERMINAL_COLS columns. Pure:
+ *  `cellWidth` is the measured css cell width (null = unmeasured → the
+ *  constant). Clamped into [MIN_PANEL_WIDTH, MAX_PANEL_WIDTH]. */
+export function defaultPanelWidth(containerWidth: number, cellWidth: number | null): number {
+  if (!Number.isFinite(containerWidth) || containerWidth <= 0) return DEFAULT_PANEL_WIDTH;
+  if (cellWidth === null || !Number.isFinite(cellWidth) || cellWidth <= 0) return DEFAULT_PANEL_WIDTH;
+  const need = Math.ceil(TERMINAL_COLS * cellWidth) + TERMINAL_GUTTER;
+  return clampPanelWidth(Math.round(containerWidth) - DIVIDER_WIDTH - need);
+}
+
+/** The width the host should REQUEST: the stored one when the user set it,
+ *  else the 100-column default for this container. */
+export function effectivePanelWidth(stored: number, containerWidth: number, cellWidth: number | null): number {
+  return isDefaultPanelWidth(stored) ? defaultPanelWidth(containerWidth, cellWidth) : stored;
+}
+
 // ── Header presentation (A2) ─────────────────────────────────────────────────
 
 /** One breadcrumb segment tone, mirroring the KB screen's breadcrumb exactly:
@@ -503,6 +561,17 @@ export function describeArtifact(artifact: Artifact): ArtifactDescription {
           { text: "question", tone: "bright" },
         ],
         title: "a question from the agent",
+      };
+    case "set":
+      // SWIT-79: the caption is the set's — the member showing is named by
+      // the set frame's own switcher, not by the header.
+      return {
+        icon: FILE_ICON,
+        crumbs: [
+          { text: "set", tone: "dim" },
+          { text: artifact.label, tone: "bright" },
+        ],
+        title: `set / ${artifact.label}`,
       };
   }
 }
@@ -650,6 +719,32 @@ export function sanitizeArtifact(raw: unknown): Artifact | null {
       return isNonEmptyString(raw.threadId) && isNonEmptyString(raw.questionId)
         ? { kind: "question", threadId: raw.threadId, questionId: raw.questionId }
         : null;
+    case "set": {
+      // SWIT-79. Members go through THIS gate recursively; a nested set
+      // FLATTENS (its members join, in order), a session member is dropped
+      // (one live view — never inside a switcher), duplicates collapse by
+      // identity, and the membership caps at SET_ITEM_CAP. A set with no
+      // surviving member is no tab at all.
+      if (!Array.isArray(raw.items)) return null;
+      const items: Artifact[] = [];
+      const seen = new Set<string>();
+      const take = (entry: unknown) => {
+        const clean = sanitizeArtifact(entry);
+        if (!clean) return;
+        const leaves = clean.kind === "set" ? clean.items : [clean];
+        for (const leaf of leaves) {
+          if (leaf.kind === "session" || leaf.kind === "set") continue;
+          const id = artifactIdentity(leaf);
+          if (seen.has(id) || items.length >= SET_ITEM_CAP) continue;
+          seen.add(id);
+          items.push(leaf);
+        }
+      };
+      for (const entry of raw.items) take(entry);
+      if (items.length === 0) return null;
+      const label = isNonEmptyString(raw.label) ? raw.label.trim().slice(0, SET_LABEL_CAP) : "";
+      return { kind: "set", label: label.length > 0 ? label : `${items.length} items`, items };
+    }
     default:
       return null;
   }
@@ -704,6 +799,11 @@ export function artifactIdentity(artifact: Artifact): string {
       }${artifact.drill ? `/${artifact.drill.key}` : ""}`;
     case "question":
       return `question:${artifact.threadId}:${artifact.questionId}`;
+    case "set":
+      // IDENTITY IS MEMBERSHIP (SWIT-79, Ky's rule): the sorted member
+      // identities, so the same views folded in another order are ONE set
+      // and the label — a caption — never splits one set into two tabs.
+      return `set:[${artifact.items.map(artifactIdentity).sort().join("|")}]`;
   }
 }
 
@@ -740,6 +840,8 @@ export function artifactShortTitle(artifact: Artifact): string {
     return artifact.drill ? `${artifact.viewId} › ${artifact.drill.key}` : artifact.viewId;
   }
   if (artifact.kind === "question") return "question";
+  // A set prints the fold mark and its caption (SWIT-79) — `⧉ 3 views`.
+  if (artifact.kind === "set") return `⧉ ${artifact.label}`;
   // A surface's short title is its page LABEL (the same word the header's
   // last crumb prints), not a path — it has none.
   if (artifact.kind === "surface") {
@@ -1492,6 +1594,8 @@ export function initPanelStore(
   parkedSessions = new Set();
   // Full view is a viewing gesture (SWIT-54) — a fresh seed starts normal.
   maximizedKey = null;
+  // A set starts at its first item on reopen (SWIT-79).
+  setPositions = new Map();
   panelWidth = clampPanelWidth(width);
   bump();
 }
@@ -1527,6 +1631,11 @@ export function openInPanel(
      *  Tree/link clicks pass true through applyOpenDecision. A `session`
      *  artifact is never a preview — a live shell is not a glance. */
     preview?: boolean;
+    /** SWIT-79 (Ky's `focus: false`): open BEHIND the active tab — the
+     *  strip gains (or swaps in) the artifact but whatever was active stays
+     *  active. The turn-end "next thing" uses it: the page stays in front,
+     *  the spec/ticket it names is one tab over. Default true. */
+    focus?: boolean;
   } = {}
 ): void {
   if (sessionId.length === 0) {
@@ -1580,6 +1689,15 @@ export function openInPanel(
   const live = panels.get(key) ?? null;
   const revived = live === null ? lastPanelStates.get(key) ?? null : null;
   const current = live ?? revived;
+  // `focus: false` (SWIT-79): the tab that was active stays active, found
+  // again BY CONTENT after the strip changes under it. Only meaningful when
+  // there is a strip to stay in — a fresh strip's one tab is active anyway.
+  const keepActive = opts.focus === false && current ? current.artifacts[current.activeIndex] ?? null : null;
+  const withFocusRule = (state: PanelState): PanelState => {
+    if (!keepActive) return state;
+    const at = indexOfArtifact(state.artifacts, keepActive);
+    return at >= 0 && at !== state.activeIndex ? { ...state, activeIndex: at } : state;
+  };
 
   // THE PREVIEW REPLACE (SWIT-47). Applies only when the artifact is NOT
   // already in the strip (an existing tab — pinned or preview — is activated,
@@ -1604,7 +1722,7 @@ export function openInPanel(
       previews.set(key, artifactIdentity(clean));
       if (revived !== null) forgetPanel(key);
       panels = new Map(panels);
-      panels.set(key, { artifacts, activeIndex: previewIndex });
+      panels.set(key, withFocusRule({ artifacts, activeIndex: previewIndex }));
       bump();
       return;
     }
@@ -1626,7 +1744,7 @@ export function openInPanel(
   // undone by a stale one.
   if (revived !== null) forgetPanel(key);
   panels = new Map(panels);
-  panels.set(key, next);
+  panels.set(key, withFocusRule(next));
   bump();
 }
 
@@ -1777,6 +1895,97 @@ export function stepPreview(sessionId: string, next: Artifact): boolean {
   return true;
 }
 
+// ── SETS (SWIT-79, Ky's set tabs) ───────────────────────────────────────────
+// The pure rules are lib/artifactSets; this is the store half: the fold and
+// the split as strip mutations, and the per-set POSITION map — which member
+// a set is showing, keyed by the set's identity. Runtime-only (a set starts
+// at its first item on reopen: the reviewing posture) and never persisted.
+
+let setPositions = new Map<string, number>();
+
+/** The member a set is showing, clamped to its membership. */
+export function setPositionFor(set: SetArtifact): number {
+  return setPosition(setPositions.get(artifactIdentity(set)), set.items.length);
+}
+
+export function useSetPosition(set: SetArtifact): number {
+  return useSyncExternalStore(subscribe, () => setPositionFor(set));
+}
+
+/** Move a set to member `index` (clamped). */
+export function setSetPosition(set: SetArtifact, index: number): void {
+  const key = artifactIdentity(set);
+  const next = setPosition(index, set.items.length);
+  if (setPositions.get(key) === next) return;
+  setPositions = new Map(setPositions);
+  setPositions.set(key, next);
+  bump();
+}
+
+/** What the user is LOOKING AT behind an artifact: a set's showing member,
+ *  anything else itself. The `→ thread` reference, the spawn context and
+ *  create-path inheritance all unwrap through this — a set is a frame. */
+export function showingArtifact(artifact: Artifact): Artifact {
+  if (artifact.kind !== "set") return artifact;
+  return artifact.items[setPositionFor(artifact)] ?? artifact;
+}
+
+/** THE FOLD: every tab of the ACTIVE tab's kind into one set tab, in the
+ *  slot of the first of them; the set becomes active, showing the item that
+ *  was active. Returns false when there is nothing to fold (the header shows
+ *  `⧉ N` only when there is — artifactSets.foldableCount). The preview mark
+ *  ends if the preview was folded: a member of a set is not a glance. */
+export function foldActiveKind(sessionId: string): boolean {
+  const key = ownerKeyFor(sessionId);
+  const state = panels.get(key);
+  if (!state) return false;
+  const plan = foldPlan(state);
+  if (!plan) return false;
+  for (const item of plan.set.items) audit("set-fold", key, item, `into=${plan.set.label}`);
+  const previewId = previews.get(key);
+  if (previewId && plan.set.items.some((a) => artifactIdentity(a) === previewId)) clearPreview(key);
+  setPositions = new Map(setPositions);
+  setPositions.set(artifactIdentity(plan.set), plan.showing);
+  panels = new Map(panels);
+  panels.set(key, plan.next);
+  bump();
+  return true;
+}
+
+/** THE SPLIT: the set at `index` back into one tab per item, in place, the
+ *  member that was showing active. False when `index` is not a set. */
+export function unfoldSetAt(sessionId: string, index: number): boolean {
+  const key = ownerKeyFor(sessionId);
+  const state = panels.get(key);
+  if (!state) return false;
+  const set = state.artifacts[index];
+  if (!set || set.kind !== "set") return false;
+  const next = unfoldPlan(state, index, setPositionFor(set));
+  if (!next) return false;
+  // Splitting a PREVIEW set leaves pinned tabs behind (a member is a tab in
+  // its own right now) — the mark would dangle, so it ends here.
+  if (previews.get(key) === artifactIdentity(set)) clearPreview(key);
+  panels = new Map(panels);
+  panels.set(key, next);
+  bump();
+  return true;
+}
+
+/** Bring the thread's ✦ page tab to the front (SWIT-79's turn-end rule:
+ *  open questions → the page, no new tab). A hidden strip comes back first
+ *  (the chord's own restore), so "the page is in front" is true on screen
+ *  and not only in the map. False when the session has no page tab. */
+export function activatePageTab(sessionId: string): boolean {
+  const key = ownerKeyFor(sessionId);
+  if (!panels.has(key) && lastPanelStates.has(key)) togglePanel(sessionId);
+  const state = panels.get(key);
+  if (!state) return false;
+  const index = state.artifacts.findIndex((a) => a.kind === "page");
+  if (index < 0) return false;
+  activateArtifact(sessionId, index);
+  return true;
+}
+
 /** Clear a strip's preview mark + stack (the preview tab was closed). */
 function clearPreview(key: string): void {
   if (!previews.has(key) && !previewBacks.has(key)) return;
@@ -1860,8 +2069,11 @@ export function closeArtifactAt(
  *  brand-new thread would be a surprise, not context.
  *
  *  Returns whether the new tab now shows the inherited artifact. */
-export function inheritPanel(artifact: Artifact | null, newSessionId: string): boolean {
-  if (!artifact || newSessionId.length === 0) return false;
+export function inheritPanel(source: Artifact | null, newSessionId: string): boolean {
+  if (!source || newSessionId.length === 0) return false;
+  // A SET inherits as the member SHOWING (SWIT-79) — what the user was
+  // looking at, under the same rules as a bare tab of that kind.
+  const artifact = showingArtifact(source);
   // A RUNNING TERMINAL IS NOT CONTEXT (increment H). Inheritance copies what
   // the user was LOOKING AT into a new tab's panel; a session artifact cannot
   // be copied — it names one live shell with one live view, and "inheriting" it
@@ -2457,6 +2669,9 @@ export function setPoppedOutArtifact(sessionId: string, artifact: Artifact): voi
   // answer path (composeWrite into the terminal, the close) runs through the
   // MAIN window's action bridge, which the PiP webview does not register.
   if (clean.kind === "view" || clean.kind === "question") return;
+  // A SET never floats (SWIT-79): its members may be views (the rule above),
+  // and its position lives in this store, which the PiP webview never loads.
+  if (clean.kind === "set") return;
   poppedOut = { sessionId, artifact: clean };
   bump();
 }
@@ -2508,7 +2723,8 @@ export function isLocalhostUrlOpen(url: string): boolean {
   const out = poppedOut?.artifact;
   if (out && matches(out)) return true;
   for (const state of panels.values()) {
-    for (const artifact of state.artifacts) {
+    // A preview folded into a SET is still on screen (SWIT-79).
+    for (const artifact of flattenArtifacts(state.artifacts)) {
       if (matches(artifact)) return true;
     }
   }
@@ -2520,8 +2736,14 @@ export function isLocalhostUrlOpen(url: string): boolean {
  *  DISABLED rather than silently dead). */
 export function popOutArtifact(artifact: Artifact): void {
   // session: one live view; view: thread-resolved pins/keep; question: the
-  // main-window answer bridge — see setPoppedOutArtifact for the rules.
-  if (artifact.kind === "session" || artifact.kind === "view" || artifact.kind === "question") {
+  // main-window answer bridge; set: may hold views + its position lives here
+  // — see setPoppedOutArtifact for the rules.
+  if (
+    artifact.kind === "session" ||
+    artifact.kind === "view" ||
+    artifact.kind === "question" ||
+    artifact.kind === "set"
+  ) {
     return;
   }
   panelActions?.popOutArtifact(artifact);
@@ -2845,6 +3067,7 @@ export function __resetPanelStoreForTests(): void {
   parkedSessions = new Set();
   previews = new Map();
   previewBacks = new Map();
+  setPositions = new Map();
   threadKeyResolver = null;
   sessionLabels = new Map();
   panelSides = new Map();

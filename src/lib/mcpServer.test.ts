@@ -12,6 +12,7 @@ import { parsePageFile, mergePage } from "./pageStore";
 import { parseViewSpec } from "./viewStore";
 import { parseInboxFile } from "./pageStore";
 import { parseBacklogInbox } from "./backlogStore";
+import { parseSetsFile } from "./artifactSets";
 // Source text of the two loopback predicates, for the byte-identical check.
 import viewStoreSource from "./viewStore.ts?raw";
 import mcpServerSource from "../../src-tauri/resources/mcp/switchboard-mcp.cjs?raw";
@@ -1061,5 +1062,79 @@ describe("the view tool — levels / markerColumns / drill markers (SWIT-75, the
     expect(props.levels).toBeDefined();
     expect(props.markerColumns).toBeDefined();
     expect(String((props.drill as { description: string }).description)).toContain("markerColumns?");
+  });
+});
+
+describe("the view tool — sets (SWIT-79, Ky's set tabs)", () => {
+  const sets = server as unknown as {
+    buildViewSet: (raw: unknown, existingIds: string[], existingSetIds: string[], now: number) => { id: string; label: string; ids: string[]; builtAt: string };
+    performViewOp: (threadDir: string, args: Record<string, unknown>, now: number) => { message: string; set?: { id: string; ids: string[] } };
+    SET_CAP: number;
+    SET_ITEM_CAP: number;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeFs = require("fs") as {
+    mkdtempSync: (p: string) => string;
+    mkdirSync: (p: string, o?: { recursive: boolean }) => void;
+    writeFileSync: (p: string, d: string) => void;
+    readFileSync: (p: string, e: string) => string;
+    rmSync: (p: string, o: { recursive: boolean; force: boolean }) => void;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeOs = require("os") as { tmpdir: () => string };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodePath = require("path") as { join: (...p: string[]) => string };
+
+  it("builds a set from views that EXIST, minting s<n>, deduping ids", () => {
+    const set = sets.buildViewSet({ label: "  gamma views ", ids: ["v1", "v2", "v1", " v3 "] }, ["v1", "v2", "v3"], ["s1", "s3"], NOW);
+    expect(set).toEqual({ id: "s4", label: "gamma views", ids: ["v1", "v2", "v3"], builtAt: "2026-08-31T10:00:00.000Z" });
+  });
+
+  it("refuses — visibly — an unknown view, a bad id, fewer than two, too many, no label", () => {
+    const build = (raw: unknown, existing = ["v1", "v2"]) => () => sets.buildViewSet(raw, existing, [], NOW);
+    expect(build({ label: "x", ids: ["v1", "v9"] })).toThrow(/not a view of this thread/);
+    expect(build({ label: "x", ids: ["v1", "bad id!"] })).toThrow(/not a view id/);
+    expect(build({ label: "x", ids: ["v1", "v1"] })).toThrow(/at least two/);
+    expect(build({ label: "x", ids: ["v1"] })).toThrow(/at least two/);
+    expect(build({ label: "", ids: ["v1", "v2"] })).toThrow(/set\.label/);
+    expect(build({ label: "x" })).toThrow(/set\.ids/);
+    expect(build("x")).toThrow(/set must be/);
+    const many = Array.from({ length: sets.SET_ITEM_CAP + 1 }, (_, i) => `v${i}`);
+    expect(build({ label: "x", ids: many }, many)).toThrow(/cap is 50/);
+    expect(sets.SET_ITEM_CAP).toBe(50);
+  });
+
+  it("`show` with `set` writes sets.json newest-first (capped) and never touches views/", () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-sets-"));
+    try {
+      nodeFs.mkdirSync(nodePath.join(dir, "views"), { recursive: true });
+      for (const id of ["v1", "v2", "v3"]) nodeFs.writeFileSync(nodePath.join(dir, "views", `${id}.json`), "{}");
+      const first = sets.performViewOp(dir, { op: "show", set: { label: "two", ids: ["v1", "v2"] } }, NOW);
+      expect(first.set).toMatchObject({ id: "s1", ids: ["v1", "v2"] });
+      expect(first.message).toMatch(/ONE tab/);
+      const second = sets.performViewOp(dir, { op: "show", set: { label: "three", ids: ["v1", "v2", "v3"] } }, NOW + 1000);
+      expect(second.set?.id).toBe("s2");
+      const file = JSON.parse(nodeFs.readFileSync(nodePath.join(dir, "sets.json"), "utf8"));
+      expect(file.version).toBe(1);
+      expect(file.sets.map((s: { id: string }) => s.id)).toEqual(["s2", "s1"]);
+      // The app's parser reads exactly this shape.
+      expect(parseSetsFile(JSON.stringify(file)).map((s) => s.id)).toEqual(["s2", "s1"]);
+      // A set goes with `show` only; an unknown view is refused.
+      expect(() => sets.performViewOp(dir, { op: "update", set: { label: "x", ids: ["v1", "v2"] } }, NOW)).toThrow(/op "show"/);
+      expect(() => sets.performViewOp(dir, { op: "show", set: { label: "x", ids: ["v1", "v9"] } }, NOW)).toThrow(/show it first/);
+      // views/ untouched: still three specs.
+      expect(nodeFs.readFileSync(nodePath.join(dir, "views", "v1.json"), "utf8")).toBe("{}");
+    } finally {
+      nodeFs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a plain `show` still needs kind/title/source (checked in code — the schema requires only op)", () => {
+    expect(() => server.buildViewSpec({ op: "show" }, [], NOW)).toThrow(/kind must be/);
+    expect((server.VIEW_TOOL.inputSchema as { required: string[] }).required).toEqual(["op"]);
+    const props = (server.VIEW_TOOL.inputSchema as { properties: Record<string, unknown> }).properties;
+    expect(props.set).toBeDefined();
+    expect(server.VIEW_TOOL.description).toContain("ONE tab");
+    expect(server.VIEW_TOOL.description).toContain("set:{label:");
   });
 });

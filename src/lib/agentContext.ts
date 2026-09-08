@@ -307,6 +307,13 @@ export function artifactRef(artifact: Artifact, opts: RefOptions = {}): string {
       // A question has no file worth pointing at (it lives on the page the
       // agent already wrote) — the SPAWN arm below carries its sentence.
       return "";
+    case "set":
+      // A SET is a frame (SWIT-79): what is on screen is the member it is
+      // SHOWING, which lives in panelStore's position map, not here. Every
+      // caller unwraps through panelStore.showingArtifact BEFORE building a
+      // reference, so this arm is reached only by a caller that forgot —
+      // and an empty ref falls silent rather than naming the wrong member.
+      return "";
   }
 }
 

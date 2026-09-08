@@ -288,7 +288,9 @@ fn threads_data_dir() -> Result<std::path::PathBuf, String> {
 /// The files a thread dir may hold in this increment. SWIT-50 extends this
 /// with the views/ listing through its own guarded command. SWIT-78 adds
 /// retracted.json — the app's overlay of evidence rows taken off the page.
-const THREAD_FILES: [&str; 4] = ["page.json", "answers.json", "inbox.json", "retracted.json"];
+/// SWIT-79 adds sets.json — the MCP server's view SETS (`view show` with
+/// `set:`), read by the view-intent poll beside the views/ listing.
+const THREAD_FILES: [&str; 5] = ["page.json", "answers.json", "inbox.json", "retracted.json", "sets.json"];
 
 /// Thread ids are frontend-minted uuids (threadStore.mintUuid). Anything
 /// outside the uuid alphabet is refused outright — there is no path form to
@@ -334,8 +336,8 @@ async fn read_thread_file(thread_id: String, name: String) -> Result<String, Str
 }
 
 /// A change stamp over a thread's page files: the max mtime (ms since epoch)
-/// of page.json / answers.json / inbox.json / retracted.json, a missing file
-/// counting 0. The frontend's 5s pass compares it tick-to-tick and skips the
+/// of page.json / answers.json / inbox.json / retracted.json / sets.json, a
+/// missing file counting 0. The frontend's 5s pass compares it tick-to-tick and skips the
 /// reads when nothing moved — a per-thread stat instead of three reads per
 /// thread per tick. Same guard posture as read_thread_file: the id is validated and
 /// the names come from the fixed THREAD_FILES set, so nothing caller-named
@@ -423,8 +425,10 @@ mod thread_stamp_tests {
     fn retracted_json_is_in_the_fixed_file_set() {
         // SWIT-78: the overlay is readable through read_thread_file and moves
         // the stamp like the other three — nothing caller-named joins the set.
+        // SWIT-79: sets.json (the MCP server's view sets) is the fifth.
         assert!(THREAD_FILES.contains(&"retracted.json"));
-        assert_eq!(THREAD_FILES.len(), 4);
+        assert!(THREAD_FILES.contains(&"sets.json"));
+        assert_eq!(THREAD_FILES.len(), 5);
     }
 }
 

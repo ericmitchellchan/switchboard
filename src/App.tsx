@@ -108,6 +108,9 @@ import {
   publishSessionLabels,
   flushTerminalTranscript,
   getActiveTabSession,
+  // SWIT-79: sets + the turn-end next thing.
+  showingArtifact,
+  activatePageTab,
   type NewPanelTerminal,
   type PanelActions,
   type SessionLabel,
@@ -125,7 +128,11 @@ import {
   type StandingDecisions,
 } from "./lib/agentContext";
 import { runPromotionPass, promotionPassReason, PROMOTION_POLL_MS } from "./lib/threadPromotion";
-import { parsePageFile, parseAnswersFile, parseInboxFile, mergePage, conventionLine, postTimes, countUnreadTimes, nextPassEntry, loadInboxSeen, markInboxSeen, countQuestionStates, type ConventionEntry, type ThreadPassEntry } from "./lib/pageStore";
+import { parsePageFile, parseAnswersFile, parseInboxFile, parseRetractedFile, mergePage, conventionLine, postTimes, countUnreadTimes, nextPassEntry, loadInboxSeen, markInboxSeen, countQuestionStates, requestPageFocus, type ConventionEntry, type ThreadPassEntry } from "./lib/pageStore";
+import { nextThingFor, offerNextThing, clearNextThingOffer } from "./lib/nextThing";
+import { getCachedDocList } from "./lib/kb";
+import { requestReportAnchor } from "./lib/reportStore";
+import { parseSetsFile, setArtifactFor } from "./lib/artifactSets";
 import { explorerProjects, registerExplorerActions, quickThreadTarget, sessionRepoOptions, useSessionRepos, projectKeyForDir } from "./lib/explorer";
 import {
   configureBacklogIO,
@@ -235,7 +242,10 @@ function waitForSessionShellReady(sessionId: string): Promise<void> {
 // Never throws and never blocks the launch: a missing/unreadable sidecar just
 // means zero pins.
 async function resolveSpawnContext(sessionId: string, threadId: string): Promise<string | null> {
-  const artifact = artifactFor(sessionId);
+  // A SET announces the member it is SHOWING (SWIT-79) — a frame is not on
+  // screen, its current item is.
+  const raw = artifactFor(sessionId);
+  const artifact = raw ? showingArtifact(raw) : null;
   // SWIT-64: the backlog item this thread was opened from, found by the
   // item's `thread` link at EVERY spawn (a revive still carries it). With no
   // panel the sentence stands alone; with one it follows the panel clause.
@@ -1643,6 +1653,15 @@ export default function App() {
   // section is the answering surface (the `question` artifact kind stays in
   // the build for restored workspaces; nothing creates it any more).
   const seenViewsRef = useRef(new Map<string, Set<string>>());
+  // SWIT-79: when this poll last opened something per thread — the turn-end
+  // next-thing hook stands down for INTENT_GRACE_MS after it (the agent's
+  // own `show` wins the one preview slot).
+  const lastIntentOpenRef = useRef(new Map<string, number>());
+  const INTENT_GRACE_MS = 10_000;
+  // SWIT-79: the agent's SETS (`view show` with `set:`) ride the same poll —
+  // `sets.json` in the thread dir, read beside the views/ listing, the same
+  // baseline rule, an unseen set id opening ONE set tab of those views.
+  const seenSetsRef = useRef(new Map<string, Set<string>>());
   useEffect(() => {
     if (route.screen !== "terminal" || !activeSessionId) return;
     const thread = findThreadBySessionId(activeSessionId);
@@ -1655,7 +1674,7 @@ export default function App() {
       if (busy) return;
       busy = true;
       try {
-        const ids = await listThreadViews(threadId);
+        const [ids, setsRaw] = await Promise.all([listThreadViews(threadId), readThreadFile(threadId, "sets.json")]);
         if (cancelled) return;
         let seen = seenViewsRef.current.get(threadId);
         if (!seen) {
@@ -1671,7 +1690,22 @@ export default function App() {
             // was there — never a pinned append. A view Eric pins (double-
             // click) stays pinned; every view stays reachable from the page's
             // Evidence `views` group.
+            lastIntentOpenRef.current.set(threadId, Date.now());
             openInPanel(sessionId, { kind: "view", threadId, viewId }, { preview: true });
+          }
+        }
+        const sets = parseSetsFile(setsRaw);
+        let seenSets = seenSetsRef.current.get(threadId);
+        if (!seenSets) {
+          seenSetsRef.current.set(threadId, new Set(sets.map((s) => s.id)));
+        } else {
+          // Oldest unseen first, so a burst lands with the newest as the preview.
+          for (const set of [...sets].reverse()) {
+            if (seenSets.has(set.id)) continue;
+            seenSets.add(set.id);
+            log.info(`Set intent: thread=${threadId} set=${set.id} (${set.ids.length}) — opening as one tab`);
+            lastIntentOpenRef.current.set(threadId, Date.now());
+            openInPanel(sessionId, setArtifactFor(threadId, set), { preview: true });
           }
         }
       } catch {
@@ -1765,9 +1799,83 @@ export default function App() {
     publishSessionLabels(labels);
   }, [sessions]);
 
+  // ── The next thing after a turn (SWIT-79, Ky's settleSurfaceAfterTurn) ────
+  // THE SEAM: statusDetector's RUNNING → not-running transition per session,
+  // delivered through this very handler (the funnel every emit path takes —
+  // hidden panes included, since the registry dispatches the hook regardless
+  // of mount). No timer: a turn ends when the detector says the agent stopped
+  // producing, and that is the moment the page is worth re-reading. A
+  // `waiting` mid-turn (a permission prompt) settles too — the page is then
+  // unchanged and the once-per-key rule makes it a no-op.
+  //
+  // The page is reloaded FIRST (Ky's rule: a stale copy with no questions
+  // would miss the block the agent just wrote), then: open questions → the
+  // page's decisions block, in front (no new tab); else the first To do row
+  // with an openable address → opened BEHIND the page in the preview slot;
+  // else nothing. Offered ONCE per key (lib/nextThing). A view the agent
+  // showed in the same turn is the intent poll's to open, and it wins: when
+  // that poll opened something within INTENT_GRACE_MS the To do open stands
+  // down (not recorded, so the next settle may still offer it).
+  const prevStatusRef = useRef(new Map<string, AgentStatus>());
+  const settleTurn = useCallback(async (sessionId: string) => {
+    const thread = findThreadBySessionId(sessionId);
+    if (!thread) return;
+    const threadId = thread.id;
+    try {
+      const [pageRaw, answersRaw, inboxRaw, retractedRaw] = await Promise.all([
+        readThreadFile(threadId, "page.json"),
+        readThreadFile(threadId, "answers.json"),
+        readThreadFile(threadId, "inbox.json"),
+        readThreadFile(threadId, "retracted.json"),
+      ]);
+      const page = mergePage(
+        parsePageFile(pageRaw),
+        parseAnswersFile(answersRaw),
+        parseInboxFile(inboxRaw),
+        parseRetractedFile(retractedRaw)
+      );
+      let projectKey: string | null = null;
+      try {
+        projectKey = projectKeyForDir(await explorerProjects(), thread.workingDir);
+      } catch {
+        // no registry — a repo path stays plain text, the rest still resolves
+      }
+      const next = nextThingFor(page, { threadId, kbDocs: getCachedDocList(), projectKey });
+      if (!next) {
+        clearNextThingOffer(threadId);
+        return;
+      }
+      // The thread's session may have moved under the await (a revive).
+      const host = findThreadBySessionId(sessionId)?.id === threadId ? sessionId : getThreadById(threadId)?.sessionId ?? null;
+      if (!host) return;
+      if (next.why === "questions") {
+        if (!offerNextThing(threadId, next.offerKey)) return;
+        log.info(`Next thing: thread=${threadId} — ${next.label}`);
+        requestPageFocus(threadId, "decisions");
+        activatePageTab(host);
+        return;
+      }
+      const lastIntent = lastIntentOpenRef.current.get(threadId) ?? 0;
+      if (Date.now() - lastIntent < INTENT_GRACE_MS) return;
+      if (!offerNextThing(threadId, next.offerKey)) return;
+      log.info(`Next thing: thread=${threadId} — ${next.label} (opened behind the page)`);
+      if (next.artifact.kind === "view" && next.anchor) {
+        requestReportAnchor(threadId, next.artifact.viewId, next.anchor);
+      }
+      openInPanel(host, next.artifact, { preview: true, focus: false });
+    } catch (err) {
+      log.warn(`Next thing failed thread=${threadId}: ${err}`);
+    }
+  }, []);
+
   const handleStatusChange = useCallback(
     (sessionId: string, status: AgentStatus) => {
       updateSessionStatus(sessionId, status);
+      const prev = prevStatusRef.current.get(sessionId);
+      prevStatusRef.current.set(sessionId, status);
+      if (prev === "running" && status !== "running" && status !== "exited") {
+        void settleTurn(sessionId);
+      }
       if (status === "waiting" && sessionId !== effectiveActiveIdRef.current) {
         const session = sessionsRef.current.find((s) => s.id === sessionId);
         if (session) {
@@ -1803,7 +1911,7 @@ export default function App() {
         }
       }
     },
-    [updateSessionStatus, addToast, dismissBySessionId]
+    [updateSessionStatus, addToast, dismissBySessionId, settleTurn]
   );
 
   // (Tab reorder/move retired with the tab strip — SWIT-45. Session ORDER
