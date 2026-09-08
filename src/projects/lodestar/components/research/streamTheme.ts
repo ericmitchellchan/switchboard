@@ -29,7 +29,7 @@ export const DISPOSITION_CHIP: Record<
   open: { label: "open", color: "#e8a27a" /* = --chart-8 */, pulse: true },
   supported: { label: "supported", color: "#6fc492" /* = --up */ },
   refuted: { label: "refuted", color: "#e88a8a" /* = --dn */ },
-  watch: { label: "watch", color: "#7dd3a8" /* = --accent */, pulse: true },
+  watch: { label: "watch", color: "#7ab8e8" /* = --liq (a category beside `supported` = --up; the accent is the same green) */, pulse: true },
   parked: { label: "parked", color: "#888888" /* = --dim2 */ },
   traded: { label: "traded", color: "#e8b765" /* = --chart-3 */ },
   live: { label: "live", color: "#6fc9c0" /* = --chart-4 */, pulse: true },

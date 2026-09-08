@@ -125,7 +125,7 @@ import {
   type StandingDecisions,
 } from "./lib/agentContext";
 import { runPromotionPass, promotionPassReason, PROMOTION_POLL_MS } from "./lib/threadPromotion";
-import { parsePageFile, parseAnswersFile, parseInboxFile, mergePage, conventionLine, countUnreadPosts, loadInboxSeen, markInboxSeen, type PageQuestionKind } from "./lib/pageStore";
+import { parsePageFile, parseAnswersFile, parseInboxFile, mergePage, conventionLine, postTimes, countUnreadTimes, nextPassEntry, loadInboxSeen, markInboxSeen, type PageQuestionKind, type ThreadPassEntry } from "./lib/pageStore";
 import { explorerProjects, registerExplorerActions, quickThreadTarget, sessionRepoOptions, useSessionRepos, projectKeyForDir } from "./lib/explorer";
 import {
   configureBacklogIO,
@@ -1396,13 +1396,14 @@ export default function App() {
   // H3 (hygiene): the pass is STAMP-GATED. One `thread_files_stamp` stat per
   // thread per tick replaces three unconditional reads: when the max mtime of
   // page.json / answers.json / inbox.json is unchanged since the last pass,
-  // the cached derived counts are republished and the reads (and the delivery
-  // scan — an unchanged inbox.json holds no new post) are skipped. Compared
-  // by INEQUALITY, and a failed stat caches stamp -1, which never matches —
-  // behaviour is byte-identical whenever anything actually changed.
-  const threadPassCacheRef = useRef(
-    new Map<string, { stamp: number; questions: number; unread: number }>()
-  );
+  // the reads (and the delivery scan — an unchanged inbox.json holds no new
+  // post) are skipped and the cached entry stands in. Compared by INEQUALITY,
+  // and a failed stat caches stamp -1, which never matches. The entry caches
+  // what the FILES said — the question count and the inbox's post TIMES —
+  // and the unread count is re-derived every tick against the seen stamp
+  // (`pageStore.nextPassEntry`), because seen is device-local state, not one
+  // of the stamped files: a cached count lied for a tick after a tab switch.
+  const threadPassCacheRef = useRef(new Map<string, ThreadPassEntry>());
   useEffect(() => {
     let cancelled = false;
     let busy = false;
@@ -1447,21 +1448,23 @@ export default function App() {
             // stat failed — fall through to the reads
           }
           if (cancelled) return;
-          const cached = threadPassCacheRef.current.get(t.id);
           const isActiveThread =
             findThreadBySessionId(activeIdRef.current ?? "")?.id === t.id;
-          if (cached && stamp !== -1 && cached.stamp === stamp) {
+          const decision = nextPassEntry(threadPassCacheRef.current.get(t.id), stamp, loadInboxSeen(t.id));
+          if (!decision.reread) {
             // Opening the thread still clears its chip without a file change:
-            // seen is device-local state, not one of the stamped files.
-            if (isActiveThread && cached.unread > 0) {
+            // seen is device-local state, not one of the stamped files, which
+            // is why the unread count above came from the stamp as it is NOW.
+            let unreadNow = decision.unread;
+            if (isActiveThread && unreadNow > 0) {
               markInboxSeen(t.id);
-              cached.unread = 0;
+              unreadNow = 0;
             }
-            if (cached.questions > 0) questions[t.id] = cached.questions;
-            if (cached.unread > 0) unread[t.id] = cached.unread;
+            if (decision.questions > 0) questions[t.id] = decision.questions;
+            if (unreadNow > 0) unread[t.id] = unreadNow;
             continue;
           }
-          const entry = { stamp, questions: 0, unread: 0 };
+          const entry: ThreadPassEntry = { stamp, questions: 0, postsAt: [] };
           threadPassCacheRef.current.set(t.id, entry);
           try {
             const [pageRaw, answersRaw] = await Promise.all([
@@ -1487,8 +1490,8 @@ export default function App() {
           if (cancelled) return;
           if (posts.length === 0) continue;
           if (isActiveThread) markInboxSeen(t.id);
-          const n = countUnreadPosts(posts, loadInboxSeen(t.id));
-          entry.unread = n;
+          entry.postsAt = postTimes(posts);
+          const n = countUnreadTimes(entry.postsAt, loadInboxSeen(t.id));
           if (n > 0) unread[t.id] = n;
           let delivered = deliveredPostsRef.current.get(t.id);
           if (!delivered) {

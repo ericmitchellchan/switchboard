@@ -12,7 +12,7 @@ import { api, type TennisArc, type TennisHistPlayer } from "../../api/client";
 const CLASS_COLOR: Record<string, string> = {
   rising: "#6fc492", // = --up
   fading: "#e88a8a", // = --dn
-  peak: "#7dd3a8", // = --accent
+  peak: "#a99cf0", // = --chart-2 (a category beside `rising` = --up; the accent is the same green)
   steady: "#7ab8e8", // = --liq
   unrated: "#888888", // = --dim2
 };

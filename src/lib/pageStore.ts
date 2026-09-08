@@ -517,17 +517,69 @@ export function markInboxSeen(threadId: string, now: number = Date.now()): void 
   }
 }
 
+/** The ms of every post `at` that parses — what the 5s pass CACHES for a
+ *  thread instead of a derived unread count (see nextPassEntry). Unparseable
+ *  timestamps are dropped here, so they never count. Pure. */
+export function postTimes(posts: readonly InboxPost[]): number[] {
+  const out: number[] = [];
+  for (const p of posts) {
+    const t = Date.parse(p.at);
+    if (Number.isFinite(t)) out.push(t);
+  }
+  return out;
+}
+
+/** `countUnreadPosts` over already-parsed times. A null stamp = never opened =
+ *  EVERYTHING counts. Pure. */
+export function countUnreadTimes(times: readonly number[], seenAt: number | null): number {
+  if (seenAt === null) return times.length;
+  let n = 0;
+  for (const t of times) if (t > seenAt) n += 1;
+  return n;
+}
+
 /** Unread posts for the chip. A null stamp = never opened = EVERYTHING
  *  counts (a brand-new post to a thread you have not visited should chip).
  *  Unparseable timestamps do not count — a chip must never be noise. Pure. */
 export function countUnreadPosts(posts: readonly InboxPost[], seenAt: number | null): number {
-  let n = 0;
-  for (const p of posts) {
-    const t = Date.parse(p.at);
-    if (!Number.isFinite(t)) continue;
-    if (seenAt === null || t > seenAt) n += 1;
-  }
-  return n;
+  return countUnreadTimes(postTimes(posts), seenAt);
+}
+
+// ── The 5s pass's stamp gate (0.9.x hygiene, H3) — what a cached entry may say ─
+// One `thread_files_stamp` stat per thread per tick; while the max mtime of
+// page.json / answers.json / inbox.json is unchanged the reads are skipped and
+// the entry below stands in. The entry holds the inbox's post TIMES, never an
+// unread COUNT: the seen stamp is device-local state (localStorage), not one
+// of the stamped files, so a count frozen at read time was wrong for a whole
+// tick after a tab switch (thread B chipped `↓ 2`, Eric opened B — seen — and
+// went back to A inside the same 5s; the next tick republished the cached 2).
+
+export type ThreadPassEntry = {
+  /** The stamp the entry was read under; -1 = a failed stat or read, which
+   *  never matches, so the next tick re-reads. */
+  stamp: number;
+  /** Open questions at the read — page.json + answers.json, both stamped. */
+  questions: number;
+  /** The inbox's post times at the read (postTimes) — inbox.json is stamped,
+   *  the seen stamp is not, so unread is re-derived from these every tick. */
+  postsAt: readonly number[];
+};
+
+export type PassDecision =
+  | { reread: true }
+  | { reread: false; questions: number; unread: number };
+
+/** The cached branch's decision for one thread on one tick: reuse the entry
+ *  only when the stamp just stat'ed EQUALS the one it was read under (-1 on
+ *  either side never matches); the question count is republished as cached and
+ *  the unread count is re-derived against the seen stamp passed in NOW. Pure. */
+export function nextPassEntry(
+  cached: ThreadPassEntry | undefined,
+  stamp: number,
+  seenAt: number | null
+): PassDecision {
+  if (!cached || stamp === -1 || cached.stamp !== stamp) return { reread: true };
+  return { reread: false, questions: cached.questions, unread: countUnreadTimes(cached.postsAt, seenAt) };
 }
 
 // ── The hook — loading policy (2.5s active-gated, refreshPins rules) ─────────

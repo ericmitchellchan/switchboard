@@ -18,6 +18,9 @@ import {
   QUESTION_CAP,
   DONE_FOLD,
   countUnreadPosts,
+  postTimes,
+  countUnreadTimes,
+  nextPassEntry,
   orderedOptions,
   decisionAddress,
   conventionLine,
@@ -357,5 +360,37 @@ describe("countUnreadPosts (the chip rule, SWIT-52)", () => {
         stamp
       )
     ).toBe(1);
+  });
+
+  it("postTimes drops junk; countUnreadTimes is the same rule over parsed times", () => {
+    const times = postTimes([post("1", "2026-08-31T10:00:00Z"), post("2", "junk"), post("3", "2026-08-31T08:00:00Z")]);
+    expect(times).toEqual([Date.parse("2026-08-31T10:00:00Z"), Date.parse("2026-08-31T08:00:00Z")]);
+    expect(countUnreadTimes(times, null)).toBe(2);
+    expect(countUnreadTimes(times, Date.parse("2026-08-31T09:00:00Z"))).toBe(1);
+    expect(countUnreadTimes([], null)).toBe(0);
+  });
+});
+
+describe("nextPassEntry (the stamp gate's cached branch, 0.9.x hygiene review fix)", () => {
+  const T1 = Date.parse("2026-09-06T10:00:00Z");
+  const T2 = Date.parse("2026-09-06T10:05:00Z");
+  const cached = { stamp: 1_700_000, questions: 1, postsAt: [T1, T2] };
+
+  it("re-reads with no entry, a failed stat, or a moved stamp", () => {
+    expect(nextPassEntry(undefined, 1_700_000, null)).toEqual({ reread: true });
+    expect(nextPassEntry(cached, -1, null)).toEqual({ reread: true });
+    expect(nextPassEntry({ ...cached, stamp: -1 }, -1, null)).toEqual({ reread: true });
+    expect(nextPassEntry(cached, 1_700_001, null)).toEqual({ reread: true });
+  });
+
+  it("an unchanged stamp republishes the question count and re-derives unread from the stamp NOW", () => {
+    // Thread B shows `↓ 2`; Eric opens B (seen), clicks back to A inside the
+    // same tick; inbox.json's mtime has not moved. The next tick must say 0,
+    // not republish the count the entry was read with.
+    expect(nextPassEntry(cached, 1_700_000, null)).toEqual({ reread: false, questions: 1, unread: 2 });
+    const seenAfterOpeningB = T2 + 1_000;
+    expect(nextPassEntry(cached, 1_700_000, seenAfterOpeningB)).toEqual({ reread: false, questions: 1, unread: 0 });
+    // A post newer than the stamp still counts — the stamp is a moment, not a reset.
+    expect(nextPassEntry(cached, 1_700_000, T1 + 1)).toEqual({ reread: false, questions: 1, unread: 1 });
   });
 });

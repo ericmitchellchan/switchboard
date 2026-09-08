@@ -20,7 +20,7 @@ function utcMs(ts: string): number {
 }
 const UP = "#6fc492"; // = --up
 const DN = "#e88a8a"; // = --dn
-const AC = "#7dd3a8"; // = --accent
+const AC = "#7ab8e8"; // = --liq — the ENTRY marker, drawn over UP/DN candles beside the UP `tp` line (the accent is the same green as --up)
 
 // fixed-width bars → the chart is drawn at its natural width and scrolls, so bars aren't
 // squashed and the entry/exit can sit at the middle of the view.

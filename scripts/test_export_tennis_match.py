@@ -165,6 +165,72 @@ class FailureLine(unittest.TestCase):
         self.assertIn("docker start lode_shotclock_db", line)
         self.assertEqual(X.DB_UNREACHABLE_EXIT, 2)
 
+    def test_query_failure_after_attach_is_scrubbed_too(self):
+        # A duckdb error from the QUERY (not the ATTACH) can echo the attached URL
+        # as well — the fetch path takes the same one-line, credential-free shape.
+        line = X.query_failed_line(
+            RuntimeError(
+                'Catalog Error: Table with name kalshi_trade does not exist in "postgresql://shotclock:s3cret@localhost:5433/shotclock"!\n'
+                "LINE 3: FROM (SELECT * FROM pg.kalshi_trade ..."
+            )
+        )
+        self.assertNotIn("\n", line)
+        self.assertNotIn("s3cret", line)
+        self.assertNotIn("shotclock:", line)
+        self.assertIn('"postgresql://localhost:5433/shotclock"', line)
+        self.assertIn("Catalog Error: Table with name kalshi_trade", line)
+        self.assertNotIn("LINE 3", line)
+        self.assertIn("lode_shotclock_db", line)
+
+    def test_scrub_error_empty_message_names_the_type(self):
+        self.assertEqual(X.scrub_error(ValueError("")), "ValueError")
+
+    def test_sql_literal_doubles_quotes(self):
+        self.assertEqual(X.sql_literal("postgresql://u:p'q@h/d"), "'postgresql://u:p''q@h/d'")
+        self.assertEqual(X.sql_literal("plain"), "'plain'")
+
+
+class CapWarning(unittest.TestCase):
+    """The reader's 8 MiB cap, mirrored from lib.rs — a file over it is written, then named."""
+
+    def test_mirrors_the_reader_cap(self):
+        self.assertEqual(X.VIEW_DATA_CAP, 8 * 1024 * 1024)
+
+    def test_under_or_at_the_cap_is_silent(self):
+        self.assertIsNone(X.cap_warning("x.json", 10, 3))
+        self.assertIsNone(X.cap_warning("x.json", X.VIEW_DATA_CAP, 3))
+
+    def test_over_the_cap_names_size_rows_and_cap(self):
+        line = X.cap_warning("C:/out/m.json", X.VIEW_DATA_CAP + 1, 61170)
+        self.assertIsNotNone(line)
+        self.assertNotIn("\n", line)
+        self.assertIn("C:/out/m.json", line)
+        self.assertIn("8,388,609 bytes", line)
+        self.assertIn("61,170 rows", line)
+        self.assertIn("8,388,608", line)
+        self.assertIn("read_view_data", line)
+        self.assertIn("aggregate or window", line)
+
+
+class BaseMeta(unittest.TestCase):
+    """`--full` drops research.duckdb's Pacific stamps: one file, one clock."""
+
+    MATCH = (MID, P1, "atp_challenger", "Heide", "Galan", 1, 0.91, 6117, 40, 0.0065,
+             dt.datetime(2026, 3, 2, 9, 5, 13, 524000), dt.datetime(2026, 3, 2, 11, 40, 0, 0))
+
+    def test_default_mode_keeps_the_scorer_stamps(self):
+        meta = X.base_meta(self.MATCH, P1, P2)
+        self.assertEqual(meta["first_trade"], "2026-03-02T09:05:13.524")
+        self.assertEqual(meta["last_trade"], "2026-03-02T11:40:00.000")
+        self.assertEqual(meta["match_id"], MID)
+        self.assertEqual(meta["price_of"], "Heide")
+
+    def test_full_mode_drops_them(self):
+        meta = X.base_meta(self.MATCH, P1, P2, scorer_stamps=False)
+        self.assertNotIn("first_trade", meta)
+        self.assertNotIn("last_trade", meta)
+        self.assertEqual(meta["n_flagged"], 40)
+
 
 class PathKey(unittest.TestCase):
     def test_smoke(self):

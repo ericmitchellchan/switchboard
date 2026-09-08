@@ -44,7 +44,9 @@ flagged trades). `meta.coverage` + `meta.n_trades` are what the view's toolbar
 prints (`flagged moments only · 12 of 6,117 trades`), so it never implies more.
 
 `--full` IS THE WHOLE TAPE. Match selection and the match-level meta still come from
-research.duckdb's `_match` row (same selectors), but the ROWS come from the Shot
+research.duckdb's `_match` row (same selectors) — minus its `first_trade`/`last_trade`,
+which are that DB's Pacific wall-clock stamps (below); the full file's bounds are
+`tape_first`/`tape_last`, UTC like its rows — but the ROWS come from the Shot
 Clock Postgres/TimescaleDB — `kalshi_trade` (every trade on the match's two tickers)
 ASOF-joined to `tennis_match_state` (the score at-or-before each trade) — reached
 through duckdb's `postgres` extension (ATTACH … READ_ONLY), so the script stays
@@ -57,8 +59,11 @@ research.duckdb's naive stamps are NOT UTC but Pacific wall-clock (UTC−8 on ev
 scored match, all of which predate DST; HEIGAL's moment `09:05:13.524` is the tape's
 `17:05:13.524Z`, same ticker/price/count/state), so a default-mode file and a
 `--full` file of one match differ by 8h and the full tape's stamps are the correct
-ones; the default mode inherits Lodestar's scorer output as it is. What the full
-rows carry:
+ones; the default mode inherits Lodestar's scorer output as it is, and a full file
+carries no stamp from that clock (one file, one clock). A full file can also exceed
+the reader's 8 MiB cap (`VIEW_DATA_CAP` here mirrors lib.rs's `read_view_data`):
+the export still succeeds and ONE warning line on stderr names the size, the row
+count and the cap. What the full rows carry:
   · `backs_player` — the trade_stance port above (`taker_side` is never null and
     `side_inferred` is false on every tennis trade in the DB, but both are kept).
   · `size_z` — a port of tennis_anomaly.py's size_zscores (lines 95-106): log-scale z
@@ -100,6 +105,9 @@ PG_URL_ENV = "LODESTAR_DB_URL"
 DEFAULT_PG_URL = "postgresql://shotclock:shotclock@localhost:5433/shotclock"  # Lodestar historical.py:23
 PG_CONTAINER = "lode_shotclock_db"
 DB_UNREACHABLE_EXIT = 2
+# Mirrors VIEW_DATA_CAP in src-tauri/src/lib.rs (`read_view_data` refuses a larger
+# file) — change one, change the other.
+VIEW_DATA_CAP = 8 * 1024 * 1024
 
 # ── drillPathKey, ported from src/lib/viewStore.ts ───────────────────────────
 # JS: key.trim().slice(0, 120).replace(/[^A-Za-z0-9._-]/g, "_"); then "", "." and
@@ -261,12 +269,42 @@ def pg_label(url: str) -> str:
     return (m.group(1) + (m.group(2) or "")) if m else "<db>"
 
 
-def unreachable_line(url: str, err: Exception) -> str:
+def scrub_error(err: Exception) -> str:
+    """The FIRST line of a duckdb error with any URL's credentials dropped — duckdb
+    echoes the ATTACH string, credentials included, and not only on the ATTACH
+    itself (a failed query against the attached DB can carry it too)."""
     first = str(err).strip().splitlines()[0] if str(err).strip() else type(err).__name__
-    first = re.sub(r"://[^@/\s\"']*@", "://", first)  # duckdb echoes the URL, credentials included
+    return re.sub(r"://[^@/\s\"']*@", "://", first)
+
+
+def unreachable_line(url: str, err: Exception) -> str:
     return (
-        f"cannot reach the Shot Clock DB at {pg_label(url)} ({first}) — the container is "
+        f"cannot reach the Shot Clock DB at {pg_label(url)} ({scrub_error(err)}) — the container is "
         f"{PG_CONTAINER}; if it is stopped: docker start {PG_CONTAINER}"
+    )
+
+
+def query_failed_line(err: Exception) -> str:
+    """The full-tape query failed AFTER a successful ATTACH — one scrubbed line,
+    the same treatment as an unreachable DB, never a traceback."""
+    return f"the full-tape query against the Shot Clock DB failed ({scrub_error(err)}) — the container is {PG_CONTAINER}"
+
+
+def sql_literal(s: str) -> str:
+    """A SQL string literal, quotes doubled — a `'` in a URL's password cannot end
+    the ATTACH string early."""
+    return "'" + s.replace("'", "''") + "'"
+
+
+def cap_warning(path: str, size: int, n_rows: int) -> str | None:
+    """One line when a written file is over the reader's cap (None under it): the
+    export succeeded, but `read_view_data` will refuse the file, so say so with the
+    size, the row count and the cap rather than let the view fail later."""
+    if size <= VIEW_DATA_CAP:
+        return None
+    return (
+        f"warning: {path} is {size:,} bytes ({n_rows:,} rows) — over the reader's cap of "
+        f"{VIEW_DATA_CAP:,} bytes (8 MiB); read_view_data will refuse it: aggregate or window the rows"
     )
 
 
@@ -330,18 +368,32 @@ def attach_shotclock(con, url: str) -> None:
 
     try:
         con.execute("SET TimeZone = 'UTC'")
-        con.execute(f"ATTACH '{url}' AS pg (TYPE postgres, READ_ONLY)")
+        con.execute(f"ATTACH {sql_literal(url)} AS pg (TYPE postgres, READ_ONLY)")
     except duckdb.Error as err:
         print(unreachable_line(url, err), file=sys.stderr)
         sys.exit(DB_UNREACHABLE_EXIT)
 
 
 def fetch_full_tape(con, match_id: str) -> list[tuple]:
-    return con.execute(FULL_TAPE_SQL, {"mid": match_id}).fetchall()
+    """The tape rows. A duckdb error here (a schema drift, the container going
+    away mid-run) gets the ATTACH failure's treatment — one scrubbed line, exit 2 —
+    because duckdb's message can echo the attached URL, credentials included."""
+    import duckdb
+
+    try:
+        return con.execute(FULL_TAPE_SQL, {"mid": match_id}).fetchall()
+    except duckdb.Error as err:
+        print(query_failed_line(err), file=sys.stderr)
+        sys.exit(DB_UNREACHABLE_EXIT)
 
 
-def base_meta(match, p1_ticker: str, p2_ticker: str) -> dict:
+def base_meta(match, p1_ticker: str, p2_ticker: str, *, scorer_stamps: bool = True) -> dict:
+    """The match-level meta from the `_match` row. `scorer_stamps=False` (the full
+    export) leaves out `first_trade`/`last_trade`: they are research.duckdb's naive
+    Pacific stamps and a full file's rows and `tape_first`/`tape_last` are UTC —
+    one file, one clock."""
     (match_id, ticker, level, p1, p2, winner, score, n_trades, n_flagged, flag_rate, first, last) = match
+    stamps = {"first_trade": _iso(first), "last_trade": _iso(last)} if scorer_stamps else {}
     return {
         "match_id": match_id,
         "ticker": ticker,
@@ -355,8 +407,7 @@ def base_meta(match, p1_ticker: str, p2_ticker: str) -> dict:
         "n_flagged": _num(n_flagged),
         "flag_rate": _num(flag_rate),
         "price_of": p1,
-        "first_trade": _iso(first),
-        "last_trade": _iso(last),
+        **stamps,
         "exported_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
@@ -415,7 +466,7 @@ def export_match_full(con, match, out_path: str) -> tuple[int, int]:
     meta = {
         "coverage": COVERAGE_FULL,
         "source": FULL_SOURCE,
-        **base_meta(match, p1_ticker, p2_ticker),
+        **base_meta(match, p1_ticker, p2_ticker, scorer_stamps=False),
         "unfolded": stats["unfolded"],
         "n_trades": n,
         "n_trades_scored": _num(n_trades_scored),
@@ -430,14 +481,21 @@ def export_match_full(con, match, out_path: str) -> tuple[int, int]:
     if stats["n_unsized"] > 0:
         meta["n_unsized"] = stats["n_unsized"]
         meta["unsized"] = round(stats["n_unsized"] / n, 4) if n else 0
-    write_payload(out_path, meta, rows)
+    size = write_payload(out_path, meta, rows)
+    # A whole tape can be bigger than the reader takes; the file is still written
+    # (exit 0) and the warning names what the view would otherwise say too late.
+    warning = cap_warning(os.path.abspath(out_path), size, n)
+    if warning:
+        print(warning, file=sys.stderr)
     return n, n
 
 
-def write_payload(out_path: str, meta: dict, rows: list[dict]) -> None:
+def write_payload(out_path: str, meta: dict, rows: list[dict]) -> int:
+    """Write `{meta, rows}`; returns the file's size in bytes."""
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump({"meta": meta, "rows": rows}, f, ensure_ascii=False)
+    return os.path.getsize(out_path)
 
 
 def resolve_out(out: str, match_id: str) -> str:

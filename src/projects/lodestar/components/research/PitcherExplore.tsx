@@ -20,7 +20,8 @@ import {
   type MlbGameLogEntry,
 } from "../../api/client";
 
-const PALETTE = { home: "#7dd3a8" /* = --accent */, away: "#7ab8e8" /* = --liq */, roll: "#e8b765" /* = --chart-3 */, yes: "#6fc492" /* = --up */, no: "#e88a8a" /* = --dn */ };
+// `home` sits beside `yes` = --up in one palette, so it is not the accent (the same green).
+const PALETTE = { home: "#7ab8e8" /* = --liq */, away: "#a99cf0" /* = --chart-2 */, roll: "#e8b765" /* = --chart-3 */, yes: "#6fc492" /* = --up */, no: "#e88a8a" /* = --dn */ };
 
 function num(v: number | null | undefined, d = 2): string {
   return v == null ? "—" : v.toFixed(d);

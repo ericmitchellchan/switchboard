@@ -32,7 +32,7 @@ function fileToBase64(file: File): Promise<string> {
 const TYPES: KnowledgeType[] = ["idea", "report", "research", "link"];
 const TYPE_COLOR: Record<KnowledgeType, string> = {
   idea: "#e8b765", // = --chart-3
-  report: "#7dd3a8", // = --accent
+  report: "#7ab8e8", // = --liq (a category beside `link` = --up; the accent is the same green)
   research: "#b4b4b4", // = --dim
   link: "#6fc492", // = --up
 };
