@@ -21,7 +21,10 @@ import {
   getViewNotes,
   editViewNote,
   flushViewNotes,
+  flushAllViewNotes,
   markViewNotesSent,
+  batchSendTarget,
+  BATCH_NOT_LIVE,
   __resetViewNotesForTests,
 } from "./viewNotes";
 
@@ -121,6 +124,31 @@ describe("formatBatch — the one message the thread receives", () => {
   });
 });
 
+describe("batchSendTarget — the deck's OWN thread, launched and live, else a reason (review #1)", () => {
+  const thread = { id: "t1", sessionId: "s1" };
+
+  it("live + launched → the bound session", () => {
+    expect(batchSendTarget(thread, true, true)).toEqual({ sessionId: "s1", reason: null });
+  });
+
+  it("launched but the session exited → not live, and says the terminal exited", () => {
+    const r = batchSendTarget(thread, true, false);
+    expect(r.sessionId).toBeNull();
+    expect(r.reason).toContain(BATCH_NOT_LIVE);
+    expect(r.reason).toContain("exited");
+    // Launched with no bound session at all (unbound after a tab close) is the same outcome.
+    expect(batchSendTarget({ id: "t1", sessionId: null }, true, true).sessionId).toBeNull();
+  });
+
+  it("not launched → thread not live, even with a live shell in its tab (a plain shell runs the batch as commands)", () => {
+    expect(batchSendTarget(thread, false, true)).toEqual({ sessionId: null, reason: BATCH_NOT_LIVE });
+  });
+
+  it("thread missing → no thread", () => {
+    expect(batchSendTarget(undefined, true, true)).toEqual({ sessionId: null, reason: "no thread" });
+  });
+});
+
 describe("the store — one record per (thread, dir), injected IO, one writer", () => {
   afterEach(() => {
     __resetViewNotesForTests();
@@ -202,5 +230,74 @@ describe("the store — one record per (thread, dir), injected IO, one writer", 
     expect(unsentNotes(f)).toEqual([]);
     await vi.advanceTimersByTimeAsync(VIEW_NOTES_WRITE_DEBOUNCE_MS + 5);
     expect(io.writes).toHaveLength(1);
+  });
+
+  it("overlapping writes are CHAINED: a slow flush and an immediate markSent land in order, no spurious error (review #3)", async () => {
+    // A write that does not resolve until released — the first one is slow,
+    // the second must WAIT for it (the Rust side has one tmp name).
+    const order: string[] = [];
+    const gates: (() => void)[] = [];
+    configureViewNotesIO({
+      read: () => Promise.reject(new Error("missing")),
+      write: (_t, _d, data) =>
+        new Promise<void>((resolve) => {
+          gates.push(() => {
+            order.push(data);
+            resolve();
+          });
+        }),
+    });
+    await loadViewNotes("t1", "deck");
+    editViewNote("t1", "deck", "d1", "chase", T1);
+    const first = flushViewNotes("t1", "deck");
+    const second = markViewNotesSent("t1", "deck", ["d1"], T2);
+    // Only the first write has been ISSUED to IO; the second is queued behind it.
+    await Promise.resolve();
+    expect(gates).toHaveLength(1);
+    gates[0]();
+    await first;
+    // Now the second reaches IO, carrying the sentAt stamp.
+    await vi.waitFor(() => expect(gates).toHaveLength(2));
+    gates[1]();
+    await second;
+    expect(order).toHaveLength(2);
+    expect(parseViewNotes(order[0]).notes.d1.sentAt).toBeUndefined();
+    expect(parseViewNotes(order[1]).notes.d1.sentAt).toBe(T2);
+    expect(getViewNotes("t1", "deck").error).toBeNull();
+  });
+
+  it("a failed write in the chain does not block the next one, and the next success clears the error", async () => {
+    const io = fakeIO(null);
+    await loadViewNotes("t1", "deck");
+    io.setFail(true);
+    editViewNote("t1", "deck", "d1", "chase", T1);
+    const first = flushViewNotes("t1", "deck");
+    // The chained write reaches IO one microtask later — let it fail first.
+    await Promise.resolve();
+    io.setFail(false);
+    const second = markViewNotesSent("t1", "deck", ["d1"], T2);
+    await Promise.all([first, second]);
+    expect(io.writes).toHaveLength(1);
+    expect(parseViewNotes(io.writes[0].data).notes.d1.sentAt).toBe(T2);
+    expect(getViewNotes("t1", "deck").error).toBeNull();
+  });
+
+  it("flushAllViewNotes issues every owed write now — the unload path (review #5)", async () => {
+    vi.useFakeTimers();
+    const io = fakeIO(null);
+    await loadViewNotes("t1", "deck");
+    await loadViewNotes("t1", "other");
+    await loadViewNotes("t2", "deck");
+    editViewNote("t1", "deck", "d1", "chase", T1);
+    editViewNote("t2", "deck", "d1", "counter", T1);
+    // "t1|other" has nothing owed and must not be written.
+    expect(io.writes).toHaveLength(0);
+    flushAllViewNotes();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(io.writes.map((w) => w.dir).sort()).toEqual(["deck", "deck"]);
+    expect(io.writes).toHaveLength(2);
+    // The debounces were cancelled — nothing fires a second time.
+    await vi.advanceTimersByTimeAsync(VIEW_NOTES_WRITE_DEBOUNCE_MS + 5);
+    expect(io.writes).toHaveLength(2);
   });
 });

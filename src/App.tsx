@@ -138,6 +138,7 @@ import {
   getBacklogItems,
 } from "./lib/backlogStore";
 import { noteScanWriteCount, pruneThreadScan, scanThreadTranscript } from "./lib/evidenceScan";
+import { batchSendTarget, flushAllViewNotes } from "./lib/viewNotes";
 import { consumeDropClaim, DROP_CLAIM_DEFER_MS, stagePastedBase64 } from "./lib/attachments";
 import { isBare } from "./lib/shellMode";
 import { parsePinsFile, pinsForDoc, pinTargetFor, surfacePinTargetFor } from "./lib/pins";
@@ -2049,18 +2050,34 @@ export default function App() {
   }, []);
 
   // SUBMIT a composed message (SWIT-75 — the deck's `send N notes → thread`):
-  // the same target and reveal as the typed seam above, but the bytes come
-  // from composeWrite (the CR is inside the wire format — one bracketed
-  // paste, one submit, the composer's rule) and the outcome is RETURNED, so
-  // the caller marks its notes sent only when the PTY write succeeded.
-  const handleSubmitToThread = useCallback(async (bytes: string) => {
-    const sessionId = effectiveActiveIdRef.current ?? activeIdRef.current;
-    if (!sessionId) throw new Error("no thread to send to");
+  // the bytes come from composeWrite (the CR is inside the wire format — one
+  // bracketed paste, one submit, the composer's rule) and the outcome is
+  // RETURNED, so the caller marks its notes sent only when the PTY write
+  // succeeded. THE TARGET IS THE THREAD'S OWN SESSION, not the active tab
+  // (review #1): the first cut targeted whatever shell owned the active tab,
+  // and with claude exited there the batch ran as PowerShell commands while
+  // the write "succeeded" and the notes were stamped sent. So the session is
+  // resolved from the deck's threadId through `batchSendTarget` — launched
+  // (the composer's own signal, cleared by markThreadSessionExited) AND the
+  // session still in our list and not exited (ground truth here; the button
+  // reads the published statuses for the same rule) — and a miss REJECTS
+  // with the reason, writing nothing. No tab switch: the deck must stay on
+  // screen for its `sent` line, and the thread's tab is normally this one.
+  const handleSubmitToThread = useCallback(async (threadId: string, bytes: string) => {
+    const thread = getThreadById(threadId);
+    const live =
+      !!thread?.sessionId &&
+      sessionsRef.current.some((s) => s.id === thread.sessionId && s.status !== "exited");
+    const target = batchSendTarget(thread, isThreadLaunched(threadId), live);
+    if (target.sessionId === null) throw new Error(target.reason);
+    const sessionId = target.sessionId;
     if (bytes.length === 0) return;
     if (getNavState().route.screen !== "terminal") navigate({ screen: "terminal" });
-    log.info(`Submit to thread session=${sessionId}: ${bytes.length} bytes`);
+    log.info(`Submit to thread=${threadId} session=${sessionId}: ${bytes.length} bytes`);
     await writeToSession(sessionId, bytes);
-    getTerminal(sessionId)?.terminal.focus();
+    if ((effectiveActiveIdRef.current ?? activeIdRef.current) === sessionId) {
+      getTerminal(sessionId)?.terminal.focus();
+    }
   }, []);
 
   // POP OUT (increment F, Decision 2) — hand the panel's active artifact to
@@ -2427,8 +2444,8 @@ export default function App() {
   useEffect(() => {
     registerPanelActions({
       sendToThread: (text) => panelActionsRef.current?.sendToThread(text),
-      submitToThread: (bytes) =>
-        panelActionsRef.current?.submitToThread?.(bytes) ??
+      submitToThread: (threadId, bytes) =>
+        panelActionsRef.current?.submitToThread?.(threadId, bytes) ??
         Promise.reject(new Error("the app is not ready to send")),
       answerQuestion: (threadId, questionId, questionText, answerText, kind) =>
         panelActionsRef.current?.answerQuestion(threadId, questionId, questionText, answerText, kind) ??
@@ -2968,6 +2985,8 @@ export default function App() {
       // SWIT-64: an owed backlog write goes out now (IPC, fire-and-forget —
       // the 400ms debounce must not swallow the last edit on the way out).
       void flushBacklogWrites();
+      // SWIT-75: the deck notes' own 400ms debounce, same reasoning.
+      flushAllViewNotes();
     };
 
     window.addEventListener("beforeunload", handleBeforeUnload);

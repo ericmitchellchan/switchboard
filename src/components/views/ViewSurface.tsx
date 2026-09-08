@@ -152,6 +152,7 @@ import {
   noteFor,
   unsentNotes,
   formatBatch,
+  batchSendTarget,
 } from "../../lib/viewNotes";
 import { composeWrite } from "../../lib/composer";
 // candles.ts is pure helpers (its lightweight-charts import is type-only,
@@ -159,7 +160,7 @@ import { composeWrite } from "../../lib/composer";
 // the main chunk; the vite-build gate checks that.
 import { candleLevelLines, seriesColor } from "../../surfaces/charts/candles";
 import { viewPinTargetFor } from "../../lib/pins";
-import { getThreadById, threadRepoName } from "../../lib/threadStore";
+import { getThreadById, threadRepoName, useThreadsView } from "../../lib/threadStore";
 import {
   artifactIdentity,
   getActiveTabSession,
@@ -262,10 +263,12 @@ const NOTE_INPUT_STYLE: CSSProperties = {
   outline: "none",
 };
 
-/** The parent kinds whose rows form a DECK — the DOM kinds, where a drill
- *  key IS a row's key-column value (the table's anchor rule). A candle or
- *  line parent drills by marker, which is not a sequence to step through. */
-const DECK_PARENT_KINDS: ReadonlySet<string> = new Set(["table", "dist", "bar"]);
+/** The parent kinds whose rows form a DECK — the kinds where a drill key IS
+ *  a row's key-column value (the table's anchor rule, which `deckKeys`
+ *  walks). NOT `dist` (review #2): its drill key is the BIN LABEL, which no
+ *  row carries, so `deckPosition` would answer null on every dist child. A
+ *  candle or line parent drills by marker, which is not a sequence either. */
+const DECK_PARENT_KINDS: ReadonlySet<string> = new Set(["table", "bar"]);
 
 const SPEC_STYLE: CSSProperties = {
   flex: "none",
@@ -453,6 +456,16 @@ export function ViewChrome({
   const noteText = drillKey !== null ? noteFor(notes.file, drillKey) : "";
   const unsent = useMemo(() => (isDeckChild ? unsentNotes(notes.file, deck) : []), [isDeckChild, notes.file, deck]);
   const [sending, setSending] = useState(false);
+  // Where the batch would go (review #1): the deck's OWN thread, launched and
+  // with a live session — read from the published thread view so the button
+  // disables the moment the claude exits. App re-applies the rule on send
+  // against its session list, the ground truth.
+  const threadsView = useThreadsView();
+  const batchTarget = useMemo(() => {
+    const thread = threadsView.threads.find((t) => t.id === threadId);
+    const status = thread?.sessionId ? threadsView.sessionStatuses[thread.sessionId] : undefined;
+    return batchSendTarget(thread, threadsView.launched.has(threadId), status !== undefined && status !== "exited");
+  }, [threadsView, threadId]);
 
   // The project a view's pins + keeps file under: the thread's repo name.
   const project = useMemo(() => {
@@ -661,13 +674,16 @@ export function ViewChrome({
     if (!deckSpec || notesDir === null || sending) return;
     setSending(true);
     try {
+      // The gate again at send time (the button's disabled state can lag a
+      // store tick): a thread that is not live rejects here, notes unsent.
+      if (batchTarget.sessionId === null) throw new Error(batchTarget.reason);
       await flushViewNotes(threadId, notesDir);
       const entries = unsentNotes(getViewNotes(threadId, notesDir).file, deck);
       if (entries.length === 0) return;
       // composeWrite: multi-line → ONE bracketed paste + ONE CR (the
       // composer's wire format), so the batch arrives as one message.
       const bytes = composeWrite(formatBatch(deckSpec.title, entries));
-      await submitToThread(bytes);
+      await submitToThread(threadId, bytes);
       await markViewNotesSent(threadId, notesDir, entries.map((e) => e.key));
       flashNote(`sent ${entries.length} ${entries.length === 1 ? "note" : "notes"}`);
     } catch (err) {
@@ -675,7 +691,7 @@ export function ViewChrome({
     } finally {
       setSending(false);
     }
-  }, [deckSpec, notesDir, sending, threadId, deck, flashNote]);
+  }, [deckSpec, notesDir, sending, threadId, deck, flashNote, batchTarget]);
 
   // ── keep → the scratchpad (decided Q4) ─────────────────────────────────────
   const [keeping, setKeeping] = useState(false);
@@ -819,12 +835,25 @@ export function ViewChrome({
           {isDeckChild && unsent.length > 0 && (
             <button
               type="button"
-              style={{ ...TOOL_BTN, color: "var(--text-secondary)", borderColor: "var(--border-subtle)" }}
+              style={{
+                ...TOOL_BTN,
+                ...(batchTarget.sessionId === null
+                  ? { color: "var(--text-faint)", borderColor: "var(--border)" }
+                  : { color: "var(--text-secondary)", borderColor: "var(--border-subtle)" }),
+              }}
               onClick={() => void sendBatch()}
-              disabled={!canSend || sending}
-              title={`Send the ${unsent.length} unsent ${unsent.length === 1 ? "note" : "notes"} to the thread as one message — it submits`}
+              disabled={!canSend || sending || batchTarget.sessionId === null}
+              title={
+                batchTarget.sessionId === null
+                  ? `${batchTarget.reason} — the ${unsent.length} unsent ${unsent.length === 1 ? "note stays" : "notes stay"} in notes.json`
+                  : `Send the ${unsent.length} unsent ${unsent.length === 1 ? "note" : "notes"} to the thread as one message — it submits`
+              }
             >
-              {sending ? "…" : `send ${unsent.length} ${unsent.length === 1 ? "note" : "notes"} → thread`}
+              {batchTarget.sessionId === null
+                ? "thread not live"
+                : sending
+                  ? "…"
+                  : `send ${unsent.length} ${unsent.length === 1 ? "note" : "notes"} → thread`}
             </button>
           )}
           {spec.kind === "candles" && (

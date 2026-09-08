@@ -20,10 +20,29 @@
 // read would otherwise clobber notes already on disk — backlogStore's rule).
 // A remount (every `next` replaces the child artifact, so ViewChrome
 // remounts) reads the record, not the disk, which is what keeps a 400ms
-// pending write from being overwritten by a stale re-read.
+// pending write from being overwritten by a stale re-read. WRITES ARE
+// CHAINED per record: a debounced save and an immediate `markSent` can be
+// issued a few ms apart, and the Rust side writes through ONE tmp name
+// (`notes.json.tmp` → rename), so two in-flight writes would race on it —
+// each issued write waits for the previous one to settle (a failure is
+// recorded, never propagated into the next write).
+//
+// KNOWN RULE (review #4, decided): notes are keyed by (thread, deck DIR,
+// key), not by parent spec — the file sits beside the parent's data, so two
+// decks whose parent files share a directory SHARE one `notes.json`, and a
+// key present in both decks is one note. Put decks in their own directory
+// (the exporters do) if their notes must not mix.
+//
+// THE BATCH'S TARGET (review #1): the message goes to the thread the deck
+// BELONGS TO (the artifact's threadId) — never "whatever shell owns the
+// active tab", which is how a batch once ran as PowerShell commands in a
+// tab whose claude had exited. `batchSendTarget` is the pure rule both the
+// button and App's handler apply: launched (the composer's own signal) AND
+// the bound session's PTY not exited, else a reason and nothing is written.
 
 import { useEffect, useSyncExternalStore } from "react";
 import { readViewData, writeViewNotes } from "./ipc";
+import type { Thread } from "../types";
 
 export const VIEW_NOTES_FILE = "notes.json";
 /** Longest note kept (chars) — a note is a line, not a document. */
@@ -142,6 +161,31 @@ export function formatBatch(parentTitle: string, entries: readonly { key: string
   return [`Chart notes on ${parentTitle.trim()} (${entries.length}):`, ...lines].join("\n");
 }
 
+/** The wording the disabled button and the rejection carry. */
+export const BATCH_NOT_LIVE = "thread not live";
+
+export type BatchSendTarget =
+  | { sessionId: string; reason: null }
+  | { sessionId: null; reason: string };
+
+/** WHERE the batch goes (review #1): the deck's OWN thread's bound session,
+ *  and only while that thread is `launched` (a claude was started in it this
+ *  app run — the composer's visibility rule, `composer.composerAutoVisible`)
+ *  AND the bound session's PTY is live (`live` = the caller's knowledge of
+ *  that session's status — App reads its session list, the button reads the
+ *  published `sessionStatuses`). Anything else is a reason, never a session:
+ *  a batch typed into a dead claude's shell runs as commands. Pure. */
+export function batchSendTarget(
+  thread: Pick<Thread, "id" | "sessionId"> | undefined,
+  launched: boolean,
+  live: boolean
+): BatchSendTarget {
+  if (!thread) return { sessionId: null, reason: "no thread" };
+  if (!launched) return { sessionId: null, reason: BATCH_NOT_LIVE };
+  if (!thread.sessionId || !live) return { sessionId: null, reason: `${BATCH_NOT_LIVE} — its terminal exited` };
+  return { sessionId: thread.sessionId, reason: null };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // The store: one record per (thread, deck dir), injected IO, one writer
 // ─────────────────────────────────────────────────────────────────────────────
@@ -162,6 +206,8 @@ export function configureViewNotesIO(next: ViewNotesIO | null): void {
 }
 
 type NotesRecord = {
+  threadId: string;
+  dir: string;
   file: ViewNotesFile;
   loaded: boolean;
   /** The last write's failure, kept until the next write succeeds. */
@@ -202,6 +248,8 @@ function record(threadId: string, dir: string): NotesRecord {
   let rec = records.get(key);
   if (!rec) {
     rec = {
+      threadId,
+      dir,
       file: emptyViewNotes(),
       loaded: false,
       error: null,
@@ -249,10 +297,15 @@ export function getViewNotes(threadId: string, dir: string): ViewNotesSnapshot {
   return records.get(viewNotesKey(threadId, dir))?.snapshot ?? EMPTY_SNAPSHOT;
 }
 
+/** Issue a write of the file AS IT IS NOW, queued behind any write in flight
+ *  (review #3 — the Rust side's one tmp name; see the header). The data is
+ *  serialized at issue time, so each queued write carries the file as of
+ *  the edit that owed it. The returned promise never rejects. */
 function issueWrite(rec: NotesRecord, threadId: string, dir: string): Promise<void> {
   rec.dirty = false;
-  const p = io
-    .write(threadId, dir, serializeViewNotes(rec.file))
+  const data = serializeViewNotes(rec.file);
+  const p = (rec.writing ?? Promise.resolve())
+    .then(() => io.write(threadId, dir, data))
     .then(
       () => {
         if (rec.error !== null) {
@@ -305,6 +358,15 @@ export function flushViewNotes(threadId: string, dir: string): Promise<void> {
   }
   if (rec.dirty) return issueWrite(rec, threadId, dir);
   return rec.writing ?? Promise.resolve();
+}
+
+/** Every owed write, NOW (review #5 — App's `beforeunload`, next to the
+ *  editor/backlog flushes): a debounce still pending on the way out would
+ *  otherwise swallow the last note. Fire-and-forget IPC; nothing awaits it. */
+export function flushAllViewNotes(): void {
+  for (const rec of records.values()) {
+    if (rec.timer !== null || rec.dirty) void flushViewNotes(rec.threadId, rec.dir);
+  }
 }
 
 /** Stamp keys as sent and write immediately. Call ONLY after the thread

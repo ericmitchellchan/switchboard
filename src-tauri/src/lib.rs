@@ -1047,6 +1047,52 @@ mod view_notes_guard_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Junction (dir reparse point) escape: `jdir` inside the root that
+    /// junctions OUTSIDE it must be caught by the canonical containment
+    /// check, both as the deck dir itself and as a parent (kb.rs's
+    /// `write_rejects_junctioned_parent_dir_escape`, narrowed to a dir).
+    /// Junctions need no privilege, so this runs everywhere on Windows.
+    #[cfg(windows)]
+    #[test]
+    fn a_junctioned_dir_escaping_the_root_is_refused() {
+        let root = temp_root("junction");
+        let outside = temp_root("junction-outside");
+        let junction = root.join("jdir");
+        if !make_junction(&junction, &outside) {
+            eprintln!("junction creation failed — skipping");
+            return;
+        }
+        let err = view_notes_target(&root, "jdir").unwrap_err();
+        assert!(err.contains("escapes"), "unexpected error: {err}");
+        // A real dir REACHED THROUGH the junction (`outside/deck` exists).
+        let err = view_notes_target(&root, "jdir/deck").unwrap_err();
+        assert!(err.contains("escapes"), "unexpected error: {err}");
+        assert!(!outside.join("notes.json").exists());
+        assert!(!outside.join("deck").join("notes.json").exists());
+        let _ = std::fs::remove_dir(&junction);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// Create an NTFS junction (no privilege required). Returns false if the
+    /// tool or filesystem refuses. cmd's mklink rejects `\\?\` verbatim
+    /// forms, so the paths are stripped for the shell (kb.rs's helper).
+    #[cfg(windows)]
+    fn make_junction(link: &std::path::Path, target: &std::path::Path) -> bool {
+        fn plain(p: &std::path::Path) -> String {
+            let s = p.to_string_lossy();
+            match s.strip_prefix(r"\\?\") {
+                Some(rest) => rest.to_string(),
+                None => s.into_owned(),
+            }
+        }
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J", &plain(link), &plain(target)])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
     #[test]
     fn body_shape_and_cap_are_refused_not_repaired() {
         assert!(validate_view_notes(r#"{"version":1,"notes":{}}"#).is_ok());

@@ -2334,10 +2334,14 @@ export type PanelActions = {
    *  bytes come from `composer.composeWrite`, so the CR is INSIDE the wire
    *  format (one bracketed paste, one submit — the composer's rule) and
    *  the message is sent the way Eric asked for the batch to be sent.
-   *  Resolves when the PTY write succeeded, rejects otherwise — the caller
-   *  marks notes sent only on success. Optional so a host that registers
-   *  no submit path (tests) keeps `sendToThread` alone. */
-  submitToThread?: (bytes: string) => Promise<void>;
+   *  The TARGET is `threadId`'s bound session — the deck's own thread,
+   *  never the active tab (`viewNotes.batchSendTarget`: launched + live,
+   *  else a rejection naming why and nothing is written — a batch typed
+   *  into a dead claude's shell runs as commands). Resolves when the PTY
+   *  write succeeded, rejects otherwise — the caller marks notes sent only
+   *  on success. Optional so a host that registers no submit path (tests)
+   *  keeps `sendToThread` alone. */
+  submitToThread?: (threadId: string, bytes: string) => Promise<void>;
   /** POP OUT (increment F, Decision 2): hand this artifact to the floating PiP
    *  window. App owns the window lifecycle; the store owns only the record of
    *  WHICH artifact is out there, so the panel can say so instead of drawing a
@@ -2395,14 +2399,15 @@ export function sendToThread(text: string): void {
   panelActions?.sendToThread(text);
 }
 
-/** SUBMIT composed bytes (SWIT-75). Rejects when nothing is registered or
- *  the host has no submit path — the affordance is gated on
- *  `useSendToThreadAvailable` like the typed seam, and a rejection here is
- *  the "not sent" outcome the caller shows. */
-export function submitToThread(bytes: string): Promise<void> {
+/** SUBMIT composed bytes into `threadId`'s live session (SWIT-75). Rejects
+ *  when nothing is registered, the host has no submit path, or the thread
+ *  is not live (App applies `viewNotes.batchSendTarget`) — the affordance is
+ *  gated on `useSendToThreadAvailable` + that same rule, and a rejection
+ *  here is the "not sent" outcome the caller shows. */
+export function submitToThread(threadId: string, bytes: string): Promise<void> {
   const submit = panelActions?.submitToThread;
   if (!submit) return Promise.reject(new Error("no thread to send to"));
-  return submit(bytes);
+  return submit(threadId, bytes);
 }
 
 /** Is there anything to type into? Requires both the App-side handler and an
