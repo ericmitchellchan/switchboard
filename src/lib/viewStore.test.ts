@@ -1257,6 +1257,8 @@ describe("T8 smoke — the tennis table's drill opens the exporter's timeline fi
     return { path: p, rows: rows.length, trades: 900 };
   };
 
+  // 20s, not vitest's 5s: this `it` shells the Python exporter against the real
+  // research.duckdb (~1.5s alone) and timed out once under full-suite load.
   it("the parent's drill resolves to the exporter's file, which parses into marks + steps + trade: anchors", () => {
     const real = runExporter();
     const exported = real ?? synthesize();
@@ -1344,7 +1346,7 @@ describe("T8 smoke — the tennis table's drill opens the exporter's timeline fi
       // Every fold lands inside 0..100 and the line reads as ONE player's odds.
       expect(payload.rows.every((r) => Number(r.price) >= 0 && Number(r.price) <= 100)).toBe(true);
     }
-  });
+  }, 20_000);
 });
 
 // ── SWIT-70: line charts tell the story ──────────────────────────────────────

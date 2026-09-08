@@ -439,14 +439,21 @@ mod thread_stamp_tests {
 // without bound. RETRACTED_CAP mirrors pageStore.RETRACTED_CAP.
 
 const RETRACTED_CAP: usize = 200;
-/// An address is a page-evidence address (server TEXT_CAP is 500) — a ticket
-/// key, a path, a `surface:` state, a `view:` id. Control characters refused.
+/// An address is a page-evidence address (server TEXT_CAP is 500 CHARS, so
+/// the cap counts chars, not bytes) — a ticket key, a path, a `surface:`
+/// state, a `view:` id. Control characters refused. A `decision:` address is
+/// refused too: those rows are synthesized from answers.json at the merge and
+/// are corrected on their question, never taken off — the merge ignores the
+/// prefix as well (pageStore.isRetracted), so a hand-edited file cannot hide
+/// one either.
 const RETRACTED_ADDRESS_CAP: usize = 500;
+const DECISION_ADDRESS_PREFIX: &str = "decision:";
 
 fn valid_evidence_address(address: &str) -> bool {
     !address.is_empty()
-        && address.len() <= RETRACTED_ADDRESS_CAP
+        && address.chars().count() <= RETRACTED_ADDRESS_CAP
         && !address.chars().any(|c| c.is_control())
+        && !address.starts_with(DECISION_ADDRESS_PREFIX)
 }
 
 /// Pure half of `retract_thread_evidence`: the new list — `{address, at}`
@@ -543,6 +550,14 @@ mod retracted_evidence_tests {
         assert!(!valid_evidence_address(""));
         assert!(!valid_evidence_address("a\nb"));
         assert!(!valid_evidence_address(&"x".repeat(501)));
+        assert!(valid_evidence_address(&"x".repeat(500)));
+        // The cap is CHARS (the server's TEXT_CAP), not bytes: 500 two-byte
+        // chars is 1000 bytes and still a valid address.
+        assert!(valid_evidence_address(&"é".repeat(500)));
+        assert!(!valid_evidence_address(&"é".repeat(501)));
+        // A decision row is corrected on its question, never retracted.
+        assert!(!valid_evidence_address("decision:q1"));
+        assert!(valid_evidence_address("decisions/q1.md"));
     }
 }
 
@@ -902,13 +917,24 @@ mod attachment_guard_tests {
     }
 }
 
-/// ISO-8601 UTC "now" without pulling the chrono crate in for one format:
-/// seconds precision is plenty for an answer stamp.
+/// ISO-8601 UTC "now" without pulling the chrono crate in for one format.
+/// MILLISECONDS, the exact shape of JS `Date#toISOString()`
+/// (`2026-09-08T10:00:00.500Z`): the MCP server stamps page rows that way,
+/// and a retraction stamped at second precision compared numerically against
+/// a ms `updatedAt` lost by the fraction (SWIT-78 review, F1). Every stamp
+/// this side writes — answers, sentAt, posts, retractions — is this one shape.
 fn chrono_like_now_iso() -> String {
-    let secs = std::time::SystemTime::now()
+    let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_millis())
         .unwrap_or(0);
+    iso_from_millis(millis)
+}
+
+/// The pure half: unix milliseconds → `YYYY-MM-DDTHH:MM:SS.mmmZ`.
+fn iso_from_millis(millis: u128) -> String {
+    let secs = (millis / 1000) as u64;
+    let ms = (millis % 1000) as u64;
     // Days-from-civil (Howard Hinnant's algorithm, inverted) — exact for the
     // Gregorian calendar; no leap seconds, which JSON timestamps never carry.
     let days = (secs / 86_400) as i64;
@@ -925,9 +951,36 @@ fn chrono_like_now_iso() -> String {
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if month <= 2 { y + 1 } else { y };
     format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month, d, h, m, s
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        year, month, d, h, m, s, ms
     )
+}
+
+#[cfg(test)]
+mod iso_stamp_tests {
+    use super::{chrono_like_now_iso, iso_from_millis};
+
+    #[test]
+    fn millisecond_shape_matches_js_to_iso_string() {
+        assert_eq!(iso_from_millis(0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(iso_from_millis(1_000_000_000_000), "2001-09-09T01:46:40.000Z");
+        assert_eq!(iso_from_millis(1_000_000_000_500), "2001-09-09T01:46:40.500Z");
+        assert_eq!(iso_from_millis(1_000_000_000_007), "2001-09-09T01:46:40.007Z");
+        // Leap day, end of a month, a real 2026 stamp.
+        assert_eq!(iso_from_millis(1_709_164_799_999), "2024-02-28T23:59:59.999Z");
+        assert_eq!(iso_from_millis(1_709_164_800_000), "2024-02-29T00:00:00.000Z");
+        assert_eq!(iso_from_millis(1_788_861_600_250), "2026-09-08T10:00:00.250Z");
+    }
+
+    #[test]
+    fn now_has_the_same_shape() {
+        let now = chrono_like_now_iso();
+        assert_eq!(now.len(), 24, "{now}");
+        assert_eq!(&now[10..11], "T");
+        assert_eq!(&now[19..20], ".");
+        assert!(now.ends_with('Z'));
+        assert!(now[20..23].chars().all(|c| c.is_ascii_digit()), "{now}");
+    }
 }
 
 // ── Cross-thread posts, app side (SWIT-52 — the `@thread` composer form) ─────

@@ -202,7 +202,12 @@ html, body, #root {
 .page-evidence-x:hover {
   color: var(--tone-rose);
 }
+/* Every `×` is disabled while one write is in flight (the retractions share
+   one tmp file), but only the row being taken off DIMS — a disabled-wide
+   opacity revealed every row's `×` at once. Last so it beats the hover rule. */
 .page-evidence-x:disabled {
-  opacity: 0.4;
   cursor: default;
+}
+.page-evidence-row .page-evidence-x[data-retracting] {
+  opacity: 0.4;
 }

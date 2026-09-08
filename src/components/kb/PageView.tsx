@@ -71,9 +71,15 @@
 // the thread's retracted.json (Rust, the app's file) and asks the poll to
 // re-read NOW; the row disappears because the MERGE hides it
 // (pageStore.applyRetractions), never because of local hide state — the only
-// component state is which address's write is in flight. Scanned rows are
-// hidden by address alone (`isRetracted(address, null, …)`); an agent row
-// comes back if the agent re-posts it with a newer stamp. Items the agent
+// component state is which address's write is in flight: EVERY `×` is
+// disabled while one write runs (the retractions share one tmp file), but
+// only the in-flight row's `×` dims (`data-retracting`), and focus moves to a
+// neighbouring row's `×` before the row leaves so a keyboard retraction does
+// not land on `body`. Scanned rows are hidden by address alone
+// (`isRetracted(address, null, …)`); an agent row comes back if the agent
+// re-posts it with a newer stamp (a later SECOND); a `decision:` row is never
+// hidden — `isRetracted` ignores the prefix and Rust refuses to write it.
+// Items the agent
 // DROPPED (itemOp drop — never the right row) sit under a collapsed
 // `Dropped N` disclosure below Done, excluded from every count.
 
@@ -99,6 +105,7 @@ import {
   isRetracted,
   applyRetractions,
   isOpenItem,
+  DECISION_ADDRESS_PREFIX,
 } from "../../lib/pageStore";
 import type { AnswerNote, InboxPost, PageAnswer, PageItem, PageQuestion, RenderedPage, SettledQuestion } from "../../lib/pageStore";
 import { parseSurfaceAddress } from "../../lib/surfaceParams";
@@ -347,10 +354,15 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
   // the row leaves when the merged files say so.
   const [retracting, setRetracting] = useState<string | null>(null);
   const retract = useCallback(
-    async (address: string) => {
+    async (address: string, row: HTMLElement | null) => {
       setRetracting(address);
       try {
         await retractThreadEvidence(threadId, address);
+        // The row is about to unmount with the focused `×` inside it — hand
+        // focus to a neighbour's `×` first (keyboard: the next row's `×`
+        // shows through `:focus-visible`; mouse: nothing visible changes).
+        const neighbour = (row?.nextElementSibling ?? row?.previousElementSibling)?.querySelector<HTMLElement>(".page-evidence-x");
+        neighbour?.focus();
         refresh();
       } catch (err) {
         log.warn(`Could not take ${address} off the page: ${err}`);
@@ -559,12 +571,13 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
               </span>
               {e.status && <span style={{ ...ROW_META, fontSize: 10 }}>{e.status}</span>}
               {/* A decision row is corrected on its question (`change`), not taken off. */}
-              {!e.address.startsWith("decision:") && (
+              {!e.address.startsWith(DECISION_ADDRESS_PREFIX) && (
                 <button
                   type="button"
                   className="page-evidence-x"
                   disabled={retracting !== null}
-                  onClick={() => void retract(e.address)}
+                  data-retracting={retracting === e.address ? "" : undefined}
+                  onClick={(ev) => void retract(e.address, ev.currentTarget.closest<HTMLElement>(".page-evidence-row"))}
                   title="Take this row off the page"
                   aria-label={`Take ${e.address} off the page`}
                   style={e.status ? undefined : { marginLeft: "auto" }}

@@ -153,9 +153,13 @@ The ROW is the click target; nothing inside it is a second button except the res
   `Take this row off the page`): a trailing `×` at the row's right end, mono 11px
   `--text-faint`, `opacity: 0` until the ROW is hovered or the button itself has
   keyboard focus (`.page-evidence-row` / `.page-evidence-x` in global.css — the one
-  group-hover the inline styles cannot express), `--tone-rose` under the pointer,
-  `opacity: 0.4` while its write is in flight. The row does not shift when it appears
-  (it sits after the status meta; `margin-left: auto` only when there is no meta).
+  group-hover the inline styles cannot express), `--tone-rose` under the pointer.
+  While a write is in flight EVERY `×` is disabled (the retractions share one tmp
+  file) but only the row being taken off dims to `opacity: 0.4` (`data-retracting`
+  on that button) — a disabled-wide opacity revealed every row's `×` at once. Before
+  the row leaves, focus moves to a neighbouring row's `×` so a keyboard retraction
+  never lands on `body`. The row does not shift when it appears (it sits after the
+  status meta; `margin-left: auto` only when there is no meta).
 
 ## Button
 

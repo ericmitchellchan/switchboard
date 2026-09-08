@@ -343,20 +343,30 @@ export function parseRetractedFile(raw: string): RetractedEvidence[] {
  *  (a scrollback-scanned row — the scan's clock is a sighting, not a claim)
  *  the address alone decides. An unparseable stamp on either side counts as
  *  NOT newer — a retraction stands until the agent demonstrably re-posts.
- *  Pure. */
+ *  NEWER MEANS A LATER SECOND: the server stamps `updatedAt` in
+ *  milliseconds, and retracted.json files written before the SWIT-78 review
+ *  carry second-precision stamps — compared raw, a row updated at
+ *  `10:00:00.500Z` and retracted at `10:00:00Z` counted as "re-posted" and
+ *  stayed on the page. Both sides are floored to the second. A `decision:`
+ *  address is NEVER retracted here (the writer refuses the prefix too): a
+ *  decision is corrected on its question. Pure. */
 export function isRetracted(
   address: string,
   updatedAt: string | null,
   retracted: readonly RetractedEvidence[]
 ): boolean {
+  if (address.startsWith(DECISION_ADDRESS_PREFIX)) return false;
   const hit = retracted.find((r) => r.address === address);
   if (!hit) return false;
   if (updatedAt === null) return true;
   const rowAt = Date.parse(updatedAt);
   const retractedAt = Date.parse(hit.at);
   if (!Number.isFinite(rowAt) || !Number.isFinite(retractedAt)) return true;
-  return rowAt <= retractedAt;
+  return Math.floor(rowAt / 1000) <= Math.floor(retractedAt / 1000);
 }
+
+/** The synthesized decision row's address prefix (`decisionAddress`). */
+export const DECISION_ADDRESS_PREFIX = "decision:";
 
 /** Fold the retractions out of a row list (agent-clock rows: `updatedAt` is
  *  consulted). Returns the SAME array when nothing is hidden. Pure. */
@@ -376,7 +386,8 @@ export function applyRetractions<T extends Pick<PageEvidence, "address" | "updat
 
 /** An answer is UNSENT while it has no `sentAt`, or one older than `at` (a
  *  changed answer goes again). ISO stamps compare as strings — both come
- *  from the same second-precision writer. Pure. */
+ *  from the same writer (Rust's `chrono_like_now_iso`, one fixed shape).
+ *  Pure. */
 export function isAnswerUnsent(answer: PageAnswer | undefined): boolean {
   if (!answer) return false;
   return !answer.sentAt || answer.sentAt < answer.at;
@@ -518,7 +529,7 @@ export function orderedOptions(q: PageQuestion): string[] {
  *  `decision:` prefix is what the agent's contract tells it to look for
  *  before asking (the server's tool description names it). */
 export function decisionAddress(questionId: string): string {
-  return `decision:${questionId}`;
+  return `${DECISION_ADDRESS_PREFIX}${questionId}`;
 }
 
 /** The ONE line the app appends to conventions.md for a `convention` answer

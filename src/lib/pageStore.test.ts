@@ -553,6 +553,27 @@ describe("the correctable record (SWIT-78)", () => {
     expect(isRetracted("SWIT-1", T2, [])).toBe(false);
   });
 
+  it("isRetracted compares at SECOND precision: a ms updatedAt inside the retraction's second is NOT newer (review fix F1)", () => {
+    // The server stamps ms; retracted.json written before the review stamps seconds.
+    const retracted: RetractedEvidence[] = [{ address: "SWIT-1", at: "2026-09-08T10:00:00Z" }];
+    expect(isRetracted("SWIT-1", "2026-09-08T10:00:00.500Z", retracted)).toBe(true); // same second → hidden
+    expect(isRetracted("SWIT-1", "2026-09-08T10:00:00.999Z", retracted)).toBe(true);
+    expect(isRetracted("SWIT-1", "2026-09-08T10:00:01.000Z", retracted)).toBe(false); // the next second → re-posted
+    // And the other way round, once Rust stamps ms too.
+    const msRetracted: RetractedEvidence[] = [{ address: "SWIT-1", at: "2026-09-08T10:00:00.700Z" }];
+    expect(isRetracted("SWIT-1", "2026-09-08T10:00:00.900Z", msRetracted)).toBe(true);
+    expect(isRetracted("SWIT-1", "2026-09-08T10:00:00Z", msRetracted)).toBe(true);
+    expect(isRetracted("SWIT-1", "2026-09-08T10:00:01Z", msRetracted)).toBe(false);
+  });
+
+  it("a decision: address is never retracted, whatever retracted.json says (review fix F3 — the merge side)", () => {
+    const retracted: RetractedEvidence[] = [{ address: "decision:q1", at: T2 }];
+    expect(isRetracted("decision:q1", T0, retracted)).toBe(false);
+    expect(isRetracted("decision:q1", null, retracted)).toBe(false);
+    const rows = [{ address: "decision:q1", label: "yes", status: "decided", updatedAt: T0 }];
+    expect(applyRetractions(rows, retracted)).toBe(rows);
+  });
+
   it("applyRetractions returns the SAME array when nothing hides (the no-re-render contract)", () => {
     const rows = [
       { address: "SWIT-1", label: "a", status: null, updatedAt: T2 },
