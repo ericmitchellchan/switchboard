@@ -117,13 +117,14 @@ Produces an NSIS installer at `src-tauri/target/release/bundle/nsis/`. Installs 
 A small container that watches every Docker container on this machine — load, last real network traffic, restart policy — and writes a snapshot every minute that any Switchboard thread can read through the `machine` MCP tool (`containers`, `why <name>`, `stop <name>`). One rule, idle for 2 hours → stop, runs **dry by default** and only logs what it would do.
 
 ```bash
-bash watcher/mw.sh ensure      # start it (safe to run any time)
+bash watcher/mw.sh ensure      # start it and its page (safe to run any time)
 bash watcher/mw.sh status      # running? last snapshot? last log lines
+bash watcher/mw.sh open        # the live page, http://localhost:8090 — also fine in Switchboard's panel or floated
 bash watcher/mw.sh hold 3      # no idle-stops for 3 hours
 bash watcher/mw.sh live        # let the idle rule stop things (mw.sh dry reverts)
 ```
 
-State lives in `%LOCALAPPDATA%\switchboard\machine`. The kyde-local stack is skipped; its own reaper owns it.
+The page (`watcher/panel/`, served by a tiny busybox container) refreshes every 30 s: what's running hottest-first with how long it's been quiet, what the idle rule would stop, the last actions, and whether the rule is dry or live. State lives in `%LOCALAPPDATA%\switchboard\machine`; the page serves that folder read-only, on loopback only. The kyde-local stack is skipped; its own reaper owns it.
 
 ### Releasing
 

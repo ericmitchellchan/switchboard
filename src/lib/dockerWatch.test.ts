@@ -137,9 +137,10 @@ maybe("docker-watch.sh in docker:28-cli against a fake docker", () => {
     expect(mute.idleMinutes).toBeNull();
     expect(mute.policy).toBe("");
     expect(dry.stopped).toEqual([]);
-    expect(dry.actions.length).toBeGreaterThan(0);
-    expect(new Set(dry.actions.map((a) => `${a.name}:${a.action}`))).toEqual(new Set(["idle-old:would stop"]));
+    // three ticks, ONE line: a dry-run "would stop" is reported once per idle spell, not every minute
+    expect(dry.actions.map((a) => `${a.name}:${a.action}`)).toEqual(["idle-old:would stop"]);
     expect(dry.actions[0].rule).toBe("idle > 120m");
+    expect(dry.ledger.filter((l) => l.name === "idle-old").length).toBeGreaterThanOrEqual(2);
   });
 
   it("treats a counter that went backwards as a restart (the whole reading counts, and clears the 4096-byte floor) and a stopped container as load-free", () => {

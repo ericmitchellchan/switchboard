@@ -8,13 +8,19 @@
 #   mw actions         what the idle rule stopped or would have stopped
 #   mw live | mw dry   flip the idle rule between stopping and logging (restarts the container)
 #   mw stop <name>     stop one container by hand, recorded like the MCP tool does
-#   mw down            stop the watcher itself
+#   mw open            open the live page (http://localhost:8090) in the browser
+#   mw down            stop the watcher and the page
 #
 # The watcher (docker-watch.sh) runs in a docker:cli container with the Docker
 # socket, this folder (read-only) and the state dir mounted. State lives where
 # the Switchboard app keeps its data — %LOCALAPPDATA%\switchboard\machine — so
 # the `machine` MCP tool (handed SWITCHBOARD_MACHINE_DIR by the app) and this
 # script read the same files. Same shape as ~/bin/kyde-local-shared/kl.sh.
+#
+# The PAGE is a second, tiny container (stock busybox, its httpd) serving
+# panel/ with the state dir mounted read-only beside it at /www/state, on
+# 127.0.0.1:${MW_PORT:-8090}. Nothing is copied: edit panel/ and reload. Open
+# it in Switchboard's panel (`+` → the URL) or float it, or any browser.
 set -euo pipefail
 # Git Bash rewrites `/var/run/docker.sock` into a C:\Program Files\Git\... path
 # before docker sees it; this keeps the container-side paths as written.
@@ -34,9 +40,13 @@ if [ -z "${LOCALAPPDATA:-}" ] && grep -qi microsoft /proc/version 2>/dev/null; t
 fi
 data=${MW_DATA_DIR:-"${LOCALAPPDATA:-$HOME/.local/share}/switchboard/machine"}
 mode_file=$data/mode   # "live" or absent (= dry run)
+page=${MW_PAGE_NAME:-machine-page}
+port=${MW_PORT:-8090}
+url="http://localhost:$port/"
 
 hostpath() { if command -v cygpath >/dev/null; then cygpath -m "$1"; else echo "$1"; fi; }
 running() { [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" = true ]; }
+page_running() { [ "$(docker inspect -f '{{.State.Running}}' "$page" 2>/dev/null)" = true ]; }
 dry_run() { if [ -f "$mode_file" ] && [ "$(tr -d '[:space:]' <"$mode_file")" = live ]; then echo false; else echo true; fi; }
 
 start() {
@@ -54,10 +64,25 @@ start() {
   echo "state: $data"
 }
 
-cmd_ensure() { if running; then echo "$name is running"; else start; fi; }
+start_page() {
+  mkdir -p "$data"
+  docker rm -f "$page" >/dev/null 2>&1 || true
+  docker run -d --name "$page" --restart unless-stopped \
+    -p "127.0.0.1:$port:80" \
+    -v "$(hostpath "$here/panel"):/www:ro" \
+    -v "$(hostpath "$data"):/www/state:ro" \
+    busybox:stable httpd -f -p 80 -h /www >/dev/null
+  echo "$page running: $url"
+}
+
+cmd_ensure() {
+  if running; then echo "$name is running"; else start; fi
+  if page_running; then echo "$page is running: $url"; else start_page; fi
+}
 
 cmd_status() {
   if running; then echo "watcher: running (dry run: $(dry_run))"; else echo "watcher: not running (mw ensure)"; fi
+  if page_running; then echo "page:    $url"; else echo "page:    not running (mw ensure)"; fi
   if [ -f "$data/containers.json" ]; then
     local at; at=$(grep -o '"sampledAt":"[^"]*"' "$data/containers.json" | head -1 | cut -d'"' -f4)
     echo "snapshot: $at ($(grep -o '"name":' "$data/containers.json" | wc -l | tr -d ' ') containers)"
@@ -105,6 +130,16 @@ case ${1:-} in
   live) cmd_mode live ;;
   dry) cmd_mode dry ;;
   stop) shift; cmd_stop "$@" ;;
-  down) docker rm -f "$name" >/dev/null 2>&1 && echo "$name stopped" || echo "$name was not running" ;;
-  *) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  open)
+    page_running || start_page
+    echo "$url"
+    # Windows (Git Bash or WSL — cmd.exe may be off a WSL shell's PATH, same as
+    # above), else Linux, else macOS. Failing to open a browser is not an error.
+    if [ -x "${cmdexe:=$(command -v cmd.exe 2>/dev/null || echo /mnt/c/Windows/System32/cmd.exe)}" ]; then "$cmdexe" /c start "" "$url" >/dev/null 2>&1 || true
+    elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$url" >/dev/null 2>&1 || true
+    elif command -v open >/dev/null 2>&1; then open "$url" || true; fi ;;
+  down)
+    docker rm -f "$name" >/dev/null 2>&1 && echo "$name stopped" || echo "$name was not running"
+    docker rm -f "$page" >/dev/null 2>&1 && echo "$page stopped" || echo "$page was not running" ;;
+  *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

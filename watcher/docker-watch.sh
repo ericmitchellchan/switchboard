@@ -20,7 +20,8 @@
 # by this rule.
 #
 # Skipped, on purpose: the kyde-local compose project (its own reaper owns it,
-# ~/bin/kyde-local-shared/kl.sh) and the two reapers themselves.
+# ~/bin/kyde-local-shared/kl.sh), the two reapers themselves, and the watcher's
+# own page container (it moves almost no traffic).
 #
 # Two clock rules copied from that reaper: a (re)start of the watcher gives
 # every container a full idle window before the rule can fire (traffic.tsv
@@ -37,7 +38,7 @@ min_bytes=${MW_MIN_BYTES:-4096}
 dry_run=${MW_DRY_RUN:-true}
 start_grace=${MW_START_GRACE:-1}   # 0 only in tests: no idle window after start
 skip_projects=${MW_SKIP_PROJECTS:-"kyde-local"}
-skip_names=${MW_SKIP_NAMES:-"kyde-local-idle-reaper machine-watcher"}
+skip_names=${MW_SKIP_NAMES:-"kyde-local-idle-reaper machine-watcher machine-page"}
 ledger_max=${MW_LEDGER_MAX_LINES:-20000}
 state=/state
 tmp=/tmp/mw
@@ -162,12 +163,20 @@ while :; do
     tail -n "$ledger_max" "$state/ledger.jsonl" >"$state/.ledger.jsonl.tmp" && mv "$state/.ledger.jsonl.tmp" "$state/ledger.jsonl"
   fi
 
-  # The idle rule. One line per target in the log and in actions.jsonl.
+  # The idle rule. A real stop is one line; a DRY-RUN "would stop" is logged
+  # ONCE per idle spell (state/would-stop remembers who was reported and is
+  # rewritten to the current targets each tick, so a container that moves
+  # traffic again and later goes quiet is reported again) — without this a
+  # dry run wrote the same line every minute.
+  : >"$tmp/reported.next"
   while read -r name mins; do
     [ -z "$name" ] && continue
     if [ "$dry_run" = true ]; then
-      log "DRY RUN: $name moved no traffic for ${mins}m; would stop it (rule: idle > ${idle_minutes}m)"
-      echo "{\"at\":\"$now_iso\",\"name\":\"$name\",\"action\":\"would stop\",\"rule\":\"idle > ${idle_minutes}m\",\"idleMinutes\":$mins}" >>"$state/actions.jsonl"
+      echo "$name" >>"$tmp/reported.next"
+      if ! grep -qxF "$name" "$state/would-stop" 2>/dev/null; then
+        log "DRY RUN: $name moved no traffic for ${mins}m; would stop it (rule: idle > ${idle_minutes}m)"
+        echo "{\"at\":\"$now_iso\",\"name\":\"$name\",\"action\":\"would stop\",\"rule\":\"idle > ${idle_minutes}m\",\"idleMinutes\":$mins}" >>"$state/actions.jsonl"
+      fi
     else
       log "$name moved no traffic for ${mins}m; stopping it (rule: idle > ${idle_minutes}m)"
       if docker stop "$name" >/dev/null 2>&1; then
@@ -177,6 +186,7 @@ while :; do
       fi
     fi
   done <"$tmp/targets"
+  cp "$tmp/reported.next" "$state/.would-stop.tmp" && mv "$state/.would-stop.tmp" "$state/would-stop"
 
   sleep "$check_seconds"
 done

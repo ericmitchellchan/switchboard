@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Machine</title>
+<style>
+  :root { color-scheme: dark; --bg: #0b0c0f; --panel: #121419; --text: #d6dae2; --dim: #7c8290; --line: #232730; --warn: #f5a524; --live: #ef5350; --hold: #5aa9ff; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace; padding: 16px; max-width: 860px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 16px; margin-bottom: 14px; }
+  header.stale h1 { color: var(--warn); }
+  h1 { font-size: 15px; margin: 0; letter-spacing: .06em; text-transform: uppercase; }
+  h2 { font-size: 11px; margin: 18px 0 6px; color: var(--dim); letter-spacing: .08em; text-transform: uppercase; }
+  h2 .n { color: var(--text); }
+  h2 small, summary small { font-weight: normal; text-transform: none; letter-spacing: 0; color: var(--dim); margin-left: 6px; }
+  .pills { display: flex; flex-wrap: wrap; gap: 6px; }
+  .pill { border: 1px solid var(--line); border-radius: 999px; padding: 1px 9px; color: var(--dim); font-size: 11.5px; }
+  .pill.live { color: var(--live); border-color: var(--live); }
+  .pill.hold { color: var(--hold); border-color: var(--hold); }
+  header.stale .pill.age { color: var(--warn); border-color: var(--warn); }
+  ul { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+  .row { display: grid; grid-template-columns: minmax(160px, 1.4fr) 2fr auto auto; gap: 12px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .row .meta, .row .quiet { color: var(--dim); }
+  .row .quiet { text-align: right; white-space: nowrap; }
+  .row.warn .name, .row.warn .quiet { color: var(--warn); }
+  .row.dim .name { color: var(--dim); }
+  .tag { font-size: 10.5px; border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; color: var(--dim); white-space: nowrap; }
+  .row.warn .tag { color: var(--warn); border-color: var(--warn); }
+  details { margin-top: 18px; }
+  summary { cursor: pointer; font-size: 11px; color: var(--dim); letter-spacing: .08em; text-transform: uppercase; }
+  summary .n { color: var(--text); }
+  footer { margin-top: 20px; color: var(--dim); font-size: 11px; }
+  #err { color: var(--warn); margin: 12px 0; display: none; }
+  @media (max-width: 560px) { .row { grid-template-columns: 1fr auto; } .row .meta { grid-column: 1 / -1; } }
+</style>
+</head>
+<body>
+<div id="err"></div>
+<main id="app">loading…</main>
+<footer>refreshes every 30 s · <code>mw.sh live</code> turns the rule on, <code>mw.sh hold 3</code> pauses it, <code>mw.sh dry</code> reverts</footer>
+<script src="panel.js"></script>
+<script>
+  (function () {
+    var app = document.getElementById("app");
+    var err = document.getElementById("err");
+    function load() {
+      var bust = "?t=" + Date.now();
+      Promise.all([
+        fetch("state/containers.json" + bust, { cache: "no-store" }).then(function (r) { if (!r.ok) throw new Error("containers.json " + r.status); return r.json(); }),
+        fetch("state/actions.jsonl" + bust, { cache: "no-store" }).then(function (r) { return r.ok ? r.text() : ""; }),
+      ]).then(function (res) {
+        err.style.display = "none";
+        app.innerHTML = MachinePanel.render(MachinePanel.model(res[0], MachinePanel.parseActions(res[1]), Date.now()));
+      }).catch(function (e) {
+        err.style.display = "block";
+        err.textContent = "The watcher's page cannot read the snapshot (" + e.message + ") — run `bash watcher/mw.sh ensure` in the switchboard repo.";
+      });
+    }
+    load();
+    setInterval(function () { if (!document.hidden) load(); }, 30000);
+    document.addEventListener("visibilitychange", function () { if (!document.hidden) load(); });
+  })();
+</script>
+</body>
+</html>

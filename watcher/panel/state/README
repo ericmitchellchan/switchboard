@@ -1,0 +1,4 @@
+Mount point only. mw.sh mounts this folder read-only as the page's root (/www)
+and bind-mounts the watcher's state dir over /www/state; Docker cannot create a
+mount point inside a read-only mount, so the directory has to exist here.
+Nothing is ever written to it.

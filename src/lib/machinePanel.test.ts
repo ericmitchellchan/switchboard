@@ -1,0 +1,171 @@
+// The machine page (SWIT-92): its pure core loaded straight from the file the
+// browser runs (watcher/panel/panel.js), evaluated in a sandbox with a `self`
+// the way a browser would (the repo is "type": "module", so Node would read a
+// .js file as ESM and the CommonJS branch never runs here), plus one real run
+// of the page's server — stock busybox httpd over the panel folder with a
+// state folder mounted beside it, the way mw.sh starts it. Skips the server
+// test with a note when Docker is unreachable.
+
+import { describe, it, expect } from "vitest";
+// @ts-expect-error — no @types/node in the frontend tsconfig; vitest's node runtime provides it.
+import vm from "node:vm";
+// @ts-expect-error — same.
+import { execFileSync } from "node:child_process";
+// @ts-expect-error — same.
+import fs from "node:fs";
+// @ts-expect-error — same.
+import os from "node:os";
+// @ts-expect-error — same.
+import path from "node:path";
+// @ts-expect-error — same.
+import { fileURLToPath } from "node:url";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const panelDir = path.resolve(here, "../../watcher/panel");
+const sandbox: { self: Record<string, unknown> } = { self: {} };
+vm.runInNewContext(fs.readFileSync(path.join(panelDir, "panel.js"), "utf-8"), sandbox);
+const panel = sandbox.self.MachinePanel as {
+  esc: (s: unknown) => string;
+  quietWord: (r: Row) => string;
+  ageWord: (ms: number) => string;
+  parseActions: (text: string) => Action[];
+  model: (snapshot: Snapshot | null, actions: Action[], nowMs: number) => Model;
+  render: (m: Model) => string;
+};
+
+type Row = Record<string, unknown> & { name: string };
+type Action = Record<string, unknown> & { name: string; action: string };
+type Snapshot = { sampledAt: string; idleMinutes: number; dryRun: boolean; holdUntil: number; containers: Row[] };
+type Model = { age: string; stale: boolean; dryRun: boolean; held: boolean; running: Row[]; idle: Row[]; stopped: Row[]; comesBack: number; actions: Action[] };
+
+const NOW = Date.parse("2026-09-17T04:00:00Z");
+const row = (o: Partial<Row> & { name: string }): Row => ({
+  project: "", image: "img", state: "running", restart: "no", cpuPct: 0, memMb: 10, trafficKnown: true, idleMinutes: 1, skipped: false, policy: "", ...o,
+});
+const snap = (containers: Row[], o: Partial<Snapshot> = {}): Snapshot => ({
+  sampledAt: "2026-09-17T03:59:20Z", idleMinutes: 120, dryRun: true, holdUntil: 0, containers, ...o,
+});
+
+describe("model", () => {
+  it("sorts running hottest-first, applies the idle rule where it may, counts the come-back containers", () => {
+    const m = panel.model(
+      snap([
+        row({ name: "cool", cpuPct: 1 }),
+        row({ name: "hot", cpuPct: 30 }),
+        row({ name: "abandoned", idleMinutes: 400, policy: "would stop" }),
+        row({ name: "kyde", idleMinutes: 400, skipped: true }),
+        row({ name: "mute", trafficKnown: false, idleMinutes: null }),
+        row({ name: "gone", state: "exited" }),
+        row({ name: "zombie", state: "exited", restart: "always" }),
+      ]),
+      [],
+      NOW
+    );
+    expect(m.running.map((r) => r.name)).toEqual(["hot", "cool", "abandoned", "kyde", "mute"]);
+    expect(m.idle.map((r) => r.name)).toEqual(["abandoned"]);
+    expect(m.stopped.map((r) => r.name)).toEqual(["zombie", "gone"]);
+    expect(m.comesBack).toBe(1);
+    expect(m.age).toBe("40s ago");
+    expect(m.stale).toBe(false);
+    expect(m.dryRun).toBe(true);
+  });
+
+  it("flags a stale snapshot, a hold, and survives no snapshot at all", () => {
+    expect(panel.model(snap([], { sampledAt: "2026-09-17T03:40:00Z" }), [], NOW).stale).toBe(true);
+    const held = panel.model(snap([], { holdUntil: NOW / 1000 + 3600 }), [], NOW);
+    expect(held.held).toBe(true);
+    const none = panel.model(null, [], NOW);
+    expect(none.stale).toBe(true);
+    expect(none.age).toBe("age unknown");
+    expect(none.running).toEqual([]);
+  });
+
+  it("keeps the last ten actions, newest first, and drops a torn line", () => {
+    const text = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map((i) => JSON.stringify({ at: `2026-09-17T0${i % 10}:00:00Z`, name: `c${i}`, action: "would stop" })).join("\n") + "\n{torn";
+    const actions = panel.parseActions(text);
+    expect(actions.length).toBe(11);
+    expect(actions[0].name).toBe("c11");
+    expect(panel.model(snap([]), actions, NOW).actions.map((a) => a.name)).toEqual(["c11", "c10", "c9", "c8", "c7", "c6", "c5", "c4", "c3", "c2"]);
+  });
+});
+
+describe("render", () => {
+  it("escapes everything it prints and marks the rule's mode, holds and staleness", () => {
+    const m = panel.model(
+      snap(
+        [
+          row({ name: '<img src=x onerror="1">', project: "a&b", idleMinutes: 400, policy: "<p>" }),
+          row({ name: "<q>", state: "<x>", restart: "<r>", project: "<pr>" }),
+        ],
+        { holdUntil: NOW / 1000 + 600 }
+      ),
+      [
+        { at: "2026-09-17T03:00:00Z", name: "x", action: "stopped", rule: "idle > 120m" },
+        { at: "<s>", name: "<b>", action: "<i>", rule: "<u>" },
+      ],
+      NOW
+    );
+    const html = panel.render(m);
+    // every hostile value — a running row's name/project/policy, a stopped row's name/state/project,
+    // an action's name/action/rule/at — comes out escaped
+    for (const raw of ["<img", "<p>", "<q>", "<x>", "<pr>", "<b>", "<i>", "<u>", "<s>"]) expect(html).not.toContain(raw);
+    expect(html).toContain("&lt;img src=x onerror=&quot;1&quot;&gt;");
+    expect(html).toContain("a&amp;b");
+    expect(html).toContain("&lt;b&gt;");
+    expect(html).toContain("&lt;x&gt;");
+    expect(html).toContain("dry run — the rule logs, never stops");
+    expect(html).toContain("hold until 04:10Z — clock paused");
+    expect(html).toContain("held, nothing stops");
+    expect(html).toContain('class="row warn"');
+    expect(html).toContain("stopped · idle &gt; 120m");
+    const live = panel.render(panel.model(snap([], { dryRun: false, sampledAt: "2026-09-17T03:00:00Z" }), [], NOW));
+    expect(live).toContain("LIVE — the rule stops");
+    expect(live).toContain("watcher may be down");
+  });
+
+  it("quietWord matches the machine tool's wording", () => {
+    expect(panel.quietWord(row({ name: "a", idleMinutes: 5 }))).toBe("5m quiet");
+    expect(panel.quietWord(row({ name: "a", idleMinutes: 125 }))).toBe("2h 5m quiet");
+    expect(panel.quietWord(row({ name: "a", idleMinutes: 2000 }))).toBe("33h 20m quiet"); // the tool's own pinned example
+    expect(panel.quietWord(row({ name: "a", trafficKnown: false }))).toBe("traffic unknown");
+    expect(panel.quietWord(row({ name: "a", idleMinutes: null }))).toBe("just seen");
+  });
+});
+
+function dockerReachable(): boolean {
+  try {
+    execFileSync("docker", ["version", "--format", "{{.Server.Version}}"], { stdio: "pipe", timeout: 15000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+const reachable = dockerReachable();
+const maybe = reachable ? describe : describe.skip;
+if (!reachable) console.warn("machinePanel.test.ts: Docker is not reachable — the page-server test is skipped");
+
+maybe("the page's server (busybox httpd) over the panel folder + a state folder", () => {
+  it("serves index.html, panel.js and state/containers.json the way the page fetches them", () => {
+    const state = fs.mkdtempSync(path.join(os.tmpdir(), "sb-page-"));
+    fs.writeFileSync(path.join(state, "containers.json"), JSON.stringify(snap([row({ name: "served" })])));
+    try {
+      const out = execFileSync(
+        "docker",
+        [
+          "run", "--rm",
+          "-v", `${panelDir}:/www:ro`,
+          "-v", `${state}:/www/state:ro`,
+          "busybox:stable", "sh", "-c",
+          "httpd -p 8090 -h /www && sleep 1 && wget -qO- http://127.0.0.1:8090/ | head -c 60 && echo && echo ---JS--- && wget -qO- http://127.0.0.1:8090/panel.js | head -c 40 && echo && echo ---STATE--- && wget -qO- http://127.0.0.1:8090/state/containers.json",
+        ],
+        { encoding: "utf-8", timeout: 90000 }
+      );
+      expect(out).toContain("<!doctype html>");
+      expect(out).toContain("---JS---");
+      expect(out).toContain("The machine page");
+      expect(out).toContain('"name":"served"');
+    } finally {
+      fs.rmSync(state, { recursive: true, force: true });
+    }
+  }, 120000);
+});
