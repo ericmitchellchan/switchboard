@@ -23,10 +23,13 @@ const watcherDir = path.resolve(here, "../../watcher");
 const fixtureDir = path.join(watcherDir, "test");
 const IMAGE = "docker:28-cli";
 
+/** A daemon that runs LINUX containers. GitHub's Windows runners have Docker in
+ *  Windows-container mode: `docker version` succeeds there but no Linux image
+ *  can run ("no matching manifest for windows/amd64"). */
 function dockerReachable(): boolean {
   try {
-    execFileSync("docker", ["version", "--format", "{{.Server.Version}}"], { stdio: "pipe", timeout: 15000 });
-    return true;
+    const os = execFileSync("docker", ["version", "--format", "{{.Server.Os}}"], { stdio: "pipe", timeout: 15000, encoding: "utf-8" });
+    return os.trim() === "linux";
   } catch {
     return false;
   }
@@ -148,6 +151,10 @@ maybe("docker-watch.sh in docker:28-cli against a fake docker", () => {
     // seeded at 9000, now reads 6400: not a negative delta but a fresh 6400 → real use
     expect(dry.ledger.find((l) => l.name === "reset-me")?.movedBytes).toBe(6400);
     expect(reset.idleMinutes).toBe(0);
+    // docker prints small memory as "884KiB" (capital K) — that is under a megabyte, not 884 MB
+    expect(reset.memMb).toBe(0);
+    expect(dry.snapshot!.containers[0].memMb).toBe(302);
+    expect(dry.snapshot!.containers[1].memMb).toBe(1032);
     const gone = dry.snapshot!.containers[6];
     expect(gone.state).toBe("exited");
     expect(gone.cpuPct).toBe(0);

@@ -1,0 +1,1 @@
+{"threads": [], "note": "placeholder: mw.sh bind-mounts Switchboard's real threads.json over this file when it exists (a file mount needs a target inside the read-only /www); without it the page simply shows no owning thread"}
