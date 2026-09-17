@@ -28,8 +28,10 @@ const panel = sandbox.self.MachinePanel as {
   esc: (s: unknown) => string;
   quietWord: (r: Row) => string;
   ageWord: (ms: number) => string;
+  laneWord: (workdir: string) => string;
+  ownerThread: (workdir: string, threads: unknown) => { title: string; archived: boolean } | null;
   parseActions: (text: string) => Action[];
-  model: (snapshot: Snapshot | null, actions: Action[], nowMs: number) => Model;
+  model: (snapshot: Snapshot | null, actions: Action[], nowMs: number, threads?: unknown) => Model;
   render: (m: Model) => string;
 };
 
@@ -89,8 +91,66 @@ describe("model", () => {
   });
 });
 
+describe("lane and owner", () => {
+  const threads = {
+    threads: [
+      { title: "switchboard · Aug 2", workingDir: "C:\\Users\\ericm\\projects\\switchboard", archivedAt: null, lastActivityAt: "1" },
+      { title: "jira lane (old)", workingDir: "C:\\Users\\ericm\\projects\\ky-lanes\\jira", archivedAt: "2026-09-01", lastActivityAt: "5" },
+      { title: "jira lane", workingDir: "C:/Users/ericm/projects/ky-lanes/jira/", archivedAt: null, lastActivityAt: "3" },
+      { title: "all lanes", workingDir: "C:\\Users\\ericm\\projects\\ky-lanes", archivedAt: null, lastActivityAt: "9" },
+    ],
+  };
+
+  it("laneWord is the path after projects/, at most three segments", () => {
+    expect(panel.laneWord("C:\\Users\\ericm\\projects\\ky-lanes\\jira\\apps\\cloud")).toBe("ky-lanes/jira/apps");
+    expect(panel.laneWord("C:/Users/ericm/projects/switchboard")).toBe("switchboard");
+    expect(panel.laneWord("/opt/stacks/lc-data-collector/")).toBe("stacks/lc-data-collector");
+    expect(panel.laneWord("")).toBe("");
+  });
+
+  it("ownerThread picks the longest containing folder, live over archived, then most recent", () => {
+    expect(panel.ownerThread("C:\\Users\\ericm\\projects\\ky-lanes\\jira\\apps\\cloud", threads)).toEqual({ title: "jira lane", archived: false });
+    expect(panel.ownerThread("C:\\Users\\ericm\\projects\\ky-lanes\\other", threads)).toEqual({ title: "all lanes", archived: false });
+    expect(panel.ownerThread("C:\\Users\\ericm\\projects\\switchboard", threads)).toEqual({ title: "switchboard · Aug 2", archived: false });
+    // a sibling that merely shares a prefix string is not inside the folder
+    expect(panel.ownerThread("C:\\Users\\ericm\\projects\\switchboard-release", threads)).toBeNull();
+    // a thread opened on the projects root (or the home dir) contains everything and owns nothing
+    const roots = { threads: [{ title: "projects · Aug 6", workingDir: "C:\\Users\\ericm\\projects" }, { title: "home", workingDir: "C:\\Users\\ericm" }] };
+    expect(panel.ownerThread("C:\\Users\\ericm\\projects\\ky-lanes\\jira", roots)).toBeNull();
+    // folders differing only by case are the same folder on Windows (the real snapshot has Cursor/ and cursor/)
+    const cased = { threads: [{ title: "lc", workingDir: "C:\\Users\\ericm\\Cursor\\lc-data-collector" }] };
+    expect(panel.ownerThread("c:/users/ericm/cursor/lc-data-collector/infra", cased)).toEqual({ title: "lc", archived: false });
+    // two LIVE threads on the same folder: the most recently active wins (the real file has three on projects/switchboard)
+    const twins = { threads: [{ title: "older", workingDir: "C:\\p\\projects\\x", lastActivityAt: 10 }, { title: "newer", workingDir: "C:\\p\\projects\\x", lastActivityAt: 20 }] };
+    expect(panel.ownerThread("C:\\p\\projects\\x\\sub", twins)).toEqual({ title: "newer", archived: false });
+    expect(panel.ownerThread("C:\\elsewhere", threads)).toBeNull();
+    expect(panel.ownerThread("C:\\elsewhere", null)).toBeNull();
+  });
+
+  it("the model carries lane + owner onto every row and render prints them", () => {
+    const m = panel.model(
+      snap([row({ name: "ky-cloud-postgres", project: "cloud", workdir: "C:\\Users\\ericm\\projects\\ky-lanes\\jira\\apps\\cloud" }), row({ name: "loose", workdir: "C:\\Users\\ericm\\projects\\orbit" })]),
+      [],
+      NOW,
+      threads
+    );
+    expect(m.running[0].lane).toBe("ky-lanes/jira/apps");
+    expect(m.running[0].owner).toEqual({ title: "jira lane", archived: false });
+    expect(m.running[1].owner).toBeNull();
+    const html = panel.render(m);
+    expect(html).toContain('<span class="lane" title="C:\\Users\\ericm\\projects\\ky-lanes\\jira\\apps\\cloud">ky-lanes/jira/apps</span>');
+    expect(html).toContain("thread: jira lane");
+    expect(html).toContain("no thread on that folder");
+    // a thread title is escaped like everything else
+    const hostile = panel.render(panel.model(snap([row({ name: "a", workdir: "C:\\x" })]), [], NOW, { threads: [{ title: "<b>t</b>", workingDir: "C:\\x" }] }));
+    expect(hostile).toContain("thread: &lt;b&gt;t&lt;/b&gt;");
+    expect(hostile).not.toContain("<b>t</b>");
+  });
+});
+
 describe("render", () => {
   it("escapes everything it prints and marks the rule's mode, holds and staleness", () => {
+    const p = (n: number) => (n < 10 ? "0" : "") + n;
     const m = panel.model(
       snap(
         [
@@ -114,10 +174,18 @@ describe("render", () => {
     expect(html).toContain("&lt;b&gt;");
     expect(html).toContain("&lt;x&gt;");
     expect(html).toContain("dry run — the rule logs, never stops");
-    expect(html).toContain("hold until 04:10Z — clock paused");
+    const h = new Date((NOW / 1000 + 600) * 1000);
+    expect(html).toContain(`hold until ${p(h.getHours())}:${p(h.getMinutes())} — clock paused`);
     expect(html).toContain("held, nothing stops");
     expect(html).toContain('class="row warn"');
     expect(html).toContain("stopped · idle &gt; 120m");
+    // action stamps print in LOCAL time as MM-DD HH:MM — computed here through the same API the page
+    // uses, so the assertion is TZ-independent and, on any non-UTC host, differs from a UTC slice;
+    // an unparsable one is shown as written (escaped)
+    const d = new Date("2026-09-17T03:00:00Z");
+    expect(html).toContain(`<span class="quiet">${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}</span>`);
+    expect(html).not.toContain("2026-09-17T03:00:00Z");
+    expect(html).toContain("&lt;s&gt;");
     const live = panel.render(panel.model(snap([], { dryRun: false, sampledAt: "2026-09-17T03:00:00Z" }), [], NOW));
     expect(live).toContain("LIVE — the rule stops");
     expect(live).toContain("watcher may be down");
@@ -132,10 +200,12 @@ describe("render", () => {
   });
 });
 
+/** A daemon that runs LINUX containers (GitHub's Windows runners answer `docker version`
+ *  in Windows-container mode, where no Linux image can run). */
 function dockerReachable(): boolean {
   try {
-    execFileSync("docker", ["version", "--format", "{{.Server.Version}}"], { stdio: "pipe", timeout: 15000 });
-    return true;
+    const os = execFileSync("docker", ["version", "--format", "{{.Server.Os}}"], { stdio: "pipe", timeout: 15000, encoding: "utf-8" });
+    return os.trim() === "linux";
   } catch {
     return false;
   }

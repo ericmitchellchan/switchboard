@@ -42,6 +42,7 @@ data=${MW_DATA_DIR:-"${LOCALAPPDATA:-$HOME/.local/share}/switchboard/machine"}
 mode_file=$data/mode   # "live" or absent (= dry run)
 page=${MW_PAGE_NAME:-machine-page}
 port=${MW_PORT:-8090}
+threads=${MW_THREADS_JSON:-"$(dirname "$data")/threads.json"}   # the app's thread records, beside its machine/ dir
 url="http://localhost:$port/"
 
 hostpath() { if command -v cygpath >/dev/null; then cygpath -m "$1"; else echo "$1"; fi; }
@@ -67,10 +68,16 @@ start() {
 start_page() {
   mkdir -p "$data"
   docker rm -f "$page" >/dev/null 2>&1 || true
+  # Switchboard's thread records (title + working folder) let the page name the
+  # thread that owns a container. Mounted only when the file exists — Docker
+  # would otherwise create a DIRECTORY of that name on the host.
+  local threads_mount=()
+  if [ -f "$threads" ]; then threads_mount=(-v "$(hostpath "$threads"):/www/threads.json:ro"); fi
   docker run -d --name "$page" --restart unless-stopped \
     -p "127.0.0.1:$port:80" \
     -v "$(hostpath "$here/panel"):/www:ro" \
     -v "$(hostpath "$data"):/www/state:ro" \
+    ${threads_mount[@]+"${threads_mount[@]}"} \
     busybox:stable httpd -f -p 80 -h /www >/dev/null
   echo "$page running: $url"
 }

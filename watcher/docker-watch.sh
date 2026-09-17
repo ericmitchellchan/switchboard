@@ -109,9 +109,9 @@ while :; do
     # with forward slashes, and nothing here legitimately holds a quote.
     function esc(s) { gsub(/\\/, "/", s); gsub(/"/, "'"'"'", s); gsub(/[\t\r\n]/, " ", s); return s }
     function num(s) { gsub(/[^0-9.]/, "", s); return s + 0 }
-    function mib(s,  v, u) { # "1.2GiB" / "512MiB" / "800kB" -> MiB
+    function mib(s,  v, u) { # "1.2GiB" / "512MiB" / "884KiB" / "800kB" / "512B" -> MiB
       v = s; gsub(/[^0-9.]/, "", v); v += 0; u = s; gsub(/[0-9. ]/, "", u)
-      if (u ~ /^G/) return v * 1024; if (u ~ /^k/) return v / 1024; if (u ~ /^B/) return v / 1048576; return v
+      if (u ~ /^[Gg]/) return v * 1024; if (u ~ /^[Kk]/) return v / 1024; if (u ~ /^B/) return v / 1048576; return v
     }
     FILENAME == traffic_file { prev_bytes[$1] = $2; prev_moved[$1] = $3; next }
     FILENAME == stats_file { split($0, s, "|"); cpu[s[1]] = num(s[2]); split(s[3], m, " / "); mem[s[1]] = mib(m[1]); memlim[s[1]] = mib(m[2]); next }
