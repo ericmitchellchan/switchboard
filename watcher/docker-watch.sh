@@ -40,9 +40,14 @@ start_grace=${MW_START_GRACE:-1}   # 0 only in tests: no idle window after start
 skip_projects=${MW_SKIP_PROJECTS:-"kyde-local"}
 skip_names=${MW_SKIP_NAMES:-"kyde-local-idle-reaper machine-watcher machine-page"}
 ledger_max=${MW_LEDGER_MAX_LINES:-20000}
+request_poll=${MW_REQUEST_POLL_SECONDS:-5}
+request_max_age=${MW_REQUEST_MAX_AGE_MINUTES:-2}   # older page requests are refused as stale
 state=/state
 tmp=/tmp/mw
-mkdir -p "$state" "$tmp"
+mkdir -p "$state" "$state/requests" "$tmp"
+case $request_poll in
+  '' | *[!0-9]* | 0) log "MW_REQUEST_POLL_SECONDS='$request_poll' is not a whole number of seconds (>= 1); exiting"; exit 1 ;;
+esac
 started=$(date +%s)
 
 log() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $*"; }
@@ -82,7 +87,46 @@ bytes_running() {
   done
 }
 
-log "watching every container: snapshot every ${check_seconds}s, idle rule ${idle_minutes}m without traffic, dry run: $dry_run, skipping projects [$skip_projects] names [$skip_names]"
+# One request file → one docker stop (or a refusal), one actions.jsonl line, file
+# gone. Sets served=1 when anything was handled so the caller takes a snapshot
+# at once instead of waiting out the tick (the page reloads a few seconds after
+# a request and should see the row gone, not a fresh stop button).
+served=0
+serve_requests() {
+  [ -d "$state/requests" ] || return 0
+  for f in "$state"/requests/*.stop; do
+    [ -f "$f" ] || continue
+    served=1
+    name=${f##*/}; name=${name%.stop}
+    at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    if ! printf '%s' "$name" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$'; then
+      log "page asked to stop an invalid name; refused"
+      echo "{\"at\":\"$at\",\"name\":\"invalid\",\"action\":\"refused\",\"rule\":\"page stop\",\"reason\":\"not a container name\"}" >>"$state/actions.jsonl"
+    elif [ -n "$(find "$f" -mmin +"$request_max_age" 2>/dev/null)" ]; then
+      # Queued while the watcher was down (asleep, `mw down`, a crash): the page
+      # said "stopping…" long ago and nothing happened; the container may since
+      # have been started again on purpose. Never serve it late.
+      log "page asked to stop $name more than ${request_max_age}m ago; refused (stale)"
+      echo "{\"at\":\"$at\",\"name\":\"$name\",\"action\":\"refused\",\"rule\":\"page stop\",\"reason\":\"stale request\"}" >>"$state/actions.jsonl"
+    elif case " $skip_names " in *" $name "*) true ;; *) false ;; esac; then
+      log "page asked to stop $name; refused (a skipped container)"
+      echo "{\"at\":\"$at\",\"name\":\"$name\",\"action\":\"refused\",\"rule\":\"page stop\",\"reason\":\"skipped container\"}" >>"$state/actions.jsonl"
+    elif proj=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$name" 2>/dev/null) && [ -n "$proj" ] && case " $skip_projects " in *" $proj "*) true ;; *) false ;; esac; then
+      # Same rule the page uses to hide the button: a skipped compose project (kyde-local) has its own reaper.
+      log "page asked to stop $name; refused (project $proj has its own reaper)"
+      echo "{\"at\":\"$at\",\"name\":\"$name\",\"action\":\"refused\",\"rule\":\"page stop\",\"reason\":\"skipped project\"}" >>"$state/actions.jsonl"
+    elif docker stop "$name" >/dev/null 2>&1; then
+      log "page asked to stop $name; stopped"
+      echo "{\"at\":\"$at\",\"name\":\"$name\",\"action\":\"stopped\",\"rule\":\"page stop\"}" >>"$state/actions.jsonl"
+    else
+      log "page asked to stop $name; docker stop failed"
+      echo "{\"at\":\"$at\",\"name\":\"$name\",\"action\":\"stop failed\",\"rule\":\"page stop\"}" >>"$state/actions.jsonl"
+    fi
+    rm -f "$f"
+  done
+}
+
+log "watching every container: snapshot every ${check_seconds}s, idle rule ${idle_minutes}m without traffic, dry run: $dry_run, skipping projects [$skip_projects] names [$skip_names], page stop requests every ${request_poll}s"
 touch "$state/traffic.tsv"
 
 while :; do
@@ -188,5 +232,17 @@ while :; do
   done <"$tmp/targets"
   cp "$tmp/reported.next" "$state/.would-stop.tmp" && mv "$state/.would-stop.tmp" "$state/would-stop"
 
-  sleep "$check_seconds"
+  # Between ticks, serve STOP REQUESTS from the page (state/requests/<name>.stop,
+  # written by panel/cgi-bin/stop) every REQUEST_POLL_SECONDS. The name is
+  # re-checked here — grammar, and never one of the skipped names (the watcher,
+  # its page, the reapers) — and every outcome is a line in actions.jsonl.
+  # A served request ends the wait early: the next snapshot follows at once.
+  # (A check interval shorter than the poll simply stretches the tick to one poll.)
+  slept=0; served=0
+  while [ "$slept" -lt "$check_seconds" ]; do
+    serve_requests
+    [ "$served" = 1 ] && break
+    sleep "$request_poll"
+    slept=$((slept + request_poll))
+  done
 done

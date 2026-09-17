@@ -20,9 +20,15 @@
   .pill.hold { color: var(--hold); border-color: var(--hold); }
   header.stale .pill.age { color: var(--warn); border-color: var(--warn); }
   ul { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
-  .row { display: grid; grid-template-columns: minmax(160px, 1.4fr) 2fr auto auto; gap: 2px 12px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .row { display: grid; grid-template-columns: minmax(160px, 1.4fr) 2fr auto auto auto; gap: 2px 12px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--line); }
   .row .meta, .row .quiet { color: var(--dim); }
   .row .where { grid-column: 1 / -1; font-size: 11.5px; color: var(--dim); }
+  button.stop { font: inherit; font-size: 10.5px; background: none; color: var(--dim); border: 1px solid var(--line); border-radius: 4px; padding: 0 7px; cursor: pointer; }
+  button.stop[disabled] { opacity: .4; cursor: default; }
+  button.stop:hover { color: var(--text); border-color: var(--text); }
+  button.stop.arm { color: var(--live); border-color: var(--live); }
+  button.stop.sent { color: var(--hold); border-color: var(--hold); cursor: default; }
+  button.stop.failed { color: var(--warn); border-color: var(--warn); }
   .row .where .lane { color: var(--text); }
   .row .where .owner.dim { opacity: .7; }
   .row .quiet { text-align: right; white-space: nowrap; }
@@ -58,6 +64,7 @@
       ]).then(function (res) {
         err.style.display = "none";
         app.innerHTML = MachinePanel.render(MachinePanel.model(res[0], MachinePanel.parseActions(res[1]), Date.now(), res[2]));
+        markPending();
       }).catch(function (e) {
         err.style.display = "block";
         err.textContent = "The watcher's page cannot read the snapshot (" + e.message + ") — run `bash watcher/mw.sh ensure` in the switchboard repo.";
@@ -66,6 +73,56 @@
     load();
     setInterval(function () { if (!document.hidden) load(); }, 30000);
     document.addEventListener("visibilitychange", function () { if (!document.hidden) load(); });
+
+    // STOP is two clicks: the first arms the button for five seconds (a framed page
+    // cannot use confirm()), the second posts the request. The watcher stops the
+    // container on its next request poll, takes a snapshot right after, and logs
+    // it; the page reloads to show that. A stop already sent stays "stopping…"
+    // across re-renders (pending, by name) until the row is gone or 90 s pass, so
+    // a row that Docker is still winding down does not grow a fresh button.
+    var armed = null;
+    var pending = {};
+    function markPending() {
+      var now = Date.now();
+      Object.keys(pending).forEach(function (n) { if (now - pending[n] > 90000) delete pending[n]; });
+      var stale = document.querySelector("header.stale");
+      Array.prototype.forEach.call(app.querySelectorAll("button.stop"), function (b) {
+        var n = b.getAttribute("data-name");
+        if (pending[n]) { b.classList.add("sent"); b.textContent = "stopping…"; }
+        else if (stale) { b.disabled = true; b.title = "the watcher is not writing snapshots; a request would wait for it"; }
+      });
+    }
+    app.addEventListener("click", function (ev) {
+      var b = ev.target.closest && ev.target.closest("button.stop");
+      if (!b || b.disabled || b.classList.contains("sent")) return;
+      var name = b.getAttribute("data-name");
+      if (armed !== b) {
+        if (armed) { armed.classList.remove("arm"); armed.textContent = "stop"; }
+        armed = b; b.classList.add("arm"); b.textContent = "confirm stop";
+        setTimeout(function () { if (armed === b) { armed = null; b.classList.remove("arm"); b.textContent = "stop"; } }, 5000);
+        return;
+      }
+      armed = null;
+      pending[name] = Date.now();
+      markPending();
+      fetch("cgi-bin/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", "X-Machine-Page": "1" },
+        body: "name=" + encodeURIComponent(name),
+      })
+        .then(function (r) {
+          return r.text().then(function (t) {
+            var j = null;
+            try { j = JSON.parse(t); } catch (e) { /* httpd's own error page */ }
+            if (!r.ok) throw new Error((j && j.error) || "HTTP " + r.status);
+          });
+        })
+        .then(function () { setTimeout(load, 7000); })
+        .catch(function (e) {
+          delete pending[name];
+          b.classList.remove("sent"); b.classList.add("failed"); b.textContent = "failed: " + e.message;
+        });
+    });
   })();
 </script>
 </body>

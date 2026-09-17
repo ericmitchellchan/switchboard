@@ -41,11 +41,22 @@ type Snapshot = { sampledAt: string; idleMinutes: number; dryRun: boolean; holdU
 /** Run the sampler for ~3 s (three ticks at MW_CHECK_SECONDS=1) and return the state dir's files.
  *  Grace (the idle window after a watcher start) is OFF unless asked, so the seeded idle rows are
  *  actually idle to the rule. */
-function runWatcher(opts: { dryRun: boolean; holdSeconds?: number; grace?: boolean; traffic: string }) {
+function runWatcher(opts: { dryRun: boolean; holdSeconds?: number; grace?: boolean; traffic: string; requests?: string[]; staleRequests?: string[] }) {
   const state = fs.mkdtempSync(path.join(os.tmpdir(), "sb-watch-"));
   const cleanup = () => fs.rmSync(state, { recursive: true, force: true });
   fs.writeFileSync(path.join(state, "traffic.tsv"), opts.traffic);
   if (opts.holdSeconds) fs.writeFileSync(path.join(state, "hold-until"), String(Math.floor(Date.now() / 1000) + opts.holdSeconds));
+  if (opts.requests || opts.staleRequests) {
+    fs.mkdirSync(path.join(state, "requests"));
+    const write = (name: string, ageMs: number) => {
+      const f = path.join(state, "requests", `${name}.stop`);
+      fs.writeFileSync(f, JSON.stringify({ at: new Date(Date.now() - ageMs).toISOString(), name, action: "stop", by: "page" }) + "\n");
+      const t = new Date(Date.now() - ageMs);
+      fs.utimesSync(f, t, t); // the watcher judges staleness by the file's age
+    };
+    for (const name of opts.requests || []) write(name, 0);
+    for (const name of opts.staleRequests || []) write(name, 10 * 60 * 1000);
+  }
   const script = [
     "mkdir -p /fakebin",
     "tr -d '\\r' < /fake/docker > /fakebin/docker && chmod +x /fakebin/docker",
@@ -63,6 +74,7 @@ function runWatcher(opts: { dryRun: boolean; holdSeconds?: number; grace?: boole
         "-v", `${fixtureDir}:/fake:ro`,
         "-v", `${state}:/state`,
         "-e", "MW_CHECK_SECONDS=1",
+        "-e", "MW_REQUEST_POLL_SECONDS=1",
         "-e", `MW_START_GRACE=${opts.grace ? 1 : 0}`,
         "-e", "MW_IDLE_MINUTES=120",
         "-e", `MW_DRY_RUN=${opts.dryRun}`,
@@ -84,6 +96,7 @@ function runWatcher(opts: { dryRun: boolean; holdSeconds?: number; grace?: boole
     actions: lines(read("actions.jsonl")).map((l) => JSON.parse(l) as Row),
     stopped: lines(read("stopped")),
     traffic: read("traffic.tsv") || "",
+    requestsLeft: fs.existsSync(path.join(state, "requests")) ? fs.readdirSync(path.join(state, "requests")) : [],
     cleanup,
   };
 }
@@ -189,6 +202,36 @@ maybe("docker-watch.sh in docker:28-cli against a fake docker", () => {
       expect(Number(m![1])).toBeGreaterThanOrEqual(startedAt);
     } finally {
       graced.cleanup();
+    }
+  }, 90000);
+
+  it("serves the page's stop requests: a real name is stopped and logged; a skipped name, a skipped project, an invalid name and a stale request are refused; a docker failure is logged; every file is consumed", () => {
+    const req = runWatcher({
+      dryRun: true,
+      traffic: seeded(),
+      requests: ["busy-db", "machine-watcher", "kyde-local-timescaledb-1", "bad name", "no-such"],
+      staleRequests: ["idle-old"],
+    });
+    try {
+      // dry run: the IDLE RULE stops nothing, but an explicit page request is a human decision and goes through
+      expect(req.stopped).toEqual(["busy-db"]);
+      const pageActions = req.actions.filter((a) => a.rule === "page stop").map((a) => `${a.name}:${a.action}${a.reason ? ":" + a.reason : ""}`);
+      expect(new Set(pageActions)).toEqual(
+        new Set([
+          "busy-db:stopped",
+          "machine-watcher:refused:skipped container",
+          "kyde-local-timescaledb-1:refused:skipped project",
+          "invalid:refused:not a container name",
+          "no-such:stop failed",
+          "idle-old:refused:stale request",
+        ])
+      );
+      expect(req.requestsLeft).toEqual([]);
+      // a served request ends the wait early: more than one snapshot happened inside the 3 s window even though
+      // the request poll is 1 s and the tick 1 s (the early-tick path is what the page relies on)
+      expect(req.ledger.filter((l) => l.name === "busy-db").length).toBeGreaterThanOrEqual(2);
+    } finally {
+      req.cleanup();
     }
   }, 90000);
 

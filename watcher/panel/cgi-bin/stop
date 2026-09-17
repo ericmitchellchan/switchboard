@@ -1,0 +1,51 @@
+#!/bin/sh
+# The page's ONE write (SWIT-92): POST name=<container> → a request file the
+# watcher fulfils. This runs inside the page container (busybox httpd CGI), which
+# has no Docker access on purpose: it only drops a file in /www/state/requests
+# (the one writable mount), and docker-watch.sh — the process that already
+# talks to Docker — stops the container within its request poll and logs it to
+# actions.jsonl like every other stop. Anything odd is refused here AND
+# re-checked by the watcher.
+#
+# POST only, and only with the page's own header (X-Machine-Page: 1): a GET
+# must never mutate (an <img src=…> on any page open in any browser on this
+# machine would otherwise queue a stop), and the custom header turns every
+# cross-origin call into a CORS preflight that lands here as OPTIONS and is
+# refused. The server is loopback-only and unauthenticated; this is what keeps
+# it honest.
+set -u
+dir=/www/state/requests
+
+reply() { printf 'Status: %s\r\nContent-Type: application/json\r\nCache-Control: no-store\r\n\r\n%s\n' "$1" "$2"; }
+
+if [ "${REQUEST_METHOD:-}" != "POST" ]; then
+  reply "405 Method Not Allowed" '{"error":"POST only"}'
+  exit 0
+fi
+if [ "${HTTP_X_MACHINE_PAGE:-}" != "1" ]; then
+  reply "403 Forbidden" '{"error":"only the machine page may queue a stop"}'
+  exit 0
+fi
+
+body=""
+read -r body || true   # one line, no trailing newline from a browser: read returns 1 with the data
+# name=<value>, first field only; a URL-encoded name with anything beyond the
+# container grammar fails the check below rather than being decoded.
+name=$(printf '%s' "$body" | tr '&' '\n' | sed -n 's/^name=//p' | head -n 1)
+
+if ! printf '%s' "$name" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$'; then
+  reply "400 Bad Request" '{"error":"name must be a container name"}'
+  exit 0
+fi
+if [ ! -d "$dir" ] || [ ! -w "$dir" ]; then
+  reply "503 Service Unavailable" '{"error":"the requests folder is not writable — run mw.sh ensure"}'
+  exit 0
+fi
+now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+tmp="$dir/.$name.$$.tmp"
+if printf '{"at":"%s","name":"%s","action":"stop","by":"page"}\n' "$now" "$name" >"$tmp" && mv "$tmp" "$dir/$name.stop"; then
+  reply "202 Accepted" "{\"queued\":\"$name\",\"at\":\"$now\"}"
+else
+  rm -f "$tmp"
+  reply "500 Internal Server Error" '{"error":"could not write the request"}'
+fi
