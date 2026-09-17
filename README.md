@@ -112,6 +112,19 @@ pnpm tauri dev
 
 Produces an NSIS installer at `src-tauri/target/release/bundle/nsis/`. Installs to `%LOCALAPPDATA%` (no admin required).
 
+### Machine watcher (Docker piece)
+
+A small container that watches every Docker container on this machine — load, last real network traffic, restart policy — and writes a snapshot every minute that any Switchboard thread can read through the `machine` MCP tool (`containers`, `why <name>`, `stop <name>`). One rule, idle for 2 hours → stop, runs **dry by default** and only logs what it would do.
+
+```bash
+bash watcher/mw.sh ensure      # start it (safe to run any time)
+bash watcher/mw.sh status      # running? last snapshot? last log lines
+bash watcher/mw.sh hold 3      # no idle-stops for 3 hours
+bash watcher/mw.sh live        # let the idle rule stop things (mw.sh dry reverts)
+```
+
+State lives in `%LOCALAPPDATA%\switchboard\machine`. The kyde-local stack is skipped; its own reaper owns it.
+
 ### Releasing
 
 See [RELEASE.md](RELEASE.md) for the full release process (signing keys, GitHub Actions, version bumping).

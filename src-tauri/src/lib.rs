@@ -1457,6 +1457,11 @@ async fn prepare_thread_launch(app: tauri::AppHandle, thread_id: String) -> Resu
                     // inbox the app drains. backlog.json itself is never
                     // handed to the server.
                     "SWITCHBOARD_BACKLOG_INBOX": backlog_inbox_path()?.to_string_lossy(),
+                    // SWIT-92: the machine watcher's state dir — the
+                    // `machine` tool reads its snapshot + ledger there and
+                    // appends its own stop actions. The watcher container
+                    // (watcher/mw.sh) is the writer of everything else in it.
+                    "SWITCHBOARD_MACHINE_DIR": machine_dir()?.to_string_lossy(),
                 }
             }
         }
@@ -1564,6 +1569,17 @@ fn backlog_path() -> Result<std::path::PathBuf, String> {
 fn backlog_inbox_path() -> Result<std::path::PathBuf, String> {
     let base = dirs::data_local_dir().ok_or("Cannot resolve local data dir")?;
     Ok(base.join(data_dir_name()).join("backlog-inbox.json"))
+}
+
+/// SWIT-92: where the machine watcher (watcher/docker-watch.sh, run by
+/// watcher/mw.sh) keeps containers.json, ledger.jsonl and actions.jsonl.
+/// A literal `switchboard`, NOT `data_dir_name()`: the watcher is one per
+/// machine, not one per build, and mw.sh writes `%LOCALAPPDATA%\switchboard\
+/// machine` whether the app reading it is the release or the `.dev` build
+/// (whose data dir is `switchboard-dev`).
+fn machine_dir() -> Result<std::path::PathBuf, String> {
+    let base = dirs::data_local_dir().ok_or("Cannot resolve local data dir")?;
+    Ok(base.join("switchboard").join("machine"))
 }
 
 fn backlog_id_ok(id: &str) -> bool {

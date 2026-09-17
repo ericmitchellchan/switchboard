@@ -1,0 +1,16 @@
+#!/bin/sh
+# A fake `docker` for lib/dockerWatch.test.ts: answers exactly the calls
+# docker-watch.sh makes, from the fixtures beside this file (mounted at /fake).
+# `stop` records the name in /state/stopped instead of stopping anything.
+case "$1" in
+  ps)
+    case "$2" in
+      -aq) cat /fake/ids ;;
+      -q) cat /fake/running_ids ;;
+    esac ;;
+  inspect) cat /fake/inspect ;;
+  stats) cat /fake/stats ;;
+  exec) f="/fake/netdev_$2"; if [ -f "$f" ]; then cat "$f"; else exit 1; fi ;;
+  stop) echo "$2" >>/state/stopped ;;
+  *) echo "fake docker: unexpected call: $*" >&2; exit 2 ;;
+esac
