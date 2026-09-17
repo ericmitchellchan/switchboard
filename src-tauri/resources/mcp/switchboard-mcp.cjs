@@ -1231,6 +1231,190 @@ const BACKLOG_TOOL = {
   },
 };
 
+// ── machine (SWIT-92): the Docker piece of the machine watcher ──────────────
+// The watcher container (watcher/docker-watch.sh) writes containers.json and
+// ledger.jsonl into SWITCHBOARD_MACHINE_DIR; this tool READS them and owns ONE
+// write of its own, actions.jsonl (append-only NDJSON like the backlog inbox —
+// every live thread runs a copy of this server). `stop` is the only thing here
+// that touches Docker, and it is an explicit human-directed act: it runs
+// `docker stop <name>` and records who asked.
+
+const MACHINE_OPS = ["containers", "why", "stop"];
+/** Docker's own container-name grammar: [a-zA-Z0-9][a-zA-Z0-9_.-]+ */
+const CONTAINER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+const MACHINE_LEDGER_TAIL = 12;
+
+/** Pure: the containers of a snapshot in three lists. `running` is sorted
+ *  CPU-first; `idle` is the running ones the idle rule applies to (traffic
+ *  known, not skipped, quiet for ≥ idleMinutes); `stopped` is everything
+ *  not running, restart-policy `always`/`unless-stopped` first because those
+ *  come back on the next Docker start. */
+function classifyContainers(rows, idleMinutes) {
+  const running = rows.filter((r) => r.state === "running").sort((a, b) => (b.cpuPct || 0) - (a.cpuPct || 0));
+  const idle = running.filter(
+    (r) => r.trafficKnown && !r.skipped && typeof r.idleMinutes === "number" && r.idleMinutes >= idleMinutes
+  );
+  const comesBack = (r) => r.restart === "always" || r.restart === "unless-stopped";
+  const stopped = rows
+    .filter((r) => r.state !== "running")
+    .sort((a, b) => Number(comesBack(b)) - Number(comesBack(a)) || String(a.name).localeCompare(String(b.name)));
+  return { running, idle, stopped };
+}
+
+function idleWord(r) {
+  if (!r.trafficKnown) return "traffic unknown";
+  if (typeof r.idleMinutes !== "number") return "just seen";
+  if (r.idleMinutes < 60) return `${r.idleMinutes}m quiet`;
+  const h = Math.floor(r.idleMinutes / 60);
+  return `${h}h ${r.idleMinutes - h * 60}m quiet`;
+}
+
+function containerLine(r) {
+  const where = r.project ? ` · ${r.project}` : "";
+  const restart = r.restart && r.restart !== "no" ? ` · restart ${r.restart}` : "";
+  if (r.state !== "running") return `- ${r.name}${where}: ${r.state}${restart}`;
+  const mem = r.memMb ? ` · ${Math.round(r.memMb)} MB` : "";
+  const skip = r.skipped ? " · (skipped: its own reaper)" : "";
+  const policy = r.policy ? ` · ${r.policy.toUpperCase()}` : "";
+  return `- ${r.name}${where}: ${(r.cpuPct || 0).toFixed(1)}% cpu${mem} · ${idleWord(r)}${restart}${skip}${policy}`;
+}
+
+/** Pure: the `containers` answer. */
+function formatContainers(snapshot, nowMs) {
+  const { running, idle, stopped } = classifyContainers(snapshot.containers || [], snapshot.idleMinutes);
+  const sampledMs = Date.parse(snapshot.sampledAt);
+  const age = Number.isFinite(sampledMs) ? `${Math.max(0, Math.round((nowMs - sampledMs) / 60000))} min ago` : "age unknown";
+  const held = Boolean(snapshot.holdUntil) && snapshot.holdUntil * 1000 > nowMs;
+  const head = `Machine watcher snapshot from ${snapshot.sampledAt} (${age}) · idle rule ${snapshot.idleMinutes}m · ${snapshot.dryRun ? "DRY RUN — the rule logs, never stops" : "LIVE — the rule stops"}` +
+    (held ? ` · HOLD until ${new Date(snapshot.holdUntil * 1000).toISOString()} (the clock is paused)` : "");
+  const lines = [head, "", `Running (${running.length}, hottest first):`];
+  lines.push(...(running.length ? running.map(containerLine) : ["- none"]));
+  lines.push("", `Idle by the rule (${idle.length}):`);
+  // During a real hold the watcher resets every clock, so this list is empty and
+  // the "held" wording is defensive — it only shows for a snapshot written
+  // before the hold began.
+  const fate = held ? " — held, not stopped" : snapshot.dryRun ? " — would be stopped" : "";
+  lines.push(...(idle.length ? idle.map((r) => `- ${r.name}: ${idleWord(r)}${fate}`) : ["- none"]));
+  lines.push("", `Not running (${stopped.length}; restart always/unless-stopped come back with Docker):`);
+  lines.push(...(stopped.length ? stopped.map(containerLine) : ["- none"]));
+  lines.push("", "why {name} explains one; stop {name} stops one (recorded).");
+  return lines.join("\n");
+}
+
+/** Pure: the `why` answer for one container + its ledger tail. */
+function formatWhy(row, ledgerRows) {
+  const lines = [`${row.name} — ${row.state}${row.project ? ` · compose project ${row.project}` : ""}${row.service ? ` · service ${row.service}` : ""}`];
+  lines.push(`image ${row.image}`);
+  if (row.workdir) lines.push(`started from ${row.workdir}`);
+  if (row.startedAt && row.state === "running") lines.push(`up since ${String(row.startedAt).replace(/\.\d+Z$/, "Z")}`);
+  if (row.restart && row.restart !== "no") {
+    lines.push(`restart policy ${row.restart} — it comes back every time Docker starts; \`docker update --restart no ${row.name}\` ends that`);
+  } else {
+    lines.push("restart policy no — it stays down once stopped");
+  }
+  if (row.state === "running") {
+    lines.push(`now: ${(row.cpuPct || 0).toFixed(1)}% cpu · ${Math.round(row.memMb || 0)} MB · ${idleWord(row)}${row.lastTrafficAt ? ` (last traffic ${row.lastTrafficAt})` : ""}`);
+    if (row.skipped) lines.push("skipped by the idle rule: its own reaper owns it");
+    if (row.policy) lines.push(`idle rule: ${row.policy.toUpperCase()}`);
+  }
+  if (ledgerRows.length) {
+    lines.push("", `last ${ledgerRows.length} samples (cpu% · MB · bytes moved):`);
+    lines.push(...ledgerRows.map((l) => `- ${l.at}: ${(l.cpuPct || 0).toFixed(1)} · ${Math.round(l.memMb || 0)} · ${l.movedBytes || 0}`));
+  }
+  return lines.join("\n");
+}
+
+function readMachineSnapshot(machineDir) {
+  if (!machineDir) throw new OpError("the machine watcher is not wired in this session");
+  const file = path.join(machineDir, "containers.json");
+  if (!fs.existsSync(file)) {
+    throw new OpError("the machine watcher has not written a snapshot yet — run `watcher/mw.sh ensure` in the switchboard repo");
+  }
+  let snap;
+  try {
+    snap = JSON.parse(fs.readFileSync(file, "utf-8"));
+  } catch {
+    throw new OpError("containers.json is not readable JSON — the watcher may be mid-write; try again");
+  }
+  if (!snap || !Array.isArray(snap.containers)) throw new OpError("containers.json has no containers list");
+  return snap;
+}
+
+/** The last N ledger lines for one name. Line-wise; a torn last line drops alone. */
+function ledgerTailFor(machineDir, name, n) {
+  const file = path.join(machineDir, "ledger.jsonl");
+  if (!fs.existsSync(file)) return [];
+  const out = [];
+  for (const line of fs.readFileSync(file, "utf-8").split("\n")) {
+    if (!line) continue;
+    try {
+      const row = JSON.parse(line);
+      if (row.name === name) out.push(row);
+    } catch {
+      /* torn line */
+    }
+  }
+  return out.slice(-n);
+}
+
+function containerName(args) {
+  const name = String(args.name || "").trim();
+  if (!CONTAINER_NAME_RE.test(name)) throw new OpError("`name` must be a container name (letters, digits, _ . -)");
+  return name;
+}
+
+/** deps.exec(file, args) runs a command; the test passes a fake. */
+function performMachineOp(env, args, now, deps) {
+  const exec = (deps && deps.exec) || ((file, argv) => require("child_process").execFileSync(file, argv, { encoding: "utf-8", timeout: 30000 }));
+  const { machineDir, selfThreadId } = env;
+  if (!MACHINE_OPS.includes(args.op)) throw new OpError(`\`op\` must be one of ${MACHINE_OPS.join(" | ")}`);
+  const snap = readMachineSnapshot(machineDir);
+  if (args.op === "containers") return { message: formatContainers(snap, now) };
+  const name = containerName(args);
+  const row = snap.containers.find((r) => r.name === name);
+  if (args.op === "why") {
+    if (!row) throw new OpError(`no container named ${name} in the last snapshot (${snap.sampledAt})`);
+    return { message: formatWhy(row, ledgerTailFor(machineDir, name, MACHINE_LEDGER_TAIL)) };
+  }
+  // stop — nothing is recorded unless docker actually did it
+  if (row && row.state !== "running") return { message: `${name} is already ${row.state}; nothing to stop.` };
+  try {
+    exec("docker", ["stop", name]);
+  } catch (err) {
+    if (err && err.code === "ENOENT") throw new OpError("docker is not on this app's PATH — stop it from a terminal (`docker stop " + name + "`)");
+    const detail = String((err && err.stderr) || (err && err.message) || err).trim().split("\n").pop();
+    throw new OpError(`docker stop ${name} failed: ${detail}`);
+  }
+  const entry = { at: new Date(now).toISOString(), name, action: "stopped", rule: "mcp stop", threadId: selfThreadId || "" };
+  fs.mkdirSync(machineDir, { recursive: true });
+  fs.appendFileSync(path.join(machineDir, "actions.jsonl"), `${JSON.stringify(entry)}\n`);
+  const back = row && (row.restart === "always" || row.restart === "unless-stopped")
+    ? ` Its restart policy is ${row.restart}, so it returns when Docker restarts — \`docker update --restart no ${name}\` if it should stay down.`
+    : "";
+  return { message: `Stopped ${name} and recorded it.${back}` };
+}
+
+const MACHINE_TOOL = {
+  name: "machine",
+  description:
+    "The machine watcher (SWIT-92, Docker piece): what is running on this laptop's Docker, " +
+    "how hot it is, how long since it moved real traffic, and why it is there. " +
+    "Ops: containers (every container — running hottest first, the ones the idle rule would stop, " +
+    "the stopped ones that come back with Docker); why {name} (image, compose project and folder, " +
+    "restart policy, current load, last traffic, the last samples); stop {name} (runs `docker stop`, " +
+    "records it). CONTRACT: the snapshot is written by the watcher container every minute — say " +
+    "its age when it matters; the idle rule runs DRY by default and this tool never changes that; " +
+    "`stop` is a human decision — ask before stopping anything that is not plainly abandoned.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      op: { type: "string", enum: MACHINE_OPS },
+      name: { type: "string", description: "The container name, for why and stop." },
+    },
+    required: ["op"],
+  },
+};
+
 // ── The tool table (the behavioural contract lives HERE) ─────────────────────
 
 const PAGE_TOOL = {
@@ -1435,12 +1619,12 @@ function serve(threadDir) {
         return;
       }
       if (method === "tools/list") {
-        respond({ jsonrpc: "2.0", id, result: { tools: [PAGE_TOOL, VIEW_TOOL, POST_TOOL, BACKLOG_TOOL] } });
+        respond({ jsonrpc: "2.0", id, result: { tools: [PAGE_TOOL, VIEW_TOOL, POST_TOOL, BACKLOG_TOOL, MACHINE_TOOL] } });
         return;
       }
       if (method === "tools/call") {
         const name = params && params.name;
-        if (name !== "page" && name !== "view" && name !== "post" && name !== "backlog") {
+        if (name !== "page" && name !== "view" && name !== "post" && name !== "backlog" && name !== "machine") {
           respond({
             jsonrpc: "2.0",
             id,
@@ -1457,6 +1641,15 @@ function serve(threadDir) {
                 ? performBacklogOp(
                     {
                       backlogInboxPath: process.env.SWITCHBOARD_BACKLOG_INBOX,
+                      selfThreadId: process.env.SWITCHBOARD_THREAD_ID,
+                    },
+                    args,
+                    Date.now()
+                  ).message
+              : name === "machine"
+                ? performMachineOp(
+                    {
+                      machineDir: process.env.SWITCHBOARD_MACHINE_DIR,
                       selfThreadId: process.env.SWITCHBOARD_THREAD_ID,
                     },
                     args,
@@ -1485,7 +1678,8 @@ function serve(threadDir) {
             jsonrpc: "2.0",
             id,
             result: {
-              content: [{ type: "text", text: `${name} write refused: ${err.message}` }],
+              // `machine` mostly reads; "write refused" would misname a missing snapshot.
+              content: [{ type: "text", text: name === "machine" ? `machine: ${err.message}` : `${name} write refused: ${err.message}` }],
               isError: true,
             },
           });
@@ -1537,6 +1731,11 @@ module.exports = {
   buildBacklogEntry,
   formatBacklogEntry,
   performBacklogOp,
+  classifyContainers,
+  formatContainers,
+  formatWhy,
+  performMachineOp,
+  MACHINE_TOOL,
   BACKLOG_TOOL,
   POST_TOOL,
   PAGE_TOOL,

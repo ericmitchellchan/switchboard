@@ -1,0 +1,7 @@
+aaaaaaaaaaa1|/busy-db|running|2026-09-16T10:00:00.123456789Z|no|postgres:16-alpine|cloud|postgres|C:\Users\ericm\projects\ky-lanes\jira\apps\cloud
+aaaaaaaaaaa2|/idle-old|running|2025-09-13T05:52:21.851641600Z|always|clickhouse/clickhouse-server:23.4-alpine|<no value>|<no value>|<no value>
+aaaaaaaaaaa3|/kyde-local-timescaledb-1|running|2026-09-16T08:00:00Z|no|timescale/timescaledb-ha:pg18|kyde-local|timescaledb|C:\Users\ericm\projects\kyde-labs\kyde-local
+aaaaaaaaaaa4|/mute|running|2026-09-16T08:00:00Z|no|gcr.io/distroless/static|<no value>|<no value>|<no value>
+aaaaaaaaaaa5|/weird-one|running|2026-09-16T08:00:00Z|unless-stopped|img:1|proj|svc|C:\a "b"	c
+aaaaaaaaaaa6|/reset-me|running|2026-09-16T08:00:00Z|no|img:1|proj|svc|C:\x
+aaaaaaaaaaa7|/gone|exited|2026-01-01T00:00:00Z|always|img:old|old|svc|C:\old
