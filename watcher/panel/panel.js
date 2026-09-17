@@ -158,12 +158,15 @@
     if (r.memMb) meta.push(Math.round(r.memMb) + " MB");
     var tone = r.policy ? "warn" : !r.trafficKnown ? "dim" : "";
     var tag = r.skipped ? "own reaper" : r.policy ? r.policy : "";
+    // A skipped container (the watcher, its page, the reapers) gets no button — the watcher refuses those anyway.
+    var stop = r.skipped ? "" : '<button class="stop" type="button" data-name="' + esc(r.name) + '">stop</button>';
     return (
-      '<li class="row ' + tone + '">' +
+      '<li class="row ' + tone + '" data-name="' + esc(r.name) + '">' +
       '<span class="name">' + esc(r.name) + "</span>" +
       '<span class="meta">' + meta.join(" · ") + "</span>" +
       '<span class="quiet">' + esc(quietWord(r)) + "</span>" +
       (tag ? '<span class="tag">' + esc(tag) + "</span>" : "") +
+      stop +
       whereHtml(r) +
       "</li>"
     );
@@ -197,9 +200,10 @@
 
   function actionHtml(a) {
     var at = localStamp(a.at);
+    var what = esc(a.action) + " · " + esc(a.rule || "") + (a.reason ? " (" + esc(a.reason) + ")" : "");
     return (
       '<li class="row ' + (a.action === "stopped" ? "warn" : "") + '"><span class="name">' + esc(a.name) + "</span>" +
-      '<span class="meta">' + esc(a.action) + " · " + esc(a.rule || "") + "</span>" +
+      '<span class="meta">' + what + "</span>" +
       '<span class="quiet">' + esc(at) + "</span></li>"
     );
   }

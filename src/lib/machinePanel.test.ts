@@ -191,6 +191,20 @@ describe("render", () => {
     expect(live).toContain("watcher may be down");
   });
 
+  it("a running row gets a stop button (name escaped) unless it is a skipped container; refusals print their reason", () => {
+    const html = panel.render(
+      panel.model(
+        snap([row({ name: 'a"b' }), row({ name: "machine-watcher", skipped: true }), row({ name: "gone", state: "exited" })]),
+        [{ at: "2026-09-17T03:00:00Z", name: "machine-watcher", action: "refused", rule: "page stop", reason: "skipped container" }],
+        NOW
+      )
+    );
+    expect(html).toContain('<button class="stop" type="button" data-name="a&quot;b">stop</button>');
+    expect(html).not.toContain('data-name="machine-watcher">stop');
+    expect(html).not.toContain('data-name="gone"');
+    expect(html).toContain("refused · page stop (skipped container)");
+  });
+
   it("quietWord matches the machine tool's wording", () => {
     expect(panel.quietWord(row({ name: "a", idleMinutes: 5 }))).toBe("5m quiet");
     expect(panel.quietWord(row({ name: "a", idleMinutes: 125 }))).toBe("2h 5m quiet");
@@ -234,6 +248,45 @@ maybe("the page's server (busybox httpd) over the panel folder + a state folder"
       expect(out).toContain("---JS---");
       expect(out).toContain("The machine page");
       expect(out).toContain('"name":"served"');
+    } finally {
+      fs.rmSync(state, { recursive: true, force: true });
+    }
+  }, 120000);
+
+  it("cgi-bin/stop writes ONE request file into the writable requests mount; a bad name, a GET and a POST without the page's header are refused", () => {
+    const state = fs.mkdtempSync(path.join(os.tmpdir(), "sb-page-"));
+    const requests = path.join(state, "requests");
+    fs.mkdirSync(requests);
+    try {
+      const out = execFileSync(
+        "docker",
+        [
+          "run", "--rm",
+          "-v", `${panelDir}:/www:ro`,
+          "-v", `${state}:/www/state:ro`,
+          "-v", `${requests}:/www/state/requests`,
+          "busybox:stable", "sh", "-c",
+          [
+            // the httpd calls hit the MOUNTED script, exactly as the page does (the repo pins it to LF in .gitattributes)
+            "httpd -p 8090 -h /www",
+            "sleep 1",
+            "echo ---OK---; wget -qO- --header 'X-Machine-Page: 1' --post-data 'name=busy-db' http://127.0.0.1:8090/cgi-bin/stop; echo",
+            "echo ---BAD---; wget -qO- --header 'X-Machine-Page: 1' --post-data 'name=bad name' http://127.0.0.1:8090/cgi-bin/stop 2>&1 || echo refused-bad",
+            "echo ---GET---; wget -qO- 'http://127.0.0.1:8090/cgi-bin/stop?name=via-get' 2>&1 || echo refused-get",
+            "echo ---NOHEADER---; wget -qO- --post-data 'name=no-header' http://127.0.0.1:8090/cgi-bin/stop 2>&1 || echo refused-noheader",
+            "echo ---FILES---; ls /www/state/requests; cat /www/state/requests/busy-db.stop",
+          ].join(" && "),
+        ],
+        { encoding: "utf-8", timeout: 90000 }
+      );
+      expect(out).toContain('{"queued":"busy-db"');
+      expect(out).toMatch(/---BAD---[\s\S]*refused-bad/);
+      expect(out).toMatch(/---GET---[\s\S]*refused-get/);
+      expect(out).toMatch(/---NOHEADER---[\s\S]*refused-noheader/);
+      expect(out).toMatch(/---FILES---\s*busy-db\.stop/);
+      expect(out).toContain('"name":"busy-db","action":"stop","by":"page"');
+      // only the one legitimate request was written — the GET and the header-less POST left nothing
+      expect(fs.readdirSync(requests)).toEqual(["busy-db.stop"]);
     } finally {
       fs.rmSync(state, { recursive: true, force: true });
     }

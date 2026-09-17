@@ -124,7 +124,7 @@ bash watcher/mw.sh hold 3      # no idle-stops for 3 hours
 bash watcher/mw.sh live        # let the idle rule stop things (mw.sh dry reverts)
 ```
 
-The page (`watcher/panel/`, served by a tiny busybox container) refreshes every 30 s: what's running hottest-first with how long it's been quiet, which repo or lane it came from and which Switchboard thread owns that folder, what the idle rule would stop, the last actions, and whether the rule is dry or live. State lives in `%LOCALAPPDATA%\switchboard\machine`; the page serves that folder read-only, on loopback only. The kyde-local stack is skipped; its own reaper owns it.
+The page (`watcher/panel/`, served by a tiny busybox container) refreshes every 30 s: what's running hottest-first with how long it's been quiet, which repo or lane it came from and which Switchboard thread owns that folder, what the idle rule would stop, the last actions, and whether the rule is dry or live. Each running row has a **stop** button (click twice): the page only writes a request file, the watcher picks it up within five seconds, stops the container (Docker allows it up to ten seconds to exit) and logs it; the watcher, its page, the reapers and the kyde-local stack refuse. A request older than two minutes (the watcher was down) is refused rather than served late. State lives in `%LOCALAPPDATA%\switchboard\machine`; the page serves that folder read-only, on loopback only. The kyde-local stack is skipped; its own reaper owns it.
 
 ### Releasing
 

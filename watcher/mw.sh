@@ -20,7 +20,10 @@
 # The PAGE is a second, tiny container (stock busybox, its httpd) serving
 # panel/ with the state dir mounted read-only beside it at /www/state, on
 # 127.0.0.1:${MW_PORT:-8090}. Nothing is copied: edit panel/ and reload. Open
-# it in Switchboard's panel (`+` → the URL) or float it, or any browser.
+# it in Switchboard's panel (`+` → the URL) or float it, or any browser. Its
+# Stop button posts to panel/cgi-bin/stop, which only writes a request file
+# into state/requests (the page's one writable mount); the WATCHER stops the
+# container within 5 s and logs it — the page never touches Docker.
 set -euo pipefail
 # Git Bash rewrites `/var/run/docker.sock` into a C:\Program Files\Git\... path
 # before docker sees it; this keeps the container-side paths as written.
@@ -66,7 +69,10 @@ start() {
 }
 
 start_page() {
-  mkdir -p "$data"
+  # requests/ is the page's ONE writable mount (cgi-bin/stop drops a file there;
+  # the watcher fulfils it); it must exist on the host so the nested mount has a
+  # target inside the read-only state mount.
+  mkdir -p "$data/requests"
   docker rm -f "$page" >/dev/null 2>&1 || true
   # Switchboard's thread records (title + working folder) let the page name the
   # thread that owns a container. Mounted only when the file exists — Docker
@@ -77,6 +83,7 @@ start_page() {
     -p "127.0.0.1:$port:80" \
     -v "$(hostpath "$here/panel"):/www:ro" \
     -v "$(hostpath "$data"):/www/state:ro" \
+    -v "$(hostpath "$data/requests"):/www/state/requests" \
     ${threads_mount[@]+"${threads_mount[@]}"} \
     busybox:stable httpd -f -p 80 -h /www >/dev/null
   echo "$page running: $url"
