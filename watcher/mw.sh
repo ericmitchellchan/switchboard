@@ -22,6 +22,16 @@ export MSYS_NO_PATHCONV=1
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 name=${MW_NAME:-machine-watcher}
+# `bash` typed in PowerShell is usually WSL's bash, not Git's: no LOCALAPPDATA
+# there, so ask Windows for it and map it to /mnt/c/... — the state dir is the
+# Windows one either way (Docker Desktop's WSL integration reads /mnt paths).
+if [ -z "${LOCALAPPDATA:-}" ] && grep -qi microsoft /proc/version 2>/dev/null; then
+  # cmd.exe is not always on a non-interactive WSL shell's PATH; a failed
+  # lookup must not abort (set -e), it just falls through to the Linux default.
+  cmdexe=$(command -v cmd.exe 2>/dev/null || echo /mnt/c/Windows/System32/cmd.exe)
+  win=$("$cmdexe" /c "echo %LOCALAPPDATA%" 2>/dev/null | tr -d '\r' || true)
+  case $win in ?:\\*) LOCALAPPDATA=$(wslpath -u "$win") ;; esac
+fi
 data=${MW_DATA_DIR:-"${LOCALAPPDATA:-$HOME/.local/share}/switchboard/machine"}
 mode_file=$data/mode   # "live" or absent (= dry run)
 
