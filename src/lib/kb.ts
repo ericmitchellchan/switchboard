@@ -108,13 +108,18 @@ export function ancestorFolders(docPath: string): string[] {
 
 // ── Doc kind (extension switch, pure) ────────────────────────────────────────
 
-/** What a doc path renders as. "markdown" (T6), "wireframe" (T7) and
- *  "diagram" (T9) all have real renderers; "code"/"data"/"unknown" still show
- *  DocView's placeholder — the switch is the stable seam they plug into. */
-export type DocKind = "markdown" | "wireframe" | "diagram" | "code" | "data" | "unknown";
+/** What a doc path renders as. "markdown" (T6), "wireframe" (T7), "diagram"
+ *  (T9) and "view" (SWIT-53, a kept view snapshot) all have real renderers;
+ *  "code"/"data"/"unknown" still show DocView's placeholder — the switch is
+ *  the stable seam they plug into. */
+export type DocKind = "markdown" | "wireframe" | "diagram" | "code" | "data" | "view" | "unknown";
 
 export function docKind(path: string): DocKind {
   const name = path.split("/").pop() ?? "";
+  // A kept view's snapshot (SWIT-53): `<id>-<stamp>.view.json`, always
+  // exactly that suffix — checked BEFORE the generic extension switch so it
+  // never falls into the plain ".json" → "data" case.
+  if (/\.view\.json$/i.test(name)) return "view";
   const ext = name.includes(".") ? name.split(".").pop()!.toLowerCase() : "";
   switch (ext) {
     case "md":

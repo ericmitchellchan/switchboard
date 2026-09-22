@@ -387,6 +387,18 @@ export type ViewChromeProps = {
   block: number | null;
   /** SWIT-73: inside the report document — natural height, capped scroller. */
   embedded?: boolean;
+  /** SWIT-53: this chrome is drawing a KEPT SNAPSHOT (KeptView.tsx), not a
+   *  live thread view — no source to re-run, no thread to drill into or
+   *  send to, and no honest place to file a pin (the pin file is keyed
+   *  `view:<threadId>:<viewId>`; a kept view has neither for real). Hides
+   *  re-run / keep / pin / drill-open rather than leave a dead control.
+   *  Filters, the spec disclosure and the hover tooltip are unaffected —
+   *  none of them touch a thread. */
+  frozen?: boolean;
+  /** SWIT-53: the toolbar label frozen mode shows in place of re-run/keep —
+   *  `kept <date> · frozen`, computed by the caller from the snapshot's file
+   *  name (KeptView owns that derivation; ViewChrome only prints it). */
+  frozenLabel?: string;
 };
 
 /** Everything a rendered view IS — toolbar, filters, spec disclosure, pins,
@@ -407,6 +419,8 @@ export function ViewChrome({
   drillKey,
   block,
   embedded,
+  frozen = false,
+  frozenLabel,
 }: ViewChromeProps) {
   // ── Filters (T6): client-side slices, per view instance ───────────────────
   const [activeFilters, setActiveFilters] = useState<ActiveFilters>({});
@@ -545,6 +559,10 @@ export function ViewChrome({
   );
   const openAnchor = useCallback(
     (el: EventTarget | null) => {
+      // SWIT-53: a kept snapshot has no live thread to drill into or send
+      // to — the click still highlights (onHoverAnchor is unguarded) but
+      // opens nothing.
+      if (frozen) return;
       if (!spec) return;
       const hit = describeAnchor(el);
       if (!hit) return;
@@ -576,7 +594,7 @@ export function ViewChrome({
       }
       sendToThread(sanitizeForTypedLine(drillFallbackSentence(spec.title, hit.label), REF_MAX));
     },
-    [spec, describeAnchor, flashNote, artifact, threadId, viewId, block, canSend]
+    [spec, describeAnchor, flashNote, artifact, threadId, viewId, block, canSend, frozen]
   );
   const onBodyClick = useCallback(
     (e: ReactMouseEvent) => {
@@ -607,13 +625,15 @@ export function ViewChrome({
           : {
               key: anchor.key,
               label: hit.label,
-              verb: spec.drill ? `› ${spec.drill.title.split("{key}").join(hit.key)}` : "→ thread",
+              // SWIT-53: a kept snapshot's click opens nothing — the verb
+              // must not promise a drill/thread that will not happen.
+              verb: frozen ? "" : spec.drill ? `› ${spec.drill.title.split("{key}").join(hit.key)}` : "→ thread",
               fields: row ? rowFields(row) : [],
               el,
             }
       );
     },
-    [spec, filteredRows, provider]
+    [spec, filteredRows, provider, frozen]
   );
   const onPointerMove = useCallback((e: ReactMouseEvent) => {
     pointerRef.current = { x: e.clientX, y: e.clientY };
@@ -826,7 +846,9 @@ export function ViewChrome({
           <span style={{ color: "var(--text-faint)", overflow: "hidden", textOverflow: "ellipsis" }}>
             {flash ??
               (hover
-                ? `${hover.label} ${hover.verb}`
+                ? hover.verb
+                  ? `${hover.label} ${hover.verb}`
+                  : hover.label
                 : `${spec.source.type === "file" ? spec.source.path : spec.source.url} · ${
                     spec.builtAt ? spec.builtAt.slice(0, 16).replace("T", " ") : ""
                   } · ${spec.builtBy}${
@@ -882,39 +904,55 @@ export function ViewChrome({
           >
             spec
           </button>
-          <button
-            type="button"
-            style={{
-              ...TOOL_BTN,
-              ...(pinMode ? { color: "var(--text-primary)", borderColor: "var(--text-secondary)" } : {}),
-            }}
-            onClick={() => setPinMode((m) => !m)}
-            title="Pin mode: click a row, bar, bin or mark to drop a numbered pin"
-          >
-            {"\u{1F4CC}"} pin{pins.count > 0 ? ` ${pins.count}` : ""}
-          </button>
-          <button
-            type="button"
-            style={TOOL_BTN}
-            onClick={rerun}
-            disabled={loading}
-            title={
-              spec.source.type === "query"
-                ? "Re-run the query — refreshes only on your gesture"
-                : "Re-read the data file"
-            }
-          >
-            {loading ? "…" : "re-run"}
-          </button>
-          <button
-            type="button"
-            style={TOOL_BTN}
-            onClick={() => void keep()}
-            disabled={keeping}
-            title={`Keep this view: snapshot spec + rows to the scratchpad (_scratch/${project}/) — promote it to the KB or a Research page from there`}
-          >
-            keep
-          </button>
+          {!frozen && (
+            <button
+              type="button"
+              style={{
+                ...TOOL_BTN,
+                ...(pinMode ? { color: "var(--text-primary)", borderColor: "var(--text-secondary)" } : {}),
+              }}
+              onClick={() => setPinMode((m) => !m)}
+              title="Pin mode: click a row, bar, bin or mark to drop a numbered pin"
+            >
+              {"\u{1F4CC}"} pin{pins.count > 0 ? ` ${pins.count}` : ""}
+            </button>
+          )}
+          {frozen ? (
+            // SWIT-53: re-run and keep both need a live thread behind the
+            // spec — a kept snapshot has neither, so one label replaces both
+            // rather than leaving a disabled control with no honest tooltip.
+            <span
+              style={{ color: "var(--text-faint)", flex: "none" }}
+              title="A kept snapshot — frozen. No live source to re-run, and re-keeping a snapshot is a no-op."
+            >
+              {frozenLabel ?? "kept · frozen"}
+            </span>
+          ) : (
+            <>
+              <button
+                type="button"
+                style={TOOL_BTN}
+                onClick={rerun}
+                disabled={loading}
+                title={
+                  spec.source.type === "query"
+                    ? "Re-run the query — refreshes only on your gesture"
+                    : "Re-read the data file"
+                }
+              >
+                {loading ? "…" : "re-run"}
+              </button>
+              <button
+                type="button"
+                style={TOOL_BTN}
+                onClick={() => void keep()}
+                disabled={keeping}
+                title={`Keep this view: snapshot spec + rows to the scratchpad (_scratch/${project}/) — promote it to the KB or a Research page from there`}
+              >
+                keep
+              </button>
+            </>
+          )}
         </div>
         {showSpec && <pre style={SPEC_STYLE}>{specLines(spec).join("\n")}</pre>}
         {isDeckChild && drillKey !== null && (
@@ -986,7 +1024,7 @@ export function ViewChrome({
               threadId={threadId}
               active={active}
             />
-            {pins.marks}
+            {!frozen && pins.marks}
             {hover && hover.fields.length > 0 && !pinMode && (
               <FieldsTooltip
                 fields={hover.fields}
@@ -997,7 +1035,7 @@ export function ViewChrome({
             )}
           </div>
         </div>
-        {pins.rail}
+        {!frozen && pins.rail}
       </div>
     </SurfaceAnchorContext.Provider>
   );

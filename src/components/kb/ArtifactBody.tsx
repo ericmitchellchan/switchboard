@@ -18,6 +18,7 @@
 // a KB doc can share a relative path, so a path key would let one document's
 // zoom/pin/pan state survive a switch to a different document.
 
+import { Suspense, lazy } from "react";
 import type { ReactNode } from "react";
 import type { FileArtifact } from "../../types";
 import { docKind } from "../../lib/kb";
@@ -26,6 +27,18 @@ import { MarkdownSurface } from "./MarkdownSurface";
 import { WireframeView } from "./WireframeView";
 import { DiagramView } from "./DiagramView";
 import { ComponentPreview } from "./ComponentPreview";
+
+// SWIT-53: its own lazy chunk, like ReportView — ViewChrome pulls in the
+// chart renderers (candles/line/timeline), which must never land in `main`.
+const KeptView = lazy(() => import("../views/KeptView"));
+
+function KeptViewFallback() {
+  return (
+    <div style={{ padding: 24, fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-dim)" }}>
+      loading kept view…
+    </div>
+  );
+}
 
 export function ArtifactBody({
   artifact,
@@ -72,6 +85,16 @@ export function ArtifactBody({
       // .jsx/.tsx compiled into the same sandboxed frame (its own lazy chunk).
       return (
         <ComponentPreview key={key} artifact={artifact} content={content} onReload={onReload} />
+      );
+    case "view":
+      // SWIT-53: a kept view's frozen snapshot, over the SAME ViewChrome a
+      // live view draws with (its own lazy chunk — no chart library in
+      // `main`). No reload affordance: the file is a keepsake, not a
+      // document a save could change out from under it.
+      return (
+        <Suspense fallback={<KeptViewFallback />}>
+          <KeptView key={key} artifact={artifact} content={content} active={active} />
+        </Suspense>
       );
     default:
       return <>{fallback}</>;
