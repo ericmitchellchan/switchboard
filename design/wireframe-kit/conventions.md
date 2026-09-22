@@ -278,6 +278,21 @@ that stop being true.
   since a report's markdown never reaches the server. The hover rule and every anchor
   (`bar:`, `bin:`, `row:`) are unchanged — only the fill moves.
 
+- 2026-09-22 — KY'S BLOCKS (SWIT-95, `ky/plan/PageBlock.tsx` + `handoff/HandoffBlock.tsx`'s
+  StatusPill). The ✦ page's sections stop being an H2-with-a-count over a flat list and
+  become titled Page blocks (entry in components.md) over column-headed grids: To do
+  (check · item · link · status · owner) and Artifacts (artifact · title · status ·
+  updated · ×) are real CSS grids, not flex rows with an ad-hoc meta span. A state word
+  is now a Status pill — one width, solid color (amber/green/blue), or a neutral/dim
+  outline for anything else — instead of a dim mono string; a row's stamp is an Age (a
+  relative word, dim, with the NEW dot in front of it) instead of a bare timestamp. NO
+  COUNT AND NO COLORED HEADING on a block's title (Ky's CC-832 rule, carried verbatim):
+  Needs you loses the amber section heading it had since 2026-09-09 — the rows still
+  carry the amber (an item waiting on the user, an unsent decision), the section itself
+  does not. The pure word→tone rule (`statusTone`) and the pure age word (`ago`) live in
+  `lib/statusPill.ts`, not in a component, so pageStore and the turn-end hook could read
+  the same rule if they ever need to (neither does yet).
+
 ## Decisions recorded by the app
 
 - 2026-09-09 — Bundle IBM Plex Sans for page and doc bodies (asked: Ky's page and docs read in IBM Plex Sans; ours are still JetBrains Mono at Ky's sizes. Bring in a sans reading face?; thread: New thread)

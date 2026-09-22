@@ -328,9 +328,16 @@ shape for restored workspaces only.
 
 ## The page sections
 
-THE PAGE READS LIKE KY'S PLAN PANEL (2026-09-09; `ky/plan/PlanPanel.tsx` — Eric: "it's
-this weird gray, everything's monotone, and there are no real sections. I really just
-want to copy the Ky platform"). Ky's measurements, our tokens and typeface:
+THE PAGE READS LIKE KY'S BLOCKS (SWIT-95, 2026-09-22; `ky/plan/PageBlock.tsx` +
+`ky/handoff/HandoffBlock.tsx`'s StatusPill, CC-832's ledger-shaped pass). Every section is
+a **Page block** (entry below) — a titled header on the raised surface, no count and no
+colored heading, over **Column-headed** rows: To do (check · item · link · status ·
+owner) and Artifacts (artifact · title · status · updated · ×) are real grids, a
+**Status pill** carries the state word as color instead of a dim meta string, and a
+row's **Age** (entry below) replaces a bare timestamp. This superseded the H2-with-a-count
+Section shape the paragraphs below still describe historically — see Page block, Column
+heads, Status pill and Age for the current rows. Ky's earlier measurements, our tokens
+and typeface, kept for what has NOT changed (the head, the batch, the bodies):
 
 - **Head:** the THREAD TITLE as an H1, 17px weight 600 / 1.25 `--text-primary`; the
   summary (theme + newest turn line) 12.5px `--text-secondary` under it; then the one
@@ -420,6 +427,51 @@ other threads sit at the top of To do as post rows. Home keeps its Needs you blo
   screen, its input the page's FIELD. An EMPTY section does not render at all; the
   empty ones fold into ONE quiet line at the page bottom, 10px mono `--text-faint`:
   `needs you · live now · … — all quiet` (omitted when nothing is empty).
+
+## Page block (SWIT-95)
+
+A titled section of the ✦ page — `components/kb/PageBlock.tsx`, Ky's `ky/plan/PageBlock.tsx`.
+Radius 9, 1px `--border`, `--bg-panel` body. Header on `--bg-active`, `padding: 9px 14px
+8px`, a 1px `--border` hairline under it WHILE OPEN (none when folded); the title 13.5px
+weight 600 `--font-reading` `--text-primary` — NO COUNT, NO COLORED HEADING (Ky's CC-832
+rule: the rows carry the state, never the section); an optional dim mono 10px note beside
+it (`M of N decided`, `+3 more`); an optional action at the right; body `padding: 2px 14px
+4px`, `overflow-x: auto` for a grid wider than the panel. A fold chevron (an 8×8 SVG that
+rotates 90°, `aria-expanded`) draws only when the block is given a fold toggle — nothing
+on the ✦ page uses one yet, so every block today is always open, chevron-less.
+
+## Column heads (SWIT-95)
+
+The row grid's column names, once above the rows — `PageBlock.ColumnHeads`, Ky's
+`ColumnHeads`. 9px mono uppercase `letter-spacing: .06em` `--text-faint`, a 1px `--border`
+hairline under, `padding: 7px 0 5px`. A `{label, right: true}` entry right-aligns (Owner,
+Updated). Two grids on the ✦ page: **To do** `14px minmax(0,1fr) 150px 124px 52px` (check ·
+item · link · status · owner) and **Artifacts** `176px minmax(0,1fr) 124px 52px 14px`
+(artifact · title · status · updated · ×), column gap 11px both.
+
+## Status pill (SWIT-95)
+
+A status word as a solid, one-width pill — `PageBlock.StatusPill`, Ky's
+`handoff/HandoffBlock.tsx` StatusPill. 124px wide (a long word truncates inside rather than
+growing the slot), mono 10px weight 600, radius 11, `padding: 2px 8px`. The tone
+(`lib/statusPill.ts`'s `statusTone`, pure): **amber** `--tone-amber` fill / `--bg-primary`
+text (waiting, needs you, blocked) · **green** `--accent` fill / `--bg-primary` text (done,
+merged, passed, decided, settled, released) · **blue** `--tone-blue` fill / `--bg-primary`
+text (in progress, open, running, review) · **neutral** `--bg-hover` fill, 1px `--border`,
+`--text-secondary` (anything unrecognized — a guessed color is worse than none) ·
+**dim** transparent, 1px `--border`, `--text-faint` (closed, dropped, rejected, stale,
+mentioned, seen in thread — the thing is over). An empty word draws nothing, not an empty
+pill. An item's pill (`statusPill.itemPill`) is amber whenever the row waits on the user
+(`pageStore.isWaitingOnUser`), overriding the state word's own tone.
+
+## Age (SWIT-95)
+
+A row's relative age, dim at the right, with the NEW dot in front of it when the row moved
+since the reader last looked — `PageBlock.Age`, Ky's `Age`. 10px mono `--text-faint`,
+right-aligned, `title` = the full local timestamp. `lib/statusPill.ts`'s `ago` (pure,
+simpler than Ky's own — every stamp on the ✦ page is recent thread activity, so the range
+never needs to step past days): under a minute → `now`, else `Xm` / `Xh` / `Xd`. An
+unparseable or absent stamp draws an empty column, never `NaN` or a dash.
 
 ## Set frame (SWIT-79)
 

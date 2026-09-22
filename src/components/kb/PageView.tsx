@@ -119,7 +119,7 @@ import {
   takePageFocus,
   peekPageFocus,
 } from "../../lib/pageStore";
-import { nextThingFor } from "../../lib/nextThing";
+import { nextThingFor, openableAddressIn } from "../../lib/nextThing";
 import type { AnswerNote, InboxPost, PageAnswer, PageItem, PageQuestion, RenderedPage, SettledQuestion } from "../../lib/pageStore";
 import { parseSurfaceAddress } from "../../lib/surfaceParams";
 import { answerQuestion, openArtifact, openInPanel, getActiveTabSession, submitToThread } from "../../lib/panelStore";
@@ -128,6 +128,7 @@ import { composeWrite } from "../../lib/composer";
 import { batchSendTarget, BATCH_NOT_LIVE } from "../../lib/viewNotes";
 import { derivedThreadTitle, useThreadsView } from "../../lib/threadStore";
 import {
+  evidenceKindOf,
   groupEvidence,
   latchViewKey,
   mergeScannedEvidence,
@@ -145,43 +146,12 @@ import { getThreads } from "../../lib/threadStore";
 import { parseViewSpec } from "../../lib/viewStore";
 import { OptionRow } from "./OptionRow";
 import { log } from "../../lib/logger";
+import { itemPill, titleCase } from "../../lib/statusPill";
+import { Age, ARTIFACT_GRID, ColumnHeads, Fold, PageBlock, StatusPill, TODO_GRID, TURN_GRID, TypeTabs } from "./PageBlock";
 
 const MONO = "var(--font-mono)";
 /** The reading face (Ky's `font-sans`): bodies, not chrome. */
 const READING = "var(--font-reading)";
-
-/** Ky's section H2 (`PlanPanel.Section`): 14px semibold, a hairline under
- *  it, the count 10px faint beside it; `hot` = amber (the section that
- *  needs you). */
-const SECTION_TITLE: CSSProperties = {
-  fontFamily: READING,
-  fontSize: 14,
-  fontWeight: 600,
-  lineHeight: 1.3,
-  color: "var(--text-primary)",
-  margin: 0,
-  paddingBottom: 6,
-  marginBottom: 4,
-  borderBottom: "1px solid var(--border)",
-  display: "flex",
-  alignItems: "baseline",
-  gap: 8,
-};
-
-const SECTION_COUNT: CSSProperties = {
-  fontFamily: MONO,
-  fontSize: 10,
-  fontWeight: 400,
-  color: "var(--text-faint)",
-};
-
-const SECTION_META: CSSProperties = {
-  marginLeft: "auto",
-  fontFamily: MONO,
-  fontSize: 10,
-  fontWeight: 400,
-  color: "var(--text-faint)",
-};
 
 /** Ky's NewDot: the accent, the one place green means "moved since you
  *  last looked". */
@@ -221,15 +191,6 @@ function checkboxStyle(done: boolean): CSSProperties {
   };
 }
 
-/** Ky's trailing column on a row: 10px mono faint. */
-const ROW_META: CSSProperties = {
-  marginLeft: "auto",
-  flex: "none",
-  fontFamily: MONO,
-  fontSize: 10,
-  color: "var(--text-faint)",
-};
-
 /** Ky's input (`TodoPanel`: `bg-bg border-line-soft rounded-md px-2.5
  *  py-1.5 text-[12px]`): the deepest ground, a hairline, radius 6. */
 const FIELD: CSSProperties = {
@@ -260,19 +221,6 @@ const PRIMARY: CSSProperties = {
   cursor: "pointer",
 };
 
-/** Ky's text link button (`show all 12`, `earlier (3)`): 10px mono faint,
- *  primary under the pointer (`.page-textlink` in global.css). */
-const TEXT_LINK: CSSProperties = {
-  background: "none",
-  border: "none",
-  padding: "0 2px",
-  marginTop: 4,
-  fontFamily: MONO,
-  fontSize: 10,
-  color: "var(--text-faint)",
-  cursor: "pointer",
-};
-
 /** Owner column reads claude · you · team (Ky's OWNER_LABEL, 2026-08-31). */
 const OWNER_LABEL: Record<PageItem["owner"], string> = { agent: "claude", user: "you", team: "team" };
 
@@ -299,41 +247,6 @@ const NUM: CSSProperties = {
 };
 /** Everything under a card's first line indents past the number column. */
 const CARD_INDENT = 22;
-
-/** Ky's GroupChip (`PlanPanel.EvidenceList`): the Evidence group tabs are
- *  UNDERLINE tabs on one hairline — the active one carries a 1.5px primary
- *  bar and primary text, the rest are faint. No box. */
-const GROUP_TABS: CSSProperties = {
-  display: "flex",
-  flexWrap: "wrap",
-  alignItems: "flex-end",
-  gap: 16,
-  marginBottom: 4,
-  borderBottom: "1px solid var(--border)",
-};
-
-function chipStyle(on: boolean): CSSProperties {
-  return {
-    marginBottom: -1,
-    padding: "4px 0 6px",
-    background: "none",
-    border: "none",
-    borderBottom: `1.5px solid ${on ? "var(--text-primary)" : "transparent"}`,
-    fontFamily: MONO,
-    fontSize: 10.5,
-    color: on ? "var(--text-primary)" : "var(--text-faint)",
-    whiteSpace: "nowrap",
-    flex: "none",
-    cursor: "pointer",
-  };
-}
-
-/** SWIT-69: a checkbox, not a state glyph — done is checked, everything open
- *  is an empty box; the WORD carries the non-obvious states. */
-const STATE_WORD: Partial<Record<PageItem["state"], string>> = {
-  in_progress: "in progress",
-  waiting: "waiting",
-};
 
 export function PageView({ threadId, active }: { threadId: string; active: boolean }) {
   const { page, revision, refresh } = usePage(threadId, active);
@@ -555,7 +468,20 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
 
   const summary = pageSummary(page);
 
-  const renderAddress = (address: string, accent = false) => {
+  // SWIT-95 (Ky's LedgerPanel refColor): an address's colour reads off its
+  // KIND, not off whether it happens to be the page's own "next" line — a
+  // ticket key is blue, a doc/KB path is violet, everything else (a PR, a
+  // surface, a view, an unresolved path) is plain secondary text.
+  const addressColor = (address: string): string => {
+    const kind = evidenceKindOf(address);
+    if (kind === "ticket") return "var(--tone-blue)";
+    if (kind === "doc") return "var(--tone-violet)";
+    return "var(--text-secondary)";
+  };
+
+  const renderAddress = (address: string, opts: { accent?: boolean; fontSize?: number } = {}) => {
+    const { accent = false, fontSize } = opts;
+    const color = accent ? "var(--accent)" : addressColor(address);
     // SWIT-73: `view:<id>#h:<slug>` names a heading INSIDE a report — the
     // anchor rides reportStore's one-shot; the open is the ordinary view
     // open. A malformed fragment made the whole address plain upstream.
@@ -566,6 +492,8 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
           text={address}
           title="open this view beside the thread"
           accent={accent}
+          color={color}
+          fontSize={fontSize}
           onOpen={() => {
             if (viewHit.anchor) requestReportAnchor(threadId, viewHit.viewId, viewHit.anchor);
             openViewAddress(viewHit.viewId);
@@ -573,7 +501,16 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
         />
       );
     }
-    return <EvidenceAddress address={address} target={linkTarget(address)} accent={accent} />;
+    return <EvidenceAddress address={address} target={linkTarget(address)} accent={accent} color={color} fontSize={fontSize} />;
+  };
+
+  // SWIT-95 (Ky's To do LINK column): the first openable address inside an
+  // item's own words — the same rule the turn-end hook reads (nextThing's
+  // openableAddressIn) — or null when the item names nothing openable, which
+  // leaves the LINK column empty rather than printing a dead address.
+  const itemLink = (item: PageItem) => {
+    const hit = openableAddressIn(`${item.title} ${item.note ?? ""}`, { threadId, kbDocs, projectKey });
+    return hit ? renderAddress(hit.address, { fontSize: 10.5 }) : null;
   };
 
   return (
@@ -608,7 +545,7 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
         {nextThing?.why === "review" ? (
           <div style={{ display: "flex", gap: 6, alignItems: "baseline", minWidth: 0, fontFamily: MONO, fontSize: 11, marginTop: 2 }}>
             <span style={{ flex: "none", color: "var(--text-faint)" }}>start here →</span>
-            {renderAddress(nextThing.address, true)}
+            {renderAddress(nextThing.address, { accent: true })}
           </div>
         ) : nextThing ? (
           <div style={{ display: "flex", gap: 6, alignItems: "baseline", minWidth: 0, fontFamily: MONO, fontSize: 11, marginTop: 2 }}>
@@ -641,100 +578,137 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
 
       <DecisionsBlock threadId={threadId} page={page} seenAt={seenAt} />
 
+      {(page.latestTurn || page.updates.length > 0) && (
+        <PageBlock title="This turn">
+          {page.latestTurn &&
+            page.latestTurn.lines.map((l, i) => (
+              <TurnRow
+                key={`latest-${i}`}
+                time={i === 0 ? turnTime(page.latestTurn!.at) : ""}
+                text={l}
+                isNew={i === 0 && isNewSince(page.latestTurn!.at, seenAt)}
+              />
+            ))}
+          {page.updates.map((p) => (
+            <TurnRow key={p.id} time={<>↓ {p.from}</>} text={p.text} isNew={isNewSince(p.at, seenAt)} />
+          ))}
+          {page.earlierTurns.length > 0 && (
+            <Fold label="earlier" count={page.earlierTurns.length}>
+              {page.earlierTurns.map((t, i) =>
+                t.lines.map((l, j) => (
+                  <TurnRow key={`earlier-${i}-${j}`} time={j === 0 ? turnTime(t.at) : ""} text={l} dim />
+                ))
+              )}
+            </Fold>
+          )}
+        </PageBlock>
+      )}
+
       {(page.requests.length > 0 || page.openItems.length > 0) && (
-        <Section title="To do" count={page.requests.length + page.openItems.length}>
+        <PageBlock title="To do">
+          <ColumnHeads grid={TODO_GRID} labels={["", "Item", "Link", "Status", { label: "Owner", right: true }]} />
           {page.requests.map((p) => (
             <PostRow key={p.id} post={p} isNew={isNewSince(p.at, seenAt)} />
           ))}
           {page.openItems.map((i) => (
-            <ItemRow key={i.id} item={i} />
+            <ItemRow key={i.id} item={i} link={itemLink(i)} />
           ))}
-        </Section>
-      )}
-
-      {(page.latestTurn || page.updates.length > 0) && (
-        <Section
-          title="What happened"
-          isNew={page.latestTurn ? isNewSince(page.latestTurn.at, seenAt) : false}
-        >
-          {page.latestTurn && <TurnLines lines={page.latestTurn.lines} />}
-          {page.updates.map((p) => (
-            <PostRow key={p.id} post={p} isNew={isNewSince(p.at, seenAt)} />
-          ))}
-          {page.earlierTurns.length > 0 && <EarlierTurns turns={page.earlierTurns} />}
-        </Section>
+        </PageBlock>
       )}
 
       {evidence.length > 0 && (
-        <Section title="Evidence" count={evidence.length}>
+        <PageBlock title="Artifacts">
           {groups.length > 1 && (
-            <div style={GROUP_TABS} role="tablist">
-              {groups.map((g) => (
-                <button
-                  key={g.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={g.id === (activeGroup?.id ?? "recent")}
-                  onClick={() => setGroupId(g.id)}
-                  style={chipStyle(g.id === (activeGroup?.id ?? "recent"))}
-                >
-                  {g.label} <span style={{ color: "var(--text-faint)" }}>{g.count}</span>
-                </button>
-              ))}
-            </div>
+            <TypeTabs
+              tabs={groups.map((g) => ({ id: g.id, label: g.label, count: g.count }))}
+              selected={activeGroup?.id ?? "recent"}
+              onSelect={(id) => setGroupId(id as EvidenceGroupId)}
+            />
           )}
+          <ColumnHeads grid={ARTIFACT_GRID} labels={["Artifact", "Title", "Status", { label: "Updated", right: true }, ""]} />
           {(activeGroup?.rows ?? []).map((e) => (
             <div
               key={e.address}
-              className="page-evidence-row"
-              style={{
-                ...DENSE_ROW,
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                minWidth: 0,
-              }}
+              className="page-evidence-row page-block-row"
+              style={{ display: "grid", ...ARTIFACT_GRID, columnGap: 11, alignItems: "center", padding: "7px 0", borderBottom: "1px solid var(--border)" }}
             >
-              {isNewSince(e.updatedAt, seenAt) && <span style={NEW_DOT} />}
-              {renderAddress(e.address)}
-              <span style={{ fontSize: 12, color: "var(--text-secondary)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
-                {e.label}
+              <span style={{ minWidth: 0, overflow: "hidden" }}>{renderAddress(e.address, { fontSize: 10.5 })}</span>
+              <span
+                style={{
+                  fontSize: 12.5,
+                  minWidth: 0,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  color: e.label ? "var(--text-secondary)" : "var(--text-faint)",
+                }}
+              >
+                {e.label || titleCase(evidenceKindOf(e.address))}
               </span>
-              {e.status && <span style={ROW_META}>{e.status}</span>}
-              {/* A decision row is corrected on its question (`change`), not taken off. */}
-              {!e.address.startsWith(DECISION_ADDRESS_PREFIX) && (
-                <button
-                  type="button"
-                  className="page-evidence-x"
-                  disabled={retracting !== null}
-                  data-retracting={retracting === e.address ? "" : undefined}
-                  onClick={(ev) => void retract(e.address, ev.currentTarget.closest<HTMLElement>(".page-evidence-row"))}
-                  title="Take this row off the page"
-                  aria-label={`Take ${e.address} off the page`}
-                  style={e.status ? undefined : { marginLeft: "auto" }}
-                >
-                  ×
-                </button>
-              )}
+              <span>{e.status && <StatusPill word={e.status} />}</span>
+              <Age at={e.updatedAt} isNew={isNewSince(e.updatedAt, seenAt)} />
+              <span>
+                {/* A decision row is corrected on its question (`change`), not taken off. */}
+                {!e.address.startsWith(DECISION_ADDRESS_PREFIX) && (
+                  <button
+                    type="button"
+                    className="page-evidence-x"
+                    disabled={retracting !== null}
+                    data-retracting={retracting === e.address ? "" : undefined}
+                    onClick={(ev) => void retract(e.address, ev.currentTarget.closest<HTMLElement>(".page-evidence-row"))}
+                    title="Take this row off the page"
+                    aria-label={`Take ${e.address} off the page`}
+                  >
+                    ×
+                  </button>
+                )}
+              </span>
             </div>
           ))}
-        </Section>
+        </PageBlock>
       )}
 
       {page.settledQuestions.length > 0 && <DecidedSection rows={page.settledQuestions} />}
 
       {page.doneItems.length > 0 && (
-        <Section
-          title="Done"
-          count={page.doneItems.length}
-          meta={page.doneFolded > 0 ? `+ ${page.doneFolded} more` : undefined}
-        >
+        <PageBlock title="Done" note={page.doneFolded > 0 ? `+ ${page.doneFolded} more` : undefined}>
+          <ColumnHeads grid={TODO_GRID} labels={["", "Item", "Link", "Status", { label: "Owner", right: true }]} />
           {page.doneItems.map((i) => (
-            <ItemRow key={i.id} item={i} />
+            <ItemRow key={i.id} item={i} link={itemLink(i)} />
           ))}
-        </Section>
+        </PageBlock>
       )}
 
-      {page.droppedItems.length > 0 && <DroppedSection rows={page.droppedItems} />}
+      {page.droppedItems.length > 0 && <DroppedSection rows={page.droppedItems} itemLink={itemLink} />}
+    </div>
+  );
+}
+
+/** This turn's grid row (Ky's TurnRow, minus the "where it came from" column
+ *  — our turns have no source feed to name): time on the row a line's group
+ *  starts, blank after; the reading face for the line itself. */
+function TurnRow({
+  time,
+  text,
+  dim = false,
+  isNew = false,
+}: {
+  time: ReactNode;
+  text: string;
+  dim?: boolean;
+  /** Moved since the last visit — the accent dot in the time column. */
+  isNew?: boolean;
+}) {
+  return (
+    <div
+      className="page-block-row"
+      style={{ display: "grid", ...TURN_GRID, columnGap: 11, padding: "5px 0", borderBottom: "1px solid var(--border)" }}
+    >
+      <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)", whiteSpace: "nowrap" }}>
+        {isNew && <span style={{ ...NEW_DOT, marginRight: 4, verticalAlign: "middle" }} title="New since you last looked" />}
+        {time}
+      </span>
+      <span style={{ fontFamily: READING, fontSize: 12.5, lineHeight: 1.5, color: dim ? "var(--text-secondary)" : "var(--text-primary)" }}>{text}</span>
     </div>
   );
 }
@@ -742,48 +716,15 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
 /** DROPPED (SWIT-78, Ky's CC-703): rows that were never the right row —
  *  history, collapsed by default so they never compete with the rows that
  *  still matter. Same disclosure shape as Decided. */
-function DroppedSection({ rows }: { rows: PageItem[] }) {
-  const [open, setOpen] = useState(false);
+function DroppedSection({ rows, itemLink }: { rows: PageItem[]; itemLink: (item: PageItem) => ReactNode }) {
   return (
-    <Section title="Dropped" count={rows.length}>
-      <button type="button" className="page-textlink" onClick={() => setOpen((v) => !v)} style={TEXT_LINK}>
-        {open ? "hide" : `show ${rows.length} ▸`}
-      </button>
-      {open && rows.map((i) => <ItemRow key={i.id} item={i} />)}
-    </Section>
-  );
-}
-
-/** Ky's `PlanPanel.Section`: an H2 with a hairline; `hot` = the section
- *  that needs the user, in amber. */
-function Section({
-  title,
-  count,
-  meta,
-  isNew = false,
-  hot = false,
-  block,
-  children,
-}: {
-  title: string;
-  count?: number;
-  meta?: string;
-  isNew?: boolean;
-  hot?: boolean;
-  /** SWIT-79: a scroll target name (`data-page-block`) for a focus request. */
-  block?: string;
-  children: ReactNode;
-}) {
-  return (
-    <section data-page-block={block}>
-      <h2 style={hot ? { ...SECTION_TITLE, color: "var(--tone-amber)" } : SECTION_TITLE}>
-        {title}
-        {count !== undefined && <span style={SECTION_COUNT}>{count}</span>}
-        {isNew && <span style={{ ...NEW_DOT, alignSelf: "center" }} title="New since you last looked" />}
-        {meta && <span style={SECTION_META}>{meta}</span>}
-      </h2>
-      {children}
-    </section>
+    <PageBlock title="Dropped">
+      <Fold label="dropped" count={rows.length}>
+        {rows.map((i) => (
+          <ItemRow key={i.id} item={i} link={itemLink(i)} />
+        ))}
+      </Fold>
+    </PageBlock>
   );
 }
 
@@ -1005,7 +946,7 @@ function DecisionsBlock({
   const cannotSend = (decided === 0 && !hasDraft) || frozen || notLive;
 
   return (
-    <Section title="Open questions" count={visible.length} block="decisions" hot>
+    <PageBlock title="Needs you" note={`${decided} of ${visible.length} decided`} dataPageBlock="decisions">
       <div ref={rootRef} style={{ display: "flex", flexDirection: "column" }}>
         {visible.map((q, i) => {
           const chosen = answerOf(q);
@@ -1177,21 +1118,17 @@ function DecisionsBlock({
           </button>
         </div>
       </div>
-    </Section>
+    </PageBlock>
   );
 }
 
 /** DECIDED (SWIT-77): the settled questions, folded behind a count —
  *  `you: <answer>` for the user's, `settled: <answer>` for the agent's. */
 function DecidedSection({ rows }: { rows: SettledQuestion[] }) {
-  const [open, setOpen] = useState(false);
   return (
-    <Section title="Decided" count={rows.length}>
-      <button type="button" className="page-textlink" onClick={() => setOpen((v) => !v)} style={TEXT_LINK}>
-        {open ? "hide" : `show ${rows.length} ▸`}
-      </button>
-      {open &&
-        rows.map(({ question, answer, by }) => (
+    <PageBlock title="Decided">
+      <Fold label="decided" count={rows.length}>
+        {rows.map(({ question, answer, by }) => (
           <div key={question.id} style={{ ...DENSE_ROW, flexDirection: "column", gap: 2 }}>
             <span style={{ fontSize: 12.5, color: "var(--text-primary)", lineHeight: 1.45 }}>{question.text}</span>
             <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>
@@ -1200,7 +1137,8 @@ function DecidedSection({ rows }: { rows: SettledQuestion[] }) {
             </span>
           </div>
         ))}
-    </Section>
+      </Fold>
+    </PageBlock>
   );
 }
 
@@ -1217,47 +1155,47 @@ function PostRow({ post, isNew }: { post: InboxPost; isNew: boolean }) {
   );
 }
 
-/** SWIT-69 — words, not glyphs: a CHECKBOX (`☐` open, `☑` done, in our
- *  tokens), the text, a one-word status where not obvious, the OWNER column
- *  right-aligned — dim, or AMBER semibold when the row waits on the user
- *  (SWIT-77, Ky's PlanPanel: the colour is the state that needs you, the
- *  only colour on the page). No colored glyph, no spinner. A legacy note
- *  (nothing writes one since SWIT-77) still reads in the row's title. */
-function ItemRow({ item }: { item: PageItem }) {
-  const word = STATE_WORD[item.state];
+/** SWIT-95 (Ky's ItemRow, CC-832 grid): check · item · link · status ·
+ *  owner, one line. The link is the first openable address the item's own
+ *  words carry (the caller resolves it — `PageView.itemLink`); the status
+ *  is `itemPill` (statusTone, amber whenever the row waits on the user);
+ *  the owner column matches, amber semibold (SWIT-77's one colour) — a
+ *  dropped or done row is never amber. A legacy note (nothing writes one
+ *  since SWIT-77) still reads in the row's title. */
+function ItemRow({ item, link }: { item: PageItem; link: ReactNode }) {
   const done = item.state === "done";
+  const pill = itemPill(item);
   // SWIT-78: a dropped row is off the live list too — never amber, never checked.
   const onYou = isOpenItem(item) && isWaitingOnUser(item);
   return (
     <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "18px minmax(0, 1fr) auto",
-        columnGap: 12,
-        alignItems: "start",
-        padding: "7px 0",
-        borderBottom: "1px solid var(--border)",
-      }}
+      className="page-block-row"
+      style={{ display: "grid", ...TODO_GRID, columnGap: 11, alignItems: "center", padding: "7px 0", borderBottom: "1px solid var(--border)" }}
       title={item.note ?? undefined}
     >
       <span style={checkboxStyle(done)} aria-hidden>
         {done ? "✓" : ""}
       </span>
       <span
+        title={item.title}
         style={{
           minWidth: 0,
           fontSize: 12.5,
           lineHeight: 1.45,
-          overflowWrap: "anywhere",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
           color: isOpenItem(item) ? "var(--text-primary)" : "var(--text-faint)",
-          textDecoration: done ? "none" : undefined,
         }}
       >
         {item.title}
       </span>
+      <span style={{ minWidth: 0, overflow: "hidden" }}>{link}</span>
+      <span>
+        <StatusPill word={pill.word} tone={pill.tone} />
+      </span>
       <span
         style={{
-          paddingTop: 2,
           fontFamily: MONO,
           fontSize: 10,
           whiteSpace: "nowrap",
@@ -1265,36 +1203,10 @@ function ItemRow({ item }: { item: PageItem }) {
           color: onYou ? "var(--tone-amber)" : "var(--text-faint)",
           fontWeight: onYou ? 600 : 400,
         }}
-        title={word ?? item.state}
       >
-        {word ? `${word} · ` : ""}
         {OWNER_LABEL[item.owner]}
       </span>
     </div>
-  );
-}
-
-/** Ky's TurnLines: each line of a turn as a dash-bulleted line with a
- *  hanging indent — 12.5px primary for the latest turn, dim for earlier. */
-function TurnLines({ lines, dim = false }: { lines: string[]; dim?: boolean }) {
-  return (
-    <ul style={{ listStyle: "none", margin: 0, padding: "4px 0" }}>
-      {lines.map((l, i) => (
-        <li
-          key={i}
-          style={{
-            fontSize: 12.5,
-            lineHeight: 1.5,
-            paddingLeft: 12,
-            textIndent: -12,
-            color: dim ? "var(--text-secondary)" : "var(--text-primary)",
-          }}
-        >
-          <span style={{ color: "var(--text-faint)" }}>– </span>
-          {l}
-        </li>
-      ))}
-    </ul>
   );
 }
 
@@ -1304,6 +1216,8 @@ function AddressButton({
   title,
   onOpen,
   accent = false,
+  color,
+  fontSize = 11,
 }: {
   text: string;
   title: string;
@@ -1311,6 +1225,11 @@ function AddressButton({
   /** Ky's `next →` link: the accent, underlined under the pointer. An
    *  evidence address is primary text on Ky's hairline (`.page-address`). */
   accent?: boolean;
+  /** SWIT-95: the caller's kind colour — overrides the accent/primary
+   *  default (still used when a caller has no kind reading, e.g. a plain
+   *  view address). */
+  color?: string;
+  fontSize?: number;
 }) {
   return (
     <button
@@ -1334,8 +1253,8 @@ function AddressButton({
         margin: 0,
         font: "inherit",
         fontFamily: MONO,
-        fontSize: 11,
-        color: accent ? "var(--accent)" : "var(--text-primary)",
+        fontSize,
+        color: color ?? (accent ? "var(--accent)" : "var(--text-primary)"),
         cursor: "pointer",
       }}
     >
@@ -1355,22 +1274,26 @@ function EvidenceAddress({
   address,
   target,
   accent = false,
+  color,
+  fontSize = 11,
 }: {
   address: string;
   target: OpenableArtifact | null;
   accent?: boolean;
+  color?: string;
+  fontSize?: number;
 }) {
-  // Not openable (a ticket key, an unresolved path): plain primary text
-  // whatever the caller asked — the accent is reserved for a thing that
-  // OPENS, and a green address that does nothing on click would lie.
+  // Not openable (a ticket key, an unresolved path): plain text, coloured
+  // by kind whatever the caller asked — the accent is reserved for a thing
+  // that OPENS, and a green address that does nothing on click would lie.
   if (!target)
     return (
       <span
         className={accent ? undefined : "page-address"}
         style={{
           fontFamily: MONO,
-          fontSize: 11,
-          color: "var(--text-primary)",
+          fontSize,
+          color: color ?? "var(--text-primary)",
           flex: "0 1 auto",
           minWidth: 0,
           overflow: "hidden",
@@ -1390,27 +1313,10 @@ function EvidenceAddress({
       text={address}
       title={title}
       accent={accent}
+      color={color}
+      fontSize={fontSize}
       onOpen={(modifier) => openArtifact(target, { modifier })}
     />
-  );
-}
-
-/** Earlier turns, folded behind a text link button — the latest is the page's face. */
-function EarlierTurns({ turns }: { turns: { at: string; lines: string[] }[] }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <>
-      <button type="button" className="page-textlink" onClick={() => setOpen((v) => !v)} style={TEXT_LINK}>
-        {open ? "hide earlier" : `earlier (${turns.length})`}
-      </button>
-      {open &&
-        turns.map((t, i) => (
-          <div key={`${t.at}-${i}`} style={{ marginTop: 8, paddingLeft: 8, borderLeft: "1px solid var(--border)" }}>
-            {t.at && <div style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)" }}>{turnTime(t.at)}</div>}
-            <TurnLines lines={t.lines} dim />
-          </div>
-        ))}
-    </>
   );
 }
 
