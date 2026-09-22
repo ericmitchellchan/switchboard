@@ -1,6 +1,7 @@
 import type { Session, SavedSession, SavedWorkspace } from "../types";
 import type { PaneNode } from "./paneLayout";
 import { serializeTerminal, getTerminal, isSessionDirty, clearSessionDirty } from "./terminal";
+import { capSerialized } from "./scrollbackRestore";
 import { saveScrollback, saveThreads } from "./ipc";
 import {
   getThreads,
@@ -87,9 +88,9 @@ export async function saveAllScrollbacks(sessions: Session[], onlyDirty = false)
     const content = serializeTerminal(s.id);
     if (content) {
       clearSessionDirty(s.id);
-      const capped = content.length > MAX_SCROLLBACK_SIZE
-        ? content.slice(-MAX_SCROLLBACK_SIZE) // keep the tail (most recent)
-        : content;
+      // Keep the tail (most recent), cut at a row boundary — a raw slice
+      // could land inside an escape sequence or a surrogate pair (SWIT-93).
+      const capped = capSerialized(content, MAX_SCROLLBACK_SIZE);
       return saveScrollback(s.id, capped).catch(() => {});
     }
     return Promise.resolve();

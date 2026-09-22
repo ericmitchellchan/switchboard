@@ -48,6 +48,7 @@ import {
   onSessionExited,
 } from "./ipc";
 import { log } from "./logger";
+import { readRestoreGeometry, restoreSettleSequence } from "./scrollbackRestore";
 import {
   FIRST_SPAWN_GEN,
   acceptsGeneration,
@@ -554,16 +555,33 @@ export function acquireTerminal(
   // Restore scrollback for sessions restored from a saved workspace, then
   // flush any PTY chunks that arrived meanwhile (xterm writes are queued in
   // order, so the restore content lands first).
+  //
+  // SWIT-93: the serialized frame ends by moving the cursor back to where it
+  // WAS (claude's input box, rows above the bottom), so the fresh shell and
+  // the resumed claude painted over the old rows. After the frame is PARSED
+  // (the write callback — not merely queued) the buffer is measured and a
+  // settle sequence puts the cursor on a fresh line under the last content
+  // row; only then do the buffered PTY chunks flush. `lib/scrollbackRestore`
+  // holds the pure rule.
   if (opts?.restoredFromId) {
     const restoredFromId = opts.restoredFromId;
     log.debug(`Restoring scrollback for session id=${sessionId} from=${restoredFromId}`);
     loadScrollback(restoredFromId)
-      .then((content) => {
-        if (content && !entry.disposed) {
-          entry.terminal.write(content, () => entry.terminal.scrollToBottom());
-        }
-        log.debug(`Scrollback restored for session id=${sessionId}`);
-      })
+      .then(
+        (content) =>
+          new Promise<void>((resolve) => {
+            if (!content || entry.disposed) return resolve();
+            entry.terminal.write(content, () => {
+              if (entry.disposed) return resolve();
+              const settle = restoreSettleSequence(readRestoreGeometry(entry.terminal));
+              entry.terminal.write(settle, () => {
+                entry.terminal.scrollToBottom();
+                resolve();
+              });
+            });
+          })
+      )
+      .then(() => log.debug(`Scrollback restored for session id=${sessionId}`))
       .catch((e) => {
         log.warn(`Failed to restore scrollback for session id=${sessionId}: ${e}`);
       })

@@ -150,7 +150,10 @@ export function serializeTerminal(sessionId: string): string | null {
   const instance = getTerminal(sessionId);
   if (!instance) return null;
   try {
-    return instance.serializeAddon.serialize();
+    // SWIT-93: the modes (bracketed paste, application cursor keys, mouse
+    // tracking) belong to the program that was running; the file is read
+    // back into a FRESH shell, which arms its own. See lib/scrollbackRestore.
+    return instance.serializeAddon.serialize({ excludeModes: true });
   } catch (e) {
     log.warn(`Failed to serialize terminal for session id=${sessionId}: ${e}`);
     return null;
