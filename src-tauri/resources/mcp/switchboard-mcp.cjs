@@ -1007,7 +1007,17 @@ const VIEW_TOOL = {
     "per line. SETS: several views of one kind go in as ONE tab — the panel steps through " +
     "them — instead of opening N tabs: show each view, then `show` with " +
     "set:{label:'3 gamma views', ids:['v1','v2','v3']} (views already written this thread, " +
-    "2–50) opens them as one tab; no kind/title/source on that call.",
+    "2–50) opens them as one tab; no kind/title/source on that call. A DASHBOARD is a report " +
+    "with a layout: a ```facts block, body a JSON array (<=8) of {label, value, " +
+    "tone?:'accent'|'amber'|'neutral'}, renders ONE header card (always full width, never " +
+    "packed; a `facts` block inserted ahead of others renumbers them, so add it before pins are filed) — put it first. A ```stat tile also takes `series` (<=60 finite numbers — a longer series is trimmed to its most recent 60 — drawn as " +
+    "a sparkline) and `delta` (one line under the figure, e.g. '+2 vs prior 30d'). Any ```view " +
+    "or ```stat block's JSON may carry `width`:'half'|'third' (default 'full', stripped before " +
+    "the block is otherwise parsed); consecutive blocks of the SAME width with no prose between " +
+    "them pack side by side — two halves, three thirds. So: a ```facts header, a row of " +
+    "```stat tiles with `series`/`delta` and `width`, then ```view blocks with " +
+    "`width:'half'|'third'` for the charts beside them — reads as one scroll instead of a page " +
+    "per number.",
   inputSchema: {
     type: "object",
     properties: {

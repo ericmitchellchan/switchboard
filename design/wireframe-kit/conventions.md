@@ -301,6 +301,29 @@ that stop being true.
   `lib/statusPill.ts`, not in a component, so pageStore and the turn-end hook could read
   the same rule if they ever need to (neither does yet).
 
+- 2026-09-22 — A DASHBOARD IS A REPORT WITH A LAYOUT (SWIT-96, Ky pass 3b). Three
+  pieces, one grammar, all in `reportStore.ts` (pure) and `ReportView.tsx` (draws it).
+  (1) WIDTH: any ` ```view `/` ```stat ` block's JSON may carry `"width": "half" |
+  "third"` (default `"full"`, stripped before the block reaches
+  `parseInlineViewSpec`/`parseStatTiles` — it is layout, not part of either grammar);
+  `packRows` groups consecutive same-width blocks with no narrative between them into
+  one CSS grid row (two halves, three thirds), a leftover taking the rest of its own
+  row rather than an empty cell. An array-shaped `stat` body (the existing multi-tile
+  row convention) has no top-level JSON slot for `width` and always reads `full` — one
+  tile per block for a packed cell. (2) STAT CARDS GOT A SPARKLINE: `series` (≤ 60
+  finite numbers, `STAT_SERIES_CAP`, trimmed to the TAIL over cap) draws a 72×20
+  `--accent` polyline top-right of the figure (Ky's StatusViz `Sparkline`, ours with no
+  marker dot); `delta` (≤ 40 chars) is one mono line under the label (Ky's
+  UserOverviewTab `Stat` figure-over-label shape, adopted for the card generally). Both
+  strict like `n`/`tone` — a non-array/non-numeric `series` or a non-string `delta`
+  errors the tile. (3) FACTS HEADER: a new fenced ` ```facts ` block, body a JSON array
+  (≤ 8, `FACTS_ITEM_CAP`) of `{label, value, tone?: accent|amber|neutral}`, renders ONE
+  raised card (Ky's FactsRow, re-cut for a report's own grammar rather than a doc's
+  front-matter paragraph — `lib/facts.ts` is untouched) — always full width, never
+  packed, and it counts against `REPORT_BLOCK_CAP` like any other live block. All three
+  strict-per-block, isolated-per-block: a malformed block still errors ONE card, in its
+  own cell, and the rest of the report renders.
+
 ## Decisions recorded by the app
 
 - 2026-09-09 — Bundle IBM Plex Sans for page and doc bodies (asked: Ky's page and docs read in IBM Plex Sans; ours are still JetBrains Mono at Ky's sizes. Bring in a sans reading face?; thread: New thread)
