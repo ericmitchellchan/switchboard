@@ -20,6 +20,7 @@ describe("statusTone", () => {
     expect(statusTone("open")).toBe("blue");
     expect(statusTone("running")).toBe("blue");
     expect(statusTone("review")).toBe("blue");
+    expect(statusTone("in review")).toBe("blue"); // the ticket status the page actually emits
   });
   it("reads the dim words", () => {
     expect(statusTone("closed")).toBe("dim");

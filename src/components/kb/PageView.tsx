@@ -705,7 +705,7 @@ function TurnRow({
       style={{ display: "grid", ...TURN_GRID, columnGap: 11, padding: "5px 0", borderBottom: "1px solid var(--border)" }}
     >
       <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)", whiteSpace: "nowrap" }}>
-        {isNew && <NewDot style={{ marginRight: 4 }} />}
+        {isNew && <span style={{ ...NEW_DOT, marginRight: 4, verticalAlign: "middle" }} title="New since you last looked" />}
         {time}
       </span>
       <span style={{ fontFamily: READING, fontSize: 12.5, lineHeight: 1.5, color: dim ? "var(--text-secondary)" : "var(--text-primary)" }}>{text}</span>
