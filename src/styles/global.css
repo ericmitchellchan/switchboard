@@ -122,6 +122,23 @@
      decision covered page and doc bodies, nothing else). Chrome stays
      `--font-mono`. */
   --font-reading: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  /* SIGN + CHART TONES AT THE ROOT (SWIT-81 review fix, 2026-09-22). These were
+     declared only under `.sb-surface` (surfaces.css), the scope a project page
+     mounts in — and a `view` artifact's renderers (ViewSurface's bars and
+     tables, ReportView's stat cards) mount OUTSIDE it, in the panel, so
+     `var(--up)` resolved to nothing and a sign-toned bar drew no fill. The
+     values mirror surfaces.css exactly; change one, change the other
+     (candles.ts mirrors the chart hexes a third time for canvas). */
+  --up: #6fc492;
+  --dn: #e88a8a;
+  --chart-1: #7ab8e8;
+  --chart-2: #a99cf0;
+  --chart-3: #e8b765;
+  --chart-4: #6fc9c0;
+  --chart-5: #e89ab5;
+  --chart-6: #a8c97e;
+  --chart-7: #cf9de8;
+  --chart-8: #e8a27a;
 }
 
 @keyframes pulse-ring {
