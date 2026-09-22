@@ -277,6 +277,14 @@ that stop being true.
   `reportStore.ts`'s `parseTile` validates a stat tile's `tone` the same strict way
   since a report's markdown never reaches the server. The hover rule and every anchor
   (`bar:`, `bin:`, `row:`) are unchanged — only the fill moves.
+- 2026-09-22 — A KEPT VIEW REOPENS RENDERED, NOT AS RAW JSON (SWIT-53, half 1). A
+  `.view.json` snapshot (`_scratch/<project>/<id>-<stamp>.view.json`) now draws through
+  the same view chrome a live view uses — same table/candles/bars/line renderers, same
+  filters, same spec disclosure, same hover tooltip — over its frozen rows. It reads as
+  a SNAPSHOT, not a live view: re-run, keep and pins are hidden (no live thread to run
+  a source or file a pin against), replaced by one `kept <date> · frozen` label; a click
+  that would normally drill or send to a thread does nothing, silently. Promotion out of
+  `_scratch/` into the KB or a Research page is a separate, later piece of work.
 
 - 2026-09-22 — KY'S BLOCKS (SWIT-95, `ky/plan/PageBlock.tsx` + `handoff/HandoffBlock.tsx`'s
   StatusPill). The ✦ page's sections stop being an H2-with-a-count over a flat list and

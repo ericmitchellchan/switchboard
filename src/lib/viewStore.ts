@@ -1759,6 +1759,10 @@ export function useViewPanels(threadId: string, spec: ViewSpec | null, active: b
       return;
     }
     if (!active) return;
+    // No thread = nothing to load from (a KEPT view, SWIT-53: frozen, so its
+    // panels stay whatever the snapshot held — and a query-sourced panel must
+    // not fetch live data under a "frozen" label). Same guard as useView.
+    if (threadId.length === 0) return;
     const buildKey = `${spec.id}:${spec.builtAt}:${panels
       .map((p) => (p.source.type === "file" ? p.source.path : p.source.url))
       .join("|")}`;

@@ -611,7 +611,7 @@ function KeptViews({ kept }: { kept: string[] }) {
         return (
           <Row
             key={relPath}
-            title={`${relPath} — opens the raw snapshot for now; rendered reopen is a follow-up`}
+            title={`${relPath} — opens rendered, frozen at the moment it was kept (SWIT-53)`}
             onClick={() => navigate({ screen: "kb", doc: relPath })}
           >
             <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", ...TITLE }}>

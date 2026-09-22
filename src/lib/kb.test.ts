@@ -175,4 +175,12 @@ describe("docKind", () => {
     expect(docKind("registry.json")).toBe("data");
     expect(docKind("Makefile")).toBe("unknown");
   });
+
+  it("routes a kept view's .view.json suffix to \"view\", not \"data\" (SWIT-53)", () => {
+    expect(docKind("_scratch/switchboard/trades-2026-09-20.view.json")).toBe("view");
+    expect(docKind("_scratch/switchboard/trades-2026-09-20.VIEW.JSON")).toBe("view");
+    // a plain .json (no .view. suffix) is still "data" — the ordinary case
+    // is unchanged.
+    expect(docKind("_scratch/switchboard/trades-2026-09-20.json")).toBe("data");
+  });
 });
