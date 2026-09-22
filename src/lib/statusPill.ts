@@ -22,7 +22,7 @@ const AMBER_WORDS = new Set(["waiting", "needs you", "blocked"]);
 /** The work happened, or the answer is final. */
 const GREEN_WORDS = new Set(["done", "merged", "passed", "decided", "settled", "released"]);
 /** Live and moving. */
-const BLUE_WORDS = new Set(["in progress", "open", "running", "review"]);
+const BLUE_WORDS = new Set(["in progress", "open", "running", "review", "in review"]);
 /** Over, and not in a way that needs a color — a dim outline, same reading as
  *  Ky's ledger DIM_WORDS. */
 const DIM_WORDS = new Set(["closed", "dropped", "rejected", "stale", "mentioned", "seen in thread"]);

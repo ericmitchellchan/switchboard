@@ -27,7 +27,10 @@ const HEADER: CSSProperties = {
   minWidth: 0,
   alignItems: "center",
   gap: 10,
-  background: "var(--bg-active)",
+  // --bg-hover, not --bg-active: on the --bg-panel body (#141414) the
+  // #1a1a1a step is the one global.css says "is too close to read"; the
+  // header strip is a structural surface, not a hover accent.
+  background: "var(--bg-hover)",
   padding: "9px 14px 8px",
 };
 
@@ -51,6 +54,9 @@ const NOTE: CSSProperties = {
   color: "var(--text-faint)",
 };
 
+// The body scrolls sideways when a grid's fixed columns outgrow a narrow
+// panel; `.page-block-body` gives that bar the terminal host's thin, visible
+// thumb (global.css) — Chromium's 15px fallback read as nothing (SWIT-68).
 const BODY: CSSProperties = {
   minWidth: 0,
   padding: "2px 14px 4px",
@@ -131,7 +137,11 @@ export function PageBlock({
         {note !== undefined && <span style={NOTE}>{note}</span>}
         {action && <span style={{ display: "flex", flex: "none", alignItems: "center", gap: 6 }}>{action}</span>}
       </header>
-      {open && <div style={BODY}>{children}</div>}
+      {open && (
+        <div className="page-block-body" style={BODY}>
+          {children}
+        </div>
+      )}
     </section>
   );
 }

@@ -274,6 +274,19 @@ html, body, #root {
 /* SWIT-95 (Ky's PageBlock row rule): every block's grid row — To do, This
    turn, Artifacts (which also carries .page-evidence-row for its × reveal) —
    lights the same way on hover. */
+/* A page block's body scrolls sideways when its grid's fixed columns outgrow
+   a narrow panel (SWIT-95). The bar is the terminal host's: thin, one step
+   brighter than the global one, drawn only while there is overflow — the
+   15px Chromium fallback read as nothing (SWIT-68). */
+.page-block-body::-webkit-scrollbar {
+  height: 6px;
+}
+.page-block-body::-webkit-scrollbar-thumb {
+  background: var(--border-subtle);
+}
+.page-block-body::-webkit-scrollbar-thumb:hover {
+  background: var(--text-faint);
+}
 .page-block-row:hover {
   background: var(--bg-hover);
 }

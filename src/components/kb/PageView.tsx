@@ -582,10 +582,15 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
         <PageBlock title="This turn">
           {page.latestTurn &&
             page.latestTurn.lines.map((l, i) => (
-              <TurnRow key={`latest-${i}`} time={i === 0 ? turnTime(page.latestTurn!.at) : ""} text={l} />
+              <TurnRow
+                key={`latest-${i}`}
+                time={i === 0 ? turnTime(page.latestTurn!.at) : ""}
+                text={l}
+                isNew={i === 0 && isNewSince(page.latestTurn!.at, seenAt)}
+              />
             ))}
           {page.updates.map((p) => (
-            <TurnRow key={p.id} time={<>↓ {p.from}</>} text={p.text} />
+            <TurnRow key={p.id} time={<>↓ {p.from}</>} text={p.text} isNew={isNewSince(p.at, seenAt)} />
           ))}
           {page.earlierTurns.length > 0 && (
             <Fold label="earlier" count={page.earlierTurns.length}>
@@ -682,13 +687,27 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
 /** This turn's grid row (Ky's TurnRow, minus the "where it came from" column
  *  — our turns have no source feed to name): time on the row a line's group
  *  starts, blank after; the reading face for the line itself. */
-function TurnRow({ time, text, dim = false }: { time: ReactNode; text: string; dim?: boolean }) {
+function TurnRow({
+  time,
+  text,
+  dim = false,
+  isNew = false,
+}: {
+  time: ReactNode;
+  text: string;
+  dim?: boolean;
+  /** Moved since the last visit — the accent dot in the time column. */
+  isNew?: boolean;
+}) {
   return (
     <div
       className="page-block-row"
       style={{ display: "grid", ...TURN_GRID, columnGap: 11, padding: "5px 0", borderBottom: "1px solid var(--border)" }}
     >
-      <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)", whiteSpace: "nowrap" }}>{time}</span>
+      <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)", whiteSpace: "nowrap" }}>
+        {isNew && <NewDot style={{ marginRight: 4 }} />}
+        {time}
+      </span>
       <span style={{ fontFamily: READING, fontSize: 12.5, lineHeight: 1.5, color: dim ? "var(--text-secondary)" : "var(--text-primary)" }}>{text}</span>
     </div>
   );
