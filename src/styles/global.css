@@ -271,6 +271,12 @@ html, body, #root {
 .page-evidence-row:hover {
   background: var(--bg-hover);
 }
+/* SWIT-95 (Ky's PageBlock row rule): every block's grid row — To do, This
+   turn, Artifacts (which also carries .page-evidence-row for its × reveal) —
+   lights the same way on hover. */
+.page-block-row:hover {
+  background: var(--bg-hover);
+}
 .page-address {
   border-bottom: 1px solid var(--border);
 }
