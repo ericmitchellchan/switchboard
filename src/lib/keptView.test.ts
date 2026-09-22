@@ -48,6 +48,23 @@ describe("parseKeptView", () => {
     expect(parseKeptView("{not json")?.error).toMatch(/not valid JSON/);
   });
 
+  it("a report spec is refused by name — a document, not a snapshot", () => {
+    const raw = JSON.stringify({
+      spec: {
+        id: "r1",
+        kind: "report",
+        title: "weekly",
+        source: { type: "file", path: "weekly.md" },
+        builtAt: "2026-09-22T00:00:00.000Z",
+        builtBy: "agent",
+      },
+      rows: [],
+    });
+    const out = parseKeptView(raw);
+    expect(out.view).toBeNull();
+    expect(out.error).toMatch(/report cannot be kept/);
+  });
+
   it("a non-object body is refused", () => {
     expect(parseKeptView("[1,2,3]").error).toMatch(/not an object/);
     expect(parseKeptView('"just a string"').error).toMatch(/not an object/);

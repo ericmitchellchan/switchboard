@@ -48,6 +48,12 @@ export function parseKeptView(raw: string): KeptViewResult {
   if (!spec) {
     return { view: null, error: specError ?? "malformed spec" };
   }
+  // A report is a markdown file with live blocks — nothing about it is a
+  // snapshot, and ViewChrome draws nothing for the kind. keep() never writes
+  // one; a hand-placed file gets a named refusal instead of an empty frame.
+  if (spec.kind === "report") {
+    return { view: null, error: "a report cannot be kept — it is a document, not a snapshot" };
+  }
   // Reuse parseViewPayload's rows/meta tolerance over the SAME two fields —
   // rows defaults to [] (keep() always writes the key, but an empty view is
   // still a renderable one), a non-array rows is refused outright rather than

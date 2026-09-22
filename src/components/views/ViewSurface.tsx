@@ -545,7 +545,9 @@ export function ViewChrome({
         "no pins yet — toggle \u{1F4CC} pin, then click a row, bar, bin or mark. A view pin follows the THING and survives re-run as long as the data still holds it.",
     };
   }, [artifact, project, threadId, viewId, pinScope]);
-  const pins = useAnchoredPins(target, provider, rootEl, pinMode, onPlaced, active);
+  // A frozen (kept) view has no thread and no real pin sidecar: the hook is
+  // parked (its output is hidden below) so it never polls a bogus file.
+  const pins = useAnchoredPins(target, provider, rootEl, pinMode, onPlaced, active && !frozen);
 
   // ── Open an anchor (T6): drill into the preview slot, else → thread ───────
   const describeAnchor = useCallback(
