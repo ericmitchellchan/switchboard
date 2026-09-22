@@ -115,10 +115,18 @@
 //     not consulted). `adjacentDrillKey` / `deckPosition` are the toolbar's
 //     `←` `→` and `12 / 86`. `notesDirOf` names where the deck's notes file
 //     lives — the PARENT SOURCE's directory (lib/viewNotes.ts owns the file).
+//
+// SWIT-81 — colour carries meaning, never decoration: bar/dist views take a
+// spec-level `tone`, table views a `tones` array over columns, both
+// tolerated as ABSENT when malformed or on the wrong kind — the three pure
+// rules (default + resolve) live in `lib/viewTone.ts`, which the BarsView /
+// TableView renderers call. A report's ```stat tiles take their own `tone`,
+// validated by reportStore alone (the server never sees inside the file).
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { readThreadView, readViewData } from "./ipc";
 import { splitReport } from "./reportStore";
+import { isBarTone, parseTableTones, type BarTone, type TableTone } from "./viewTone";
 
 export const VIEW_KINDS = ["table", "candles", "dist", "line", "bar", "timeline", "report"] as const;
 export type ViewKind = (typeof VIEW_KINDS)[number];
@@ -213,6 +221,12 @@ export type ViewSpec = {
   levels?: ViewLevel[];
   /** candles / line (SWIT-75): columns whose non-null cells are markers. */
   markerColumns?: string[];
+  /** bar / dist (SWIT-81): the bars' colour rule. Absent = the reader's
+   *  default (`defaultBarTone` in viewTone.ts — sign when the value column
+   *  holds both a positive and a negative number, else neutral). */
+  tone?: BarTone;
+  /** table (SWIT-81): up to TABLE_TONES_CAP per-column cell-colour rules. */
+  tones?: TableTone[];
 };
 
 /** Caps, mirrored from the MCP server (the writer) — the reader trims to the
@@ -533,6 +547,13 @@ export function parseViewSpec(raw: string): { spec: ViewSpec | null; specError: 
   if (levels.length > 0) spec.levels = levels;
   const markerColumns = parseColumnList(data.markerColumns);
   if (markerColumns) spec.markerColumns = markerColumns;
+  // SWIT-81 — colour carries meaning: bar/dist `tone`, table `tones`, each
+  // tolerated as ABSENT when malformed or on the wrong kind.
+  if ((kind === "bar" || kind === "dist") && isBarTone(data.tone)) spec.tone = data.tone;
+  if (kind === "table") {
+    const tones = parseTableTones(data.tones);
+    if (tones.length > 0) spec.tones = tones;
+  }
   return { spec, specError: null };
 }
 

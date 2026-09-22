@@ -109,6 +109,37 @@ box is earned: it holds a figure the narrative leans on, never decoration.
   the doc's 24px gutter.
 - No trend arrows — a card states a number; the `tag` is the agent's one-phrase
   judgement, and the narrative beside it carries the rest.
+- **Tone (SWIT-81):** a tile's `tone` (`up`/`dn`/`accent`/`neutral`) colours the FIGURE
+  only — `up`/`dn` are `--up`/`--dn`, `accent` is `--accent`, `neutral` stays
+  `--text-primary`. Omitted, it defaults from the value string's own leading sign
+  (`+4%` → up, `-12` → dn, unsigned → neutral) — `lib/viewTone.ts`'s `statTone`. Label,
+  note and tag are untouched.
+
+## Tone (bars, tables, stat tiles — SWIT-81)
+
+Colour carries MEANING, never decoration (Ky's 2026-09-20 "no green furniture" rule) —
+three renderers that used to draw in greys only now take an explicit or defaulted tone,
+resolved by pure helpers in `lib/viewTone.ts` and called by the renderer, never computed
+inline.
+
+- **Bar / dist bars:** a spec-level `tone` — `neutral` (`--text-secondary` rest,
+  `--text-primary` hover — the old grey rule, now a named choice), `sign` (`--up`/`--dn`
+  by the value's sign, 0.85 opacity resting via `color-mix`, full on hover), `accent`, or
+  `chart-1`…`chart-8` (the line/candle series palette, `styles/surfaces.css`). Omitted,
+  it defaults to `sign` when the column holds both a positive and a negative value, else
+  `neutral` (`defaultBarTone`). The anchor and hover STATE are unchanged — only the fill
+  moves.
+- **Table cells:** an optional `tones` array (≤ 6) of `{column, tone}`. `sign` colours
+  the cell TEXT `--up`/`--dn` by the parsed number's sign; `heat` tints the cell
+  BACKGROUND from transparent to `--accent` at 22% by the value's position between the
+  column's min and max over the loaded rows. A non-numeric cell, or a column with no
+  rule, is untouched. Header cells are never tinted.
+- **Stat tiles:** see Stat card above.
+- Caps and enums are mirrored in the MCP server (the writer for bar/dist `tone` and
+  table `tones`) and in `lib/viewTone.ts` (the reader, tolerant — a malformed or
+  out-of-kind field is dropped, never a broken spec). A stat tile's `tone` is validated
+  by `reportStore.ts`'s `parseTile` alone, STRICT like `n` — the server never sees inside
+  the report's markdown file.
 
 ## Band header
 

@@ -250,6 +250,22 @@ that stop being true.
   elements Ky marks `font-mono`. Not `--font-sans`: that name belongs to surfaces.css's
   Tailwind theme, and Lodestar's pages keep their mono.
 
+- 2026-09-22 — COLOUR CARRIES MEANING, NEVER DECORATION (SWIT-81, Ky's "no green
+  furniture" rule, 2026-09-20). Report views drew bar/dist bars, table cells and stat
+  figures in greys only, so a wall of numbers looked flat where a sign or a magnitude
+  was the whole point. Bar/dist take a spec-level `tone` (`neutral` | `sign` — `--up`/
+  `--dn` — | `accent` | `chart-1`…`chart-8`), defaulted to `sign` when the value column
+  holds both a positive and a negative number, else `neutral`. Tables take an optional
+  `tones` array (≤ 6) of `{column, tone: sign | heat}` — `sign` colours the cell text,
+  `heat` tints the cell background toward `--accent` by the value's position between
+  the column's min and max; headers are never tinted. Stat tiles take their own `tone`
+  (`up`/`dn`/`accent`/`neutral`), defaulted from the value string's own leading sign.
+  Three pure resolvers in `lib/viewTone.ts`; the MCP server validates bar/dist `tone`
+  and table `tones` (an unknown tone, or one on the wrong kind, is a visible error),
+  `reportStore.ts`'s `parseTile` validates a stat tile's `tone` the same strict way
+  since a report's markdown never reaches the server. The hover rule and every anchor
+  (`bar:`, `bin:`, `row:`) are unchanged — only the fill moves.
+
 ## Decisions recorded by the app
 
 - 2026-09-09 — Bundle IBM Plex Sans for page and doc bodies (asked: Ky's page and docs read in IBM Plex Sans; ours are still JetBrains Mono at Ky's sizes. Bring in a sans reading face?; thread: New thread)
