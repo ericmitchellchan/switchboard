@@ -1243,3 +1243,20 @@ describe("the view tool — sets (SWIT-79, Ky's set tabs)", () => {
     expect(server.VIEW_TOOL.description).toContain("set:{label:");
   });
 });
+
+describe("the view tool — the dashboard grammar (SWIT-96: facts / width / stat series+delta)", () => {
+  it("the description names facts, width and series so an agent can write a dashboard", () => {
+    for (const rule of [
+      "```facts block",
+      "tone?:'accent'|'amber'|'neutral'",
+      "renders ONE header card (always full width",
+      "`series` (<=60 finite numbers, drawn as",
+      "a sparkline",
+      "`delta`",
+      "`width`:'half'|'third'",
+      "pack side by side",
+    ]) {
+      expect(server.VIEW_TOOL.description).toContain(rule);
+    }
+  });
+});

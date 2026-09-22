@@ -89,31 +89,89 @@ raised card — the thing needing action — everything else flat).
   the top-right), the OptionRow list between hairlines, the dim `or`, one kit
   input at `max-width: 480px`. Requests, items, posts, threads stay flat rows.
 
-## Stat card (reports — SWIT-73; Ky's report cards since 2026-09-09)
+## Stat card (reports — SWIT-73; Ky's report cards since 2026-09-09; SWIT-96 headline tiles)
 
 ONE NUMBER with a label, an optional n, one note line and an optional accent chip —
 the report's headline figure. A fenced `stat` block in a report's markdown renders one
-card ({label, value, n?, note?, tag?}) or a wrapping row of them (an array, ≤ 8). The
-box is earned: it holds a figure the narrative leans on, never decoration.
+card ({label, value, n?, note?, tag?, tone?, series?, delta?}) or a wrapping row of them
+(an array, ≤ 8). The box is earned: it holds a figure the narrative leans on, never
+decoration.
 
 - **Ky:** the report cards Eric pointed at (2026-09-09, the ads-learnings report): a
   raised card, the label in plain words, the figure big, a dim line under it ("4 – 7% is
   called good on ChatGPT Ads"), a green chip ("2 – 3× benchmark"), two-up in the panel.
+  SWIT-96 re-reads Ky's HEADLINE tile too — `ops/user360/UserOverviewTab.tsx`'s `Stat`
+  (figure mono over a faint label, `StatRow`'s grid) and `ops/StatusViz.tsx`'s
+  `Sparkline` (a 72×20 polyline trend, nothing under 2 points).
 - **Ours** (`components/views/ReportView.tsx` `StatTileBox`): `--bg-active`, 1px
   `--border`, radius 8, padding `12px 14px 13px`, `flex: 1 1 180px` so cards flow
-  two-up in the panel's width, mono. Label 11.5px `--text-secondary`, 6px below it the
-  value 24px weight 600 / 1.15 `--text-primary`; `n=<count>` rides 6px after the value
-  at 10px `--text-faint`; `note` 10.5px `--text-muted` 4px under the figure; `tag` a
-  chip 8px below — 10.5px `--accent` on the accent at 12% (`color-mix`), 1px
-  `--accent-dim`, radius 6. Cards sit in a `flex-wrap` row, `gap: 10px`, aligned with
-  the doc's 24px gutter.
-- No trend arrows — a card states a number; the `tag` is the agent's one-phrase
-  judgement, and the narrative beside it carries the rest.
+  two-up in the panel's width when not packed into a half/third cell (see Report layout
+  below). The figure sits TOP-LEFT — 24px weight 600 / 1.15, toned; `n=<count>` rides
+  6px after it at 10px `--text-faint`, mono; a `series` sparkline (SWIT-96) sits
+  TOP-RIGHT of the figure, same row. Under the figure: the LABEL, 10px mono uppercase
+  `letter-spacing: 0.06em` `--text-faint` (Ky's cut, not the earlier 11.5px sentence
+  case); then `delta` (10.5px mono `--text-muted`, e.g. "+2 vs prior 30d"); then `note`
+  (10.5px `--text-muted`); then `tag`, a chip — 10.5px `--accent` on the accent at 12%
+  (`color-mix`), 1px `--accent-dim`, radius 6. Cards sit in a `flex-wrap` row,
+  `gap: 10px`, aligned with the doc's 24px gutter.
+- **Sparkline (SWIT-96):** 72×20 inline SVG, `--accent` stroke 1.5px, no axes, no fill,
+  no marker dot (Ky's has one; ours reads plainer next to a mono figure); nothing for
+  fewer than 2 points. Values scale to the series' own min/max with 1px vertical
+  padding; x is evenly spaced. `STAT_SERIES_CAP` 60 — an over-cap series is trimmed to
+  its TAIL (the recent trend), not an error, the same kind of cap as the label/value
+  caps below. `delta` is a plain string, `STAT_DELTA_CAP` 40.
+- No trend arrows on the figure itself — the sparkline and `delta` carry the trend; the
+  `tag` is the agent's one-phrase judgement, and the narrative beside it carries the rest.
 - **Tone (SWIT-81):** a tile's `tone` (`up`/`dn`/`accent`/`neutral`) colours the FIGURE
   only — `up`/`dn` are `--up`/`--dn`, `accent` is `--accent`, `neutral` stays
   `--text-primary`. Omitted, it defaults from the value string's own leading sign
   (`+4%` → up, `-12` → dn, unsigned → neutral) — `lib/viewTone.ts`'s `statTone`. Label,
-  note and tag are untouched.
+  note, tag, series and delta are untouched.
+
+## Facts header (reports — SWIT-96; not to be confused with the doc's Facts row below)
+
+A dashboard's opening card — Ky's FactsRow re-cut for a REPORT rather than a doc's
+front matter. A fenced ` ```facts ` block, body a JSON array (≤ 8) of
+`{label, value, tone?: 'accent'|'amber'|'neutral'}`, renders ONE raised card of
+label/value pairs. Always full width — see Report layout below; it never packs into a
+half/third cell, because a dashboard's header names what the whole page is about.
+
+- **Ky:** `ky/components/FactsRow.tsx` (CC-702) — see the doc-facing Facts row entry;
+  this is the same visual shape, applied to a report's own grammar instead of a spec's
+  front-matter paragraph.
+- **Ours** (`components/views/ReportView.tsx` `FactsBlock`): `--bg-active`, 1px
+  `--border`, radius 8, padding `12px 16px`, items in a `flex-wrap` row `gap: 8px 28px`.
+  Label 10px mono uppercase `letter-spacing: 0.06em` `--text-faint`; value 13px
+  `--font-reading` `--text-primary` (or `--accent`/`--tone-amber` under `tone`), 3px
+  under the label. Parsed by `reportStore.parseFactsBlock`, STRICT per item (one bad
+  entry errors the whole card) — the same rule `parseStatTiles` applies.
+- Distinct from `lib/facts.ts`'s Facts row (below): that one reads a `**Key:** value`
+  paragraph out of ARBITRARY markdown (a KB doc's front matter); this one is a
+  report-only fenced block. Neither touches the other.
+
+## Report layout (SWIT-96 — a dashboard is a report with a layout)
+
+Blocks side by side, not one per scroll-length row. Any ` ```view ` or ` ```stat `
+block's JSON may carry a top-level `"width": "half" | "third"` (default `"full"`,
+stripped before the block is otherwise parsed — it is layout, not part of either
+grammar). Consecutive blocks of the SAME width, with no narrative between them, pack
+into one CSS grid row: two `half`s or three `third`s side by side; a leftover (an odd
+`half`, a lone `third`) takes the rest of its own row rather than sitting beside an
+empty cell. A `full` block, a `facts` block, a width change, or a narrative segment ends
+the open row.
+
+- **Ours** (`reportStore.packRows`, pure — `components/views/ReportView.tsx` calls it
+  once per render): a packed row is `display: grid; grid-template-columns: repeat(N,
+  minmax(0, 1fr)); gap: 10px`, the same 24px gutter as every other segment's margin. A
+  block rendered inside a packed row drops its OWN outer margin (`packedStyle`) since
+  the row wrapper already carries it — nothing else about the block changes: an
+  embedded view still draws the full `ViewChrome`, a stat tile row still wraps if it
+  must, an error card still names its block.
+- An array-shaped `stat` body (today's multi-tile ROW convention — several cards in one
+  block) has no syntactic top-level place for `width` in JSON; it always reads `full`.
+  For a packed half/third cell, write ONE tile per `stat` block.
+- Order is preserved throughout; a malformed block still errors ONE card, in its own
+  cell — packing is a layout decision, not a validity check.
 
 ## Tone (bars, tables, stat tiles — SWIT-81)
 
@@ -468,7 +526,10 @@ reserved column.
 ## Facts row (SWIT-79)
 
 A spec's front-matter line — `**Owner:** … · **Status:** … · **Tickets:** …` — as a
-definition list under the title instead of a bold run-on paragraph. Display only.
+definition list under the title instead of a bold run-on paragraph. Display only. (Not
+the same thing as the REPORT's Facts header, SWIT-96, above — that one is a fenced
+` ```facts ` block in a report's own grammar, editable JSON rather than a markdown
+paragraph a rule extracts.)
 
 - **Ky:** `ky/components/FactsRow.tsx` (CC-702) — `<dl class="flex flex-wrap gap-x-6
   gap-y-2">`; `<dt>` `font-mono text-[9.5px] uppercase tracking-[0.08em] text-txt-faint`,

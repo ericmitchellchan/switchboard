@@ -42,12 +42,16 @@ export type ReportSegment =
   | { kind: "markdown"; text: string }
   | { kind: "view"; block: number; body: string }
   | { kind: "stat"; block: number; body: string }
+  | { kind: "facts"; block: number; body: string }
   | { kind: "overflow"; total: number };
 
-/** Most view/stat blocks one report renders LIVE; the rest render as code. */
+/** Most view/stat/facts blocks one report renders LIVE; the rest render as code. */
 export const REPORT_BLOCK_CAP = 24;
 
-const OPEN_RE = /^```(view|stat)\s*$/;
+// SWIT-96 recognises a third live fence, ```facts — a dashboard's header
+// card (see "Facts header" below). It is numbered and capped alongside
+// view/stat, but never packs into a row (see `packRows`).
+const OPEN_RE = /^```(view|stat|facts)\s*$/;
 const CLOSE_RE = /^```\s*$/;
 const FENCE_RE = /^(`{3,}|~{3,})/;
 
@@ -57,7 +61,7 @@ export function splitReport(markdown: string): ReportSegment[] {
   const out: ReportSegment[] = [];
   let md: string[] = [];
   let body: string[] = [];
-  let mode: "normal" | "code" | "view" | "stat" = "normal";
+  let mode: "normal" | "code" | "view" | "stat" | "facts" = "normal";
   let codeClose: RegExp | null = null;
   let block = 0;
   const flushMd = () => {
@@ -65,12 +69,12 @@ export function splitReport(markdown: string): ReportSegment[] {
     if (text.trim().length > 0) out.push({ kind: "markdown", text });
     md = [];
   };
-  const flushBlock = (kind: "view" | "stat") => {
+  const flushBlock = (kind: "view" | "stat" | "facts") => {
     out.push({ kind, block: ++block, body: body.join("\n") });
     body = [];
   };
   for (const line of lines) {
-    if (mode === "view" || mode === "stat") {
+    if (mode === "view" || mode === "stat" || mode === "facts") {
       if (CLOSE_RE.test(line)) {
         flushBlock(mode);
         mode = "normal";
@@ -90,7 +94,7 @@ export function splitReport(markdown: string): ReportSegment[] {
     const open = OPEN_RE.exec(line);
     if (open) {
       flushMd();
-      mode = open[1] as "view" | "stat";
+      mode = open[1] as "view" | "stat" | "facts";
       continue;
     }
     md.push(line);
@@ -101,7 +105,7 @@ export function splitReport(markdown: string): ReportSegment[] {
       codeClose = new RegExp(`^${ch}{${fence[1].length},}\\s*$`);
     }
   }
-  if (mode === "view" || mode === "stat") flushBlock(mode);
+  if (mode === "view" || mode === "stat" || mode === "facts") flushBlock(mode);
   else flushMd();
   return capReportBlocks(out);
 }
@@ -109,13 +113,17 @@ export function splitReport(markdown: string): ReportSegment[] {
 /** Enforce REPORT_BLOCK_CAP: blocks past the cap become plain code fences in
  *  the narrative, and ONE `overflow` segment (carrying the TOTAL block count)
  *  takes the first over-cap block's place. Under the cap this is identity. */
+function isLiveSegment(s: ReportSegment): s is Extract<ReportSegment, { block: number; body: string }> {
+  return s.kind === "view" || s.kind === "stat" || s.kind === "facts";
+}
+
 function capReportBlocks(segs: ReportSegment[]): ReportSegment[] {
-  const total = segs.reduce((n, s) => (s.kind === "view" || s.kind === "stat" ? n + 1 : n), 0);
+  const total = segs.reduce((n, s) => (isLiveSegment(s) ? n + 1 : n), 0);
   if (total <= REPORT_BLOCK_CAP) return segs;
   const out: ReportSegment[] = [];
   let marked = false;
   for (const seg of segs) {
-    if (seg.kind === "markdown" || seg.kind === "overflow" || seg.block <= REPORT_BLOCK_CAP) {
+    if (!isLiveSegment(seg) || seg.block <= REPORT_BLOCK_CAP) {
       out.push(seg);
       continue;
     }
@@ -128,14 +136,114 @@ function capReportBlocks(segs: ReportSegment[]): ReportSegment[] {
   return out;
 }
 
+// ── Report layout: width + packed rows (SWIT-96) ───────────────────────────
+// A dashboard needs blocks SIDE BY SIDE, not one per scroll-length row. Any
+// ```view or ```stat block's JSON may carry a top-level `"width"` — read
+// here, and STRIPPED before the body reaches parseInlineViewSpec /
+// parseStatTiles (neither rejects an unknown key today, but `width` is
+// report LAYOUT, not part of either grammar, and must not ride through as a
+// spec field a future kind could collide with). A ```facts block never
+// packs (see parseFactsBlock) and an array-shaped ```stat body (today's
+// multi-tile ROW convention) has no syntactic top-level place for `width`
+// in JSON — both simply read as `full`, which is the honest default.
+
+export type ReportWidth = "full" | "half" | "third";
+const REPORT_WIDTHS: readonly ReportWidth[] = ["full", "half", "third"];
+
+function isReportWidth(v: unknown): v is ReportWidth {
+  return typeof v === "string" && (REPORT_WIDTHS as readonly string[]).includes(v);
+}
+
+/** A view/stat block's requested column width, `full` on absence, malformed
+ *  JSON (the block itself will render as an error card; layout must not
+ *  throw over it) or a non-object body (an array of stat tiles). Pure. */
+export function blockWidth(body: string): ReportWidth {
+  let data: unknown;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    return "full";
+  }
+  if (!isRecord(data)) return "full";
+  return isReportWidth(data.width) ? data.width : "full";
+}
+
+/** The same block's body with `width` removed — what parseInlineViewSpec /
+ *  parseStatTiles actually parse. Malformed/non-object JSON passes through
+ *  unchanged so the downstream parser reports the real error. Pure. */
+export function stripBlockWidth(body: string): string {
+  let data: unknown;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    return body;
+  }
+  if (!isRecord(data) || !("width" in data)) return body;
+  const { width: _width, ...rest } = data;
+  return JSON.stringify(rest);
+}
+
+export type ReportRow = { columns: number; segments: ReportSegment[] };
+
+/** Group CONSECUTIVE `view`/`stat` blocks of the SAME non-full width, with
+ *  no narrative between them, into one grid row: two `half`s or three
+ *  `third`s side by side. A `full` block, a `facts` block, an `overflow`
+ *  card, a markdown segment, or a width change ENDS the open row and starts
+ *  its own one-column one; a leftover (an odd `half`, a lone `third`) takes
+ *  the rest of ITS row — `columns` is however many segments actually landed
+ *  in it, never padded with an empty cell. Order is preserved throughout.
+ *  Pure. */
+export function packRows(segments: readonly ReportSegment[]): ReportRow[] {
+  const rows: ReportRow[] = [];
+  let current: ReportSegment[] = [];
+  let currentWidth: ReportWidth | null = null;
+
+  const flush = () => {
+    if (current.length === 0) return;
+    rows.push({ columns: current.length, segments: current });
+    current = [];
+    currentWidth = null;
+  };
+
+  for (const seg of segments) {
+    const packable = seg.kind === "view" || seg.kind === "stat";
+    const width = packable ? blockWidth(seg.body) : "full";
+    if (!packable || width === "full") {
+      flush();
+      rows.push({ columns: 1, segments: [seg] });
+      continue;
+    }
+    const maxCols = width === "half" ? 2 : 3;
+    if (currentWidth !== width || current.length >= maxCols) flush();
+    current.push(seg);
+    currentWidth = width;
+    if (current.length >= maxCols) flush();
+  }
+  flush();
+  return rows;
+}
+
 // ── Stat tiles ───────────────────────────────────────────────────────────────
 
 /** One tile: the label, the figure, an optional n, and (2026-09-09, Ky's
  *  report cards) an optional `note` — one plain line under the figure
  *  ("4 – 7% is called good on ChatGPT Ads") — and an optional `tag`, a few
  *  words drawn as an accent chip ("2 – 3× benchmark"). SWIT-81: an optional
- *  `tone` colours the FIGURE only — see lib/viewTone.ts's `statTone`. */
-export type StatTile = { label: string; value: string; n?: number; note?: string; tag?: string; tone?: StatTone };
+ *  `tone` colours the FIGURE only — see lib/viewTone.ts's `statTone`.
+ *  SWIT-96: an optional `series` (a sparkline over up to STAT_SERIES_CAP
+ *  points) and `delta` (one line under the figure, e.g. "+2 vs prior 30d")
+ *  — Ky's headline-tile pair (StatusViz's Sparkline, UserOverviewTab's
+ *  Stat). */
+export type StatTile = {
+  label: string;
+  value: string;
+  n?: number;
+  note?: string;
+  tag?: string;
+  tone?: StatTone;
+  series?: number[];
+  delta?: string;
+};
 
 /** Most tiles one ```stat block renders (a row, not a dashboard). */
 export const STAT_TILE_CAP = 8;
@@ -143,6 +251,12 @@ export const STAT_LABEL_CAP = 60;
 export const STAT_VALUE_CAP = 40;
 export const STAT_NOTE_CAP = 120;
 export const STAT_TAG_CAP = 32;
+/** A sparkline reads the most recent STAT_SERIES_CAP points; an over-cap
+ *  series is trimmed to its TAIL (the trend that is still visible at 72px
+ *  wide is the recent one), not an error — unlike STAT_TILE_CAP, this is a
+ *  display-width limit, the same kind of cap as STAT_LABEL_CAP/STAT_VALUE_CAP. */
+export const STAT_SERIES_CAP = 60;
+export const STAT_DELTA_CAP = 40;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -161,7 +275,7 @@ function parseTile(raw: unknown, at: string): { tile: StatTile } | { error: stri
     if (typeof raw.n !== "number" || !Number.isFinite(raw.n)) return { error: `${at}.n must be a number` };
     tile.n = raw.n;
   }
-  for (const [key, cap] of [["note", STAT_NOTE_CAP], ["tag", STAT_TAG_CAP]] as const) {
+  for (const [key, cap] of [["note", STAT_NOTE_CAP], ["tag", STAT_TAG_CAP], ["delta", STAT_DELTA_CAP]] as const) {
     const v2 = raw[key];
     if (v2 === undefined || v2 === null) continue;
     if (typeof v2 !== "string") return { error: `${at}.${key} must be a string` };
@@ -173,6 +287,21 @@ function parseTile(raw: unknown, at: string): { tile: StatTile } | { error: stri
   if (raw.tone !== undefined && raw.tone !== null) {
     if (!isStatTone(raw.tone)) return { error: `${at}.tone must be one of ${STAT_TONES.join(", ")}` };
     tile.tone = raw.tone as StatTone;
+  }
+  // SWIT-96: `series` is STRICT too — a non-array or a non-numeric entry
+  // errors the tile rather than silently dropping the sparkline, matching
+  // `n`/`tone`. An over-cap array is trimmed, not an error (see the cap's
+  // own comment).
+  if (raw.series !== undefined && raw.series !== null) {
+    if (!Array.isArray(raw.series)) return { error: `${at}.series must be an array of finite numbers` };
+    const nums: number[] = [];
+    for (const n of raw.series) {
+      if (typeof n !== "number" || !Number.isFinite(n)) {
+        return { error: `${at}.series must hold only finite numbers` };
+      }
+      nums.push(n);
+    }
+    tile.series = nums.length > STAT_SERIES_CAP ? nums.slice(nums.length - STAT_SERIES_CAP) : nums;
   }
   return { tile };
 }
@@ -199,6 +328,68 @@ export function parseStatTiles(body: string): { tiles: StatTile[]; error: null }
     tiles.push(parsed.tile);
   }
   return { tiles, error: null };
+}
+
+// ── Facts header (SWIT-96) ───────────────────────────────────────────────────
+// A dashboard's opening card — Ky's FactsRow re-cut for a REPORT rather than
+// a doc's front matter (`lib/facts.ts`, which this does not touch: that rule
+// reads a `**Key:** value` paragraph out of arbitrary markdown; this one
+// reads a fenced ```facts block, a report-only grammar). A raised card of
+// label/value pairs, always full width — see `packRows`.
+
+export const FACTS_ITEM_CAP = 8;
+export const FACTS_LABEL_CAP = 40;
+export const FACTS_VALUE_CAP = 60;
+
+export const FACTS_TONES = ["accent", "amber", "neutral"] as const;
+export type FactsTone = (typeof FACTS_TONES)[number];
+
+export function isFactsTone(v: unknown): v is FactsTone {
+  return typeof v === "string" && (FACTS_TONES as readonly string[]).includes(v);
+}
+
+/** One fact: a label and a value, optionally toned. */
+export type FactsItem = { label: string; value: string; tone?: FactsTone };
+
+function parseFactsItem(raw: unknown, at: string): { item: FactsItem } | { error: string } {
+  if (!isRecord(raw)) return { error: `${at} must be {label, value, tone?}` };
+  const label = typeof raw.label === "string" ? raw.label.trim() : "";
+  if (label.length === 0) return { error: `${at} has no label` };
+  const v = raw.value;
+  const value =
+    typeof v === "string" ? v.trim() : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
+  if (value.length === 0) return { error: `${at} has no value (a string or a finite number)` };
+  const item: FactsItem = { label: label.slice(0, FACTS_LABEL_CAP), value: value.slice(0, FACTS_VALUE_CAP) };
+  if (raw.tone !== undefined && raw.tone !== null) {
+    if (!isFactsTone(raw.tone)) return { error: `${at}.tone must be one of ${FACTS_TONES.join(", ")}` };
+    item.tone = raw.tone;
+  }
+  return { item };
+}
+
+/** A ```facts block's body → items, STRICT per block (one bad entry errors
+ *  the whole card) — the same rule `parseStatTiles` applies, over an array
+ *  ONLY: a facts header is a row of pairs, never a lone object shorthand.
+ *  Pure. */
+export function parseFactsBlock(body: string): { items: FactsItem[]; error: null } | { items: null; error: string } {
+  let data: unknown;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    return { items: null, error: "not valid JSON — expected an array of {label, value, tone?}" };
+  }
+  if (!Array.isArray(data)) return { items: null, error: "must be an array of {label, value, tone?}" };
+  if (data.length === 0) return { items: null, error: "an empty array renders nothing" };
+  if (data.length > FACTS_ITEM_CAP) {
+    return { items: null, error: `${data.length} items; the cap is ${FACTS_ITEM_CAP}` };
+  }
+  const items: FactsItem[] = [];
+  for (let i = 0; i < data.length; i++) {
+    const parsed = parseFactsItem(data[i], data.length === 1 ? "the item" : `items[${i}]`);
+    if ("error" in parsed) return { items: null, error: parsed.error };
+    items.push(parsed.item);
+  }
+  return { items, error: null };
 }
 
 // ── Evidence → heading handoff (one-shot) ────────────────────────────────────

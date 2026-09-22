@@ -1,18 +1,26 @@
 // Report lexical layer (SWIT-73): fence splitting, stat tile parse, the
 // evidence→heading one-shot — plus the realistic fixture report exercising
-// the whole inline-spec derivation through viewStore.
+// the whole inline-spec derivation through viewStore. SWIT-96 adds facts
+// blocks, sparkline/delta on a stat tile, and the width/packRows layout.
 
 import { describe, it, expect } from "vitest";
 import {
   splitReport,
   parseStatTiles,
+  parseFactsBlock,
+  blockWidth,
+  stripBlockWidth,
+  packRows,
   requestReportAnchor,
   takeReportAnchor,
   subscribeReportAnchor,
   reportAnchorNonce,
   STAT_TILE_CAP,
+  STAT_SERIES_CAP,
+  FACTS_ITEM_CAP,
   REPORT_BLOCK_CAP,
 } from "./reportStore";
+import type { ReportSegment } from "./reportStore";
 import { parseInlineViewSpec, inlineSpecAt, parseViewSpec } from "./viewStore";
 import type { ViewSpec } from "./viewStore";
 
@@ -142,6 +150,21 @@ describe("splitReport", () => {
     expect(tail.kind).toBe("markdown");
     expect((tail as { text: string }).text).toBe(`\`\`\`view\n{"i":${total - 1}}\n\`\`\``);
   });
+
+  it("SWIT-96: recognises ```facts as a third live block kind, numbered with the others", () => {
+    const md = '```facts\n[{"label":"a","value":"1"}]\n```\n```view\n{}\n```\n```facts\n[{"label":"b","value":"2"}]\n```';
+    const segs = splitReport(md);
+    expect(segs.map((s) => s.kind)).toEqual(["facts", "view", "facts"]);
+    expect(segs.map((s) => (s as { block: number }).block)).toEqual([1, 2, 3]);
+  });
+
+  it("SWIT-96: a ```facts block counts against REPORT_BLOCK_CAP", () => {
+    const total = REPORT_BLOCK_CAP + 1;
+    const md = Array.from({ length: total }, () => "```facts\n[]\n```").join("\n");
+    const segs = splitReport(md);
+    expect(segs.filter((s) => s.kind === "facts")).toHaveLength(REPORT_BLOCK_CAP);
+    expect(segs.some((s) => s.kind === "overflow")).toBe(true);
+  });
 });
 
 describe("parseStatTiles", () => {
@@ -187,12 +210,133 @@ describe("parseStatTiles", () => {
     expect(badInArray.error).toContain("tiles[1].tone");
   });
 
+  it("SWIT-96: carries a tile's series (trimmed to the TAIL over the cap) and delta; strict types", () => {
+    expect(parseStatTiles('{"label":"a","value":"3","series":[1,2,3],"delta":"+2 vs prior 30d"}').tiles).toEqual([
+      { label: "a", value: "3", series: [1, 2, 3], delta: "+2 vs prior 30d" },
+    ]);
+    const long = Array.from({ length: STAT_SERIES_CAP + 5 }, (_, i) => i);
+    const trimmed = parseStatTiles(JSON.stringify({ label: "a", value: "1", series: long })).tiles;
+    expect(trimmed?.[0].series).toHaveLength(STAT_SERIES_CAP);
+    expect(trimmed?.[0].series).toEqual(long.slice(5));
+    expect(parseStatTiles('{"label":"a","value":1,"series":"nope"}').error).toContain(".series");
+    expect(parseStatTiles('{"label":"a","value":1,"series":[1,"x"]}').error).toContain(".series");
+    // 1e400 is valid JSON syntax but overflows to a non-finite JS number.
+    expect(parseStatTiles('{"label":"a","value":1,"series":[1,1e400]}').error).toContain(".series");
+    expect(parseStatTiles('{"label":"a","value":1,"delta":5}').error).toContain(".delta");
+    expect(parseStatTiles('{"label":"a","value":1,"delta":""}').tiles).toEqual([{ label: "a", value: "1" }]);
+  });
+
   it("errors on non-JSON, empty arrays, over-cap rows and a bad n", () => {
     expect(parseStatTiles("not json").error).toContain("not valid JSON");
     expect(parseStatTiles("[]").error).toContain("empty");
     const many = JSON.stringify(Array.from({ length: STAT_TILE_CAP + 1 }, (_, i) => ({ label: `t${i}`, value: i })));
     expect(parseStatTiles(many).error).toContain(`${STAT_TILE_CAP}`);
     expect(parseStatTiles('{"label":"a","value":1,"n":"lots"}').error).toContain(".n");
+  });
+});
+
+describe("parseFactsBlock (SWIT-96)", () => {
+  it("parses an array of {label, value, tone?}, capped at FACTS_ITEM_CAP", () => {
+    const out = parseFactsBlock('[{"label":"sport","value":"tennis"},{"label":"week","value":"jun 5","tone":"accent"}]');
+    expect(out.items).toEqual([
+      { label: "sport", value: "tennis" },
+      { label: "week", value: "jun 5", tone: "accent" },
+    ]);
+    const many = JSON.stringify(Array.from({ length: FACTS_ITEM_CAP + 1 }, (_, i) => ({ label: `k${i}`, value: i })));
+    expect(parseFactsBlock(many).error).toContain(`${FACTS_ITEM_CAP}`);
+  });
+
+  it("is array-only — a bare object (the stat shorthand) is refused", () => {
+    expect(parseFactsBlock('{"label":"a","value":"b"}').error).toContain("array");
+  });
+
+  it("errors the WHOLE block on one bad item, an empty array, non-JSON or a bad tone", () => {
+    expect(parseFactsBlock("not json").error).toContain("not valid JSON");
+    expect(parseFactsBlock("[]").error).toContain("empty");
+    const bad = parseFactsBlock('[{"label":"a","value":"1"},{"value":"2"}]');
+    expect(bad.items).toBeNull();
+    expect(bad.error).toContain("items[1]");
+    const badTone = parseFactsBlock('[{"label":"a","value":"1","tone":"rainbow"}]');
+    expect(badTone.items).toBeNull();
+    expect(badTone.error).toContain(".tone");
+  });
+});
+
+describe("blockWidth / stripBlockWidth (SWIT-96)", () => {
+  it("reads an object body's width, defaulting to full", () => {
+    expect(blockWidth('{"kind":"line","width":"half"}')).toBe("half");
+    expect(blockWidth('{"kind":"line","width":"third"}')).toBe("third");
+    expect(blockWidth('{"kind":"line"}')).toBe("full");
+    expect(blockWidth('{"kind":"line","width":"nope"}')).toBe("full");
+  });
+
+  it("an array body (a multi-tile stat row) has no top-level place for width — always full", () => {
+    expect(blockWidth('[{"label":"a","value":"1"}]')).toBe("full");
+  });
+
+  it("malformed JSON is full, not a throw", () => {
+    expect(blockWidth("not json")).toBe("full");
+  });
+
+  it("strips width from an object body; leaves everything else, non-object bodies and malformed JSON untouched", () => {
+    expect(JSON.parse(stripBlockWidth('{"kind":"line","width":"half","title":"t"}'))).toEqual({
+      kind: "line",
+      title: "t",
+    });
+    expect(stripBlockWidth('{"kind":"line"}')).toBe('{"kind":"line"}');
+    expect(stripBlockWidth('[{"label":"a"}]')).toBe('[{"label":"a"}]');
+    expect(stripBlockWidth("not json")).toBe("not json");
+  });
+});
+
+describe("packRows (SWIT-96)", () => {
+  const view = (i: number, width?: string): ReportSegment => ({
+    kind: "view",
+    block: i,
+    body: JSON.stringify({ kind: "line", ...(width ? { width } : {}) }),
+  });
+  const stat = (i: number, width?: string): ReportSegment => ({
+    kind: "stat",
+    block: i,
+    body: JSON.stringify({ label: "a", value: "1", ...(width ? { width } : {}) }),
+  });
+  const md = (text = "prose"): ReportSegment => ({ kind: "markdown", text });
+
+  it("a full or unwidthed block is its own one-column row", () => {
+    const rows = packRows([view(1), stat(2, "full")]);
+    expect(rows).toEqual([
+      { columns: 1, segments: [view(1)] },
+      { columns: 1, segments: [stat(2, "full")] },
+    ]);
+  });
+
+  it("two halves pack into one 2-column row; a third leftover half is its own row", () => {
+    const rows = packRows([view(1, "half"), stat(2, "half"), view(3, "half")]);
+    expect(rows).toEqual([
+      { columns: 2, segments: [view(1, "half"), stat(2, "half")] },
+      { columns: 1, segments: [view(3, "half")] },
+    ]);
+  });
+
+  it("three thirds pack into one 3-column row; a fourth starts a new row", () => {
+    const rows = packRows([view(1, "third"), view(2, "third"), view(3, "third"), stat(4, "third")]);
+    expect(rows.map((r) => r.columns)).toEqual([3, 1]);
+    expect(rows[0].segments).toHaveLength(3);
+  });
+
+  it("a width change, a facts block, an overflow card or narrative ends the open row", () => {
+    const facts: ReportSegment = { kind: "facts", block: 5, body: "[]" };
+    const overflow: ReportSegment = { kind: "overflow", total: 30 };
+    const rows = packRows([view(1, "half"), view(2, "third"), stat(3, "third"), md(), view(4, "third"), view(5, "third"), facts, overflow]);
+    // view(1,half) alone (nothing else at "half" follows it before the width
+    // changes), view(2)+stat(3) pack as thirds, narrative breaks the run,
+    // view(4)+view(5) pack as thirds, then facts and overflow each solo.
+    expect(rows.map((r) => r.columns)).toEqual([1, 2, 1, 2, 1, 1]);
+  });
+
+  it("order is preserved and a leftover row is never padded with an empty cell", () => {
+    const rows = packRows([view(1, "half")]);
+    expect(rows).toEqual([{ columns: 1, segments: [view(1, "half")] }]);
   });
 });
 
@@ -237,14 +381,18 @@ describe("parseInlineViewSpec / inlineSpecAt", () => {
   });
 });
 
-describe("the fixture report (SWIT-73 verification shape)", () => {
-  // Three narrative sections, a stat row, a line view with regions, a table
-  // with a drill — the report the ticket names, end to end through the
+describe("the fixture report (SWIT-73/96 verification shape)", () => {
+  // A facts header, a stat row, a line view with regions, a table with a
+  // drill — the dashboard report SWIT-96 names, end to end through the
   // lexical split and the inline derivation.
   const FIXTURE = [
     "# Gamma over the June week",
     "",
     "What moved and when — the squeeze case in one page.",
+    "",
+    "```facts",
+    '[{"label":"underlying","value":"SPX"},{"label":"week","value":"jun 1 – jun 5","tone":"accent"}]',
+    "```",
     "",
     "```stat",
     '[{"label":"sessions","value":5},{"label":"flagged","value":"12","n":6117},{"label":"max |gamma|","value":"4.1bn"}]',
@@ -290,6 +438,7 @@ describe("the fixture report (SWIT-73 verification shape)", () => {
     const segs = splitReport(FIXTURE);
     expect(segs.map((s) => s.kind)).toEqual([
       "markdown",
+      "facts",
       "stat",
       "markdown",
       "view",
@@ -297,14 +446,19 @@ describe("the fixture report (SWIT-73 verification shape)", () => {
       "view",
       "markdown",
     ]);
-    const stat = segs[1];
+    const facts = segs[1];
+    expect(facts.kind === "facts" && parseFactsBlock(facts.body).items).toEqual([
+      { label: "underlying", value: "SPX" },
+      { label: "week", value: "jun 1 – jun 5", tone: "accent" },
+    ]);
+    const stat = segs[2];
     expect(stat.kind === "stat" && parseStatTiles(stat.body).tiles?.length).toBe(3);
-    const line = inlineSpecAt(FIXTURE, 2, REPORT);
-    expect(line.spec).toMatchObject({ id: "r1~b2", kind: "line" });
+    const line = inlineSpecAt(FIXTURE, 3, REPORT);
+    expect(line.spec).toMatchObject({ id: "r1~b3", kind: "line" });
     expect(line.spec?.regions).toHaveLength(1);
     expect(line.spec?.seriesLabels).toEqual({ net_gamma: "net gamma ($bn)" });
-    const table = inlineSpecAt(FIXTURE, 3, REPORT);
-    expect(table.spec).toMatchObject({ id: "r1~b3", kind: "table", keyColumn: "match_id" });
+    const table = inlineSpecAt(FIXTURE, 4, REPORT);
+    expect(table.spec).toMatchObject({ id: "r1~b4", kind: "table", keyColumn: "match_id" });
     expect(table.spec?.drill?.kind).toBe("timeline");
   });
 
@@ -313,6 +467,7 @@ describe("the fixture report (SWIT-73 verification shape)", () => {
     const segs = splitReport(broken);
     expect(segs.map((s) => s.kind)).toEqual([
       "markdown",
+      "facts",
       "stat",
       "markdown",
       "view",
@@ -320,8 +475,8 @@ describe("the fixture report (SWIT-73 verification shape)", () => {
       "view",
       "markdown",
     ]);
-    expect(inlineSpecAt(broken, 2, REPORT).error).toBe("view block 2: not valid JSON");
-    expect(inlineSpecAt(broken, 3, REPORT).spec?.kind).toBe("table");
+    expect(inlineSpecAt(broken, 3, REPORT).error).toBe("view block 3: not valid JSON");
+    expect(inlineSpecAt(broken, 4, REPORT).spec?.kind).toBe("table");
   });
 });
 
