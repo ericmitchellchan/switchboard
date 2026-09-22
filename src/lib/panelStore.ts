@@ -1271,24 +1271,17 @@ let panelSides = new Map<string, PanelSide>();
 /** The side a tab's panel takes until the user's ⇄ says otherwise. RIGHT
  *  (2026-09-09, Eric: "the panel now opens automatically on the left side
  *  and I have to switch it back" — Ky's layout: terminal left, page right).
- *  The 2026-09-02 left default is gone; a tab that was explicitly put left
- *  keeps its entry. */
+ *  The 2026-09-02 left default is gone. ONLY THE TOGGLE WRITES AN ENTRY
+ *  (review fix, 2026-09-22): SWIT-69's `sideOnOpen` used to pin a never-set
+ *  tab to the default the moment a surface opened, which made an auto-write
+ *  look exactly like a user's choice — and would have kept every thread that
+ *  saw a page during the left week on the left after the default moved back.
+ *  Workspace v7 drops those `"left"` entries once (threadStore.migrateSavedWorkspace). */
 export const DEFAULT_PANEL_SIDE: PanelSide = "right";
 
 export function panelSideFor(sessionId: string | null): PanelSide {
   // An explicit entry — either value — is the user's and wins.
   return (sessionId && panelSides.get(ownerKeyFor(sessionId))) || DEFAULT_PANEL_SIDE;
-}
-
-/** The side a fresh open should WRITE for its tab, or null for "leave it".
- *  PURE (SWIT-69, rule 5): a surface artifact opening into a tab with no
- *  explicit side pins that tab to the DEFAULT side explicitly; an explicit
- *  side — either value — is the user's and is never touched. */
-export function sideOnOpen(
-  kind: Artifact["kind"],
-  explicit: PanelSide | undefined
-): PanelSide | null {
-  return kind === "surface" && explicit === undefined ? DEFAULT_PANEL_SIDE : null;
 }
 
 export function usePanelSide(sessionId: string | null): PanelSide {
@@ -1309,10 +1302,10 @@ export function togglePanelSide(sessionId: string): void {
   setPanelSide(sessionId, panelSideFor(sessionId) === "left" ? "right" : "left");
 }
 
-/** Lean record for the workspace blob: the EXPLICITLY-set THREAD panel sides,
- *  both values, keyed by thread id (a shell's side is transient, like its
- *  strip). "right" entries matter: they are the user's ⇄ overriding the
- *  surfaces-left default, and dropping them would re-flip the tab at restore. */
+/** Lean record for the workspace blob: the THREAD panel sides the user set
+ *  with ⇄, both values, keyed by thread id (a shell's side is transient, like
+ *  its strip). Both values are recorded so a "put back" survives a change of
+ *  default. */
 export function getPanelSidesRecord(): Record<string, PanelSide> {
   const out: Record<string, PanelSide> = {};
   for (const [key, side] of panelSides) {
@@ -1660,16 +1653,8 @@ export function openInPanel(
     return;
   }
   const key = ownerKeyFor(sessionId);
-  // SWIT-69 rule 5: a SURFACE opening into a tab whose side was never
-  // explicitly set pins that tab's panel to the default side — written into
-  // the map so it persists; the user's `⇄` (either direction) is explicit
-  // and wins forever. `sideOnOpen` is the pure rule.
-  const defaultSide = sideOnOpen(clean.kind, panelSides.get(key));
-  if (defaultSide !== null) {
-    panelSides = new Map(panelSides);
-    panelSides.set(key, defaultSide);
-    bump();
-  }
+  // An open never writes a panel SIDE (SWIT-90 review fix): only the user's
+  // ⇄ does. See DEFAULT_PANEL_SIDE.
   if (clean.kind === "session") {
     // ONE SESSION, ONE HOME (increment H). A live shell must not be listed in
     // two strips: only one panel renders at a time, so it would not produce two

@@ -6,7 +6,6 @@ import {
   __resetPanelStoreForTests,
   panelSideFor,
   setPanelSide,
-  sideOnOpen,
   togglePanelSide,
   openInPanel,
   getPanelSidesRecord,
@@ -69,26 +68,16 @@ describe("panel side", () => {
     expect(parsePanelSides(["left"])).toEqual({});
   });
 
-  it("sideOnOpen (pure): a surface into a never-set tab pins the default (right); explicit sides are untouched; other kinds never move it", () => {
-    expect(sideOnOpen("surface", undefined)).toBe("right");
-    expect(sideOnOpen("surface", "right")).toBeNull();
-    expect(sideOnOpen("surface", "left")).toBeNull();
-    expect(sideOnOpen("kb-doc", undefined)).toBeNull();
-    expect(sideOnOpen("view", undefined)).toBeNull();
-    expect(sideOnOpen("session", undefined)).toBeNull();
-  });
-
-  it("opening a surface pins the tab's side to the default (right) and persists it; the user's ⇄ then wins", () => {
+  it("an open — a surface included — never writes a side; only the user's ⇄ does (SWIT-90 review fix)", () => {
     setPanelThreadResolver((s) => (s === "s1" ? "th1" : null));
     openInPanel("s1", { kind: "surface", project: "lodestar", page: "trading" });
     expect(panelSideFor("s1")).toBe("right");
-    expect(getPanelSidesRecord()).toEqual({ th1: "right" });
+    expect(getPanelSidesRecord()).toEqual({}); // the default is not an entry
     togglePanelSide("s1"); // the user moves it left
     expect(panelSideFor("s1")).toBe("left");
     openInPanel("s1", { kind: "surface", project: "lodestar", page: "markets" });
     expect(panelSideFor("s1")).toBe("left"); // explicit left holds
-    // A non-surface open into a fresh tab writes nothing — the tab just
-    // shows the (right) default.
+    expect(getPanelSidesRecord()).toEqual({ th1: "left" });
     setPanelThreadResolver(() => null);
     openInPanel("s2", { kind: "kb-doc", path: "notes.md" });
     expect(panelSideFor("s2")).toBe("right");

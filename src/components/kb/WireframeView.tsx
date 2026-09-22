@@ -241,9 +241,11 @@ const FRAME_BOX_STYLE: CSSProperties = {
 };
 
 // The approved wireframe's note card (workstation-shell.html row 2):
-// bg-elevated chip, border-subtle, 2px text-secondary left edge, dim meta.
+// a raised chip, border-subtle, 2px text-secondary left edge, dim meta.
+// --bg-active, not --bg-elevated: the panel surface IS --bg-elevated's value
+// since SWIT-90, and a card must sit one step above what hosts it.
 const NOTE_CARD_STYLE: CSSProperties = {
-  background: "var(--bg-elevated)",
+  background: "var(--bg-active)",
   border: "1px solid var(--border-subtle)",
   borderLeft: "2px solid var(--text-secondary)",
   borderRadius: 3,

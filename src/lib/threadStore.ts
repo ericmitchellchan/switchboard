@@ -741,7 +741,8 @@ export function migrateSavedWorkspace(raw: unknown): SavedWorkspace | null {
     version !== 3 &&
     version !== 4 &&
     version !== 5 &&
-    version !== 6
+    version !== 6 &&
+    version !== 7
   ) {
     return null;
   }
@@ -753,11 +754,23 @@ export function migrateSavedWorkspace(raw: unknown): SavedWorkspace | null {
   // dropped (transient by the new rule).
   const rawPanels =
     version >= 4 ? parsePanels(ws.panels) : version === 3 ? parsePanelsV3(ws.panels) : {};
-  const panels = version === 6 ? rawPanels : rekeyBySavedThreads(rawPanels, threads);
-  const rawSides = parsePanelSides(ws.panelSides);
-  const panelSides = version === 6 ? rawSides : rekeyBySavedThreads(rawSides, threads);
+  const panels = version >= 6 ? rawPanels : rekeyBySavedThreads(rawPanels, threads);
+  const keyedSides = parsePanelSides(ws.panelSides);
+  const rekeyedSides = version >= 6 ? keyedSides : rekeyBySavedThreads(keyedSides, threads);
+  // v7 (SWIT-90 review fix, 2026-09-22): every `"left"` in a ≤v6 blob is
+  // DROPPED once. Between 2026-09-02 and 09-09 left was the default and a
+  // surface opening into a never-set tab WROTE `"left"` into this record —
+  // an auto-write that is indistinguishable from a user's ⇄ and that would
+  // have kept exactly the threads Eric complained about on the left after
+  // the default moved back to right. A user's own left from before 09-02 is
+  // lost with them (one ⇄ restores it, and that toggle is recorded as v7).
+  // `"right"` entries are always a user's and survive.
+  const panelSides =
+    version === 7
+      ? rekeyedSides
+      : Object.fromEntries(Object.entries(rekeyedSides).filter(([, side]) => side === "right"));
   return {
-    version: 6,
+    version: 7,
     sessions: ws.sessions as SavedSession[],
     activeSessionId: typeof ws.activeSessionId === "string" ? ws.activeSessionId : null,
     paneLayout: ws.paneLayout ?? null,

@@ -156,7 +156,10 @@ export function DocTickRail({
           pointerEvents: open ? "auto" : "none",
           transform: open ? "translateX(0)" : "translateX(-8px)",
           transition: "opacity 0.1s, transform 0.1s",
-          background: "var(--bg-elevated)",
+          // One step ABOVE the panel surface: --bg-panel is Ky's pane
+          // (#141414 = --bg-elevated) since SWIT-90, so an --bg-elevated
+          // overlay would sit flush with the content it slides over.
+          background: "var(--bg-active)",
           borderRight: "1px solid var(--border)",
           overflowY: "auto",
           paddingTop: 24,

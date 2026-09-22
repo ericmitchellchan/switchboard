@@ -1204,7 +1204,7 @@ function DecidedSection({ rows }: { rows: SettledQuestion[] }) {
   );
 }
 
-/** A cross-thread post: the origin as a 9.5px meta line, then the text. */
+/** A cross-thread post: the origin as a 10px mono meta line, then the text. */
 function PostRow({ post, isNew }: { post: InboxPost; isNew: boolean }) {
   return (
     <div style={{ ...DENSE_ROW, flexDirection: "column", gap: 2 }}>
@@ -1360,6 +1360,9 @@ function EvidenceAddress({
   target: OpenableArtifact | null;
   accent?: boolean;
 }) {
+  // Not openable (a ticket key, an unresolved path): plain primary text
+  // whatever the caller asked — the accent is reserved for a thing that
+  // OPENS, and a green address that does nothing on click would lie.
   if (!target)
     return (
       <span
@@ -1367,7 +1370,7 @@ function EvidenceAddress({
         style={{
           fontFamily: MONO,
           fontSize: 11,
-          color: accent ? "var(--accent)" : "var(--text-primary)",
+          color: "var(--text-primary)",
           flex: "0 1 auto",
           minWidth: 0,
           overflow: "hidden",

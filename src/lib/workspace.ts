@@ -43,7 +43,7 @@ export function buildSavedWorkspace(
   });
 
   return {
-    version: 6,
+    version: 7,
     sessions: savedSessions,
     activeSessionId,
     paneLayout: paneLayout as unknown,
@@ -60,8 +60,8 @@ export function buildSavedWorkspace(
     // above like any other.
     panels: getPanelsRecord(),
     panelWidth: getPanelWidth(),
-    // SWIT-33: which tabs keep their panel on the LEFT (right is the default
-    // and is never written). Absent on every older blob = all right.
+    // SWIT-33/69/90: the panel sides the user set with ⇄ (both values; only
+    // the toggle writes here since v7). Absent = the default, right.
     panelSides: getPanelSidesRecord(),
   };
 }

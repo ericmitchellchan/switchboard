@@ -333,7 +333,7 @@ describe("migrateSavedWorkspace (panels)", () => {
   it("v1 → v5: sessions/layout/counter preserved, panels default {} + default width", () => {
     const raw = mkWorkspaceV1();
     const ws = migrateSavedWorkspace(raw)!;
-    expect(ws.version).toBe(6);
+    expect(ws.version).toBe(7);
     expect(ws.sessions).toEqual(raw.sessions);
     expect(ws.paneLayout).toEqual(raw.paneLayout);
     expect(ws.activeSessionId).toBe("s1");
@@ -348,7 +348,7 @@ describe("migrateSavedWorkspace (panels)", () => {
     const t = mkThread({ sessionId: "s1" });
     const raw = mkWorkspaceV1({ version: 2, threads: [t] });
     const ws = migrateSavedWorkspace(raw)!;
-    expect(ws.version).toBe(6);
+    expect(ws.version).toBe(7);
     expect(ws.sessions).toEqual(raw.sessions);
     expect(ws.threads).toEqual([t]);
     expect(ws.panels).toEqual({});
@@ -369,7 +369,7 @@ describe("migrateSavedWorkspace (panels)", () => {
       panelWidth: 500,
     });
     const ws = migrateSavedWorkspace(raw)!;
-    expect(ws.version).toBe(6);
+    expect(ws.version).toBe(7);
     expect(ws.sessions).toEqual(raw.sessions); // v3's other halves untouched
     expect(ws.threads).toHaveLength(1);
     // s1 follows its thread; s3 has no thread record → transient, dropped.
@@ -390,7 +390,7 @@ describe("migrateSavedWorkspace (panels)", () => {
       panelWidth: 5000,
     });
     const ws = migrateSavedWorkspace(raw)!;
-    expect(ws.version).toBe(6);
+    expect(ws.version).toBe(7);
     expect(ws.panels).toEqual({ [t1.id]: strip([KB_DOC, REPO_FILE], 1) });
     expect(ws.panelWidth).toBe(MAX_PANEL_WIDTH);
   });
@@ -405,7 +405,7 @@ describe("migrateSavedWorkspace (panels)", () => {
   });
 
   it("unknown versions are still rejected outright", () => {
-    expect(migrateSavedWorkspace(mkWorkspaceV1({ version: 7 }))).toBeNull();
+    expect(migrateSavedWorkspace(mkWorkspaceV1({ version: 8 }))).toBeNull();
     expect(migrateSavedWorkspace(mkWorkspaceV1({ version: "4" }))).toBeNull();
   });
 });
@@ -2530,7 +2530,7 @@ describe("migrateSavedWorkspace v5→v6 (SWIT-47 — panels re-key by thread)", 
       panelWidth: 500,
     });
     const ws = migrateSavedWorkspace(raw)!;
-    expect(ws.version).toBe(6);
+    expect(ws.version).toBe(7);
     expect(ws.panels).toEqual({ "th-1": strip([KB_DOC, SESSION_A], 1) });
   });
 
@@ -2543,20 +2543,36 @@ describe("migrateSavedWorkspace v5→v6 (SWIT-47 — panels re-key by thread)", 
     const raw = mkWorkspaceV1({
       version: 5,
       threads: [THREAD_S1],
-      panelSides: { s1: "left", s2: "left" },
+      panelSides: { s1: "right", s2: "right" },
     });
-    expect(migrateSavedWorkspace(raw)!.panelSides).toEqual({ "th-1": "left" });
+    expect(migrateSavedWorkspace(raw)!.panelSides).toEqual({ "th-1": "right" });
   });
 
-  it("a v6 blob passes through unchanged", () => {
+  it("v7 (SWIT-90 review fix): a ≤v6 blob's `left` sides are dropped ONCE — the 2026-09-02..09 auto-writes — and `right` survives", () => {
     const raw = mkWorkspaceV1({
       version: 6,
       panels: { "th-1": one(KB_DOC) },
-      panelSides: { "th-1": "left" },
+      panelSides: { "th-1": "left", "th-2": "right", "th-3": "left" },
     });
     const ws = migrateSavedWorkspace(raw)!;
+    expect(ws.version).toBe(7);
     expect(ws.panels).toEqual({ "th-1": one(KB_DOC) });
-    expect(ws.panelSides).toEqual({ "th-1": "left" });
+    expect(ws.panelSides).toEqual({ "th-2": "right" });
+    // A ≤v5 left is dropped too, after the re-key.
+    const old = mkWorkspaceV1({ version: 5, threads: [THREAD_S1], panelSides: { s1: "left" } });
+    expect(migrateSavedWorkspace(old)!.panelSides).toEqual({});
+  });
+
+  it("a v7 blob passes through unchanged — a left recorded AFTER the migration is the user's", () => {
+    const raw = mkWorkspaceV1({
+      version: 7,
+      panels: { "th-1": one(KB_DOC) },
+      panelSides: { "th-1": "left", "th-2": "right" },
+    });
+    const ws = migrateSavedWorkspace(raw)!;
+    expect(ws.version).toBe(7);
+    expect(ws.panels).toEqual({ "th-1": one(KB_DOC) });
+    expect(ws.panelSides).toEqual({ "th-1": "left", "th-2": "right" });
   });
 
   it("v4 and v5 blobs with the same content migrate identically", () => {

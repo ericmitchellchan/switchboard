@@ -64,7 +64,7 @@ export interface SavedSession {
 }
 
 export interface SavedWorkspace {
-  version: 6; // v6 (SWIT-47): panels + panelSides keyed by THREAD id (shells transient). v1–v5 payloads are migrated on load.
+  version: 7; // v7 (SWIT-90): ≤v6 `"left"` panelSides dropped once (the 2026-09-02..09 auto-writes). v6 (SWIT-47): panels + panelSides keyed by THREAD id. v1–v6 payloads are migrated on load.
   sessions: SavedSession[];
   activeSessionId: string | null;
   paneLayout: unknown; // PaneNode serialized
@@ -92,12 +92,11 @@ export interface SavedWorkspace {
   panels: Record<string, PanelState>;
   /** Global panel width (one width for all tabs — one less thing to restore). */
   panelWidth: number;
-  /** PANEL SIDE per tab (SWIT-33): the tabs whose panel sits on the LEFT of
-   *  the pane tree. Right is the default and is never recorded, so the record
-   *  lists only `"left"` values — an empty or absent record is "every panel on
-   *  the right", which is also what every pre-SWIT-33 blob means. Keys are
-   *  saved session ids, remapped through the restore idMap like `panels`.
-   *  Optional: the v5 SHAPE is unchanged. */
+  /** PANEL SIDE per tab (SWIT-33): the tabs whose panel side the user set
+   *  with ⇄, BOTH values recorded (SWIT-69). Right is the default (SWIT-90);
+   *  an absent entry is "the default". Keys are thread ids (v6). Nothing
+   *  writes an entry but the user's toggle since v7 — the surface auto-write
+   *  is gone, and a ≤v6 blob's `"left"` entries are dropped on load. */
   panelSides?: Record<string, "left" | "right">;
 }
 
