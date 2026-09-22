@@ -155,6 +155,7 @@ import {
   batchSendTarget,
 } from "../../lib/viewNotes";
 import { composeWrite } from "../../lib/composer";
+import { barTone, columnMinMax, tableCellTone } from "../../lib/viewTone";
 // candles.ts is pure helpers (its lightweight-charts import is type-only,
 // erased at build) — importing seriesColor here pulls no chart library into
 // the main chunk; the vite-build gate checks that.
@@ -1139,10 +1140,21 @@ function ChartFallback() {
 
 /** The table renderer: kit tokens, click-to-sort, `row:<key>` anchors.
  *  Rows are focusable (T6): Enter opens the focused row the way a click does;
- *  focus shows the same tooltip hover does (T7). */
+ *  focus shows the same tooltip hover does (T7). SWIT-81: `spec.tones`
+ *  colours cells (sign = text, heat = background, over the loaded rows'
+ *  min/max) — never the header. */
 function TableView({ spec, rows, hoverKey, onActivate, onHover }: RendererProps) {
   const columns = tableColumns(rows, spec);
   const [sort, setSort] = useState<{ column: string; dir: 1 | -1 } | null>(null);
+  const tones = spec.kind === "table" ? spec.tones : undefined;
+  const heatRanges = useMemo(() => {
+    if (!tones || tones.length === 0) return null;
+    const map = new Map<string, { min: number; max: number } | null>();
+    for (const t of tones) {
+      if (t.tone === "heat") map.set(t.column, columnMinMax(rows, t.column));
+    }
+    return map;
+  }, [tones, rows]);
   const sorted = useMemo(() => {
     if (!sort) return rows;
     const { column, dir } = sort;
@@ -1245,6 +1257,7 @@ function TableView({ spec, rows, hoverKey, onActivate, onHover }: RendererProps)
                 const v = row[c];
                 const n = Number(v);
                 const numeric = typeof v === "number" || (typeof v === "string" && Number.isFinite(n) && v.trim() !== "");
+                const cellTone = tableCellTone(tones, c, v, heatRanges?.get(c) ?? null);
                 return (
                   <td
                     key={c}
@@ -1252,7 +1265,8 @@ function TableView({ spec, rows, hoverKey, onActivate, onHover }: RendererProps)
                       padding: "3px 8px",
                       textAlign: numeric ? "right" : "left",
                       whiteSpace: "nowrap",
-                      color: "var(--text-secondary)",
+                      color: cellTone?.color ?? "var(--text-secondary)",
+                      background: cellTone?.background,
                     }}
                   >
                     {v === null || v === undefined ? "" : String(v)}
@@ -1270,9 +1284,11 @@ function TableView({ spec, rows, hoverKey, onActivate, onHover }: RendererProps)
 
 /** The distribution AND category-bar renderer: plain flex bars with
  *  `bin:<n>` (dist) or `bar:<key>` (bar) anchors — 40 honest lines instead of
- *  bending uPlot into a histogram. Soft palette; the hovered bar takes the
- *  brighter `--text-secondary` fill (T7). Duplicate categories on a bar view
- *  follow the table's rule: the FIRST keeps the anchor, later ones get none. */
+ *  bending uPlot into a histogram. Duplicate categories on a bar view follow
+ *  the table's rule: the FIRST keeps the anchor, later ones get none.
+ *  SWIT-81: `spec.tone` (explicit, else `barTone`'s default) picks each
+ *  bar's resting/hover fill — the anchor and hover STATE are unchanged,
+ *  only the colour handed back moves. */
 function BarsView({ spec, rows, hoverKey, onActivate, onHover }: RendererProps) {
   // Binning is a full pass over the rows; the parent's hover state re-renders
   // this component with the same props, so the bins are memoised on them.
@@ -1287,6 +1303,7 @@ function BarsView({ spec, rows, hoverKey, onActivate, onHover }: RendererProps) 
     }
     return toDistBins(rows, spec).map((b, i) => ({ label: b.label, count: b.count, anchor: `bin:${i}` as string | null }));
   }, [rows, spec]);
+  const tones = useMemo(() => barTone(spec, bars.map((b) => b.count)), [spec, bars]);
   if (bars.length === 0) {
     return (
       <div style={{ padding: 24, fontFamily: MONO, fontSize: 11, color: "var(--text-dim)" }}>
@@ -1338,11 +1355,7 @@ function BarsView({ spec, rows, hoverKey, onActivate, onHover }: RendererProps) 
               style={{
                 width: "100%",
                 height: h,
-                background: hovered
-                  ? "var(--text-secondary)"
-                  : bar.count >= 0
-                    ? "var(--text-muted)"
-                    : "var(--text-faint)",
+                background: hovered ? tones[i].hover : tones[i].rest,
                 borderRadius: "2px 2px 0 0",
               }}
             />

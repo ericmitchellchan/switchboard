@@ -36,6 +36,8 @@
 // charts. The cap lives HERE only; the MCP server states it in the tool
 // description but cannot see inside the file to enforce it.
 
+import { isStatTone, STAT_TONES, type StatTone } from "./viewTone";
+
 export type ReportSegment =
   | { kind: "markdown"; text: string }
   | { kind: "view"; block: number; body: string }
@@ -131,8 +133,9 @@ function capReportBlocks(segs: ReportSegment[]): ReportSegment[] {
 /** One tile: the label, the figure, an optional n, and (2026-09-09, Ky's
  *  report cards) an optional `note` — one plain line under the figure
  *  ("4 – 7% is called good on ChatGPT Ads") — and an optional `tag`, a few
- *  words drawn as an accent chip ("2 – 3× benchmark"). */
-export type StatTile = { label: string; value: string; n?: number; note?: string; tag?: string };
+ *  words drawn as an accent chip ("2 – 3× benchmark"). SWIT-81: an optional
+ *  `tone` colours the FIGURE only — see lib/viewTone.ts's `statTone`. */
+export type StatTile = { label: string; value: string; n?: number; note?: string; tag?: string; tone?: StatTone };
 
 /** Most tiles one ```stat block renders (a row, not a dashboard). */
 export const STAT_TILE_CAP = 8;
@@ -164,6 +167,12 @@ function parseTile(raw: unknown, at: string): { tile: StatTile } | { error: stri
     if (typeof v2 !== "string") return { error: `${at}.${key} must be a string` };
     const clean = v2.trim();
     if (clean.length > 0) tile[key] = clean.slice(0, cap);
+  }
+  // SWIT-81: strict, like `n` — a bad tone errors the whole block rather
+  // than silently falling back, so a typo is visible instead of guessed at.
+  if (raw.tone !== undefined && raw.tone !== null) {
+    if (!isStatTone(raw.tone)) return { error: `${at}.tone must be one of ${STAT_TONES.join(", ")}` };
+    tile.tone = raw.tone as StatTone;
   }
   return { tile };
 }

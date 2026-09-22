@@ -172,6 +172,21 @@ describe("parseStatTiles", () => {
     expect(out.error).toContain("tiles[1]");
   });
 
+  it("SWIT-81: carries a tile's optional tone; an invalid one is a STRICT error (like n)", () => {
+    expect(parseStatTiles('{"label":"a","value":"+4%","tone":"up"}').tiles).toEqual([
+      { label: "a", value: "+4%", tone: "up" },
+    ]);
+    expect(parseStatTiles('{"label":"a","value":1,"tone":"accent"}').tiles).toEqual([
+      { label: "a", value: "1", tone: "accent" },
+    ]);
+    const bad = parseStatTiles('{"label":"a","value":1,"tone":"rainbow"}');
+    expect(bad.tiles).toBeNull();
+    expect(bad.error).toContain(".tone");
+    const badInArray = parseStatTiles('[{"label":"a","value":1},{"label":"b","value":2,"tone":"nope"}]');
+    expect(badInArray.tiles).toBeNull();
+    expect(badInArray.error).toContain("tiles[1].tone");
+  });
+
   it("errors on non-JSON, empty arrays, over-cap rows and a bad n", () => {
     expect(parseStatTiles("not json").error).toContain("not valid JSON");
     expect(parseStatTiles("[]").error).toContain("empty");

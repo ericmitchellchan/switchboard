@@ -45,6 +45,10 @@ const server = require("../../src-tauri/resources/mcp/switchboard-mcp.cjs") as {
   EVIDENCE_CAP: number;
   QUESTION_CAP: number;
   VIEW_LEVEL_CAP: number;
+  BAR_TONES: string[];
+  TABLE_TONE_KINDS: string[];
+  TABLE_TONES_CAP: number;
+  TABLE_TONE_COLUMN_CAP: number;
 };
 
 const NOW = Date.parse("2026-08-31T10:00:00Z");
@@ -1062,6 +1066,107 @@ describe("the view tool — levels / markerColumns / drill markers (SWIT-75, the
     expect(props.levels).toBeDefined();
     expect(props.markerColumns).toBeDefined();
     expect(String((props.drill as { description: string }).description)).toContain("markerColumns?");
+  });
+});
+
+describe("the view tool — tone / tones (SWIT-81, colour carries meaning)", () => {
+  const bar = {
+    op: "show",
+    kind: "bar",
+    title: "flow by strike",
+    source: { type: "file", path: "out/flow.json" },
+    keyColumn: "strike",
+    valueColumn: "net",
+  };
+  const table = {
+    op: "show",
+    kind: "table",
+    title: "flows",
+    source: { type: "file", path: "out/flows.json" },
+    keyColumn: "id",
+  };
+  const build = (extra: Record<string, unknown>, base: Record<string, unknown> = bar) =>
+    server.buildViewSpec({ ...base, ...extra }, [], NOW);
+
+  it("accepts a valid bar/dist tone and round-trips through viewStore's parse", () => {
+    const spec = build({ tone: "chart-4" });
+    expect(spec.tone).toBe("chart-4");
+    const parsed = parseViewSpec(JSON.stringify(spec));
+    expect(parsed.specError).toBeNull();
+    expect(parsed.spec?.tone).toBe("chart-4");
+    expect(build({ tone: "sign" }, { ...bar, kind: "dist", source: { type: "file", path: "out/dist.json" } }).tone).toBe(
+      "sign"
+    );
+  });
+
+  it("rejects an unknown tone, naming the allowed values", () => {
+    expect(() => build({ tone: "rainbow" })).toThrow(/tone must be one of/);
+    expect(() => build({ tone: "rainbow" })).toThrow(/neutral/);
+  });
+
+  it("tone is bar/dist only — a table spec carrying it is refused", () => {
+    expect(() => build({ tone: "accent" }, table)).toThrow(/tone applies to bar \/ dist/);
+  });
+
+  it("accepts valid table tones, trims the column, and round-trips through viewStore's parse", () => {
+    const spec = build(
+      { tones: [{ column: " pnl ", tone: "sign" }, { column: "vol", tone: "heat" }] },
+      table
+    );
+    expect(spec.tones).toEqual([
+      { column: "pnl", tone: "sign" },
+      { column: "vol", tone: "heat" },
+    ]);
+    const parsed = parseViewSpec(JSON.stringify(spec));
+    expect(parsed.specError).toBeNull();
+    expect(parsed.spec?.tones).toEqual(spec.tones);
+  });
+
+  it("rejects malformed tones as visible errors — bad kind, empty/over-cap column, repeated column, the cap", () => {
+    expect(() => build({ tones: [{ column: "x", tone: "rainbow" }] }, table)).toThrow(/tones\[0\]\.tone must be one of/);
+    expect(() => build({ tones: [{ column: "", tone: "sign" }] }, table)).toThrow(/tones\[0\]\.column/);
+    expect(() => build({ tones: [{ column: "x".repeat(65), tone: "sign" }] }, table)).toThrow(/cap is 64/);
+    expect(() =>
+      build({ tones: [{ column: "pnl", tone: "sign" }, { column: "pnl", tone: "heat" }] }, table)
+    ).toThrow(/repeats column pnl/);
+    expect(() =>
+      build({ tones: Array.from({ length: 7 }, (_, i) => ({ column: `c${i}`, tone: "sign" })) }, table)
+    ).toThrow(/cap is 6/);
+    expect(server.TABLE_TONES_CAP).toBe(6);
+    expect(server.TABLE_TONE_COLUMN_CAP).toBe(64);
+  });
+
+  it("tones is table only — a bar spec carrying it is refused", () => {
+    expect(() => build({ tones: [{ column: "n", tone: "sign" }] })).toThrow(/tones applies to table/);
+  });
+
+  it("the tool description names tone/tones and the schema exposes both properties", () => {
+    for (const rule of [
+      "tone` picks the bars' fill",
+      "neutral' | 'sign' (--up/--dn) | 'accent' | 'chart-1'..'chart-8'",
+      "tones` (<=6)",
+      "sign colours the",
+      "heat tints the cell background",
+    ]) {
+      expect(server.VIEW_TOOL.description).toContain(rule);
+    }
+    const props = (server.VIEW_TOOL.inputSchema as { properties: Record<string, unknown> }).properties;
+    expect(props.tone).toBeDefined();
+    expect(props.tones).toBeDefined();
+    expect(server.BAR_TONES).toEqual([
+      "neutral",
+      "sign",
+      "accent",
+      "chart-1",
+      "chart-2",
+      "chart-3",
+      "chart-4",
+      "chart-5",
+      "chart-6",
+      "chart-7",
+      "chart-8",
+    ]);
+    expect(server.TABLE_TONE_KINDS).toEqual(["sign", "heat"]);
   });
 });
 

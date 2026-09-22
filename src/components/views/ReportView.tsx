@@ -42,6 +42,7 @@ import type { ReportSegment, StatTile } from "../../lib/reportStore";
 import { log } from "../../lib/logger";
 import { parseInlineViewSpec, useInlineViewData } from "../../lib/viewStore";
 import type { ViewSpec } from "../../lib/viewStore";
+import { statTone } from "../../lib/viewTone";
 import { MarkdownBody, MarkdownDocStyles } from "../kb/MarkdownDoc";
 import { ViewChrome } from "./ViewSurface";
 
@@ -306,7 +307,7 @@ function StatTileBox({ tile }: { tile: StatTile }) {
       <div style={{ fontSize: 11.5, lineHeight: 1.35, color: "var(--text-secondary)", marginBottom: 6 }}>
         {tile.label}
       </div>
-      <div style={{ fontSize: 24, fontWeight: 600, lineHeight: 1.15, color: "var(--text-primary)", whiteSpace: "nowrap" }}>
+      <div style={{ fontSize: 24, fontWeight: 600, lineHeight: 1.15, color: statTone(tile), whiteSpace: "nowrap" }}>
         {tile.value}
         {tile.n !== undefined && (
           <span style={{ fontFamily: MONO, fontSize: 10, fontWeight: 400, color: "var(--text-faint)", marginLeft: 6 }}>n={tile.n}</span>

@@ -1719,3 +1719,66 @@ describe("SWIT-75 smoke — the gamma deck: next/prev across 86 days, markers ou
     );
   });
 });
+
+import { isBarTone } from "./viewTone";
+
+describe("SWIT-81 — bar/dist `tone` and table `tones`: tolerant parse, kind-scoped", () => {
+  const bar: ViewSpec = {
+    ...T7_BAR_SPEC,
+  };
+  const table: ViewSpec = {
+    id: "t81",
+    kind: "table",
+    title: "flows",
+    source: { type: "file", path: "out/flows.json" },
+    builtAt: "2026-09-22T10:00:00Z",
+    builtBy: "agent",
+  };
+
+  it("a valid tone on a bar/dist spec round-trips through parseViewSpec", () => {
+    const raw = JSON.stringify({ ...bar, tone: "chart-4" });
+    const { spec, specError } = parseViewSpec(raw);
+    expect(specError).toBeNull();
+    expect(spec?.tone).toBe("chart-4");
+    expect(isBarTone(spec?.tone)).toBe(true);
+  });
+
+  it("an invalid or missing tone is ABSENT, never a broken spec", () => {
+    expect(parseViewSpec(JSON.stringify({ ...bar, tone: "rainbow" })).spec?.tone).toBeUndefined();
+    expect(parseViewSpec(JSON.stringify(bar)).spec?.tone).toBeUndefined();
+  });
+
+  it("tone is scoped to bar/dist — a valid tone on a table spec is dropped", () => {
+    const raw = JSON.stringify({ ...table, tone: "accent" });
+    expect(parseViewSpec(raw).spec?.tone).toBeUndefined();
+  });
+
+  it("valid `tones` on a table spec round-trip, trimmed, capped, deduped by first-wins", () => {
+    const raw = JSON.stringify({
+      ...table,
+      tones: [
+        { column: " pnl ", tone: "sign" },
+        { column: "vol", tone: "heat" },
+        { column: "pnl", tone: "heat" }, // repeated column — first wins
+      ],
+    });
+    const { spec, specError } = parseViewSpec(raw);
+    expect(specError).toBeNull();
+    expect(spec?.tones).toEqual([
+      { column: "pnl", tone: "sign" },
+      { column: "vol", tone: "heat" },
+    ]);
+  });
+
+  it("tones is scoped to table — a well-formed tones array on a bar spec is dropped", () => {
+    const raw = JSON.stringify({ ...bar, tones: [{ column: "n", tone: "sign" }] });
+    expect(parseViewSpec(raw).spec?.tones).toBeUndefined();
+  });
+
+  it("malformed tones entries are ABSENT rather than a broken spec", () => {
+    const raw = JSON.stringify({ ...table, tones: "nope" });
+    const { spec, specError } = parseViewSpec(raw);
+    expect(specError).toBeNull();
+    expect(spec?.tones).toBeUndefined();
+  });
+});

@@ -381,6 +381,15 @@ function applyOp(page, args, now, answeredIds = new Set()) {
 // static `markers` list. The shell adds deck next/prev over a drilled
 // child, a per-card note (`<deck dir>/notes.json`, written by the app) and
 // a batch send; this server validates the fields and states the loop.
+// SWIT-81: colour carries meaning, never decoration. `tone` (bar/dist only)
+// picks the bars' fill — 'neutral' | 'sign' (--up/--dn) | 'accent' |
+// 'chart-1'..'chart-8'; omitted, the shell defaults it (sign when the
+// values are mixed, else neutral — see viewTone.ts). `tones` (table only,
+// <=6) [{column, tone:'sign'|'heat'}] colours cells — sign the text by
+// number sign, heat the background by the column's min–max position; a
+// report's ```stat tile takes its own `tone` ('up'|'dn'|'accent'|'neutral')
+// on the figure, validated by the shell alone (this server cannot see
+// inside the markdown file).
 
 const VIEW_KINDS = ["table", "candles", "dist", "line", "bar", "timeline", "report"];
 const VIEW_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -398,6 +407,23 @@ const VIEW_SERIES_LABEL_CAP = 24;
 // SWIT-75: levels per chart — mirrored in viewStore.ts.
 const VIEW_LEVEL_CAP = 12;
 const VIEW_LEVEL_STYLES = ["solid", "dashed", "zone"];
+// SWIT-81: bar/dist tone, table tones — mirrored in src/lib/viewTone.ts.
+const BAR_TONES = [
+  "neutral",
+  "sign",
+  "accent",
+  "chart-1",
+  "chart-2",
+  "chart-3",
+  "chart-4",
+  "chart-5",
+  "chart-6",
+  "chart-7",
+  "chart-8",
+];
+const TABLE_TONE_KINDS = ["sign", "heat"];
+const TABLE_TONES_CAP = 6;
+const TABLE_TONE_COLUMN_CAP = 64;
 
 function validViewSourcePath(p) {
   if (typeof p !== "string" || p.trim().length === 0) return false;
@@ -672,6 +698,49 @@ function buildSizeColumn(v, field) {
   return v.trim();
 }
 
+/** `tone` (SWIT-81): bar / dist only — the bars' colour rule. Absent = the
+ *  reader's default (sign when the values are mixed, else neutral). Pure;
+ *  throws OpError. */
+function buildTone(v, kind) {
+  if (v === undefined || v === null) return undefined;
+  if (kind !== "bar" && kind !== "dist") {
+    throw new OpError("tone applies to bar / dist views");
+  }
+  if (typeof v !== "string" || !BAR_TONES.includes(v)) {
+    throw new OpError(`tone must be one of ${BAR_TONES.join(", ")}`);
+  }
+  return v;
+}
+
+/** `tones` (SWIT-81): table only — up to TABLE_TONES_CAP
+ *  {column, tone:'sign'|'heat'} cell-colour rules; a repeated column is an
+ *  error (the reader's tolerant re-parse keeps the first rule instead, for
+ *  a hand-written spec). Pure; throws OpError. */
+function buildTableTones(raw, kind) {
+  if (raw === undefined || raw === null) return undefined;
+  if (kind !== "table") throw new OpError("tones applies to table views");
+  if (!Array.isArray(raw)) throw new OpError("tones must be an array of {column, tone:'sign'|'heat'}");
+  if (raw.length > TABLE_TONES_CAP) {
+    throw new OpError(`tones has ${raw.length} entries; the cap is ${TABLE_TONES_CAP}`);
+  }
+  const out = [];
+  const seen = new Set();
+  raw.forEach((t, i) => {
+    if (typeof t !== "object" || t === null) throw new OpError(`tones[${i}] must be {column, tone}`);
+    const column = text(t.column, `tones[${i}].column`).trim();
+    if (column.length > TABLE_TONE_COLUMN_CAP) {
+      throw new OpError(`tones[${i}].column is ${column.length} chars; the cap is ${TABLE_TONE_COLUMN_CAP}`);
+    }
+    if (!TABLE_TONE_KINDS.includes(t.tone)) {
+      throw new OpError(`tones[${i}].tone must be one of ${TABLE_TONE_KINDS.join(", ")}`);
+    }
+    if (seen.has(column)) throw new OpError(`tones[${i}] repeats column ${column}`);
+    seen.add(column);
+    out.push({ column, tone: t.tone });
+  });
+  return out.length > 0 ? out : undefined;
+}
+
 /** Validate + normalize a view op into the spec the shell renders. Pure;
  *  throws OpError with agent-readable messages. */
 function buildViewSpec(args, existingIds, now) {
@@ -751,6 +820,11 @@ function buildViewSpec(args, existingIds, now) {
   if (regions !== undefined) spec.regions = regions;
   const panels = buildPanels(args.panels, kind);
   if (panels !== undefined) spec.panels = panels;
+  // SWIT-81: colour carries meaning.
+  const tone = buildTone(args.tone, kind);
+  if (tone !== undefined) spec.tone = tone;
+  const tones = buildTableTones(args.tones, kind);
+  if (tones !== undefined) spec.tones = tones;
   return spec;
 }
 
@@ -867,11 +941,16 @@ const VIEW_TOOL = {
     "{type:'query', url}. The view NEVER runs your code — it renders your data. op 'show' " +
     "opens it (id minted if omitted); op 'update' with the same id refreshes the open tab. " +
     "For tables pass columns (display order) and keyColumn (the column whose value names a " +
-    "row for pins). For candles pass markers [{ts, label, id?}] for entries/exits. " +
+    "row for pins); `tones` (<=6) [{column, tone:'sign'|'heat'}] colours cells — sign colours the " +
+    "cell text --up/--dn by the number's sign, heat tints the cell background toward --accent by " +
+    "the column's min–max position; header cells are never tinted. For candles pass markers " +
+    "[{ts, label, id?}] for entries/exits. " +
     "line: rows {time|ts, <series>…} over one time axis — pass `series` (column names) or every " +
     "numeric non-time column is drawn; markers apply as on candles. bar: one row per category " +
     "{<keyColumn>, <valueColumn>} — pass keyColumn and valueColumn (else count/n/value by name). " +
-    "dist is the same shape, pre-binned. timeline: one row per moment {ts, price (0-100, the " +
+    "dist is the same shape, pre-binned. bar / dist colour: `tone` picks the bars' fill — " +
+    "'neutral' | 'sign' (--up/--dn) | 'accent' | 'chart-1'..'chart-8'; omit it and the shell " +
+    "picks sign when the values are mixed, else neutral. timeline: one row per moment {ts, price (0-100, the " +
     "yes-price), <sizeColumn>, backs_player? (1|2), sets_p1?, sets_p2?, games_p1?, games_p2?} — " +
     "the price is drawn as a line, every row as a mark sized by `sizeColumn` (default size_z) " +
     "and toned by backs_player, the score as discrete steps under the price; anchors are " +
@@ -905,8 +984,10 @@ const VIEW_TOOL = {
     "pass kind:'report', source:{type:'file', path:'analysis.md'}; inside it a fenced block " +
     "```view whose body is a view-spec JSON (the same fields as this tool, NO id — the " +
     "block's position names it) renders as an interactive chart in place, and ```stat with " +
-    '{label, value, n?, note?, tag?} (or an array of them) renders stat cards — note = one ' +
-    "plain line under the figure, tag = a few words drawn as an accent chip ('2 – 3× benchmark') — e.g. ```view\\n" +
+    '{label, value, n?, note?, tag?, tone?} (or an array of them) renders stat cards — note = one ' +
+    "plain line under the figure, tag = a few words drawn as an accent chip ('2 – 3× benchmark'), " +
+    "tone ('up'|'dn'|'accent'|'neutral') colours the figure only — omit it and a value that starts " +
+    "with an explicit + or - picks up/dn for you — e.g. ```view\\n" +
     '{"kind":"line","title":"net gamma","source":{"type":"file","path":".sb-views/gamma.json"}}\\n```. ' +
     "Blocks are validated when drawn — a broken block shows an error card in place and the " +
     "rest of the report renders; at most 24 view/stat blocks render live, the rest as plain " +
@@ -967,6 +1048,18 @@ const VIEW_TOOL = {
       sizeColumn: {
         type: "string",
         description: "timeline: the column a mark's radius comes from (size_z or count). Default size_z. Radii are clamped to a readable range.",
+      },
+      tone: {
+        type: "string",
+        enum: BAR_TONES,
+        description:
+          "bar / dist: the bars' colour. Omit for the default — 'sign' (--up/--dn) when the values are mixed, else 'neutral'.",
+      },
+      tones: {
+        type: "array",
+        items: { type: "object" },
+        description:
+          "table (<=6): [{column, tone:'sign'|'heat'}] — sign colours the cell text by the number's sign, heat tints the cell background toward --accent by the column's min–max position. Header cells are never tinted.",
       },
       definition: {
         type: "string",
@@ -1718,6 +1811,10 @@ module.exports = {
   VIEW_PANEL_CAP,
   VIEW_SERIES_LABEL_CAP,
   VIEW_LEVEL_CAP,
+  BAR_TONES,
+  TABLE_TONE_KINDS,
+  TABLE_TONES_CAP,
+  TABLE_TONE_COLUMN_CAP,
   parsePage,
   applyOp,
   performOp,
