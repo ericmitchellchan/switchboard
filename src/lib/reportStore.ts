@@ -4,16 +4,22 @@
 // A report is a `view` of kind `report` whose source is a markdown file in
 // the thread's working directory. Inside it, a fenced code block whose info
 // string is `view` embeds a view spec (the same fields the `view` tool takes,
-// NO id — the block's POSITION indexes it) and one whose info string is
-// `stat` embeds stat tiles ({label, value, n?} or an array of them). This
+// NO id — the block's POSITION indexes it), one whose info string is `stat`
+// embeds stat tiles ({label, value, n?, note?, tag?, tone?, series?, delta?}
+// or an array of them), and — SWIT-96 — one whose info string is `facts`
+// embeds the report's header card ([{label, value, tone?}], ≤ 8). A `view`
+// or `stat` block's JSON may carry `width` (`full` | `half` | `third`,
+// stripped before the spec/tile parser sees it; an UNKNOWN width reads as
+// `full` on purpose — a layout hint must never break a block) and packed
+// rows are computed by `packRows`. This
 // module is purely LEXICAL: it finds the fences and hands back raw bodies;
 // the SPEC semantics (JSON parse, kind rules, id derivation) live in
 // viewStore's `parseInlineViewSpec`, which imports from here — never the
 // other way round, so viewStore's import-graph tripwire stays honest.
 //
 // Fence grammar, deliberately narrow:
-//   · a line that is exactly ```view or ```stat (trailing spaces tolerated)
-//     OPENS a block; a line that is exactly ``` CLOSES it;
+//   · a line that is exactly ```view, ```stat or ```facts (trailing spaces
+//     tolerated) OPENS a block; a line that is exactly ``` CLOSES it;
 //   · any OTHER fence line — backtick or tilde, 3+ of either, per CommonMark —
 //     opens an ordinary code fence, and a ```view line inside one is code,
 //     not a block. The state machine tracks the opening fence's CHARACTER and
@@ -26,10 +32,13 @@
 //     to the end) — a torn write renders as one block error, not as a page
 //     of raw JSON.
 //
-// Blocks are numbered 1-based across BOTH kinds in document order — the
+// Blocks are numbered 1-based across ALL THREE kinds in document order — the
 // number an error card names, the `b<n>` in a derived spec id, the `#b<n>`
 // pin-scope suffix and the `block` field on a drilled child's artifact all
-// come from this one count. LIVE blocks are capped at REPORT_BLOCK_CAP:
+// come from this one count. CONSEQUENCE, stated (SWIT-96 review): inserting
+// a block ahead of others — a `facts` header at the top, the pattern the
+// tool description recommends — renumbers every block after it, and pins
+// filed under the old `#b<n>` scope no longer draw. LIVE blocks are capped at REPORT_BLOCK_CAP:
 // blocks past the cap fall back to plain code fences in the narrative, with
 // ONE `overflow` segment (rendered as one error card) marking where the cap
 // bit — a runaway generator degrades to code, never to an unbounded page of

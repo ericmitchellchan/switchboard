@@ -1010,7 +1010,7 @@ const VIEW_TOOL = {
     "2–50) opens them as one tab; no kind/title/source on that call. A DASHBOARD is a report " +
     "with a layout: a ```facts block, body a JSON array (<=8) of {label, value, " +
     "tone?:'accent'|'amber'|'neutral'}, renders ONE header card (always full width, never " +
-    "packed) — put it first. A ```stat tile also takes `series` (<=60 finite numbers, drawn as " +
+    "packed; a `facts` block inserted ahead of others renumbers them, so add it before pins are filed) — put it first. A ```stat tile also takes `series` (<=60 finite numbers — a longer series is trimmed to its most recent 60 — drawn as " +
     "a sparkline) and `delta` (one line under the figure, e.g. '+2 vs prior 30d'). Any ```view " +
     "or ```stat block's JSON may carry `width`:'half'|'third' (default 'full', stripped before " +
     "the block is otherwise parsed); consecutive blocks of the SAME width with no prose between " +
