@@ -185,8 +185,9 @@ Three ranks. One primary per surface; when a second action feels important it is
 - **Ours — primary:** Ky's PrimaryButton verbatim since 2026-09-09 — `--accent`
   fill, text `--bg-primary` (near-black, as Ky's `#0f1115`), 12px weight 600, padding
   `4px 12px`, radius 6, no border; hover `opacity: .9`; disabled `opacity: .4`. The
-  ✦ page's `Send decisions ▸` is this. (The 2026-09-01 white-fill / radius-3 form
-  survives on the confirm dialog until that surface takes its Ky pass.)
+  ✦ page's `Send decisions ▸` is this, and (SWIT-91) so is the confirm dialog's
+  confirm button — the same shape in `--tone-rose` fill when the action is
+  destructive.
 - **Ours — quiet:** transparent, 1px `--border-subtle`, `--text-secondary`, 11px,
   padding `3px 10px`, radius 3; hover `--text-primary` + border `--text-secondary`;
   disabled `opacity: .4`. Destructive quiet: text + border `--accent-red`.
@@ -371,19 +372,22 @@ other threads sit at the top of To do as post rows. Home keeps its Needs you blo
   `--tone-amber` (Ky's `plan-question-unsent`) on its folded row and its card.
 - Empty page: the `✦` glyph 14px `--text-muted` over ONE line, `No page yet.` Nothing
   about who writes it or when.
-- **Home (`Home.tsx`, SWIT-54 hierarchy pass)** is the same content at screen scale
-  with Ky's HomeScreen hierarchy logic: ONE left-aligned column, `max-width: 720px`,
-  sections separated by the RULE-WITH-LABEL header (~28px above, 10px below — the
-  whitespace asymmetry chunks them; entry above) in page order Needs you · Backlog ·
-  Live now · Between threads · Listening · Kept views. Type follows the RAMP: titles
-  12.5px `--text-primary`, body 11px, meta 9.5px `--text-dim` right-aligned in one
-  column (`open →`, a time, a project, `listening`). Every informational item is a
-  flat content-body list row (`5px 8px`, hover `--bg-active` + `--text-primary`,
-  focus bar) with NO leading glyph column — dots (live status, the probe) are data
-  and sit inline before the title; `?`/`○`/`→` decoration is gone, the section
-  label says what rows are. A question in Needs you is THE EARNED BOX (entry above)
-  — the only card on the screen. An EMPTY section does not render at all; the empty
-  ones fold into ONE quiet line at the page bottom, 9.5px `--text-dim`:
+- **Home (`Home.tsx`, SWIT-54 hierarchy pass; re-cut SWIT-91 to this page's own Ky
+  pass, SWIT-90)** is the same content at screen scale, now in the page's own
+  grammar rather than a second kit voice: ONE left-aligned column, `max-width:
+  720px`, sections as this page's SECTION TITLE (H2, entry above) — 14px 600
+  reading-face, a 1px `--border` hairline under, the count/meta 10px mono
+  `--text-faint` beside it — 18px apart, in page order Needs you · Backlog · Live
+  now · Between threads · Listening · Kept views. The RULE-WITH-LABEL header and
+  the uppercase faint section-label voice are RETIRED on Home. Every informational
+  item is the page's DENSE_ROW (entry above): 12.5px reading-face `--text-primary`
+  title, a 1px `--border` hairline under each row, meta 10px mono `--text-faint`
+  right-aligned (`open →`, a time, a project, `listening`); hover `--bg-hover` +
+  `--text-primary`, focus bar. NO leading glyph column — dots (live status, the
+  probe) are data and sit inline before the title. A question in Needs you is THE
+  EARNED BOX (entry above) — `--bg-active`, radius 8 — the only card on the
+  screen, its input the page's FIELD. An EMPTY section does not render at all; the
+  empty ones fold into ONE quiet line at the page bottom, 10px mono `--text-faint`:
   `needs you · live now · … — all quiet` (omitted when nothing is empty).
 
 ## Set frame (SWIT-79)

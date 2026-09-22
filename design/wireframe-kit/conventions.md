@@ -249,6 +249,18 @@ that stop being true.
   the counts, owner column, addresses, stamps, wire text, tables and code — the
   elements Ky marks `font-mono`. Not `--font-sans`: that name belongs to surfaces.css's
   Tailwind theme, and Lodestar's pages keep their mono.
+- 2026-09-22 — KY PASS 2: HOME, THE TO-DOS DROPDOWN AND THE CONFIRM DIALOG (SWIT-91).
+  The three surfaces the 2026-09-09 pass left behind now draw from a shared
+  `components/kit.ts` (the ✦ page's own constants, copied rather than imported so
+  PageView stays untouched). Home's sections are the page's H2s, its rows the page's
+  hairline-under-each rows in reading face — the rule-with-label header and the type
+  ramp are retired here. The To-dos dropdown is a Ky-shaped popover (`--bg-panel`,
+  radius 8) with a real checkbox-shaped stage square per row and a mono sub-line
+  (project · stage · links) under reading-face text. The confirm dialog is `--bg-panel`
+  + radius 8 with a reading-face title/body and the page's PrimaryButton shape for its
+  confirm action (`--tone-rose` fill when destructive) — closing the Button entry's
+  note that its old form survived only until this pass. A re-skin throughout: every
+  write and every existing behaviour is unchanged.
 
 ## Decisions recorded by the app
 

@@ -14,24 +14,27 @@
 //   Listening        → announced dev servers, probed (never "healthy").
 //   Kept views       → the scratchpad listing (_scratch/*.view.json).
 //
-// SKIN (SWIT-54 hierarchy pass — Eric: "it all blends in … we need sections
-// and break it out but not overuse boxes either"): ONE left-aligned column
-// (max 720px), Ky's HomeScreen hierarchy logic in our mono. The kit TYPE RAMP
-// (four sizes, no fifth): 10px uppercase `--text-faint` section label · 12.5px
-// `--text-primary` title · 11px `--text-secondary` body · 9.5px `--text-dim`
-// meta. Sections separate by STRUCTURE — the rule-with-label header (label,
-// then a 1px `--border` hairline filling the line, count/meta at the right)
-// with 28px above and 10px below — never by boxes. Exactly ONE earned box:
-// a question in Needs you is an elevated card (`--bg-elevated`, 1px
-// `--border`, radius 6), because it asks Eric to act; everything else is a
-// flat kit list row with its meta right-aligned. No decorative leading glyph
-// column — dots (live status, the probe) are data and stay inline. An EMPTY
-// section does not render; the empty ones fold into one quiet 9.5px line at
-// the page bottom. Skin only — every click and every write goes through the
-// same bridge it did.
+// SKIN (SWIT-54 hierarchy pass; re-cut SWIT-91 — the ✦ page's Ky pass,
+// SWIT-90, reads like Ky's PlanPanel and Home did not): ONE left-aligned
+// column (max 720px), Ky's HomeScreen hierarchy logic in the page's own
+// grammar. Sections are H2s — the page's SECTION_TITLE (14px 600 reading
+// face, a 1px `--border` hairline under, the count/meta 10px mono faint
+// beside it) — 18px apart; the rule-with-label header and the uppercase
+// faint section-label voice are RETIRED on Home (kept nowhere else that
+// still reads that way). Rows are 12.5px reading-face `--text-primary` with
+// a hairline under each (the page's DENSE_ROW), meta 10px mono
+// `--text-faint` right-aligned. Exactly ONE earned box: a question in
+// Needs you is an elevated card — `--bg-active` (one step up from
+// `--bg-panel`), 1px `--border`, radius 8 — because it asks Eric to act,
+// with the page's FIELD for its input; everything else is a flat row. No
+// decorative leading glyph column — dots (live status, the probe) are data
+// and stay inline. An EMPTY section does not render; the empty ones fold
+// into one quiet 10px mono line at the page bottom. Skin only — every click
+// and every write goes through the same bridge it did.
 import { useCallback, useEffect, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { PulsingDot } from "./PulsingDot";
+import { MONO, READING, SECTION_TITLE, DENSE_ROW, FIELD } from "./kit";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
 import {
   useThreadsView,
@@ -63,97 +66,76 @@ import type { BacklogItem } from "../lib/backlogStore";
 import { BacklogListing } from "./BacklogPanel";
 import { OptionRow } from "./kb/OptionRow";
 
-const MONO = "var(--font-mono)";
-
-// ── The type ramp (kit: "type ramp — four sizes, no fifth") ─────────────────
-
-/** kit: section label — 10px uppercase `--text-faint`, tracking 0.08em. */
-const SECTION_LABEL: CSSProperties = {
+/** The page's H2 + trailing meta (10px mono faint, pushed right). */
+const SECTION_META: CSSProperties = {
+  marginLeft: "auto",
   fontFamily: MONO,
   fontSize: 10,
-  textTransform: "uppercase",
-  letterSpacing: "0.08em",
+  fontWeight: 400,
   color: "var(--text-faint)",
-  flex: "none",
 };
 
-/** kit: row / question title — 12.5px `--text-primary`. */
+/** The page's section header: an H2 (SECTION_TITLE) with an optional meta
+ *  string at the right — a count (`Backlog · 3`) or a description
+ *  (`Live now · 2 threads`, `Listening · probed, not health-checked`). */
+function SectionHeader({ label, meta }: { label: string; meta?: string }) {
+  return (
+    <h2 style={SECTION_TITLE}>
+      {label}
+      {meta !== undefined && <span style={SECTION_META}>{meta}</span>}
+    </h2>
+  );
+}
+
+/** Row / question title — 12.5px reading-face `--text-primary`. */
 const TITLE: CSSProperties = {
+  fontFamily: READING,
   fontSize: 12.5,
   color: "var(--text-primary)",
 };
 
-/** kit: trailing meta on a row — 9.5px `--text-dim`, right-aligned. */
+/** Trailing meta on a row — 10px mono `--text-faint`, right-aligned. */
 const ROW_META: CSSProperties = {
   marginLeft: "auto",
   flex: "none",
-  fontSize: 9.5,
-  color: "var(--text-dim)",
+  fontFamily: MONO,
+  fontSize: 10,
+  color: "var(--text-faint)",
   whiteSpace: "nowrap",
 };
 
-/** kit: the rule-with-label section header — label · hairline · meta. */
-function SectionHeader({ label, meta }: { label: string; meta?: string }) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-      <span style={SECTION_LABEL}>{label}</span>
-      <span style={{ flex: 1, height: 1, background: "var(--border)" }} />
-      {meta ? (
-        <span style={{ fontFamily: MONO, fontSize: 9.5, color: "var(--text-dim)", flex: "none" }}>
-          {meta}
-        </span>
-      ) : null}
-    </div>
-  );
-}
-
-/** kit: list row (content-body variant, `5px 8px`). The row IS the target. */
+/** The page's DENSE_ROW, as a full-width row (a hairline under each). */
 const ROW: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
+  ...DENSE_ROW,
   width: "100%",
-  padding: "5px 8px",
+  padding: "6px 4px",
   background: "none",
   border: "none",
   boxShadow: "none",
-  fontFamily: MONO,
+  fontFamily: READING,
   fontSize: 12.5,
-  lineHeight: 1.5,
+  lineHeight: 1.45,
   color: "var(--text-secondary)",
   textAlign: "left",
   outline: "none",
 };
 
-/** kit: THE EARNED BOX — reserved for a block that asks the user to act. */
+/** THE EARNED BOX — reserved for a block that asks the user to act; one
+ *  step up from `--bg-panel` (`--bg-active`), the page's radius. */
 const CARD: CSSProperties = {
-  background: "var(--bg-elevated)",
+  background: "var(--bg-active)",
   border: "1px solid var(--border)",
-  borderRadius: 6,
+  borderRadius: 8,
   padding: 14,
   display: "flex",
   flexDirection: "column",
   gap: 10,
-  fontFamily: MONO,
+  fontFamily: READING,
 };
 
-/** kit: input. Transparent — the field takes the screen's surface. */
-const FIELD: CSSProperties = {
-  width: "100%",
-  maxWidth: 480,
-  background: "transparent",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: 3,
-  color: "var(--text-primary)",
-  fontFamily: MONO,
-  fontSize: 11,
-  lineHeight: 1.5,
-  padding: "5px 8px",
-  outline: "none",
-};
-
-/** A clickable kit row: hover `--bg-active` + `--text-primary`, keyboard
- *  focus draws the inset bar. Children lay out as the row's flex items. */
+/** A clickable row: hover `--bg-hover` + `--text-primary` (the page's own
+ *  row-hover fill), keyboard focus draws the inset bar. Children lay out as
+ *  the row's flex items. */
 function Row({
   onClick,
   title,
@@ -177,7 +159,7 @@ function Row({
       style={{
         ...ROW,
         cursor: "pointer",
-        background: hover || focus ? "var(--bg-active)" : "none",
+        background: hover || focus ? "var(--bg-hover)" : "none",
         boxShadow: focus ? "inset 2px 0 0 var(--text-primary)" : "none",
         color: hover || focus ? "var(--text-primary)" : "var(--text-secondary)",
       }}
@@ -307,10 +289,10 @@ export function Home({
         <div
           style={{
             maxWidth: 720,
-            padding: "28px 18px 18px",
+            padding: "14px 20px 28px",
             display: "flex",
             flexDirection: "column",
-            gap: 28,
+            gap: 18,
           }}
         >
           {needsCount > 0 && <NeedsYou digests={digests} />}
@@ -322,7 +304,7 @@ export function Home({
           {servers.length > 0 && <Listening active={active} servers={servers} />}
           {kept.length > 0 && <KeptViews kept={kept} />}
           {quiet.length > 0 && (
-            <div style={{ fontFamily: MONO, fontSize: 9.5, color: "var(--text-dim)", lineHeight: 1.5 }}>
+            <div style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)", lineHeight: 1.5 }}>
               {quiet.join(" · ")} — all quiet
             </div>
           )}
@@ -429,7 +411,7 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
         </span>
       </div>
       {noteReplacesForm(note) ? (
-        <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>{note?.text}</div>
+        <div style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.5 }}>{note?.text}</div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {options.length > 0 && (
@@ -466,7 +448,7 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
               ))}
             </div>
           )}
-          {options.length > 0 && <div style={{ fontSize: 10, color: "var(--text-dim)" }}>or</div>}
+          {options.length > 0 && <div style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)" }}>or</div>}
           <input
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
@@ -478,12 +460,12 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
             }}
             placeholder={options.length > 0 ? "type your own…" : "type your answer…"}
             disabled={busy}
-            style={{ ...FIELD, borderColor: fieldFocus ? "var(--text-dim)" : "var(--border-subtle)" }}
+            style={{ ...FIELD, borderColor: fieldFocus ? "var(--text-secondary)" : "var(--border)" }}
           />
           {/* A failed answer keeps the form — options clickable, draft intact
               (pageStore.noteReplacesForm); the error is one line below it. */}
           {note?.kind === "error" && (
-            <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>{note.text}</div>
+            <div style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.5 }}>{note.text}</div>
           )}
         </div>
       )}
@@ -500,7 +482,7 @@ function UnsentRow({ digest, count }: { digest: ThreadDigest; count: number }) {
     <Row onClick={() => getThreadActions()?.openThread(digest.thread.id)}>
       <span style={{ minWidth: 0, flex: 1, ...TITLE }}>
         {unsentDecisionsLine(count)}{" "}
-        <span style={{ color: "var(--text-dim)", fontSize: 9.5 }}>
+        <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)" }}>
           {digest.thread.title} · {threadRepoName(digest.thread.workingDir)}
         </span>
       </span>
@@ -514,7 +496,7 @@ function RequestCard({ digest, post }: { digest: ThreadDigest; post: InboxPost }
     <Row onClick={() => getThreadActions()?.openThread(digest.thread.id)}>
       <span style={{ minWidth: 0, flex: 1, ...TITLE }}>
         {post.text}{" "}
-        <span style={{ color: "var(--text-dim)", fontSize: 9.5 }}>
+        <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)" }}>
           from {post.from} · {digest.thread.title}
         </span>
       </span>
@@ -528,7 +510,7 @@ function UserItemCard({ digest, item }: { digest: ThreadDigest; item: PageItem }
     <Row onClick={() => getThreadActions()?.openThread(digest.thread.id)}>
       <span style={{ minWidth: 0, flex: 1, ...TITLE }}>
         {item.title}{" "}
-        <span style={{ color: "var(--text-dim)", fontSize: 9.5 }}>
+        <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)" }}>
           {digest.thread.title}
           {item.note ? ` · ${item.note}` : ""}
         </span>
@@ -560,7 +542,7 @@ function LiveNow({ rows, digests }: { rows: Thread[]; digests: ThreadDigest[] })
             </span>
             <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               <span style={TITLE}>{t.title}</span>
-              <span style={{ color: "var(--text-dim)", fontSize: 9.5 }}>
+              <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)" }}>
                 {" "}
                 {threadRepoName(t.workingDir)}
               </span>
@@ -602,9 +584,9 @@ function BetweenThreads({ recent }: { recent: RecentPost[] }) {
     <div>
       <SectionHeader label="Between threads" meta="last hour" />
       {recent.map(({ post, to, t }) => (
-        <div key={`${to.id}-${post.id}`} style={{ ...ROW, fontSize: 11 }}>
+        <div key={`${to.id}-${post.id}`} style={ROW}>
           <span style={{ minWidth: 0, flex: 1 }}>
-            <span style={{ color: "var(--text-dim)", fontSize: 9.5 }}>
+            <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)" }}>
               {post.from} → {to.title}
             </span>{" "}
             <span style={{ color: "var(--text-secondary)" }}>{post.text}</span>
@@ -692,12 +674,12 @@ function Listening({ active, servers }: { active: boolean; servers: readonly Dev
                   ? "not answering — nothing is listening on that port"
                   : "probing"
             }
-            style={{ ...ROW, fontSize: 11, whiteSpace: "nowrap", overflow: "hidden" }}
+            style={{ ...ROW, whiteSpace: "nowrap", overflow: "hidden" }}
           >
             <span style={{ flex: "none", display: "flex", alignItems: "center" }}>
               <span style={{ width: 7, height: 7, borderRadius: "50%", background: dotColor }} />
             </span>
-            <span style={{ color: "var(--text-dim)", fontSize: 9.5, flex: "none" }}>{hit.source}</span>
+            <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)", flex: "none" }}>{hit.source}</span>
             <span style={{ color: "var(--text-secondary)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{hit.url}</span>
             <span style={ROW_META}>{label}</span>
           </div>
