@@ -905,7 +905,8 @@ const VIEW_TOOL = {
     "pass kind:'report', source:{type:'file', path:'analysis.md'}; inside it a fenced block " +
     "```view whose body is a view-spec JSON (the same fields as this tool, NO id — the " +
     "block's position names it) renders as an interactive chart in place, and ```stat with " +
-    '{label, value, n?} (or an array of them) renders stat tiles — e.g. ```view\\n' +
+    '{label, value, n?, note?, tag?} (or an array of them) renders stat cards — note = one ' +
+    "plain line under the figure, tag = a few words drawn as an accent chip ('2 – 3× benchmark') — e.g. ```view\\n" +
     '{"kind":"line","title":"net gamma","source":{"type":"file","path":".sb-views/gamma.json"}}\\n```. ' +
     "Blocks are validated when drawn — a broken block shows an error card in place and the " +
     "rest of the report renders; at most 24 view/stat blocks render live, the rest as plain " +

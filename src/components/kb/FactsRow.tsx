@@ -23,7 +23,8 @@ const LABEL: CSSProperties = {
 };
 
 const VALUE: CSSProperties = {
-  fontFamily: MONO,
+  // Ky's `<dd>` is `font-sans` (the reading face); the label stays mono.
+  fontFamily: "var(--font-reading)",
   fontSize: 12.5,
   lineHeight: 1.5,
   color: "var(--text-primary)",

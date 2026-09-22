@@ -30,6 +30,43 @@
   src: url('../assets/fonts/JetBrainsMono-Bold.woff2') format('woff2');
 }
 
+/* THE READING FACE (2026-09-09, Eric's decision on the Ky-pass thread:
+   "Bundle IBM Plex Sans for page and doc bodies"). Ky's rule (CC-555): sans
+   for reading, mono for chrome — labels, counts, addresses, stamps, codes.
+   Bundled (latin subset, OFL — IBMPlexSans-LICENSE.txt beside the files), never
+   fetched: the app must paint the same offline. */
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../assets/fonts/IBMPlexSans-Regular.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('../assets/fonts/IBMPlexSans-Medium.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('../assets/fonts/IBMPlexSans-SemiBold.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('../assets/fonts/IBMPlexSans-Bold.woff2') format('woff2');
+}
+
 :root {
   /* THE KY PALETTE (SWIT-72, 2026-09-02). Values re-pointed onto Ky's current
      theme (ky-desktop global.css, the newer block: bg #0a0a0a · pane #141414 ·
@@ -41,13 +78,19 @@
   --bg-primary: #0f0f0f;
   --bg-secondary: #0a0a0a;
   --bg-elevated: #141414;
-  /* Artifact panel surface. A DELIBERATE step up the ramp so the panel side
-     reads as a second surface beside the terminal's --bg-primary: ~1.15:1
-     (was 1.126:1 pre-SWIT-72; a per-channel hair above --bg-active would be
-     invisible). Sits below --border #2e2e2e so the divider still reads
-     against it. */
-  --bg-panel: #1e1e1e;
+  /* Artifact panel surface = Ky's pane (#141414, the same value as
+     --bg-elevated). 2026-09-09, Eric: "it's this weird gray" — the old
+     #1e1e1e step (a ~1.15:1 second surface, SWIT-72) read as a grey slab
+     beside the terminal. Ky separates its terminal and its page with a
+     hairline, not a tone, so the panel now sits one whisper above the
+     terminal's #0f0f0f and the 1px edge + the divider do the separating.
+     Kept as its own name so the panel's surface can move again without
+     touching cards and dialogs. */
+  --bg-panel: #141414;
   --bg-active: #1a1a1a;
+  /* Ky's --bg-hover #242424: the row-hover fill ON the panel surface, where
+     --bg-active (#1a1a1a) is too close to #141414 to read. */
+  --bg-hover: #242424;
   --border: #2e2e2e;
   --border-subtle: #3a3a3a;
   --text-primary: #ededed;
@@ -72,6 +115,13 @@
   --accent-yellow: #e8b765;
   --accent-red: #e88a8a;
   --font-mono: 'JetBrains Mono', 'Cascadia Code', 'SF Mono', monospace;
+  /* The reading face: the ✦ page's and the markdown doc's BODIES, Ky's sans.
+     Named `--font-reading`, NOT `--font-sans`: surfaces.css pins a Tailwind
+     `--font-sans` for project pages under its own @theme, and an unlayered
+     `--font-sans` here would silently re-font every Lodestar page (the
+     decision covered page and doc bodies, nothing else). Chrome stays
+     `--font-mono`. */
+  --font-reading: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
 }
 
 @keyframes pulse-ring {
@@ -210,4 +260,27 @@ html, body, #root {
 }
 .page-evidence-row .page-evidence-x[data-retracting] {
   opacity: 0.4;
+}
+
+/* THE ✦ PAGE READS LIKE KY'S (2026-09-09; ky/plan/PlanPanel.tsx): the three
+   hover states the shell's inline styles cannot express. An evidence row is
+   the click target and lights on hover (Ky `hover:bg-line-soft`); an address
+   carries Ky's hairline underline (a `border-b`, not text-decoration) and
+   brightens under the pointer; a text link (`earlier (3)`, `show 4`) goes
+   faint → primary. */
+.page-evidence-row:hover {
+  background: var(--bg-hover);
+}
+.page-address {
+  border-bottom: 1px solid var(--border);
+}
+button.page-address:hover {
+  color: var(--text-primary);
+  border-bottom-color: var(--text-secondary);
+}
+.page-textlink:hover {
+  color: var(--text-primary) !important;
+}
+.page-next:hover {
+  text-decoration: underline;
 }

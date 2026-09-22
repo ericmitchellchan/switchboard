@@ -128,19 +128,25 @@ function capReportBlocks(segs: ReportSegment[]): ReportSegment[] {
 
 // ── Stat tiles ───────────────────────────────────────────────────────────────
 
-export type StatTile = { label: string; value: string; n?: number };
+/** One tile: the label, the figure, an optional n, and (2026-09-09, Ky's
+ *  report cards) an optional `note` — one plain line under the figure
+ *  ("4 – 7% is called good on ChatGPT Ads") — and an optional `tag`, a few
+ *  words drawn as an accent chip ("2 – 3× benchmark"). */
+export type StatTile = { label: string; value: string; n?: number; note?: string; tag?: string };
 
 /** Most tiles one ```stat block renders (a row, not a dashboard). */
 export const STAT_TILE_CAP = 8;
 export const STAT_LABEL_CAP = 60;
 export const STAT_VALUE_CAP = 40;
+export const STAT_NOTE_CAP = 120;
+export const STAT_TAG_CAP = 32;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 function parseTile(raw: unknown, at: string): { tile: StatTile } | { error: string } {
-  if (!isRecord(raw)) return { error: `${at} must be {label, value, n?}` };
+  if (!isRecord(raw)) return { error: `${at} must be {label, value, n?, note?, tag?}` };
   const label = typeof raw.label === "string" ? raw.label.trim() : "";
   if (label.length === 0) return { error: `${at} has no label` };
   const v = raw.value;
@@ -151,6 +157,13 @@ function parseTile(raw: unknown, at: string): { tile: StatTile } | { error: stri
   if (raw.n !== undefined && raw.n !== null) {
     if (typeof raw.n !== "number" || !Number.isFinite(raw.n)) return { error: `${at}.n must be a number` };
     tile.n = raw.n;
+  }
+  for (const [key, cap] of [["note", STAT_NOTE_CAP], ["tag", STAT_TAG_CAP]] as const) {
+    const v2 = raw[key];
+    if (v2 === undefined || v2 === null) continue;
+    if (typeof v2 !== "string") return { error: `${at}.${key} must be a string` };
+    const clean = v2.trim();
+    if (clean.length > 0) tile[key] = clean.slice(0, cap);
   }
   return { tile };
 }

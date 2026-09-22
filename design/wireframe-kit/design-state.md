@@ -13,7 +13,8 @@ the chrome components change (see README).
 | `--bg-primary` | `#0f0f0f` | app background, **terminal side** |
 | `--bg-secondary` | `#0a0a0a` | tab bar, status bar, sidebars, side menu (Ky `--bg`) |
 | `--bg-elevated` | `#141414` | cards, dialogs (Ky `--bg-pane`) |
-| `--bg-panel` | `#1e1e1e` | **artifact panel surface** — ~1.15:1 vs `--bg-primary` |
+| `--bg-panel` | `#141414` | **artifact panel surface** — Ky's pane (2026-09-09; was `#1e1e1e`, "this weird gray") |
+| `--bg-hover` | `#242424` | row hover ON the panel surface (Ky `--bg-hover`) |
 | `--bg-active` | `#1a1a1a` | active tab / hover / selected row (Ky `--bg-raised`) |
 | `--border` | `#2e2e2e` | primary hairlines (Ky `--line`) |
 | `--border-subtle` | `#3a3a3a` | inner dividers, scrollbar-thumb hover, **panel left edge** |
@@ -34,7 +35,8 @@ the chrome components change (see README).
 | `--accent-blue-light` | `#9ccaee` | → a lightened tone-blue (links/hover on blue) |
 | `--accent-yellow` | `#e8b765` | → tone-amber (waiting badge, TabBar) |
 | `--accent-red` | `#e88a8a` | → tone-rose (error) |
-| `--font-mono` | `'JetBrains Mono', 'Cascadia Code', 'SF Mono', monospace` | ALL text — the app is 100% mono |
+| `--font-mono` | `'JetBrains Mono', 'Cascadia Code', 'SF Mono', monospace` | chrome — bars, menus, trees, counts, addresses, stamps, tables, code |
+| `--font-reading` | `'IBM Plex Sans', system-ui, sans-serif` | BODIES — the ✦ page, the markdown doc, stat-card label + figure (2026-09-09; bundled, OFL) |
 
 Font weights bundled: 400 / 500 / 600 / 700 (global.css:1-31). True-dark, no light theme.
 
@@ -62,18 +64,17 @@ zinc ramp. No new hue, no tinted text, no status colour involved.
 | Terminal side (pane tree, xterm) | `--bg-primary` `#0f0f0f` | — | terminal.ts, App.tsx root |
 | Divider between them | 4px `--border` `#2e2e2e` (drag: `#EDEDED66`) | 1.41:1 | ArtifactPanel.tsx PanelDivider |
 | Panel left edge | 1px `--border-subtle` `#3a3a3a`, docked AND overlay | 1.69:1 | ArtifactPanel.tsx:aside |
-| Artifact panel (strip + header + body) | `--bg-panel` `#1e1e1e` | **~1.15:1** | ArtifactPanel.tsx `PANEL_SURFACE` |
+| Artifact panel (strip + header + body) | `--bg-panel` `#141414` | ~1.02:1 | ArtifactPanel.tsx `PANEL_SURFACE` |
 
-Ratios are WCAG relative luminance (vs `#0f0f0f`). The original pass used
-`--bg-elevated` — a few units per channel, ~1.02:1, i.e. invisible: acceptance
-6 was being carried entirely by the divider, and in OVERLAY mode (no divider)
-by a single hairline. `#1e1e1e` is a difference you see without looking for it
-and still sits below `--border` `#2e2e2e`, so the 4px divider keeps reading
-against the panel side too.
+Ratios are WCAG relative luminance (vs `#0f0f0f`). Increment B chose
+`#1e1e1e` (~1.15:1) so the panel read as a second surface without leaning on
+the divider; 2026-09-09 it went back to Ky's pane value — Eric: "it's this
+weird gray" — and the separation is the edge hairline + the 4px divider,
+exactly as Ky draws its terminal beside its page.
 
 The panel is ONE surface top to bottom — its viewers (DocView scroller,
 FileViewer `<pre>`, WireframeView letterbox, DiagramView canvas) paint
-`transparent` so they take whichever host renders them: `#1e1e1e` in the
+`transparent` so they take whichever host renders them: `#141414` in the
 panel, `#0f0f0f` on the full-width KB/Explorer screens. Anything painting
 `--bg-primary` inside the panel punches a terminal-coloured hole in it.
 

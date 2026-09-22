@@ -23,7 +23,7 @@ const SCROLL_STYLE: CSSProperties = {
   overflowY: "auto",
   // SURFACE-AGNOSTIC (increment B): DocView is hosted by both the full-width
   // KB screen (--bg-primary #0f0f0f) and the artifact panel, which paints its
-  // own --bg-panel #1e1e1e so it reads as a second surface. Painting
+  // own --bg-panel (Ky's pane #141414 since 2026-09-09). Painting
   // --bg-primary here would punch a terminal-coloured hole in the panel.
   background: "transparent",
 };

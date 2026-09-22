@@ -85,22 +85,40 @@ const BLOCK_ERROR: CSSProperties = {
   color: "var(--text-muted)",
 };
 
-// The STAT TILE (SWIT-73; design/wireframe-kit/components.md): one number
-// with a label and an optional n — the earned box for a headline figure.
+// The STAT CARD (SWIT-73; re-cut 2026-09-09 after Ky's report cards —
+// design/wireframe-kit/components.md): a plain label, the figure BIG, one
+// note line under it, an optional accent chip. Cards flow two-up in the
+// panel's width (`flex: 1 1 180px`), the way Ky's reports lay them out.
 const TILE_ROW: CSSProperties = {
   display: "flex",
   flexWrap: "wrap",
-  gap: 8,
-  margin: "10px 24px 14px",
+  gap: 10,
+  margin: "10px 24px 16px",
 };
 
 const TILE: CSSProperties = {
-  minWidth: 96,
-  padding: "8px 14px 9px",
-  background: "var(--bg-panel)",
+  flex: "1 1 180px",
+  minWidth: 0,
+  padding: "12px 14px 13px",
+  background: "var(--bg-active)",
   border: "1px solid var(--border)",
-  borderRadius: 4,
-  fontFamily: MONO,
+  borderRadius: 8,
+  fontFamily: "var(--font-reading)",
+};
+
+/** Ky's accent chip on a card (`2 – 3× benchmark`): the accent at 12% for
+ *  the fill, the dim accent for the hairline, the accent for the words. */
+const TILE_TAG: CSSProperties = {
+  display: "inline-block",
+  marginTop: 8,
+  padding: "2px 8px",
+  borderRadius: 6,
+  fontSize: 10.5,
+  lineHeight: 1.5,
+  color: "var(--accent)",
+  background: "color-mix(in srgb, var(--accent) 12%, transparent)",
+  border: "1px solid var(--accent-dim)",
+  whiteSpace: "nowrap",
 };
 
 export default function ReportView({
@@ -285,24 +303,19 @@ function StatBlock({ block, body }: { block: number; body: string }) {
 function StatTileBox({ tile }: { tile: StatTile }) {
   return (
     <div style={TILE}>
-      <div
-        style={{
-          fontSize: 9.5,
-          letterSpacing: "0.5px",
-          textTransform: "uppercase",
-          color: "var(--text-dim)",
-          marginBottom: 3,
-          whiteSpace: "nowrap",
-        }}
-      >
+      <div style={{ fontSize: 11.5, lineHeight: 1.35, color: "var(--text-secondary)", marginBottom: 6 }}>
         {tile.label}
       </div>
-      <div style={{ fontSize: 16, lineHeight: 1.2, color: "var(--text-primary)", whiteSpace: "nowrap" }}>
+      <div style={{ fontSize: 24, fontWeight: 600, lineHeight: 1.15, color: "var(--text-primary)", whiteSpace: "nowrap" }}>
         {tile.value}
         {tile.n !== undefined && (
-          <span style={{ fontSize: 9.5, color: "var(--text-faint)", marginLeft: 6 }}>n={tile.n}</span>
+          <span style={{ fontFamily: MONO, fontSize: 10, fontWeight: 400, color: "var(--text-faint)", marginLeft: 6 }}>n={tile.n}</span>
         )}
       </div>
+      {tile.note && (
+        <div style={{ marginTop: 4, fontSize: 10.5, lineHeight: 1.45, color: "var(--text-muted)" }}>{tile.note}</div>
+      )}
+      {tile.tag && <span style={TILE_TAG}>{tile.tag}</span>}
     </div>
   );
 }

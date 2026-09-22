@@ -227,3 +227,29 @@ that stop being true.
   below Done, collapsed behind `show N`) instead of closing it — close means the work
   happened. A decided answer that has not reached the agent says `not sent yet` in
   amber beside the answer; `you:` vs `settled:` says who decided.
+- 2026-09-09 — THE PANEL IS KY'S PANE, THE PAGE IS KY'S PLAN PANEL, AND COLOUR GOES
+  WHERE KY PUTS IT (Eric: "it's this weird gray, everything's monotone, and there are
+  no real sections. I really just want to copy the Ky platform"). `--bg-panel` is Ky's
+  #141414 (the #1e1e1e slab is gone; a hairline and the divider separate the terminal
+  from the page); the panel opens on the RIGHT again (Ky's layout; `⇄` per tab still
+  wins). The ✦ page takes `ky/plan/PlanPanel.tsx`'s grammar: a 17px thread title, 14px
+  ruled H2 sections (Open questions in amber), 12.5px rows with a hairline under each,
+  a real checkbox square, `claude · you · team`, dash-bulleted turn lines, underline
+  tabs on Evidence. The accent is no longer reserved for "you are here": `next →`, the
+  NEW dot and the one primary button (`Send decisions ▸`, Ky's PrimaryButton) are the
+  accent, as on Ky. Reading surfaces follow: `MarkdownDoc` is Ky's `.doc-md` (ruled
+  H2s, dash bullets, amber inline code, accent links, bordered tables) and a report's
+  stat block is Ky's CARD (`{label, value, n?, note?, tag?}`, big figure, accent chip).
+  Home is untouched by this pass.
+- 2026-09-09 — TWO FACES, KY'S SPLIT (Eric, answering the question above on the page:
+  "Bundle IBM Plex Sans for page and doc bodies"). `--font-reading` = IBM Plex Sans,
+  bundled (latin, four weights, OFL), for BODIES: the ✦ page's title, rows, turn lines,
+  questions, input and button; the markdown doc; a stat card's label and figure.
+  `--font-mono` stays for CHROME: every bar, menu and tree, and on those same surfaces
+  the counts, owner column, addresses, stamps, wire text, tables and code — the
+  elements Ky marks `font-mono`. Not `--font-sans`: that name belongs to surfaces.css's
+  Tailwind theme, and Lodestar's pages keep their mono.
+
+## Decisions recorded by the app
+
+- 2026-09-09 — Bundle IBM Plex Sans for page and doc bodies (asked: Ky's page and docs read in IBM Plex Sans; ours are still JetBrains Mono at Ky's sizes. Bring in a sans reading face?; thread: New thread)

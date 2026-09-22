@@ -55,64 +55,99 @@ const processor = unified()
   .use(rehypeAutolinkHeadings, { behavior: "wrap" })
   .use(rehypeStringify);
 
-// Kit-matching doc typography (design-state.md tokens). Plain CSS in a scoped
-// <style> block — the repo has no Tailwind and no CSS-modules pipeline, and
-// element selectors (the markdown HTML is generated, not JSX) need real CSS.
+// Doc typography = Ky's KB reader (`ky-desktop/src/styles/global.css`
+// `.doc-md`, 2026-09-09) in our tokens: a real heading hierarchy (H2 carries
+// a hairline), dash bullets, amber inline code on the deepest ground, accent
+// links, bordered tables with a raised header row; the body is the READING
+// face (IBM Plex Sans, `--font-reading`), tables and code stay mono — Ky's
+// split. Plain CSS in a scoped <style> block — the repo has
+// no Tailwind and no CSS-modules pipeline, and element selectors (the
+// markdown HTML is generated, not JSX) need real CSS.
 const DOC_CSS = `
 .kb-doc {
   max-width: 72ch;
   padding: 18px 24px 48px;
-  font-family: var(--font-mono);
-  font-size: 12px;
+  font-family: var(--font-reading);
+  font-size: 13px;
   line-height: 1.7;
-  color: var(--text-secondary);
+  color: var(--text-primary);
 }
+.kb-doc > :first-child { margin-top: 0; }
 .kb-doc h1, .kb-doc h2, .kb-doc h3, .kb-doc h4, .kb-doc h5, .kb-doc h6 {
   color: var(--text-primary);
   font-weight: 600;
-  line-height: 1.4;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
 }
-.kb-doc h1 { font-size: 15px; margin: 20px 0 10px; }
-.kb-doc h2 { font-size: 12.5px; margin: 18px 0 8px; }
-.kb-doc h3, .kb-doc h4, .kb-doc h5, .kb-doc h6 { font-size: 12px; margin: 14px 0 6px; }
+.kb-doc h1 { font-size: 1.65em; margin: 0 0 0.6em; }
+.kb-doc h2 {
+  font-size: 1.32em;
+  margin: 1.7em 0 0.55em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--border);
+}
+.kb-doc h3 { font-size: 1.12em; margin: 1.4em 0 0.45em; }
+.kb-doc h4, .kb-doc h5, .kb-doc h6 { font-size: 1em; margin: 1.2em 0 0.4em; color: var(--text-secondary); }
 .kb-doc h1:first-child { margin-top: 0; }
-.kb-doc p { margin: 0 0 10px; }
-.kb-doc ul, .kb-doc ol { margin: 0 0 10px; padding-left: 22px; }
-.kb-doc li { margin: 2px 0; }
-.kb-doc a { color: var(--accent-blue-light); text-decoration: none; }
-.kb-doc a:hover { text-decoration: underline; }
+.kb-doc p { margin: 0 0 0.95em; }
+.kb-doc ol { margin: 0 0 0.95em; padding-left: 1.4em; }
+.kb-doc ol li::marker { color: var(--text-faint); }
+.kb-doc ul { list-style: none; margin: 0 0 0.95em; padding-left: 1.3em; }
+.kb-doc ul li { position: relative; }
+.kb-doc ul li::before { content: "–"; position: absolute; left: -1.1em; color: var(--text-faint); }
+.kb-doc ul li:has(> input[type="checkbox"])::before { content: none; }
+.kb-doc li { margin-bottom: 0.35em; }
+.kb-doc li > ul, .kb-doc li > ol { margin: 0.35em 0 0.2em; }
+.kb-doc strong, .kb-doc b { color: var(--text-primary); font-weight: 700; }
+.kb-doc a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
 /* rehype-autolink-headings behavior:"wrap" wraps heading TEXT in an anchor —
-   headings must keep heading color, not link blue. */
+   headings must keep heading color, not link green. */
 .kb-doc h1 a, .kb-doc h2 a, .kb-doc h3 a,
-.kb-doc h4 a, .kb-doc h5 a, .kb-doc h6 a { color: inherit; }
+.kb-doc h4 a, .kb-doc h5 a, .kb-doc h6 a { color: inherit; text-decoration: none; font-weight: inherit; }
 .kb-doc code {
-  background: var(--bg-active);
-  border: 1px solid var(--border-subtle);
-  border-radius: 3px;
-  padding: 1px 5px;
-  font-size: 11px;
   font-family: var(--font-mono);
+  font-size: 0.9em;
+  color: var(--tone-amber);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.08em 0.34em;
 }
 .kb-doc pre {
-  background: var(--bg-active);
-  border: 1px solid var(--border-subtle);
-  border-radius: 4px;
-  padding: 10px 12px;
-  margin: 0 0 12px;
+  font-family: var(--font-mono);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 12px 14px;
+  margin: 1em 0;
   overflow-x: auto;
+  font-size: 0.9em;
+  line-height: 1.55;
 }
-.kb-doc pre code { background: none; border: none; padding: 0; }
+.kb-doc pre code { background: none; border: none; color: var(--text-primary); padding: 0; font-size: inherit; }
 .kb-doc blockquote {
-  border-left: 2px solid var(--border-subtle);
-  margin: 0 0 10px;
-  padding: 2px 0 2px 12px;
-  color: var(--text-muted);
+  border-left: 3px solid var(--border);
+  margin: 1em 0;
+  padding: 2px 0 2px 14px;
+  color: var(--text-secondary);
 }
-.kb-doc table { border-collapse: collapse; margin: 0 0 12px; font-size: 11.5px; }
-.kb-doc th, .kb-doc td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
-.kb-doc th { color: var(--text-primary); }
-.kb-doc hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
-.kb-doc img { max-width: 100%; }
+.kb-doc table {
+  border-collapse: collapse;
+  margin: 1.2em 0;
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.kb-doc th, .kb-doc td { border: 1px solid var(--border); padding: 6px 12px; text-align: left; vertical-align: top; }
+.kb-doc th { background: var(--bg-active); color: var(--text-primary); font-weight: 600; }
+.kb-doc td { color: var(--text-secondary); }
+.kb-doc tr:nth-child(even) td { background: rgba(255, 255, 255, 0.025); }
+.kb-doc hr { border: none; border-top: 1px solid var(--border); margin: 1.6em 0; }
+.kb-doc img { max-width: 100%; border-radius: 6px; }
 `;
 
 /** The markdown rendering path as a self-contained unit (pipeline + doc CSS).

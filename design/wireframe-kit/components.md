@@ -11,8 +11,12 @@ Ground rules that apply to every entry (conventions.md has the dated receipts):
 
 - Tokens are `src/styles/global.css` (shell) / `src/styles/surfaces.css` (surfaces).
   No new colour, ever. Status colours come from `statusConfig.ts` and mean status.
-- One typeface: `var(--font-mono)` (JetBrains Mono). Hierarchy = size 9–13px, weight
-  400–700, the zinc text ramp. Ky's IBM Plex Sans / Newsreader do not come across.
+- Two faces since 2026-09-09 (Eric: "Bundle IBM Plex Sans for page and doc bodies"),
+  Ky's split: `var(--font-reading)` (IBM Plex Sans, bundled) for BODIES — the ✦ page's
+  title/rows/turns/questions/input/button, the markdown doc, a stat card's label and
+  figure; `var(--font-mono)` (JetBrains Mono) for CHROME — bars, menus, trees, counts,
+  owner columns, addresses, stamps, wire text, tables, code. Hierarchy = size 9–17px,
+  weight 400–700, the zinc text ramp. Newsreader does not come across.
 - Square where Ky is round: Ky's `rounded-lg` rows and `rounded-md` buttons become
   radius 0 (rows) / 3 (controls) / 4 (chips) — terminal-grade density, 1px hairlines.
 - Ky's `--accent` (mint) hover becomes `--text-primary`. Emphasis is white/zinc.
@@ -85,20 +89,26 @@ raised card — the thing needing action — everything else flat).
   the top-right), the OptionRow list between hairlines, the dim `or`, one kit
   input at `max-width: 480px`. Requests, items, posts, threads stay flat rows.
 
-## Stat tile (reports — SWIT-73)
+## Stat card (reports — SWIT-73; Ky's report cards since 2026-09-09)
 
-ONE NUMBER with a label and an optional n — the report's headline figure. A fenced
-`stat` block in a report's markdown renders one tile ({label, value, n?}) or a
-wrapping row of them (an array, ≤ 8). The box is earned: it holds a figure the
-narrative leans on, never decoration.
+ONE NUMBER with a label, an optional n, one note line and an optional accent chip —
+the report's headline figure. A fenced `stat` block in a report's markdown renders one
+card ({label, value, n?, note?, tag?}) or a wrapping row of them (an array, ≤ 8). The
+box is earned: it holds a figure the narrative leans on, never decoration.
 
-- **Ours** (`components/views/ReportView.tsx` `StatTileBox`): `--bg-panel`, 1px
-  `--border`, radius 4, padding `8px 14px 9px`, min-width 96px, mono. Label on top:
-  9.5px uppercase, 0.5px letter-spacing, `--text-dim`, 3px below it the value: 16px /
-  1.2 `--text-primary`; `n=<count>` rides 6px after the value at 9.5px `--text-faint`.
-  Tiles sit in a `flex-wrap` row, `gap: 8px`, aligned with the doc's 24px gutter.
-- No trend arrows, no tones — a stat tile states a number; judgement lives in the
-  narrative beside it.
+- **Ky:** the report cards Eric pointed at (2026-09-09, the ads-learnings report): a
+  raised card, the label in plain words, the figure big, a dim line under it ("4 – 7% is
+  called good on ChatGPT Ads"), a green chip ("2 – 3× benchmark"), two-up in the panel.
+- **Ours** (`components/views/ReportView.tsx` `StatTileBox`): `--bg-active`, 1px
+  `--border`, radius 8, padding `12px 14px 13px`, `flex: 1 1 180px` so cards flow
+  two-up in the panel's width, mono. Label 11.5px `--text-secondary`, 6px below it the
+  value 24px weight 600 / 1.15 `--text-primary`; `n=<count>` rides 6px after the value
+  at 10px `--text-faint`; `note` 10.5px `--text-muted` 4px under the figure; `tag` a
+  chip 8px below — 10.5px `--accent` on the accent at 12% (`color-mix`), 1px
+  `--accent-dim`, radius 6. Cards sit in a `flex-wrap` row, `gap: 10px`, aligned with
+  the doc's 24px gutter.
+- No trend arrows — a card states a number; the `tag` is the agent's one-phrase
+  judgement, and the narrative beside it carries the rest.
 
 ## Band header
 
@@ -172,10 +182,11 @@ Three ranks. One primary per surface; when a second action feels important it is
   `ky/main/Topbar.tsx` (~370–376) `h-7 w-7 rounded-md text-txt-faint hover:bg-bg-hover
   hover:text-txt-dim`; `ky/chat/ChatTerminal.tsx` composer `+` (~1392) `w-7 h-7 rounded
   text-[15px]`.
-- **Ours — primary:** `--text-primary` fill, text `--bg-primary` (near-black,
-  as Ky's `#0f1115`: on-white text is near-black in any theme), 11px weight 600,
-  padding `3px 10px`, radius 3, no border; hover `opacity: .9`; disabled `opacity: .4`.
-  The confirm dialog's non-destructive button is this (conventions 2026-08-01).
+- **Ours — primary:** Ky's PrimaryButton verbatim since 2026-09-09 — `--accent`
+  fill, text `--bg-primary` (near-black, as Ky's `#0f1115`), 12px weight 600, padding
+  `4px 12px`, radius 6, no border; hover `opacity: .9`; disabled `opacity: .4`. The
+  ✦ page's `Send decisions ▸` is this. (The 2026-09-01 white-fill / radius-3 form
+  survives on the confirm dialog until that surface takes its Ky pass.)
 - **Ours — quiet:** transparent, 1px `--border-subtle`, `--text-secondary`, 11px,
   padding `3px 10px`, radius 3; hover `--text-primary` + border `--text-secondary`;
   disabled `opacity: .4`. Destructive quiet: text + border `--accent-red`.
@@ -285,8 +296,44 @@ shape for restored workspaces only.
 
 ## The page sections
 
-The ✦ page (`PageView.tsx`, re-cut SWIT-67/68/69/77/78): summary · open questions (the batch,
-entry above) · to do · what happened · evidence · decided (folded) · done · dropped
+THE PAGE READS LIKE KY'S PLAN PANEL (2026-09-09; `ky/plan/PlanPanel.tsx` — Eric: "it's
+this weird gray, everything's monotone, and there are no real sections. I really just
+want to copy the Ky platform"). Ky's measurements, our tokens and typeface:
+
+- **Head:** the THREAD TITLE as an H1, 17px weight 600 / 1.25 `--text-primary`; the
+  summary (theme + newest turn line) 12.5px `--text-secondary` under it; then the one
+  `next →` / `start here →` line — the arrow 11px `--text-faint`, the target 11px
+  `--accent`, underlined under the pointer (`.page-next`).
+- **Section = H2:** 14px weight 600 `--text-primary`, `padding-bottom: 6px`, a 1px
+  `--border` hairline under, `margin-bottom: 4px`; the count 10px weight 400
+  `--text-faint` beside it; `hot` (Open questions) turns the title `--tone-amber`; the
+  NEW dot after it is 6px `--accent`. Sections are 18px apart (Ky `pt-3 pb-1`).
+- **Rows:** 12.5px `--text-primary` / 1.45, `padding: 6–7px 0`, a 1px `--border`
+  hairline under EACH (a list, not a wall). Item row = Ky's grid `[18px minmax(0,1fr)
+  auto]`, gap 12: a 12×12 radius-3 square bordered `--text-primary` (filled, `✓` 9px in
+  `--bg-primary`, when done) · the title (`--text-faint` when done or dropped) · the
+  owner column 10px `--text-faint` right-aligned reading `claude · you · team`
+  (`waiting · you` in `--tone-amber` weight 600 when the row waits on the user; `in
+  progress · claude` otherwise where the state is not obvious). Turn lines: `– ` in
+  `--text-faint` + the line, `padding-left: 12px; text-indent: -12px`; earlier turns
+  fold behind `earlier (N)` (text link) and open with a 1px `--border` left rule, a
+  `Sep 9, 9:09 AM` stamp 10px faint, lines in `--text-secondary`. Evidence: the group
+  chips are UNDERLINE TABS on one hairline (10.5px, active = 1.5px `--text-primary`
+  bar + primary text, others `--text-faint`); a row lights `--bg-hover` on hover; the
+  address 11px `--text-primary` on a 1px `--border` hairline (`.page-address`,
+  brighter under the pointer), the label 12px `--text-secondary`, the status 10px
+  faint at the right. Text links (`show 4 ▸`, `hide`) 10px `--text-faint` →
+  `--text-primary` on hover (`.page-textlink`).
+- **The batch:** question 12.5px `--text-primary`; `open`/`decided` 10px; the input is
+  Ky's field (`--bg-secondary`, 1px `--border`, radius 6, `6px 10px`, 12px); the preview
+  box `--bg-secondary` + hairline, radius 6; `Send decisions ▸` is the accent primary.
+- Bodies are `--font-reading` (IBM Plex Sans, decided 2026-09-09); the counts, owner
+  column, `open`/`decided`, `change`, addresses, `next →` line, stamps, the preview box
+  and the footer are `--font-mono` — exactly the elements Ky marks `font-mono`.
+
+The ✦ page (`PageView.tsx`, re-cut SWIT-67/68/69/77/78; the Ky pass above supersedes
+the measurements in this paragraph where they differ): summary · open questions (the
+batch, entry above) · to do · what happened · evidence · decided (folded) · done · dropped
 (SWIT-78, Ky's CC-703: the agent's never-the-right-row items, collapsed behind a
 `show N ▸` / `hide` text link exactly as Decided is — history never competes with the
 rows that still matter; its rows are the same ITEM ROW in `--text-dim`, unchecked, never

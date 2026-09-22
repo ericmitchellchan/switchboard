@@ -157,6 +157,15 @@ describe("parseStatTiles", () => {
     ]);
   });
 
+  it("carries a tile's note and tag (Ky's report cards), trimmed and capped; a non-string errors", () => {
+    const out = parseStatTiles('{"label":"click rate","value":"3.3 – 6.4%","note":" fitness benchmark 1.2 – 2.2% ","tag":"2 – 3× benchmark"}');
+    expect(out.tiles).toEqual([
+      { label: "click rate", value: "3.3 – 6.4%", note: "fitness benchmark 1.2 – 2.2%", tag: "2 – 3× benchmark" },
+    ]);
+    expect(parseStatTiles('{"label":"a","value":1,"note":""}').tiles).toEqual([{ label: "a", value: "1" }]);
+    expect(parseStatTiles('{"label":"a","value":1,"tag":5}').error).toContain(".tag");
+  });
+
   it("errors the WHOLE block on one bad entry (strict per block)", () => {
     const out = parseStatTiles('[{"label":"a","value":1},{"value":2}]');
     expect(out.tiles).toBeNull();

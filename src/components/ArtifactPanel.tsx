@@ -132,20 +132,16 @@ export const CRUMB_TONE: Record<ArtifactCrumb["tone"], CSSProperties> = {
   bright: { color: "var(--text-primary)", fontWeight: 400 },
 };
 
-/** The panel's surface value (Increment B, Decision 4 / acceptance 6).
+/** The panel's surface value (Increment B, Decision 4 / acceptance 6;
+ *  re-pointed 2026-09-09).
  *
- *  The terminal side is `--bg-primary` #0f0f0f; the panel is `--bg-panel`
- *  #1e1e1e — several steps up the SAME warm-grey ramp (Ky palette, SWIT-72),
- *  ~1.15:1. The original pass used `--bg-elevated`, a few units per channel
- *  and ~1.02:1 — arithmetically a step, visually nothing; acceptance 6
- *  was being carried entirely by the divider, and in OVERLAY mode (no
- *  divider) by a single hairline. #1e1e1e is a difference you can see without
- *  looking for it, and still sits BELOW `--border` #2e2e2e so the 4px divider
- *  keeps reading against the panel.
- *
- *  Still no new hue, no tinted text, no status colour touched: same neutral
- *  zinc, +3 blue like every other value in the ramp. The soft palette holds
- *  (2026-08-01 convention).
+ *  The terminal side is `--bg-primary` #0f0f0f; the panel is `--bg-panel`,
+ *  now Ky's pane #141414 (= `--bg-elevated`). Increment B chose #1e1e1e so
+ *  the panel read as a second surface (~1.15:1) without leaning on the
+ *  divider; Eric's verdict on it in use was "this weird gray", and Ky —
+ *  the reference — separates its terminal from its page with a hairline
+ *  and the same near-black on both sides. So the edge hairline + the 4px
+ *  divider carry the separation, and the panel is a surface, not a slab.
  *
  *  Applied to the STRIP, the header (by inheritance) and the body together —
  *  the panel's own viewers paint `transparent` so they take whichever surface

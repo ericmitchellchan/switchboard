@@ -1268,23 +1268,27 @@ let lastPanelStates = new Map<string, PanelState>();
 export type PanelSide = "left" | "right";
 let panelSides = new Map<string, PanelSide>();
 
+/** The side a tab's panel takes until the user's ⇄ says otherwise. RIGHT
+ *  (2026-09-09, Eric: "the panel now opens automatically on the left side
+ *  and I have to switch it back" — Ky's layout: terminal left, page right).
+ *  The 2026-09-02 left default is gone; a tab that was explicitly put left
+ *  keeps its entry. */
+export const DEFAULT_PANEL_SIDE: PanelSide = "right";
+
 export function panelSideFor(sessionId: string | null): PanelSide {
-  // LEFT is the default (2026-09-02, Eric: "I thought we talked about having
-  // the page one be pinned to the left side" — the panel, ✦ page included,
-  // sits left of the terminal unless the user's ⇄ said otherwise). An
-  // explicit entry — either value — is the user's and wins.
-  return (sessionId && panelSides.get(ownerKeyFor(sessionId))) || "left";
+  // An explicit entry — either value — is the user's and wins.
+  return (sessionId && panelSides.get(ownerKeyFor(sessionId))) || DEFAULT_PANEL_SIDE;
 }
 
 /** The side a fresh open should WRITE for its tab, or null for "leave it".
  *  PURE (SWIT-69, rule 5): a surface artifact opening into a tab with no
- *  explicit side defaults that tab LEFT; an explicit side — either value —
- *  is the user's and is never touched. */
+ *  explicit side pins that tab to the DEFAULT side explicitly; an explicit
+ *  side — either value — is the user's and is never touched. */
 export function sideOnOpen(
   kind: Artifact["kind"],
   explicit: PanelSide | undefined
 ): PanelSide | null {
-  return kind === "surface" && explicit === undefined ? "left" : null;
+  return kind === "surface" && explicit === undefined ? DEFAULT_PANEL_SIDE : null;
 }
 
 export function usePanelSide(sessionId: string | null): PanelSide {
@@ -1657,9 +1661,9 @@ export function openInPanel(
   }
   const key = ownerKeyFor(sessionId);
   // SWIT-69 rule 5: a SURFACE opening into a tab whose side was never
-  // explicitly set defaults that tab's panel LEFT — written into the map so
-  // it persists; the user's `⇄` (either direction) is explicit and wins
-  // forever. `sideOnOpen` is the pure rule.
+  // explicitly set pins that tab's panel to the default side — written into
+  // the map so it persists; the user's `⇄` (either direction) is explicit
+  // and wins forever. `sideOnOpen` is the pure rule.
   const defaultSide = sideOnOpen(clean.kind, panelSides.get(key));
   if (defaultSide !== null) {
     panelSides = new Map(panelSides);
