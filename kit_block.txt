@@ -31,6 +31,13 @@ export const SECTION_TITLE: CSSProperties = {
   gap: 8,
 };
 
+export const SECTION_COUNT: CSSProperties = {
+  fontFamily: MONO,
+  fontSize: 10,
+  fontWeight: 400,
+  color: "var(--text-faint)",
+};
+
 /** Ky's row: a hairline under each, baseline-aligned, `padding: 6px 0`. */
 export const DENSE_ROW: CSSProperties = {
   display: "flex",
@@ -108,7 +115,6 @@ export const TEXT_LINK: CSSProperties = {
   background: "none",
   border: "none",
   padding: "0 2px",
-  marginTop: 4, // PageView's copy carries it; the two must not drift
   fontFamily: MONO,
   fontSize: 10,
   color: "var(--text-faint)",

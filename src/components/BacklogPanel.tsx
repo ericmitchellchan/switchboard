@@ -487,7 +487,9 @@ export function BacklogRow({
               setEdit(null);
             }
           }}
-          style={{ ...INPUT_STYLE, padding: "1px 5px", fontSize: "inherit", border: "1px solid var(--text-secondary)" }}
+          // 12px like the title it replaces: the row no longer sets a font
+          // size of its own, so `inherit` would bottom out at the browser's 16px.
+          style={{ ...INPUT_STYLE, padding: "1px 5px", fontSize: 12, border: "1px solid var(--text-secondary)" }}
         />
       ) : (
         <span style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 1 }}>
