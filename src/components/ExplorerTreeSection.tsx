@@ -28,21 +28,20 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { Route } from "../types";
+import { annotateProjects, getExplorerActions } from "../lib/explorer";
+import type { ExplorerProject } from "../lib/explorer";
 import {
-  annotateProjects,
-  explorerList,
-  explorerProjects,
-  getExplorerActions,
-} from "../lib/explorer";
-import type { ExplorerEntry, ExplorerProject } from "../lib/explorer";
+  fetchListing,
+  getListing,
+  getRegistryProjects,
+  refreshRepoKb,
+  repoShortcutDirs,
+  useRepoListings,
+} from "../lib/repoListing";
+import { RepoDirRows } from "./RepoDirRows";
 import { useThreadsView } from "../lib/threadStore";
 import { getNavState } from "../lib/route";
-import {
-  FILE_ICON,
-  folderIcon,
-  openArtifact,
-  useActiveTabArtifact,
-} from "../lib/panelStore";
+import { folderIcon, openArtifact, useActiveTabArtifact } from "../lib/panelStore";
 import { PulsingDot } from "./PulsingDot";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
 import { KbTreeNode, TreeMessage, TreeRow } from "./KbTreeSection";
@@ -54,11 +53,10 @@ import type { KbNode } from "../lib/kb";
 
 // ── Module-level caches (survive menu unmount) ───────────────────────────────
 
-let projectsCache: ExplorerProject[] | null = null;
-/** node key: `project` for a project root, `project::dir/path` for a dir. */
+/** node key: `project` for a project root, `project::dir/path` for a dir.
+ *  Listings themselves live in lib/repoListing (SWIT-97), shared with the KB
+ *  section's repo folders. */
 let expandedCache: ReadonlySet<string> = new Set<string>();
-const listingCache = new Map<string, ExplorerEntry[]>();
-const listingErrors = new Map<string, string>();
 
 function nodeKey(project: string, dir: string): string {
   return dir ? `${project}::${dir}` : project;
@@ -79,8 +77,8 @@ const PAGES_NODE = "pages/";
 const KNOWLEDGE_NODE = "knowledge/";
 const REPO_NODE = "repo/";
 const TERMINALS_NODE = "terminals/";
-/** Repo directories that get a shortcut node beside `repo` when they exist. */
-const REPO_SHORTCUTS = ["knowledge", "specs", "docs"] as const;
+/** A repo shortcut's pseudo key. The directories that get one (when they
+ *  exist) are lib/repoListing's REPO_SHORTCUTS — the KB band shows the same. */
 function shortcutNode(dir: string): string {
   return `${dir}//`;
 }
@@ -102,27 +100,15 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
   // land in the module caches.
   const [, setBump] = useState(0);
   const force = () => setBump((n) => n + 1);
+  // Listing arrivals (from either tree) re-render through the shared store.
+  useRepoListings();
 
-  const [projects, setProjects] = useState<ExplorerProject[] | null>(projectsCache);
-  const [projectsError, setProjectsError] = useState<string | null>(null);
-
-  // Projects refresh on every menu mount (the old rail refreshed on screen
-  // activation; the menu opening is the equivalent moment now).
+  // The registry list is lib/repoListing's (SWIT-97) — ONE copy shared with
+  // the KB section, refreshed on menu mount (the old rail refreshed on screen
+  // activation; the menu opening is the equivalent moment now), throttled.
+  const { projects, error: projectsError } = getRegistryProjects();
   useEffect(() => {
-    let cancelled = false;
-    explorerProjects()
-      .then((list) => {
-        if (cancelled) return;
-        projectsCache = list;
-        setProjects(list);
-        setProjectsError(null);
-      })
-      .catch((e) => {
-        if (!cancelled) setProjectsError(String(e));
-      });
-    return () => {
-      cancelled = true;
-    };
+    refreshRepoKb();
   }, []);
 
   // Live-thread annotation (unchanged logic from the old rail).
@@ -197,20 +183,6 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
   const activeRoute: { project?: string; path?: string } | undefined =
     panelFile ?? routeTarget;
 
-  const fetchListing = (project: string, dir: string) => {
-    const key = nodeKey(project, dir);
-    explorerList(project, dir)
-      .then((entries) => {
-        listingCache.set(key, entries);
-        listingErrors.delete(key);
-        force();
-      })
-      .catch((e) => {
-        listingErrors.set(key, String(e));
-        force();
-      });
-  };
-
   const toggle = (project: string, dir: string) => {
     const key = nodeKey(project, dir);
     const next = new Set(expandedCache);
@@ -224,57 +196,16 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
     force();
   };
 
-  const renderDir = (project: string, dir: string, depth: number) => {
-    const key = nodeKey(project, dir);
-    const entries = listingCache.get(key);
-    const error = listingErrors.get(key);
-    if (error !== undefined && entries === undefined) {
-      return <TreeMessage key={`${key}#err`}>cannot list: {error}</TreeMessage>;
-    }
-    if (entries === undefined) {
-      return <TreeMessage key={`${key}#load`}>loading…</TreeMessage>;
-    }
-    if (entries.length === 0) {
-      return <TreeMessage key={`${key}#empty`}>empty</TreeMessage>;
-    }
-    return entries.map((entry) => {
-      const childPath = dir ? `${dir}/${entry.name}` : entry.name;
-      if (entry.is_dir) {
-        const childKey = nodeKey(project, childPath);
-        const isOpen = expandedCache.has(childKey);
-        return (
-          <div key={childKey}>
-            <TreeRow
-              label={entry.name}
-              expanded={isOpen}
-              icon={folderIcon(isOpen)}
-              depth={depth}
-              active={false}
-              onClick={() => toggle(project, childPath)}
-            />
-            {isOpen && renderDir(project, childPath, depth + 1)}
-          </div>
-        );
-      }
-      const isActive =
-        activeRoute?.project === project && activeRoute?.path === childPath;
-      return (
-        <TreeRow
-          key={nodeKey(project, childPath)}
-          label={entry.name}
-          icon={FILE_ICON}
-          depth={depth}
-          active={isActive}
-          onClick={(e) =>
-            openArtifact(
-              { kind: "repo-file", project, path: childPath },
-              { modifier: e.ctrlKey || e.metaKey }
-            )
-          }
-        />
-      );
-    });
-  };
+  const renderDir = (project: string, dir: string, depth: number) => (
+    <RepoDirRows
+      project={project}
+      dir={dir}
+      depth={depth}
+      isExpanded={(path) => expandedCache.has(nodeKey(project, path))}
+      onToggleDir={(path) => toggle(project, path)}
+      active={activeRoute}
+    />
+  );
 
   const togglePseudo = (key: string) => {
     const next = new Set(pseudoExpanded);
@@ -397,9 +328,7 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
    *  has that directory, which the project row's expand already fetched. The
    *  meta says `repo` so it never reads as the KB folder above it. */
   const renderRepoShortcuts = (project: string) => {
-    const root = listingCache.get(nodeKey(project, ""));
-    if (!root) return null;
-    return REPO_SHORTCUTS.filter((d) => root.some((e) => e.is_dir && e.name === d)).map((d) => {
+    return repoShortcutDirs(getListing(project, "")).map((d) => {
       const key = nodeKey(project, shortcutNode(d));
       const open = pseudoExpanded.has(key);
       return (

@@ -19,8 +19,16 @@
 // Expansion state and the doc list live at MODULE level so hiding the menu
 // (it unmounts) and reopening it keeps the tree where you left it — the same
 // keep-alive feel the kb screen's rail got for free from the screen cache.
+//
+// REPO FOLDERS (SWIT-97): a project's thinking often lives in its REPO, not in
+// personal-kb (Lodestar's `knowledge/`, `specs/`, `docs/`). Under each registry
+// project's folder the tree also lists those repo directories, LIVE — read
+// through the guarded `explorer_list`, never copied — with a dim `repo` meta so
+// they never read as KB folders. A project with no KB docs still gets its
+// folder when its repo has one. Files open as `repo-file` artifacts: the same
+// viewer, pins mirror and markdown editing the Projects section gives them.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import type { Route } from "../types";
 import { ancestorFolders, buildKbTree, useKbDocList } from "../lib/kb";
@@ -32,15 +40,36 @@ import {
   openArtifact,
   useActiveTabArtifact,
 } from "../lib/panelStore";
+import {
+  fetchListing,
+  getListing,
+  getRegistryProjects,
+  listingKey,
+  refreshRepoKb,
+  repoKbProjects,
+  useRepoListings,
+  withRepoProjects,
+} from "../lib/repoListing";
 import { EXPANDER_SIZE, ICON_SIZE, Icon, type IconName } from "./icons";
+import { RepoDirRows } from "./RepoDirRows";
 
 // Survives menu unmount (visibility toggle). Not persisted to disk — a fresh
 // launch starts collapsed, matching the wireframe's ▸ project rows.
 let expandedCache: ReadonlySet<string> = new Set<string>();
+/** Expansion of REPO directories in this tree, keyed `project::dir` — its own
+ *  set, so a folder opened here does not open under Projects › repo. */
+let repoExpandedCache: ReadonlySet<string> = new Set<string>();
 
 export function KbTreeSection({ route }: { route: Route }) {
   const { docs, error } = useKbDocList(true); // menu visible = section active
-  const tree = buildKbTree(docs ?? []);
+  useRepoListings();
+  // The registry + each project's root listing, refreshed when the menu mounts.
+  useEffect(() => {
+    refreshRepoKb();
+  }, []);
+  const registry = getRegistryProjects();
+  const repoProjects = repoKbProjects(registry.projects ?? [], (p) => getListing(p, ""));
+  const tree = withRepoProjects(buildKbTree(docs ?? []), repoProjects.keys());
 
   // Active doc — the highlight must name what is ACTUALLY on screen (A3):
   //   · on the kb screen, that's the route's doc (full-width reading wins);
@@ -57,6 +86,22 @@ export function KbTreeSection({ route }: { route: Route }) {
   const routeDoc =
     route.screen === "kb" ? route.doc : lastKb?.screen === "kb" ? lastKb.doc : undefined;
   const activeDoc = panelDoc ?? routeDoc;
+  // The repo file ACTUALLY on screen — the Projects section's rule: the
+  // panel's repo-file on the terminal screen, else the explorer route.
+  const panelFile =
+    route.screen === "terminal" && panelArtifact?.kind === "repo-file"
+      ? { project: panelArtifact.project, path: panelArtifact.path }
+      : undefined;
+  const lastExplorer = getNavState().lastByScreen.explorer;
+  const explorerRoute =
+    route.screen === "explorer"
+      ? route
+      : lastExplorer?.screen === "explorer"
+        ? lastExplorer
+        : undefined;
+  const activeFile: { project?: string; path?: string } | undefined =
+    panelFile ?? explorerRoute;
+  const [, setRepoBump] = useState(0);
 
   const [expanded, setExpandedState] = useState<ReadonlySet<string>>(() => {
     // Force-expand the active doc's ancestors at mount so a deep link /
@@ -92,21 +137,73 @@ export function KbTreeSection({ route }: { route: Route }) {
     openArtifact({ kind: "kb-doc", path }, { modifier });
   };
 
+  const toggleRepoDir = (project: string, dir: string) => {
+    const key = listingKey(project, dir);
+    const next = new Set(repoExpandedCache);
+    if (next.has(key)) {
+      next.delete(key);
+    } else {
+      next.add(key);
+      fetchListing(project, dir); // stale-while-revalidate
+    }
+    repoExpandedCache = next;
+    setRepoBump((n) => n + 1);
+  };
+
+  /** A project folder's repo directories, drawn after its KB children. */
+  const repoFolders = (project: string, dirs: readonly string[]) =>
+    dirs.map((d) => {
+      const open = repoExpandedCache.has(listingKey(project, d));
+      return (
+        <div key={`${project}::${d}`}>
+          <TreeRow
+            label={d}
+            expanded={open}
+            icon={folderIcon(open)}
+            depth={1}
+            active={false}
+            meta="repo"
+            onClick={() => toggleRepoDir(project, d)}
+          />
+          {open && (
+            <RepoDirRows
+              project={project}
+              dir={d}
+              depth={2}
+              isExpanded={(path) => repoExpandedCache.has(listingKey(project, path))}
+              onToggleDir={(path) => toggleRepoDir(project, path)}
+              active={activeFile}
+            />
+          )}
+        </div>
+      );
+    });
+
   return (
     <div>
       {error !== null && <TreeMessage>KB unavailable: {error}</TreeMessage>}
+      {registry.error !== null && (
+        <TreeMessage>project folders unavailable: {registry.error}</TreeMessage>
+      )}
       {error === null && docs !== null && tree.length === 0 && (
         <TreeMessage>no docs in the knowledge base</TreeMessage>
       )}
       {tree.map((node) => (
         <KbTreeNode
-          key={node.path}
+          // type + path: a top-level doc and a synthesized project folder
+          // could otherwise share a path and a React key.
+          key={`${node.type}:${node.path}`}
           node={node}
           depth={0}
           expanded={expanded}
           activeDoc={activeDoc}
           onSelect={select}
           onToggle={toggle}
+          after={
+            node.type === "folder" && repoProjects.has(node.name)
+              ? repoFolders(node.name, repoProjects.get(node.name)!)
+              : undefined
+          }
         />
       ))}
     </div>
@@ -123,6 +220,7 @@ export function KbTreeNode({
   activeDoc,
   onSelect,
   onToggle,
+  after,
 }: {
   node: KbNode;
   depth: number;
@@ -130,6 +228,9 @@ export function KbTreeNode({
   activeDoc: string | undefined;
   onSelect: (path: string, modifier: boolean) => void;
   onToggle: (path: string) => void;
+  /** Rows drawn after an OPEN folder's children — the KB section's repo
+   *  folders (SWIT-97). This node only; never passed down. */
+  after?: ReactNode;
 }) {
   if (node.type === "folder") {
     const isOpen = expanded.has(node.path);
@@ -155,6 +256,7 @@ export function KbTreeNode({
               onToggle={onToggle}
             />
           ))}
+        {isOpen && after}
       </>
     );
   }
