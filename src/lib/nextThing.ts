@@ -41,7 +41,28 @@ export type NextThingContext = {
   kbDocs: readonly string[] | null;
   /** The thread's own project key (a repo path resolves against it). */
   projectKey: string | null;
+  /** SWIT-101: told when a doc/file address is NOT in a known KB list, before
+   *  the repo fallback (evidenceModel.resolveDocTarget) — the caller's way to
+   *  refresh a stale list. Optional; absent = the pre-SWIT-101 behaviour. */
+  onKbMiss?: (address: string) => void;
 };
+
+/** THE address resolver (SWIT-102 lifted it out of `openableAddressIn`): ONE
+ *  whole address → the artifact it opens, or null. `view:<id>[#anchor]`,
+ *  `surface:<project>/<page>[?k=v]`, a KB doc in the real list, a repo path
+ *  against the thread's project — the Evidence vocabulary. Text tokens
+ *  (`openableAddressIn`) and the agent's `show` (showIntent) both come here. */
+export function resolveAddress(
+  address: string,
+  ctx: NextThingContext
+): { artifact: Artifact; anchor: string | null } | null {
+  const view = viewAnchorOfAddress(address);
+  if (view) return { artifact: { kind: "view", threadId: ctx.threadId, viewId: view.viewId }, anchor: view.anchor };
+  const surface = parseSurfaceAddress(address);
+  if (surface) return { artifact: surface, anchor: null };
+  const doc = resolveDocTarget(address, ctx.kbDocs, ctx.projectKey, ctx.onKbMiss);
+  return doc ? { artifact: doc, anchor: null } : null;
+}
 
 export type NextThing =
   | {
@@ -74,18 +95,8 @@ export function openableAddressIn(
   for (const raw of text.split(/\s+/)) {
     const token = raw.replace(/^[(\[<"'`]+/, "").replace(/[)\]>"'`,.;:!?]+$/, "");
     if (token.length === 0) continue;
-    const view = viewAnchorOfAddress(token);
-    if (view) {
-      return {
-        artifact: { kind: "view", threadId: ctx.threadId, viewId: view.viewId },
-        anchor: view.anchor,
-        address: token,
-      };
-    }
-    const surface = parseSurfaceAddress(token);
-    if (surface) return { artifact: surface, anchor: null, address: token };
-    const doc = resolveDocTarget(token, ctx.kbDocs, ctx.projectKey);
-    if (doc) return { artifact: doc, anchor: null, address: token };
+    const hit = resolveAddress(token, ctx);
+    if (hit) return { ...hit, address: token };
   }
   return null;
 }

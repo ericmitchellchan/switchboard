@@ -19,6 +19,7 @@ import {
   TRANSCRIPT_SUFFIX,
   DECISION_LABELS_NAMED,
   DECISION_LABEL_MAX,
+  PANEL_REPORT_SENTENCE,
   artifactRef,
   buildBacklogItemLine,
   buildPageContractLine,
@@ -557,6 +558,64 @@ describe("buildPageContractLine + standing decisions (SWIT-58)", () => {
     expect(cut.length).toBeLessThanOrEqual(SPAWN_CONTEXT_MAX);
     // An all-junk label vanishes and the count still speaks.
     expect(buildPageContractLine({ count: 1, labels: ['"""'] })).toContain("tagged decision:)");
+  });
+});
+
+describe("buildPageContractLine — a report stays in the panel (SWIT-102)", () => {
+  // The longest standing-decisions clause there can be: three labels at the cap.
+  const FULL: { count: number; labels: string[] } = {
+    count: 999,
+    labels: ["a".repeat(DECISION_LABEL_MAX * 2), "b".repeat(DECISION_LABEL_MAX * 2), "c".repeat(DECISION_LABEL_MAX * 2)],
+  };
+
+  it("says it plainly: the panel, the view tool, never claude.ai unless asked for a link, page show for what exists", () => {
+    const line = buildPageContractLine();
+    expect(line).toContain(
+      "A report, brief, summary or 'artifact' the user asks for goes IN THE PANEL: write a .md file in the repo and open it with the view tool (kind report)."
+    );
+    expect(line).toContain(
+      "Never publish it to claude.ai (the Artifact tool, Claude Docs) unless the user asks for a link to share."
+    );
+    expect(line).toContain("To put an existing doc or file in front of the user, use the page tool (op show).");
+    // The words a user actually says are all claimed.
+    for (const word of ["report", "brief", "summary", "'artifact'", "IN THE PANEL"]) expect(line).toContain(word);
+  });
+
+  it("the sentence survives the typed-line sanitizer VERBATIM — nothing in it is a shell metacharacter", () => {
+    expect(sanitizeForTypedLine(PANEL_REPORT_SENTENCE, SPAWN_CONTEXT_MAX)).toBe(PANEL_REPORT_SENTENCE);
+    expect(PANEL_REPORT_SENTENCE).not.toMatch(/["\\$%`\u201C-\u201F\n]/);
+    expect(buildPageContractLine()).toContain(PANEL_REPORT_SENTENCE);
+    // And once more through the launch line's own re-sanitize (threadStore).
+    const launch = launchCommand({ chatSessionId: "abc-123", resume: false, appendSystemPrompt: buildPageContractLine() });
+    expect(launch).toContain(PANEL_REPORT_SENTENCE);
+    expect((launch.match(/"/g) ?? []).length).toBe(2);
+  });
+
+  it("stays whole, inside SPAWN_CONTEXT_MAX, WITH the longest standing-decisions clause after it", () => {
+    const line = buildPageContractLine(FULL);
+    expect(line.length).toBeLessThanOrEqual(SPAWN_CONTEXT_MAX);
+    expect(line).toContain(PANEL_REPORT_SENTENCE);
+    expect(line).toContain("already made 999 decisions on this page");
+    // Nothing was cut: the clause's own last words are the line's last words.
+    expect(line.endsWith("and do not re-ask what they settle.")).toBe(true);
+    expect(line).not.toMatch(/…$/);
+    // The budget, stated: the contract alone, and at its longest — what is
+    // left of the 2000 is the panel ref's (it is composed after this line).
+    expect(buildPageContractLine().length).toBeLessThan(800);
+    expect(line.length).toBeLessThan(1200);
+  });
+
+  it("with a worst-case panel context behind it the contract is still whole (the panel's tail is what truncates)", () => {
+    const panel = buildSpawnContext({ kind: "surface", project: "lodestar", page: "trading" }, 3, {
+      kbRoot: KB_ROOT,
+      anchorHint: "trade:<id>, bar:<iso>, row:<key>",
+      backlogItem: { id: "b1", text: "x".repeat(400) },
+    });
+    const joined = [buildPageContractLine(FULL), panel].join(" ");
+    const launch = launchCommand({ chatSessionId: "abc-123", resume: true, appendSystemPrompt: joined });
+    expect(launch).toContain(PANEL_REPORT_SENTENCE);
+    expect(launch).toContain("and do not re-ask what they settle.");
+    expect(launch).toContain("Workstation context: panel shows surface lodestar/trading");
   });
 });
 

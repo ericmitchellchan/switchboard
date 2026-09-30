@@ -290,7 +290,16 @@ fn threads_data_dir() -> Result<std::path::PathBuf, String> {
 /// retracted.json — the app's overlay of evidence rows taken off the page.
 /// SWIT-79 adds sets.json — the MCP server's view SETS (`view show` with
 /// `set:`), read by the view-intent poll beside the views/ listing.
-const THREAD_FILES: [&str; 5] = ["page.json", "answers.json", "inbox.json", "retracted.json", "sets.json"];
+/// SWIT-102 adds shows.json — the MCP server's SHOWS (`page` op `show`: put
+/// an existing doc or file in front of the user), read by the same poll.
+const THREAD_FILES: [&str; 6] = [
+    "page.json",
+    "answers.json",
+    "inbox.json",
+    "retracted.json",
+    "sets.json",
+    "shows.json",
+];
 
 /// Thread ids are frontend-minted uuids (threadStore.mintUuid). Anything
 /// outside the uuid alphabet is refused outright — there is no path form to
@@ -336,8 +345,8 @@ async fn read_thread_file(thread_id: String, name: String) -> Result<String, Str
 }
 
 /// A change stamp over a thread's page files: the max mtime (ms since epoch)
-/// of page.json / answers.json / inbox.json / retracted.json / sets.json, a
-/// missing file counting 0. The frontend's 5s pass compares it tick-to-tick and skips the
+/// of page.json / answers.json / inbox.json / retracted.json / sets.json /
+/// shows.json, a missing file counting 0. The frontend's 5s pass compares it tick-to-tick and skips the
 /// reads when nothing moved — a per-thread stat instead of three reads per
 /// thread per tick. Same guard posture as read_thread_file: the id is validated and
 /// the names come from the fixed THREAD_FILES set, so nothing caller-named
@@ -428,7 +437,25 @@ mod thread_stamp_tests {
         // SWIT-79: sets.json (the MCP server's view sets) is the fifth.
         assert!(THREAD_FILES.contains(&"retracted.json"));
         assert!(THREAD_FILES.contains(&"sets.json"));
-        assert_eq!(THREAD_FILES.len(), 5);
+        // SWIT-102: shows.json (the MCP server's `page` op `show`) is the sixth.
+        assert!(THREAD_FILES.contains(&"shows.json"));
+        assert_eq!(THREAD_FILES.len(), 6);
+    }
+
+    #[test]
+    fn a_show_moves_the_stamp_and_no_other_name_joins_the_set() {
+        // SWIT-102: the view-intent poll reads shows.json through
+        // read_thread_file, so the name must be in the closed set — and, being
+        // in it, a write moves the stamp like any other thread file.
+        let dir = temp_dir("shows");
+        assert_eq!(max_mtime_ms(&dir, &THREAD_FILES), 0);
+        std::fs::write(dir.join("shows.json"), "{\"version\":1,\"shows\":[]}").unwrap();
+        assert!(max_mtime_ms(&dir, &THREAD_FILES) > 0);
+        // The allowlist is exact: a near-miss name is not a thread file.
+        for name in ["show.json", "shows.json.tmp", "Shows.json", "../shows.json", "views/shows.json"] {
+            assert!(!THREAD_FILES.contains(&name), "{name} must not be readable");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

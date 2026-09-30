@@ -13,6 +13,7 @@ import { parseViewSpec } from "./viewStore";
 import { parseInboxFile } from "./pageStore";
 import { parseBacklogInbox } from "./backlogStore";
 import { parseSetsFile } from "./artifactSets";
+import { parseShowsFile, showTargetFor, SHOW_CAP, SHOW_ADDRESS_CAP } from "./showIntent";
 // Source text of the two loopback predicates, for the byte-identical check.
 import viewStoreSource from "./viewStore.ts?raw";
 import mcpServerSource from "../../src-tauri/resources/mcp/switchboard-mcp.cjs?raw";
@@ -385,7 +386,7 @@ describe("ROUND-TRIP: the server's writes parse through pageStore (the seam)", (
     }
     const props = (server.PAGE_TOOL.inputSchema as { properties: Record<string, { enum?: string[] }> }).properties;
     expect(props.kind.enum).toEqual(["decision", "convention", "info"]);
-    expect(props.op.enum).toEqual(["theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item"]);
+    expect(props.op.enum).toEqual(["theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "show"]);
     expect(props.default).toBeDefined();
     expect(props.reviewFirst).toBeDefined();
     expect(props.why).toBeDefined();
@@ -1259,5 +1260,204 @@ describe("the view tool — the dashboard grammar (SWIT-96: facts / width / stat
     ]) {
       expect(server.VIEW_TOOL.description).toContain(rule);
     }
+  });
+});
+
+describe("the page tool — op show (SWIT-102): put an existing doc or file in front of the user", () => {
+  const shows = server as unknown as {
+    normalizeShowAddress: (raw: unknown, cwd: string, viewIds: string[]) => { address: string; form: string };
+    performShowOp: (
+      threadDir: string,
+      args: Record<string, unknown>,
+      now: number,
+      env?: { cwd?: string; exists?: (p: string) => boolean }
+    ) => { show: { id: string; address: string; at: string }; message: string };
+    performOp: (threadDir: string, args: Record<string, unknown>, now: number) => string;
+    SHOW_CAP: number;
+    SHOW_ADDRESS_CAP: number;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeFs = require("fs") as {
+    mkdtempSync: (p: string) => string;
+    mkdirSync: (p: string, o?: { recursive: boolean }) => void;
+    writeFileSync: (p: string, d: string) => void;
+    readFileSync: (p: string, e: string) => string;
+    existsSync: (p: string) => boolean;
+    rmSync: (p: string, o: { recursive: boolean; force: boolean }) => void;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeOs = require("os") as { tmpdir: () => string };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodePath = require("path") as { join: (...p: string[]) => string };
+  const CWD = "C:/Users/eric/projects/lodestar";
+  const norm = (raw: unknown, viewIds: string[] = []) => shows.normalizeShowAddress(raw, CWD, viewIds);
+
+  it("accepts the four address forms and normalizes a path (backslashes, ./, an absolute path inside cwd)", () => {
+    expect(norm("specs/sextant/gamma-metric-design.md")).toEqual({ address: "specs/sextant/gamma-metric-design.md", form: "path" });
+    expect(norm("  switchboard/features/x/requirements.md ")).toEqual({ address: "switchboard/features/x/requirements.md", form: "path" });
+    expect(norm("mockups\\cases-compact-v1.html")).toEqual({ address: "mockups/cases-compact-v1.html", form: "path" });
+    expect(norm("./README.md")).toEqual({ address: "README.md", form: "path" });
+    // Inside the working directory — drive paths compare case-insensitively.
+    expect(norm("c:\\users\\eric\\projects\\lodestar\\specs\\a.md")).toEqual({ address: "specs/a.md", form: "path" });
+    // Outside it — kept absolute; the app opens it only inside the knowledge base.
+    expect(norm("C:\\Users\\eric\\projects\\personal-kb\\switchboard\\notes.md")).toEqual({
+      address: "C:/Users/eric/projects/personal-kb/switchboard/notes.md",
+      form: "absolute",
+    });
+    // A sibling directory that merely shares the prefix is NOT inside cwd.
+    expect(norm("C:/Users/eric/projects/lodestar-old/a.md").form).toBe("absolute");
+    expect(norm("surface:lodestar/trading?instrument=NQ&date=2026-06-05")).toEqual({
+      address: "surface:lodestar/trading?instrument=NQ&date=2026-06-05",
+      form: "surface",
+    });
+    expect(norm("view:v2", ["v1", "v2"])).toEqual({ address: "view:v2", form: "view" });
+    expect(norm("view:v2#h:net-gamma", ["v2"])).toEqual({ address: "view:v2#h:net-gamma", form: "view" });
+  });
+
+  it("refuses — visibly — what cannot open: a ticket key, a URL, prose, `..`, a bare word, an unknown view, a bad anchor, a long address", () => {
+    expect(() => norm("SWIT-102")).toThrow(/not something the panel can open/);
+    expect(() => norm("https://claude.ai/artifact/abc")).toThrow(/not something the panel can open/);
+    expect(() => norm("the gamma design doc")).toThrow(/no spaces/);
+    expect(() => norm("../secrets/a.md")).toThrow(/no \.\./);
+    expect(() => norm("specs/../../a.md")).toThrow(/not something the panel can open/);
+    expect(() => norm("refactor")).toThrow(/not something the panel can open/);
+    expect(() => norm("")).toThrow(/address must be a non-empty string/);
+    expect(() => norm(undefined)).toThrow(/address must be a non-empty string/);
+    expect(() => norm("view:v9", ["v1"])).toThrow(/no view with id v9 in this thread — create it with the view tool/);
+    expect(() => norm("view:bad id", ["v1"])).toThrow(/not a view address/);
+    expect(() => norm("view:v1#nope", ["v1"])).toThrow(/malformed anchor/);
+    expect(() => norm("surface:lodestar")).toThrow(/not a page address/);
+    expect(() => norm(`docs/${"a".repeat(shows.SHOW_ADDRESS_CAP)}.md`)).toThrow(/too long \(\d+ chars; the cap is 300\)/);
+  });
+
+  it("writes shows.json newest-first with o<n> ids, capped at 20 — and never touches page.json", () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-shows-"));
+    try {
+      const env = { cwd: CWD, exists: () => true };
+      const first = shows.performShowOp(dir, { op: "show", address: "specs/a.md" }, NOW, env);
+      expect(first.show).toEqual({ id: "o1", address: "specs/a.md", at: "2026-08-31T10:00:00.000Z" });
+      expect(first.message).toBe("specs/a.md is opening in the panel beside the terminal.");
+      const second = shows.performShowOp(dir, { op: "show", address: "mock.html" }, NOW + 1000, env);
+      expect(second.show.id).toBe("o2");
+      const file = JSON.parse(nodeFs.readFileSync(nodePath.join(dir, "shows.json"), "utf8"));
+      expect(file.version).toBe(1);
+      expect(file.shows.map((s: { id: string }) => s.id)).toEqual(["o2", "o1"]);
+      // The app's parser reads exactly this shape.
+      expect(parseShowsFile(JSON.stringify(file))).toEqual([
+        { id: "o2", address: "mock.html", at: "2026-08-31T10:00:01.000Z" },
+        { id: "o1", address: "specs/a.md", at: "2026-08-31T10:00:00.000Z" },
+      ]);
+      // The cap: 25 more shows keep the newest 20, and ids keep counting up
+      // (a trimmed id is never re-minted — the app's seen-set stays honest).
+      for (let i = 0; i < 25; i++) shows.performShowOp(dir, { op: "show", address: `docs/n${i}.md` }, NOW + 2000 + i, env);
+      const capped = JSON.parse(nodeFs.readFileSync(nodePath.join(dir, "shows.json"), "utf8"));
+      expect(capped.shows).toHaveLength(shows.SHOW_CAP);
+      expect(capped.shows[0].id).toBe("o27");
+      expect(capped.shows[capped.shows.length - 1].id).toBe("o8");
+      expect(parseShowsFile(JSON.stringify(capped))).toHaveLength(SHOW_CAP);
+      // Through the page tool's own entry point; page.json is never written.
+      expect(shows.performOp(dir, { op: "show", address: "surface:lodestar/trading" }, NOW)).toBe(
+        "surface:lodestar/trading is opening in the panel beside the terminal."
+      );
+      expect(nodeFs.existsSync(nodePath.join(dir, "page.json"))).toBe(false);
+      // The pure page half refuses it rather than pretending to write a page.
+      expect(() => server.applyOp(empty(), { op: "show", address: "a/b.md" }, NOW)).toThrow(/shows\.json/);
+      // A refused address writes nothing.
+      const before = nodeFs.readFileSync(nodePath.join(dir, "shows.json"), "utf8");
+      expect(() => shows.performShowOp(dir, { op: "show", address: "SWIT-1" }, NOW, env)).toThrow();
+      expect(nodeFs.readFileSync(nodePath.join(dir, "shows.json"), "utf8")).toBe(before);
+    } finally {
+      nodeFs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("the RESULT says plainly when nothing may open: a path not under cwd, an absolute path outside it; a missing absolute path is refused", () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-shows-"));
+    try {
+      nodeFs.mkdirSync(nodePath.join(dir, "views"), { recursive: true });
+      nodeFs.writeFileSync(nodePath.join(dir, "views", "v1.json"), "{}");
+      const asked: string[] = [];
+      const missing = { cwd: CWD, exists: (p: string) => (asked.push(p), false) };
+      const kbDoc = shows.performShowOp(dir, { op: "show", address: "switchboard/features/x/requirements.md" }, NOW, missing);
+      expect(kbDoc.message).toMatch(/^Recorded — but switchboard\/features\/x\/requirements\.md is not a file under this thread's working directory/);
+      expect(kbDoc.message).toMatch(/opens ONLY if Switchboard can resolve it as a knowledge-base doc .* or a file in this thread's project; otherwise nothing opens\.$/);
+      // The existence check is cwd + the relative address (the server's cwd is the thread's).
+      expect(asked[asked.length - 1].replace(/\\/g, "/")).toBe(`${CWD}/switchboard/features/x/requirements.md`);
+      const outside = shows.performShowOp(
+        dir,
+        { op: "show", address: "C:\\Users\\eric\\projects\\personal-kb\\switchboard\\notes.md" },
+        NOW,
+        { cwd: CWD, exists: () => true }
+      );
+      expect(outside.show.address).toBe("C:/Users/eric/projects/personal-kb/switchboard/notes.md");
+      expect(outside.message).toMatch(/outside this thread's working directory, so it opens ONLY if it sits inside the knowledge base; otherwise nothing opens\.$/);
+      expect(() =>
+        shows.performShowOp(dir, { op: "show", address: "C:/nowhere/at/all.md" }, NOW, missing)
+      ).toThrow(/no file at C:\/nowhere\/at\/all\.md — nothing to open/);
+      // A view the thread has opens; one it does not have is refused by name.
+      expect(shows.performShowOp(dir, { op: "show", address: "view:v1#h:summary" }, NOW, missing).message).toBe(
+        "view:v1#h:summary is opening in the panel beside the terminal."
+      );
+      expect(() => shows.performShowOp(dir, { op: "show", address: "view:v2" }, NOW, missing)).toThrow(/no view with id v2/);
+    } finally {
+      nodeFs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ROUND-TRIP: every address the server stores resolves through the app's resolver (or to nothing, as the result said)", () => {
+    const ctx = { threadId: "t1", kbDocs: ["switchboard/notes.md"], projectKey: "lodestar", kbRoot: "C:/Users/eric/projects/personal-kb" };
+    const stored = (raw: string, viewIds: string[] = ["v1"]) => shows.normalizeShowAddress(raw, CWD, viewIds).address;
+    expect(showTargetFor(stored("specs\\a.md"), ctx)?.artifact).toEqual({ kind: "repo-file", project: "lodestar", path: "specs/a.md" });
+    expect(showTargetFor(stored("switchboard/notes.md"), ctx)?.artifact).toEqual({ kind: "kb-doc", path: "switchboard/notes.md" });
+    expect(showTargetFor(stored("C:\\Users\\eric\\projects\\personal-kb\\switchboard\\notes.md"), ctx)?.artifact).toEqual({
+      kind: "kb-doc",
+      path: "switchboard/notes.md",
+    });
+    expect(showTargetFor(stored("view:v1#h:summary"), ctx)).toEqual({ artifact: { kind: "view", threadId: "t1", viewId: "v1" }, anchor: "h:summary" });
+    expect(showTargetFor(stored("surface:lodestar/trading?instrument=NQ"), ctx)?.artifact).toEqual({
+      kind: "surface",
+      project: "lodestar",
+      page: "trading",
+      params: { instrument: "NQ" },
+    });
+    expect(showTargetFor(stored("C:/elsewhere/a.md"), ctx)).toBeNull();
+  });
+
+  it("caps are mirrored in showIntent.ts and the tool table states the op", () => {
+    expect(shows.SHOW_CAP).toBe(SHOW_CAP);
+    expect(shows.SHOW_ADDRESS_CAP).toBe(SHOW_ADDRESS_CAP);
+    for (const rule of [
+      "op show {address} PUTS AN EXISTING DOC OR FILE IN FRONT OF THE USER",
+      "it opens in the panel beside the terminal, in front",
+      "nothing is published anywhere",
+      "a knowledge-base doc path relative to the knowledge-base root",
+      "a file path relative to this thread's working directory",
+      "surface:<project>/<page>?key=value; view:<id>",
+      "A ticket key or a URL opens nothing",
+      "The result says when the address may not resolve — then nothing opens",
+      "The last 20 shows are kept",
+      "a new report is made with the view tool (kind report), not this op",
+    ]) {
+      expect(server.PAGE_TOOL.description).toContain(rule);
+    }
+    const props = (server.PAGE_TOOL.inputSchema as { properties: Record<string, { enum?: string[]; description?: string }> }).properties;
+    expect(props.op.enum).toContain("show");
+    expect(props.address.description).toContain("show: what to open in the panel");
+  });
+});
+
+describe("the view tool claims the words a user says (SWIT-102): report, artifact, summary page, in the panel", () => {
+  it("the description OPENS with them, keeps the report in Switchboard, and points at page show for what already exists", () => {
+    const d = server.VIEW_TOOL.description;
+    const opening = d.slice(0, 480);
+    expect(opening.startsWith('A REPORT, an "artifact", a summary page, a brief')).toBe(true);
+    for (const word of ["REPORT", '"artifact"', "summary page", "IN THE PANEL"]) expect(opening).toContain(word);
+    expect(opening).toContain("is made with THIS tool and stays in Switchboard");
+    expect(opening).toContain("show it with kind 'report'");
+    expect(opening).toContain("Never publish it to claude.ai (the Artifact tool, Claude Docs) unless the user asks for a link to share");
+    expect(opening).toContain("A doc or file that ALREADY exists opens with the page tool's op show");
+    // The rest of the description is still there, after the claim.
+    expect(d).toContain("SHOW the user rendered data in the panel");
+    expect(d).toContain("report: ONE document with live views embedded");
   });
 });

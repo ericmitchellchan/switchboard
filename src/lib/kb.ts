@@ -157,18 +157,116 @@ export function getCachedDocList(): string[] | null {
   return docListCache;
 }
 
+const docListListeners = new Set<() => void>();
+
+/** Be told when the cached list CHANGES (a new reference — never on an
+ *  unchanged refresh). With `getCachedDocList` as the snapshot this is a
+ *  `useSyncExternalStore` pair: a page holding the list re-resolves its
+ *  addresses the moment a refresh — anyone's — brings a new doc in. */
+export function subscribeDocList(listener: () => void): () => void {
+  docListListeners.add(listener);
+  return () => {
+    docListListeners.delete(listener);
+  };
+}
+
 /** Re-IPC the doc list. Keeps the SAME array reference when the content is
  *  unchanged so setState(prev => …) consumers can no-op by identity. */
 export async function refreshDocList(): Promise<string[]> {
   const next = await kbListDocs();
   if (docListCache && sameDocList(docListCache, next)) return docListCache;
   docListCache = next;
+  for (const listener of [...docListListeners]) listener();
   return next;
 }
 
 /** Test-only: reset the module cache. */
 export function __resetKbCacheForTests(): void {
   docListCache = null;
+  kbMisses.clear();
+  missRefreshQueued = false;
+  docListListeners.clear();
+}
+
+// ── A KB-list MISS refreshes the list once (SWIT-101) ────────────────────────
+// The list above is a cache: it loads once and refreshes on KB-screen
+// activation. A doc created mid-session (an agent writes a spec, then points
+// at it) is not in it, so `evidenceModel.resolveDocTarget` fell through to
+// the repo fallback and the doc opened as a missing repo file. The resolver
+// now REPORTS a miss; these are the two things a caller does with one:
+//
+//   · RENDER (`noteKbMiss`): a page resolves its addresses on every paint, so
+//     a miss is REMEMBERED — each address asks for a refresh ONCE, a paint's
+//     worth of new misses share ONE `kb_list`, and an address that simply is
+//     not a KB doc (every repo path on the page) never asks again. Never a
+//     loop: a failed refresh stays remembered too.
+//   · ONE-SHOT OPEN (`resolveWithFreshKbDocs`): a click, the turn-end hook,
+//     the agent's `show`. The memory above would be wrong here — an address
+//     seen BEFORE its file existed is remembered as a miss — so a one-shot
+//     that misses refreshes once and resolves again, every time. One
+//     `kb_list` per open that missed; an open is an event, not a poll.
+//
+// A refresh that changes the list notifies `subscribeDocList`, so a row that
+// was plain text or a repo link becomes the KB doc without another paint
+// asking.
+
+/** Remembered misses are capped; at the cap the memory starts over (each live
+ *  address may then ask once more — still bounded, still never per paint). */
+export const KB_MISS_CAP = 2000;
+
+const kbMisses = new Set<string>();
+let missRefreshQueued = false;
+
+/** The memory rule, pure over the set it is handed: true when this address
+ *  has NOT missed before (and records it). */
+export function rememberKbMiss(remembered: Set<string>, address: string, cap: number = KB_MISS_CAP): boolean {
+  if (remembered.has(address)) return false;
+  if (remembered.size >= cap) remembered.clear();
+  remembered.add(address);
+  return true;
+}
+
+/** The render-side sink for `resolveDocTarget`'s `onKbMiss`: a NEW miss asks
+ *  for one list refresh, coalesced across the paint that reported it (a
+ *  microtask — every miss of one synchronous render lands first). Safe to
+ *  call during render: idempotent, and it touches no React state itself. */
+export function noteKbMiss(address: string): void {
+  if (!rememberKbMiss(kbMisses, address)) return;
+  if (missRefreshQueued) return;
+  missRefreshQueued = true;
+  queueMicrotask(() => {
+    missRefreshQueued = false;
+    refreshDocList().catch(() => {
+      // kb_list failed — the misses stay remembered (no retry loop); any
+      // later refresh, or a one-shot open, still brings the list in.
+    });
+  });
+}
+
+/** Run a resolver against the doc list for a ONE-SHOT open. A cold cache is
+ *  loaded first; a miss against a list that was already cached refreshes it
+ *  ONCE and, when the list actually changed, resolves again. `run` must be
+ *  pure over its arguments — it may be called twice. A failed `kb_list`
+ *  degrades to the first answer (the repo fallback), never a throw. */
+export async function resolveWithFreshKbDocs<T>(
+  run: (kbDocs: readonly string[] | null, onKbMiss: (address: string) => void) => T
+): Promise<T> {
+  let docs = getCachedDocList();
+  let justLoaded = false;
+  if (docs === null) {
+    docs = await refreshDocList().catch(() => null);
+    justLoaded = true;
+  }
+  let missed = false;
+  const first = run(docs, (address) => {
+    missed = true;
+    // The refresh below covers this address — a later paint need not ask.
+    rememberKbMiss(kbMisses, address);
+  });
+  if (!missed || justLoaded) return first;
+  const fresh = await refreshDocList().catch(() => null);
+  if (fresh === null || fresh === docs) return first;
+  return run(fresh, () => {});
 }
 
 // ── Poll differ (pure core of useKbDoc) ──────────────────────────────────────

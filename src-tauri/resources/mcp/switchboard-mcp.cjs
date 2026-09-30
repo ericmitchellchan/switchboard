@@ -9,7 +9,8 @@
 // one file shipped as a plain Tauri resource. Runs on any Node ≥ 18.
 //
 // ONE WRITER, ONE FILE: this process is the SOLE writer of its thread's
-// page.json, and (SWIT-64) ONE OF MANY APPENDERS to the app-wide
+// page.json (and of views/, sets.json and — SWIT-102 — shows.json beside
+// it), and (SWIT-64) ONE OF MANY APPENDERS to the app-wide
 // backlog-inbox.json — an append-only NDJSON file with one taker (the app),
 // never of backlog.json, which the app alone rewrites after draining the
 // inbox (the app writes answers.json / inbox.json; the rendered page is
@@ -351,9 +352,126 @@ function applyOp(page, args, now, answeredIds = new Set()) {
       }
       throw new OpError('itemOp must be "add", "update", "close" or "drop"');
     }
+    case "show":
+      // SWIT-102: `show` writes shows.json, never page.json — performOp routes
+      // it to performShowOp before this function is reached.
+      throw new OpError("show does not write the page — it is recorded in shows.json (performShowOp)");
     default:
-      throw new OpError('op must be one of "theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item"');
+      throw new OpError('op must be one of "theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "show"');
   }
+}
+
+// ── Shows (SWIT-102) — put an EXISTING doc or file in front of the user ──────
+// `page` op `show {address}` appends to `shows.json` in the thread dir
+// (`{version:1, shows:[{id:"o<n>", address, at}]}`, newest first, capped; this
+// server is its one writer) and the app's view-intent poll reads it beside
+// views/ and sets.json with the same baseline rule, opening an unseen show in
+// the ONE preview slot, focused. The address is the Evidence vocabulary's
+// openable half: a knowledge-base doc path, a file path in this thread's
+// project, `surface:<project>/<page>[?k=v]`, `view:<id>[#h:<slug>]`. Caps
+// mirror src/lib/showIntent.ts.
+
+const SHOW_CAP = 20; // shows kept in shows.json
+const SHOW_ADDRESS_CAP = 300; // an address, not prose (reviewFirst's cap)
+const SHOW_PATH_SEGMENT_RE = /^[A-Za-z0-9._-]+$/; // evidenceModel's PATH_SEGMENT
+const SHOW_SURFACE_RE = /^surface:[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+(\?.*)?$/; // surfaceParams' SURFACE_ADDRESS
+const SHOW_FORMS =
+  "a knowledge-base doc path (relative to the knowledge-base root), a file path relative to this thread's working directory, surface:<project>/<page>[?k=v] or view:<id>[#h:<heading-slug>]";
+
+/** Classify + normalize a `show` address. Pure: `cwd` and the thread's view
+ *  ids are passed in. Returns `{address, form}` — form is `view` | `surface` |
+ *  `path` (relative, forward slashes) | `absolute` (outside cwd; the app opens
+ *  it only when it sits inside the knowledge base). Throws OpError — visible —
+ *  on anything that cannot open (a ticket key, a URL, prose, `..`). */
+function normalizeShowAddress(raw, cwd, viewIds) {
+  const a = text(raw, "address");
+  if (a.length > SHOW_ADDRESS_CAP) {
+    throw new OpError(`address is too long (${a.length} chars; the cap is ${SHOW_ADDRESS_CAP}) — it is ${SHOW_FORMS}, not prose`);
+  }
+  if (a.startsWith("view:")) {
+    const rest = a.slice("view:".length);
+    const hash = rest.indexOf("#");
+    const id = hash === -1 ? rest : rest.slice(0, hash);
+    if (!VIEW_ID_RE.test(id)) throw new OpError(`${JSON.stringify(a)} is not a view address — view:<id> with the id the view tool gave you`);
+    if (!viewIds.includes(id)) {
+      throw new OpError(`no view with id ${id} in this thread — create it with the view tool (op show) first`);
+    }
+    // The anchor grammar is viewAnchorOfAddress's (evidenceModel): <kind>:<id>.
+    // eslint-disable-next-line no-control-regex
+    if (hash !== -1 && (!/^[a-z][a-z0-9-]*:.+$/s.test(rest.slice(hash + 1)) || /[\x00-\x1f\x7f]/.test(rest.slice(hash + 1)))) {
+      throw new OpError(`${JSON.stringify(a)} has a malformed anchor — a report heading is view:<id>#h:<heading-slug>`);
+    }
+    return { address: a, form: "view" };
+  }
+  if (a.startsWith("surface:")) {
+    if (!SHOW_SURFACE_RE.test(a)) {
+      throw new OpError(`${JSON.stringify(a)} is not a page address — surface:<project>/<page>?key=value`);
+    }
+    return { address: a, form: "surface" };
+  }
+  // A path. Backslashes are separators here (Windows); `./` is noise.
+  let p = a.replace(/\\/g, "/");
+  while (p.startsWith("./")) p = p.slice(2);
+  const drive = /^[A-Za-z]:\//.test(p);
+  let absolute = drive || p.startsWith("/");
+  if (absolute && typeof cwd === "string" && cwd.length > 0) {
+    // An absolute path INSIDE the working directory is that relative path.
+    const root = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
+    const fold = (s) => (drive ? s.toLowerCase() : s); // drive paths are case-insensitive
+    if (root.length > 0 && fold(p).startsWith(`${fold(root)}/`)) {
+      p = p.slice(root.length + 1);
+      absolute = false;
+    }
+  }
+  const body = absolute ? p.replace(/^[A-Za-z]:\//, "").replace(/^\/+/, "") : p;
+  const segments = body.split("/");
+  const clean = segments.every((s) => s.length > 0 && s !== ".." && s !== "." && SHOW_PATH_SEGMENT_RE.test(s));
+  if (!clean || (!body.includes("/") && !/\.[A-Za-z0-9]{1,8}$/.test(body))) {
+    throw new OpError(
+      `${JSON.stringify(a)} is not something the panel can open — address must be ${SHOW_FORMS}. ` +
+        "A path uses letters, digits, . _ - and / only (no spaces, no ..); a ticket key or a URL opens nothing here — those are evidence rows."
+    );
+  }
+  return { address: p, form: absolute ? "absolute" : "path" };
+}
+
+function readShowsFile(file) {
+  try {
+    const data = JSON.parse(fs.readFileSync(file, "utf8"));
+    return Array.isArray(data && data.shows) ? data.shows.filter((s) => s && typeof s.id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** `page` op `show`. `env` = {cwd, exists} — injected by the tests; the real
+ *  server uses its own working directory (claude's — the thread's) and the
+ *  filesystem. The RESULT says plainly when nothing may open. */
+function performShowOp(threadDir, args, now, env) {
+  const cwd = (env && env.cwd) || process.cwd();
+  const exists = (env && env.exists) || ((p) => fs.existsSync(p));
+  const { address, form } = normalizeShowAddress(args.address, cwd, listViewIds(path.join(threadDir, "views")));
+  if (form === "absolute" && !exists(address)) {
+    throw new OpError(`no file at ${address} — nothing to open`);
+  }
+  const file = path.join(threadDir, "shows.json");
+  const shows = readShowsFile(file);
+  const show = { id: nextId(shows, "o"), address, at: new Date(now).toISOString() };
+  const next = { version: 1, shows: [show, ...shows].slice(0, SHOW_CAP) };
+  fs.mkdirSync(threadDir, { recursive: true });
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(next, null, 2));
+  fs.renameSync(tmp, file);
+  const opening = `${address} is opening in the panel beside the terminal.`;
+  const message =
+    form === "view" || form === "surface"
+      ? opening
+      : form === "absolute"
+        ? `Recorded — but ${address} is outside this thread's working directory, so it opens ONLY if it sits inside the knowledge base; otherwise nothing opens.`
+        : exists(path.join(cwd, address))
+          ? opening
+          : `Recorded — but ${address} is not a file under this thread's working directory, so it opens ONLY if Switchboard can resolve it as a knowledge-base doc (a path relative to the knowledge-base root) or a file in this thread's project; otherwise nothing opens.`;
+  return { show, message };
 }
 
 // ── Views (SWIT-50) — a rendered dataset the shell draws ─────────────────────
@@ -930,6 +1048,14 @@ function performViewOp(threadDir, args, now) {
 const VIEW_TOOL = {
   name: "view",
   description:
+    // SWIT-102: the description OPENS by claiming the words a user says — an
+    // agent that hears "artifact" or "report" reached for a claude.ai
+    // publishing tool three times on 2026-09-22 and every link died.
+    "A REPORT, an \"artifact\", a summary page, a brief — anything the user asks to see IN THE " +
+    "PANEL — is made with THIS tool and stays in Switchboard: write a .md file in this " +
+    "thread's working directory and show it with kind 'report' (see report: below). Never " +
+    "publish it to claude.ai (the Artifact tool, Claude Docs) unless the user asks for a link " +
+    "to share. A doc or file that ALREADY exists opens with the page tool's op show. " +
     "SHOW the user rendered data in the panel — a table, a candle chart with markers, a " +
     "distribution, a line chart, bars by category, or a match timeline — drawn by Switchboard's own chart " +
     "components from data YOU supply. Use it " +
@@ -1564,13 +1690,22 @@ const PAGE_TOOL = {
     "EVERY TURN, resolve every question that is settled — answered in chat, decided " +
     "elsewhere, or moot — or it stays open forever; the page lists the open ones. Set op " +
     "theme once to one line saying what this thread is working on. Never open anything for " +
-    "an answer — the page IS where your findings go.",
+    "an answer — the page IS where your findings go. op show {address} PUTS AN EXISTING DOC " +
+    "OR FILE IN FRONT OF THE USER: it opens in the panel beside the terminal, in front. Use " +
+    "it when the user asks to open, show or see a doc or file \"in the panel\" — this is how a " +
+    "file gets there; nothing is published anywhere. address is ONE of: a knowledge-base doc " +
+    "path relative to the knowledge-base root (switchboard/features/x/requirements.md); a " +
+    "file path relative to this thread's working directory (specs/design.md renders as a " +
+    "document, mock.html as a page); surface:<project>/<page>?key=value; view:<id> (add " +
+    "#h:<heading-slug> for a report heading). A ticket key or a URL opens nothing. The " +
+    "result says when the address may not resolve — then nothing opens. The last 20 shows " +
+    "are kept; a new report is made with the view tool (kind report), not this op.",
   inputSchema: {
     type: "object",
     properties: {
       op: {
         type: "string",
-        enum: ["theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item"],
+        enum: ["theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "show"],
         description: "Which page operation to perform.",
       },
       addresses: {
@@ -1599,7 +1734,7 @@ const PAGE_TOOL = {
       },
       address: {
         type: "string",
-        description: "evidence: the row's address — a ticket key, `repo #pr`, a doc or file path, or a page state `surface:<project>/<page>?key=value`. The same address updates its row.",
+        description: "evidence: the row's address — a ticket key, `repo #pr`, a doc or file path, or a page state `surface:<project>/<page>?key=value`. The same address updates its row. show: what to open in the panel — a knowledge-base doc path, a file path in this thread's working directory, `surface:<project>/<page>?key=value` or `view:<id>[#h:<slug>]` (≤ 300 chars).",
       },
       label: { type: "string", description: "evidence: a plain few-word label." },
       status: {
@@ -1645,6 +1780,8 @@ function pagePathFor(threadDir) {
  *  writer, so the read is always our own last write; the atomicity protects
  *  the APP's concurrent 2.5s reads from a torn file. */
 function performOp(threadDir, args, now) {
+  // SWIT-102: `show` is the one page op that does not touch page.json.
+  if (args && args.op === "show") return performShowOp(threadDir, args, now).message;
   const file = pagePathFor(threadDir);
   let raw = "";
   try {
@@ -1828,6 +1965,10 @@ module.exports = {
   parsePage,
   applyOp,
   performOp,
+  normalizeShowAddress,
+  performShowOp,
+  SHOW_CAP,
+  SHOW_ADDRESS_CAP,
   buildViewSpec,
   buildViewSet,
   performViewOp,

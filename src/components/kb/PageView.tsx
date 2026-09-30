@@ -138,7 +138,7 @@ import {
 import { requestReportAnchor } from "../../lib/reportStore";
 import type { EvidenceGroupId, ThreadViewRow } from "../../lib/evidenceModel";
 import { useScannedEvidence } from "../../lib/evidenceScan";
-import { getCachedDocList, refreshDocList } from "../../lib/kb";
+import { getCachedDocList, noteKbMiss, refreshDocList, resolveWithFreshKbDocs, subscribeDocList } from "../../lib/kb";
 import { explorerProjects, listThreadViews, markThreadAnswersSent, readThreadView, retractThreadEvidence } from "../../lib/ipc";
 import { projectKeyForDir } from "../../lib/explorer";
 import { getThreads } from "../../lib/threadStore";
@@ -361,19 +361,16 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
   // The doc/file link rule's context: the REAL KB doc list (a KB row must
   // exist to link) and the thread's own project key (a repo path resolves
   // syntactically against it — evidenceModel.resolveDocTarget).
-  const [kbDocs, setKbDocs] = useState<readonly string[] | null>(() => getCachedDocList());
+  // SWIT-101: the list is SUBSCRIBED, not seeded once — a doc created after it
+  // loaded missed forever and opened as a missing repo file. Every resolve
+  // below reports a miss to `noteKbMiss` (one coalesced kb_list per NEW
+  // address, remembered), and whoever refreshes the list — this page, the
+  // turn-end hook, an agent `show` — re-renders it here.
+  const kbDocs: readonly string[] | null = useSyncExternalStore(subscribeDocList, getCachedDocList);
   const [projectKey, setProjectKey] = useState<string | null>(null);
   useEffect(() => {
     if (getCachedDocList() !== null) return;
-    let cancelled = false;
-    refreshDocList()
-      .then((docs) => {
-        if (!cancelled) setKbDocs(docs);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
+    refreshDocList().catch(() => {});
   }, []);
   useEffect(() => {
     let cancelled = false;
@@ -390,7 +387,12 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
     };
   }, [threadId]);
   const linkTarget = (address: string): OpenableArtifact | null =>
-    parseSurfaceAddress(address) ?? resolveDocTarget(address, kbDocs, projectKey);
+    parseSurfaceAddress(address) ?? resolveDocTarget(address, kbDocs, projectKey, noteKbMiss);
+  // The CLICK re-asks (SWIT-101): a row that fell back to a repo file may
+  // name a KB doc written after its one remembered miss — a one-shot open
+  // refreshes the list once and resolves again before anything opens.
+  const lateTarget = (address: string): Promise<OpenableArtifact | null> =>
+    resolveWithFreshKbDocs((docs, onKbMiss) => resolveDocTarget(address, docs, projectKey, onKbMiss));
   // A `view:` address opens the view artifact in the ONE preview slot beside
   // this thread (SWIT-69) — a view has no full-width screen, so no modifier.
   const openViewAddress = useCallback(
@@ -417,7 +419,7 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
   // the hook cannot disagree about WHAT is next; a click here opens it
   // focused where the hook opens it behind.
   const nextThing = useMemo(
-    () => nextThingFor(page, { threadId, kbDocs, projectKey }),
+    () => nextThingFor(page, { threadId, kbDocs, projectKey, onKbMiss: noteKbMiss }),
     [page, threadId, kbDocs, projectKey]
   );
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -500,7 +502,17 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
         />
       );
     }
-    return <EvidenceAddress address={address} target={linkTarget(address)} accent={accent} color={color} fontSize={fontSize} />;
+    const target = linkTarget(address);
+    return (
+      <EvidenceAddress
+        address={address}
+        target={target}
+        lateTarget={target?.kind === "repo-file" ? () => lateTarget(address) : undefined}
+        accent={accent}
+        color={color}
+        fontSize={fontSize}
+      />
+    );
   };
 
   // SWIT-95 (Ky's To do LINK column): the first openable address inside an
@@ -508,7 +520,7 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
   // openableAddressIn) — or null when the item names nothing openable, which
   // leaves the LINK column empty rather than printing a dead address.
   const itemLink = (item: PageItem) => {
-    const hit = openableAddressIn(`${item.title} ${item.note ?? ""}`, { threadId, kbDocs, projectKey });
+    const hit = openableAddressIn(`${item.title} ${item.note ?? ""}`, { threadId, kbDocs, projectKey, onKbMiss: noteKbMiss });
     return hit ? renderAddress(hit.address, { fontSize: 10.5 }) : null;
   };
 
@@ -567,7 +579,15 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
                     if (nextThing.artifact.kind === "view" && nextThing.anchor) {
                       requestReportAnchor(threadId, nextThing.artifact.viewId, nextThing.anchor);
                     }
-                  openInPanel(host, nextThing.artifact, { preview: true });
+                  const artifact = nextThing.artifact;
+                  if (artifact.kind !== "repo-file") {
+                    openInPanel(host, artifact, { preview: true });
+                    return;
+                  }
+                  // A repo fallback re-asks the KB list at the click (SWIT-101).
+                  void lateTarget(nextThing.address)
+                    .catch(() => null)
+                    .then((late) => openInPanel(host, late ?? artifact, { preview: true }));
                 }}
               />
             )}
@@ -1270,16 +1290,20 @@ function AddressButton({
  *  the same rule as a destination click (the preview slot beside this thread;
  *  Ctrl = full width). Anything else — a ticket key, a PR, an unresolved
  *  path, a malformed surface query — prints as plain text, no link. The
- *  caller resolves; this component only draws. */
+ *  caller resolves; this component only draws. `lateTarget` (SWIT-101) is the
+ *  caller's one-shot re-resolve for a row that fell back to a repo file: the
+ *  click awaits it and opens what it says, else the target it was drawn with. */
 function EvidenceAddress({
   address,
   target,
+  lateTarget,
   accent = false,
   color,
   fontSize = 11,
 }: {
   address: string;
   target: OpenableArtifact | null;
+  lateTarget?: () => Promise<OpenableArtifact | null>;
   accent?: boolean;
   color?: string;
   fontSize?: number;
@@ -1316,7 +1340,15 @@ function EvidenceAddress({
       accent={accent}
       color={color}
       fontSize={fontSize}
-      onOpen={(modifier) => openArtifact(target, { modifier })}
+      onOpen={(modifier) => {
+        if (!lateTarget) {
+          openArtifact(target, { modifier });
+          return;
+        }
+        void lateTarget()
+          .catch(() => null)
+          .then((late) => openArtifact(late ?? target, { modifier }));
+      }}
     />
   );
 }

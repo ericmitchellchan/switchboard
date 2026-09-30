@@ -534,9 +534,26 @@ export function buildPageContractLine(decisions: StandingDecisions | null = null
     // the shape is named without them.
     "Answers to your questions arrive as ONE message (Decisions: 1. <question> → <answer>, " +
     "undecided ones still open) when the user sends — do not re-ask; resolve settled " +
-    "questions every turn.";
+    "questions every turn. " +
+    PANEL_REPORT_SENTENCE;
   return sanitizeForTypedLine(base + standingDecisionsClause(decisions), SPAWN_CONTEXT_MAX);
 }
+
+/** SWIT-102: WHERE A REPORT GOES. On 2026-09-22 three threads were asked for
+ *  "an artifact in the panel" and all three published to claude.ai — the
+ *  agent heard "artifact"/"report" and reached for a publishing tool, and
+ *  every link died that evening. So the launch line claims those words for
+ *  the panel and names both tools: the view tool makes a report, the page
+ *  tool's `show` opens what already exists. Written to survive
+ *  sanitizeForTypedLine unchanged (no `"`, backtick, `$`, `%` or `\` — the
+ *  single quotes around 'artifact' are literal inside the flag's
+ *  double-quoted argument); the tests assert it arrives verbatim and whole
+ *  with the longest standing-decisions clause after it. */
+export const PANEL_REPORT_SENTENCE =
+  "A report, brief, summary or 'artifact' the user asks for goes IN THE PANEL: write a .md " +
+  "file in the repo and open it with the view tool (kind report). Never publish it to " +
+  "claude.ai (the Artifact tool, Claude Docs) unless the user asks for a link to share. " +
+  "To put an existing doc or file in front of the user, use the page tool (op show).";
 
 /** The standing decisions a thread's page holds (SWIT-58): how many, and
  *  the newest labels (answer texts) first. Built by App from pageStore's

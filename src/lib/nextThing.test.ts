@@ -5,6 +5,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import {
   nextThingFor,
   openableAddressIn,
+  resolveAddress,
   questionsOfferKey,
   offerNextThing,
   clearNextThingOffer,
@@ -65,6 +66,49 @@ describe("openableAddressIn", () => {
 
   it("takes the FIRST openable token", () => {
     expect(openableAddressIn("view:v1 then switchboard/spec.md", ctx)?.address).toBe("view:v1");
+  });
+});
+
+describe("resolveAddress — the ONE resolver (SWIT-102) and the KB miss it reports (SWIT-101)", () => {
+  it("resolves a whole address exactly as a token of text resolves", () => {
+    for (const address of ["view:v3#h:results", "surface:lodestar/trading?instrument=NQ", "switchboard/spec.md", "src/lib/panelStore.ts"]) {
+      const whole = resolveAddress(address, ctx);
+      const token = openableAddressIn(`see ${address} first`, ctx);
+      expect(whole).not.toBeNull();
+      expect(token).toEqual({ ...whole, address });
+    }
+    expect(resolveAddress("SWIT-79", ctx)).toBeNull();
+    expect(resolveAddress("decision:q1", ctx)).toBeNull();
+    // Whole, not tokenized: text around an address is not an address.
+    expect(resolveAddress("see switchboard/spec.md", ctx)).toBeNull();
+  });
+
+  it("a doc/file address NOT in a known KB list reports the miss, then falls back — text, reviewFirst and To do alike", () => {
+    const misses: string[] = [];
+    const c: NextThingContext = { ...ctx, onKbMiss: (a) => misses.push(a) };
+    expect(resolveAddress("switchboard/new-spec.md", c)?.artifact).toEqual({ kind: "repo-file", project: "switchboard", path: "switchboard/new-spec.md" });
+    expect(misses).toEqual(["switchboard/new-spec.md"]);
+    // A hit, a view, a surface and a ticket report nothing.
+    resolveAddress("switchboard/spec.md", c);
+    resolveAddress("view:v1", c);
+    resolveAddress("surface:lodestar/trading", c);
+    resolveAddress("SWIT-79", c);
+    expect(misses).toHaveLength(1);
+    // Through the page's own paths: a reviewFirst and a To do row.
+    const review = mergePage({ ...parsePageFile(""), turns: [{ at: "2026-09-30T10:00:00Z", lines: ["wrote it"], reviewFirst: "switchboard/review.md" }] }, {}, []);
+    expect(nextThingFor(review, c)?.why).toBe("review");
+    expect(misses).toContain("switchboard/review.md");
+    nextThingFor(rendered([], [item("i1", "read switchboard/todo.md")]), c);
+    expect(misses).toContain("switchboard/todo.md");
+    // With the refreshed list the SAME call resolves to the KB doc.
+    const fresh = nextThingFor(review, { ...ctx, kbDocs: ["switchboard/spec.md", "switchboard/review.md"] });
+    expect(fresh && fresh.why === "review" ? fresh.artifact : null).toEqual({ kind: "kb-doc", path: "switchboard/review.md" });
+  });
+
+  it("an UNKNOWN list (null — still loading) is not a miss: there is nothing to have missed", () => {
+    const misses: string[] = [];
+    resolveAddress("switchboard/new-spec.md", { ...ctx, kbDocs: null, onKbMiss: (a) => misses.push(a) });
+    expect(misses).toEqual([]);
   });
 });
 

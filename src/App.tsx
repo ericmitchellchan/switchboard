@@ -122,6 +122,7 @@ import {
   buildSpawnContext,
   refOptions,
   sanitizeForTypedLine,
+  getKbRootForContext,
   setKbRootForContext,
   setScrollbackRootForContext,
   setThreadsRootForContext,
@@ -131,10 +132,11 @@ import {
 import { runPromotionPass, promotionPassReason, PROMOTION_POLL_MS } from "./lib/threadPromotion";
 import { parsePageFile, parseAnswersFile, parseInboxFile, parseRetractedFile, mergePage, conventionLine, postTimes, countUnreadTimes, nextPassEntry, loadInboxSeen, markInboxSeen, countQuestionStates, requestPageFocus, type ConventionEntry, type ThreadPassEntry } from "./lib/pageStore";
 import { nextThingFor, offerNextThing, clearNextThingOffer } from "./lib/nextThing";
-import { getCachedDocList, refreshDocList } from "./lib/kb";
+import { resolveWithFreshKbDocs } from "./lib/kb";
 import { requestReportAnchor } from "./lib/reportStore";
 import { parseSetsFile, setArtifactFor } from "./lib/artifactSets";
-import { explorerProjects, registerExplorerActions, quickThreadTarget, sessionRepoOptions, useSessionRepos, projectKeyForDir } from "./lib/explorer";
+import { parseShowsFile, showTargetFor, repoDirOf, repoFileListed } from "./lib/showIntent";
+import { explorerProjects, explorerList, registerExplorerActions, quickThreadTarget, sessionRepoOptions, useSessionRepos, projectKeyForDir, projectPlaceForDir } from "./lib/explorer";
 import {
   configureBacklogIO,
   initBacklog,
@@ -1677,11 +1679,22 @@ export default function App() {
   // `sets.json` in the thread dir, read beside the views/ listing, the same
   // baseline rule, an unseen set id opening ONE set tab of those views.
   const seenSetsRef = useRef(new Map<string, Set<string>>());
+  // SWIT-102: the agent's SHOWS (`page` op `show {address}`) ride the same
+  // poll — `shows.json` in the thread dir, the same baseline rule (nothing
+  // replays after a restart), an unseen show opening the doc / file / page /
+  // view it names in the preview slot, FOCUSED: an explicit request, unlike
+  // the turn-end hook's open-behind. The address goes through the resolver
+  // the Evidence rows and nextThingFor use (showIntent.showTargetFor →
+  // nextThing.resolveAddress), inside kb.resolveWithFreshKbDocs so a KB doc
+  // written seconds ago is found (SWIT-101). An address nothing resolves
+  // opens nothing — the tool result already said so.
+  const seenShowsRef = useRef(new Map<string, Set<string>>());
   useEffect(() => {
     if (route.screen !== "terminal" || !activeSessionId) return;
     const thread = findThreadBySessionId(activeSessionId);
     if (!thread) return;
     const threadId = thread.id;
+    const workingDir = thread.workingDir;
     const sessionId = activeSessionId;
     let cancelled = false;
     let busy = false;
@@ -1689,7 +1702,13 @@ export default function App() {
       if (busy) return;
       busy = true;
       try {
-        const [ids, setsRaw] = await Promise.all([listThreadViews(threadId), readThreadFile(threadId, "sets.json")]);
+        const [ids, setsRaw, showsRaw] = await Promise.all([
+          listThreadViews(threadId),
+          readThreadFile(threadId, "sets.json"),
+          // Its own catch: a failed shows read must never take the views and
+          // sets down with it.
+          readThreadFile(threadId, "shows.json").catch(() => ""),
+        ]);
         if (cancelled) return;
         let seen = seenViewsRef.current.get(threadId);
         if (!seen) {
@@ -1721,6 +1740,62 @@ export default function App() {
             log.info(`Set intent: thread=${threadId} set=${set.id} (${set.ids.length}) — opening as one tab`);
             lastIntentOpenRef.current.set(threadId, Date.now());
             openInPanel(sessionId, setArtifactFor(threadId, set), { preview: true });
+          }
+        }
+        const shows = parseShowsFile(showsRaw);
+        const seenShows = seenShowsRef.current.get(threadId);
+        if (!seenShows) {
+          seenShowsRef.current.set(threadId, new Set(shows.map((s) => s.id)));
+        } else {
+          // Oldest unseen first, so a burst lands with the newest in front.
+          for (const show of [...shows].reverse()) {
+            if (seenShows.has(show.id)) continue;
+            // The agent's path is relative to the THREAD'S working directory
+            // (that is what the server checked); a repo file is addressed
+            // from the project root — `place.prefix` is the difference.
+            let place: { key: string; prefix: string } | null = null;
+            try {
+              place = projectPlaceForDir(await explorerProjects(), workingDir);
+            } catch {
+              // no registry — a repo path opens nothing; the rest still resolves
+            }
+            const hit = await resolveWithFreshKbDocs((kbDocs, onKbMiss) =>
+              showTargetFor(show.address, {
+                threadId,
+                kbDocs,
+                projectKey: place?.key ?? null,
+                pathPrefix: place?.prefix ?? "",
+                kbRoot: getKbRootForContext(),
+                onKbMiss,
+              })
+            );
+            // A repo path resolves SYNTACTICALLY (the Evidence rule) — for a
+            // show that is not enough: a file that is not there must open
+            // nothing, not an error card in front of the user.
+            let missing = false;
+            if (hit && hit.artifact.kind === "repo-file") {
+              try {
+                const entries = await explorerList(hit.artifact.project, repoDirOf(hit.artifact.path));
+                missing = !repoFileListed(entries, hit.artifact.path);
+              } catch {
+                missing = true; // no such directory (or the guard refused it)
+              }
+            }
+            // Marked seen only AFTER the awaits: a tick cancelled mid-resolve
+            // (this effect re-runs on every session churn) leaves the show
+            // unseen, and the next tick takes it — never dropped, never twice.
+            if (cancelled) return;
+            seenShows.add(show.id);
+            if (!hit || missing) {
+              log.info(`Show intent: thread=${threadId} show=${show.id} ${show.address} — nothing resolves, nothing opened`);
+              continue;
+            }
+            log.info(`Show intent: thread=${threadId} show=${show.id} ${show.address} — opening in the preview slot, focused`);
+            lastIntentOpenRef.current.set(threadId, Date.now());
+            if (hit.artifact.kind === "view" && hit.anchor) {
+              requestReportAnchor(threadId, hit.artifact.viewId, hit.anchor);
+            }
+            openInPanel(sessionId, hit.artifact, { preview: true });
           }
         }
       } catch {
@@ -1833,9 +1908,10 @@ export default function App() {
   // (1) the preview is the strip's ACTIVE tab — an open-behind would REPLACE
   // the thing being read, in front (`isPreviewActive`); (2) a view the agent
   // showed in the same turn is the intent poll's to open, and it wins for
-  // INTENT_GRACE_MS. The KB doc list is refreshed when the cache is still
-  // cold (no PageView has mounted yet) — one IPC, once, so a KB address is
-  // never mis-read as a repo file.
+  // INTENT_GRACE_MS (a view, a set, or a `show`). The KB doc list is loaded
+  // when the cache is cold and REFRESHED ONCE when an address misses it
+  // (kb.resolveWithFreshKbDocs, SWIT-101) — so a KB doc the agent wrote this
+  // turn is never mis-read as a repo file.
   const prevStatusRef = useRef(new Map<string, AgentStatus>());
   const settleTurn = useCallback(async (sessionId: string) => {
     const thread = findThreadBySessionId(sessionId);
@@ -1860,8 +1936,11 @@ export default function App() {
       } catch {
         // no registry — a repo path stays plain text, the rest still resolves
       }
-      const kbDocs = getCachedDocList() ?? (await refreshDocList().catch(() => null));
-      const next = nextThingFor(page, { threadId, kbDocs, projectKey });
+      // SWIT-101: a one-shot resolve — an address that misses the cached KB
+      // list refreshes it once before the repo fallback is believed.
+      const next = await resolveWithFreshKbDocs((kbDocs, onKbMiss) =>
+        nextThingFor(page, { threadId, kbDocs, projectKey, onKbMiss })
+      );
       if (!next) {
         clearNextThingOffer(threadId);
         return;

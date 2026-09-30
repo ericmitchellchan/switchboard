@@ -264,16 +264,29 @@ export function mergeViewEvidence(
  *  when it stays plain text. A KB doc must be IN the real doc list (exact
  *  path); a repo file needs the thread's project key and a syntactically
  *  clean relative path — v1's honest reach: the file's existence is the
- *  viewer's problem (explorerRead errors visibly), never a silent link. */
+ *  viewer's problem (explorerRead errors visibly), never a silent link.
+ *
+ *  SWIT-101 — THE MISS: the doc list is a cache, and a KB doc created after
+ *  it loaded is not in it, so the address fell through to the repo fallback
+ *  and opened as a missing repo file. This function stays pure; it REPORTS
+ *  the miss (a doc/file address, a KNOWN list, not in it) through `onKbMiss`
+ *  before falling back, and the caller decides what a miss costs: a render
+ *  hands in `kb.noteKbMiss` (one coalesced list refresh per NEW address,
+ *  remembered), a one-shot open runs inside `kb.resolveWithFreshKbDocs`
+ *  (refresh once, resolve again). Every resolver path — Evidence rows,
+ *  reviewFirst, To do links, the turn-end hook, the agent's `show` — comes
+ *  through here, so they all get it. */
 export function resolveDocTarget(
   address: string,
   kbDocs: readonly string[] | null,
-  projectKey: string | null
+  projectKey: string | null,
+  onKbMiss?: (address: string) => void
 ): OpenableArtifact | null {
   const kind = evidenceKindOf(address);
   if (kind !== "doc" && kind !== "file") return null;
   const a = address.trim();
   if (kbDocs !== null && kbDocs.includes(a)) return { kind: "kb-doc", path: a };
+  if (kbDocs !== null) onKbMiss?.(a);
   if (projectKey !== null && a.includes("/")) return { kind: "repo-file", project: projectKey, path: a };
   return null;
 }
