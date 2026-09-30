@@ -340,6 +340,33 @@ export async function jobsPost(threadId: string, text: string): Promise<void> {
   return invoke("jobs_post", { threadId, text });
 }
 
+// ── Watches (SWIT-110) — the same module; watches.json is the app's ─────────
+
+/** Every watch (JSON array; lib/jobs.parseWatches). */
+export async function watchesRead(): Promise<string> {
+  return invoke("watches_read");
+}
+
+/** Set (or, from the same thread, replace) a watch; every guard is Rust's. */
+export async function watchSet(threadId: string, name: string, command: string, cwd: string | null, everyMin: number): Promise<void> {
+  return invoke("watch_set", { threadId, name, command, cwd, everyMin });
+}
+
+/** Remove a watch: `threadId` = only that thread's own; null = the user. */
+export async function watchRemove(threadId: string | null, name: string): Promise<void> {
+  return invoke("watch_remove", { threadId, name });
+}
+
+/** Start one run of a watch now (rejects — and Rust records it failing — when it cannot start). */
+export async function watchRun(name: string): Promise<void> {
+  return invoke("watch_run", { name });
+}
+
+/** Record a finished run's reading (only the watch's current run, once). */
+export async function watchRecord(name: string, jobId: string, status: "pass" | "fail", lastLine: string): Promise<void> {
+  return invoke("watch_record", { name, jobId, status, lastLine });
+}
+
 /** Ground truth for revive: does claude's transcript for this conversation
  *  exist on disk (~/.claude/projects/<munged-cwd>/<sessionId>.jsonl)? Decides
  *  --resume vs --session-id; the chatStarted flag is a UI hint only. */

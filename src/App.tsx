@@ -20,7 +20,7 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, listThreadViews, readThreadFile, threadFilesStamp, writeThreadAnswer, appendConvention, writeThreadPost, saveTranscript, readBacklog, writeBacklog, takeBacklogInbox, takeJobsInbox, jobStart, jobStop, jobsSnapshot, jobNotify, jobsPost } from "./lib/ipc";
+import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, listThreadViews, readThreadFile, threadFilesStamp, writeThreadAnswer, appendConvention, writeThreadPost, saveTranscript, readBacklog, writeBacklog, takeBacklogInbox, takeJobsInbox, jobStart, jobStop, jobsSnapshot, jobNotify, jobsPost, watchesRead, watchSet, watchRemove, watchRun, watchRecord } from "./lib/ipc";
 import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, refreshAllTerminalViews, clearSessionDirty, isSessionDirty, serializeForPip, plainTextTerminal, getSessionWriteCount, setTerminalScreenVisible, pasteIntoTerminal } from "./lib/terminal";
 import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing, sendPipHost } from "./lib/pipBridge";
 import { bumpSessionGeneration, addSessionInputListener, getSessionGeneration } from "./lib/terminalRegistry";
@@ -1699,6 +1699,12 @@ export default function App() {
             snapshot: jobsSnapshot,
             notify: jobNotify,
             post: jobsPost,
+            // SWIT-110: watches ride the same tick — due runs start here.
+            watch: watchSet,
+            unwatch: (threadId, name) => watchRemove(threadId, name),
+            readWatches: watchesRead,
+            runWatch: watchRun,
+            recordWatch: watchRecord,
           },
           Date.now(),
           (msg) => log.warn(msg)

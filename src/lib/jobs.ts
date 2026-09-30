@@ -27,6 +27,9 @@
 // inbox delivery then types it into the thread's live terminal and the page
 // shows it under This turn.
 //
+// WATCHES (SWIT-110) ride the same inbox and the same pass — see the section
+// below.
+//
 // LATER (requirements-lanes, "Later"): a job may belong to a lane. Nothing
 // here builds that; a job keeps its `threadId`, which is what a lane rolls up
 // by.
@@ -43,6 +46,9 @@ export const JOB_COMMAND_CAP = 2000;
 export const JOBS_RUNNING_PER_THREAD = 8;
 export const JOB_LOG_LINES_DEFAULT = 40;
 export const JOB_LOG_LINES_MAX = 400;
+/** A watch's cadence, minutes (SWIT-110) — mirrored in jobs.rs. */
+export const WATCH_EVERY_MIN = 5;
+export const WATCH_EVERY_MAX = 7 * 24 * 60;
 /** Home's Jobs block keeps an ended job this long. */
 export const HOME_JOBS_ENDED_MS = 24 * 60 * 60 * 1000;
 const THREAD_ID_RE = /^[A-Za-z0-9-]{1,64}$/;
@@ -161,7 +167,9 @@ export function parseJobsSnapshot(raw: string): JobRow[] {
 
 export type JobRequest =
   | { op: "start"; id: string; threadId: string; name: string; command: string; cwd: string | null; at: string }
-  | { op: "stop"; id: string; threadId: string; name: string; at: string };
+  | { op: "stop"; id: string; threadId: string; name: string; at: string }
+  | { op: "watch"; id: string; threadId: string; name: string; command: string; cwd: string | null; every: number; at: string }
+  | { op: "unwatch"; id: string; threadId: string; name: string; at: string };
 
 /** Code points, as the caps count. */
 function chars(s: string): number {
@@ -175,7 +183,7 @@ function chars(s: string): number {
 export function parseJobsInbox(raw: string): JobRequest[] {
   if (typeof raw !== "string" || raw.trim().length === 0) return [];
   const out: JobRequest[] = [];
-  for (const line of raw.replace(/^﻿/, "").split(/\r?\n/)) {
+  for (const line of raw.replace(/^\uFEFF/, "").split(/\r?\n/)) {
     const t = line.trim();
     if (t.length === 0) continue;
     let e: unknown;
@@ -190,12 +198,18 @@ export function parseJobsInbox(raw: string): JobRequest[] {
     if (!threadId || !THREAD_ID_RE.test(threadId) || !name || !JOB_NAME_RE.test(name)) continue;
     const id = str(e.id) ?? "";
     const at = str(e.at) ?? "";
-    if (e.op === "stop") {
-      out.push({ op: "stop", id, threadId, name, at });
-    } else if (e.op === "start") {
+    if (e.op === "stop" || e.op === "unwatch") {
+      out.push({ op: e.op, id, threadId, name, at });
+    } else if (e.op === "start" || e.op === "watch") {
       const command = typeof e.command === "string" ? e.command.trim() : "";
       if (command.length === 0 || chars(command) > JOB_COMMAND_CAP) continue;
-      out.push({ op: "start", id, threadId, name, command, cwd: str(e.cwd), at });
+      if (e.op === "start") {
+        out.push({ op: "start", id, threadId, name, command, cwd: str(e.cwd), at });
+        continue;
+      }
+      const every = num(e.every);
+      if (every === null || !Number.isInteger(every) || every < WATCH_EVERY_MIN || every > WATCH_EVERY_MAX) continue;
+      out.push({ op: "watch", id, threadId, name, command, cwd: str(e.cwd), every, at });
     }
   }
   return out;
@@ -314,6 +328,125 @@ export function homeJobs(rows: readonly JobRow[], now: number): JobRow[] {
   );
 }
 
+// ── Watches (SWIT-110) ───────────────────────────────────────────────────────
+// Eric: the Kalshi capture wrote zero prices for a month unnoticed; "Are we
+// now collecting ITF?". A WATCH is a job on a schedule with a pass/fail
+// reading. `watch {name, command, every, cwd?}` / `unwatch {name}` ride the
+// same inbox; `watches.json` is app-owned (Rust writes it). While the app
+// runs, this pass starts each DUE watch as a short `watch-run` job (120 s,
+// the supervisor's timeout), judges each finished run ONCE (exit 0 = pass;
+// anything else — a non-zero exit, a timeout, a lost run, a start that
+// failed — is fail), and posts ONE line to the watch's thread on an EDGE
+// only: into failing, and back out of it. A failing watch is one Needs-you
+// row on Home; every watch folds under `Watching N` at Home's bottom.
+
+export type WatchStatus = "unknown" | "pass" | "fail";
+
+export type Watch = {
+  name: string;
+  threadId: string;
+  command: string;
+  cwd: string;
+  everyMin: number;
+  createdAt: number;
+  lastRunAt: number | null;
+  lastJobId: string | null;
+  judgedJobId: string | null;
+  status: WatchStatus;
+  lastLine: string;
+  changedAt: number | null;
+};
+
+/** Rust's `watches_read` (the file's `watches` array). Tolerant. */
+export function parseWatches(raw: string): Watch[] {
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(data)) return [];
+  const out: Watch[] = [];
+  for (const w of data) {
+    if (!isRecord(w)) continue;
+    const name = str(w.name);
+    const threadId = str(w.threadId);
+    const everyMin = num(w.everyMin);
+    if (!name || !threadId || everyMin === null) continue;
+    out.push({
+      name,
+      threadId,
+      command: str(w.command) ?? "",
+      cwd: str(w.cwd) ?? "",
+      everyMin,
+      createdAt: num(w.createdAt) ?? 0,
+      lastRunAt: num(w.lastRunAt),
+      lastJobId: str(w.lastJobId),
+      judgedJobId: str(w.judgedJobId),
+      status: w.status === "pass" || w.status === "fail" ? w.status : "unknown",
+      lastLine: typeof w.lastLine === "string" ? w.lastLine : "",
+      changedAt: num(w.changedAt),
+    });
+  }
+  return out;
+}
+
+/** A finished run's reading: exit 0 and no timeout passes; everything else
+ *  fails. Null while it runs. */
+export function watchOutcome(run: Pick<JobRow, "state" | "exit">): "pass" | "fail" | null {
+  if (run.state === "running") return null;
+  return run.state === "ended" && run.exit?.code === 0 && !run.exit.timedOut ? "pass" : "fail";
+}
+
+/** THE EDGE: into failing (from passing OR from a first reading — a watch
+ *  whose very first run fails is news), or back out of it. Everything else
+ *  — pass after pass, fail after fail, a first pass — says nothing. */
+export function watchEdge(prev: WatchStatus, next: "pass" | "fail"): "failing" | "recovered" | null {
+  if (next === "fail" && prev !== "fail") return "failing";
+  if (next === "pass" && prev === "fail") return "recovered";
+  return null;
+}
+
+/** Why a run failed, in two words. */
+function failWord(run: Pick<JobRow, "state" | "exit">): string {
+  if (run.state === "lost") return "lost";
+  if (run.state === "stopped") return "stopped";
+  if (run.exit?.timedOut) return "timed out";
+  if (run.exit?.code === -1) return "could not start";
+  return run.exit?.code === null || !run.exit ? "no exit code" : `exit ${run.exit.code}`;
+}
+
+/** The ONE line an edge posts to the watch's thread. */
+export function watchEdgeLine(name: string, edge: "failing" | "recovered", why: string, lastLine: string): string {
+  if (edge === "recovered") return capLine(`watch ${name} passing again`);
+  const last = lastLine.trim();
+  return capLine(`watch ${name} failing: ${why}${last ? ` · ${last}` : ""}`);
+}
+
+/** Due = no run of it in flight, and never run or `every` minutes since the
+ *  last run STARTED. */
+export function isWatchDue(w: Pick<Watch, "lastRunAt" | "lastJobId" | "everyMin">, rows: readonly JobRow[], now: number): boolean {
+  if (w.lastJobId && rows.some((r) => r.id === w.lastJobId && r.state === "running")) return false;
+  return w.lastRunAt === null || now >= w.lastRunAt + w.everyMin * 60_000;
+}
+
+/** Home's Needs-you rows: the failing watches. */
+export function failingWatches(watches: readonly Watch[]): Watch[] {
+  return watches.filter((w) => w.status === "fail").sort((a, b) => (b.changedAt ?? 0) - (a.changedAt ?? 0));
+}
+
+/** Home's `Watching N` fold: failing first, then by name. */
+export function orderWatches(watches: readonly Watch[]): Watch[] {
+  return [...watches].sort((a, b) => Number(b.status === "fail") - Number(a.status === "fail") || a.name.localeCompare(b.name));
+}
+
+/** A watch's row, in words: `failing · every 15 min · ran 3 min ago`. */
+export function watchSummary(w: Watch, now: number): string {
+  const state = w.status === "fail" ? "failing" : w.status === "pass" ? "passing" : "not run yet";
+  const ran = w.lastRunAt === null ? "" : ` · ran ${jobDuration(now - w.lastRunAt)} ago`;
+  return `${state} · every ${w.everyMin} min${ran}`;
+}
+
 // ── The pass (effectful, IO injected so it is testable) ─────────────────────
 
 export type JobsIO = {
@@ -324,6 +457,12 @@ export type JobsIO = {
   /** Post the one ended-line; false when it was already posted. */
   notify: (id: string, text: string) => Promise<boolean>;
   post: (threadId: string, text: string) => Promise<unknown>;
+  watch: (threadId: string, name: string, command: string, cwd: string | null, everyMin: number) => Promise<unknown>;
+  unwatch: (threadId: string, name: string) => Promise<unknown>;
+  readWatches: () => Promise<string>;
+  /** Start one run now; rejects (and Rust records it failing) when it cannot start. */
+  runWatch: (name: string) => Promise<unknown>;
+  recordWatch: (name: string, jobId: string, status: "pass" | "fail", lastLine: string) => Promise<unknown>;
 };
 
 /** One tick of App's 5s pass: act on the requests, read the snapshot,
@@ -339,7 +478,9 @@ export async function runJobsPass(io: JobsIO, now: number, warn: (msg: string) =
   for (const req of requests) {
     try {
       if (req.op === "start") await io.start(req.threadId, req.name, req.command, req.cwd);
-      else await io.stop(req.threadId, req.name);
+      else if (req.op === "stop") await io.stop(req.threadId, req.name);
+      else if (req.op === "watch") await io.watch(req.threadId, req.name, req.command, req.cwd, req.every);
+      else await io.unwatch(req.threadId, req.name);
     } catch (err) {
       warn(`job ${req.op} ${req.name} refused: ${err}`);
       await io.post(req.threadId, jobRefusalLine(req, err)).catch((e) => warn(`job refusal post failed: ${e}`));
@@ -356,7 +497,59 @@ export async function runJobsPass(io: JobsIO, now: number, warn: (msg: string) =
   for (const row of jobsToNotify(rows)) {
     await io.notify(row.id, jobEndedLine(row, now)).catch((e) => warn(`job ${row.name} ended-line failed: ${e}`));
   }
+  await runWatchesPass(io, rows, now, warn);
   return rows;
+}
+
+/** The watches half of the tick: judge each finished run once (posting a
+ *  line on an edge), start each due watch, publish. */
+async function runWatchesPass(io: JobsIO, rows: readonly JobRow[], now: number, warn: (msg: string) => void): Promise<void> {
+  let watches: Watch[];
+  try {
+    watches = parseWatches(await io.readWatches());
+  } catch (err) {
+    warn(`watches read failed: ${err}`);
+    return;
+  }
+  let changed = false;
+  for (const w of watches) {
+    const run = w.lastJobId ? rows.find((r) => r.id === w.lastJobId) : undefined;
+    if (run && run.id !== w.judgedJobId) {
+      const outcome = watchOutcome(run);
+      if (outcome) {
+        try {
+          await io.recordWatch(w.name, run.id, outcome, run.lastLine);
+          changed = true;
+          const edge = watchEdge(w.status, outcome);
+          if (edge) await io.post(w.threadId, watchEdgeLine(w.name, edge, failWord(run), run.lastLine));
+          w.status = outcome;
+        } catch (err) {
+          warn(`watch ${w.name} record failed: ${err}`);
+        }
+      }
+    }
+    if (isWatchDue(w, rows, now)) {
+      changed = true;
+      try {
+        await io.runWatch(w.name);
+      } catch (err) {
+        // Rust recorded it failing (lastRunAt moved, so the next try is at
+        // the next due time); the edge line is ours.
+        const why = String(err instanceof Error ? err.message : err);
+        const edge = watchEdge(w.status, "fail");
+        if (edge) await io.post(w.threadId, watchEdgeLine(w.name, edge, "could not start", why)).catch(() => {});
+        warn(`watch ${w.name} could not start: ${why}`);
+      }
+    }
+  }
+  if (changed) {
+    try {
+      watches = parseWatches(await io.readWatches());
+    } catch {
+      // publish what we have
+    }
+  }
+  publishWatches(watches);
 }
 
 // ── The store ────────────────────────────────────────────────────────────────
@@ -383,7 +576,31 @@ export function useJobs(): JobRow[] {
   return useSyncExternalStore(subscribe, getJobs);
 }
 
+let watchList: Watch[] = [];
+const watchListeners = new Set<() => void>();
+
+export function publishWatches(next: Watch[]): void {
+  watchList = next;
+  for (const l of watchListeners) l();
+}
+
+function subscribeWatches(l: () => void): () => void {
+  watchListeners.add(l);
+  return () => watchListeners.delete(l);
+}
+
+function getWatches(): Watch[] {
+  return watchList;
+}
+
+/** Every watch as the last pass read it. */
+export function useWatches(): Watch[] {
+  return useSyncExternalStore(subscribeWatches, getWatches);
+}
+
 export function __resetJobsForTests(): void {
   jobs = [];
   listeners.clear();
+  watchList = [];
+  watchListeners.clear();
 }

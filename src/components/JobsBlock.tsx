@@ -16,8 +16,22 @@ import { MONO, TEXT_LINK } from "./kit";
 
 const ARM_MS = 5_000;
 
-/** The two-click stop. A failure is the button's title and one faint word. */
-export function StopButton({ id, name }: { id: string; name: string }) {
+/** THE TWO-CLICK ARM (the machine page's): the first click arms it for 5 s
+ *  and reads `confirm`, the second acts. A failure is the button's title and
+ *  one faint word. Shared by a job's `stop` and Home's `unwatch`. */
+export function ArmButton({
+  label,
+  busyLabel,
+  title,
+  armedTitle,
+  onConfirm,
+}: {
+  label: string;
+  busyLabel: string;
+  title: string;
+  armedTitle: string;
+  onConfirm: () => Promise<void>;
+}) {
   const [armed, setArmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,9 +51,7 @@ export function StopButton({ id, name }: { id: string; name: string }) {
     setArmed(false);
     setBusy(true);
     try {
-      await jobStopId(id);
-      // Show the stop now rather than on the next 5s tick.
-      publishJobs(parseJobsSnapshot(await jobsSnapshot()));
+      await onConfirm();
     } catch (err) {
       setError(String(err instanceof Error ? err.message : err));
     } finally {
@@ -49,20 +61,41 @@ export function StopButton({ id, name }: { id: string; name: string }) {
   return (
     <button
       type="button"
-      onClick={() => void click()}
+      onClick={(e) => {
+        e.stopPropagation();
+        void click();
+      }}
       disabled={busy}
-      title={error ?? (armed ? `Click again to stop ${name} and everything it started` : `Stop ${name}`)}
-      aria-label={armed ? `Confirm: stop ${name}` : `Stop ${name}`}
+      title={error ?? (armed ? armedTitle : title)}
+      aria-label={armed ? `Confirm: ${title}` : title}
       style={{
         ...TEXT_LINK,
         marginTop: 0,
         justifySelf: "end",
+        flex: "none",
         color: armed ? "var(--tone-rose)" : error ? "var(--tone-amber)" : "var(--text-faint)",
         cursor: busy ? "default" : "pointer",
       }}
     >
-      {busy ? "stopping…" : armed ? "confirm" : error ? "failed" : "stop"}
+      {busy ? busyLabel : armed ? "confirm" : error ? "failed" : label}
     </button>
+  );
+}
+
+/** A running job's stop: its whole tree, through Rust's pid + creation-time check. */
+export function StopButton({ id, name }: { id: string; name: string }) {
+  return (
+    <ArmButton
+      label="stop"
+      busyLabel="stopping…"
+      title={`Stop ${name}`}
+      armedTitle={`Click again to stop ${name} and everything it started`}
+      onConfirm={async () => {
+        await jobStopId(id);
+        // Show the stop now rather than on the next 5s tick.
+        publishJobs(parseJobsSnapshot(await jobsSnapshot()));
+      }}
+    />
   );
 }
 

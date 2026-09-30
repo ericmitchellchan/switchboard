@@ -2945,7 +2945,7 @@ const MACHINE_TOOL = {
 // this server writes nothing there. The early checks below are courtesy —
 // Rust holds every guard and a refusal comes back as one inbox line.
 
-const JOB_OPS = ["start", "stop", "list", "log"];
+const JOB_OPS = ["start", "stop", "list", "log", "watch", "unwatch"];
 /** Mirrors lib/jobs.ts + src-tauri/src/jobs.rs — change one, change all three. */
 const JOB_NAME_RE = /^[A-Za-z0-9_.-]{1,48}$/;
 const JOB_COMMAND_CAP = 2000;
@@ -2953,6 +2953,22 @@ const JOBS_RUNNING_PER_THREAD = 8;
 const JOB_LOG_LINES_DEFAULT = 40;
 const JOB_LOG_LINES_MAX = 400;
 const JOB_ID_RE = /^[a-z0-9-]{1,40}$/;
+/** SWIT-110 — mirrored in lib/jobs.ts + jobs.rs. */
+const WATCH_EVERY_MIN = 5;
+const WATCH_EVERY_MAX = 7 * 24 * 60;
+const WATCHES_PER_THREAD = 8;
+
+/** The app's watches.json (a READ — the app is its one writer). */
+function readWatchesFile(jobsDir) {
+  const file = path.join(jobsDir, "watches.json");
+  if (!fs.existsSync(file)) return [];
+  try {
+    const data = JSON.parse(fs.readFileSync(file, "utf-8").replace(/^\uFEFF/, ""));
+    return Array.isArray(data && data.watches) ? data.watches.filter((w) => w && typeof w.name === "string") : [];
+  } catch {
+    throw new OpError("the app's watches.json is unreadable right now — try again in a few seconds");
+  }
+}
 
 /** THE state rule (lib/jobs.ts deriveJobState, jobs.rs derive_state). */
 function jobState(rec, exit, alive) {
@@ -2980,7 +2996,7 @@ function readJobsIndex(jobsDir) {
   const file = path.join(jobsDir, "jobs.json");
   if (!fs.existsSync(file)) return [];
   try {
-    const data = JSON.parse(fs.readFileSync(file, "utf-8").replace(/^﻿/, ""));
+    const data = JSON.parse(fs.readFileSync(file, "utf-8").replace(/^\uFEFF/, ""));
     return Array.isArray(data && data.jobs) ? data.jobs.filter((j) => j && JOB_ID_RE.test(String(j.id))) : [];
   } catch {
     throw new OpError("the app's jobs.json is unreadable right now — try again in a few seconds");
@@ -2989,7 +3005,7 @@ function readJobsIndex(jobsDir) {
 
 function readJobExit(jobDir) {
   try {
-    const v = JSON.parse(fs.readFileSync(path.join(jobDir, "exit.json"), "utf-8").replace(/^﻿/, ""));
+    const v = JSON.parse(fs.readFileSync(path.join(jobDir, "exit.json"), "utf-8").replace(/^\uFEFF/, ""));
     return { code: typeof v.code === "number" ? v.code : null, endedAt: typeof v.endedAt === "number" ? v.endedAt : null, timedOut: v.timedOut === true, error: typeof v.error === "string" ? v.error : null };
   } catch (err) {
     // A file that exists but does not parse still means the supervisor reached its last line.
@@ -3006,7 +3022,7 @@ function readLogFileTail(file) {
     const len = Math.min(size, 512 * 1024);
     const buf = Buffer.alloc(len);
     fs.readSync(fd, buf, 0, len, size - len);
-    let t = buf.toString("utf-8").replace(/^﻿/, "");
+    let t = buf.toString("utf-8").replace(/^\uFEFF/, "");
     if (size > len) t = t.slice(t.indexOf("\n") + 1);
     const lines = t.split(/\r?\n/).map((l) => l.replace(/\s+$/, ""));
     while (lines.length && lines[lines.length - 1] === "") lines.pop();
@@ -3076,7 +3092,8 @@ function jobName(args) {
   return name;
 }
 
-/** Newest first; this thread's before any other's. */
+/** Newest first; this thread's before any other's. A watch's runs carry the
+ *  watch's name, so `log {watch name}` reads its latest run. */
 function findJob(rows, name, selfThreadId) {
   const byName = rows.filter((r) => r.name === name).sort((a, b) => b.startedAt - a.startedAt);
   return byName.find((r) => r.threadId === selfThreadId) || byName[0] || null;
@@ -3084,9 +3101,10 @@ function findJob(rows, name, selfThreadId) {
 
 /** Validate + build one inbox request. Pure over `rows` (the current jobs)
  *  and `isDir`; throws OpError with a sentence the agent can act on. */
-function buildJobRequest(args, env, rows, now, isDir) {
+function buildJobRequest(args, env, rows, now, isDir, watches) {
   const op = args.op;
   const name = jobName(args);
+  const allWatches = watches || [];
   const base = { id: `jr${now.toString(36)}${Math.random().toString(36).slice(2, 6)}`, op, threadId: env.selfThreadId || "", name, at: new Date(now).toISOString() };
   const running = rows.filter((r) => r.state === "running");
   if (op === "stop") {
@@ -3097,28 +3115,57 @@ function buildJobRequest(args, env, rows, now, isDir) {
     }
     return base;
   }
-  // start
+  if (op === "unwatch") {
+    const w = allWatches.find((x) => x.name === name);
+    if (!w || w.threadId !== env.selfThreadId) throw new OpError(`this thread has no watch named ${name}`);
+    return base;
+  }
+  // start | watch
   const command = typeof args.command === "string" ? args.command.trim() : "";
   if (!command) throw new OpError("`command` must be a non-empty string");
   if ([...command].length > JOB_COMMAND_CAP) throw new OpError(`command too long (cap ${JOB_COMMAND_CAP} characters) — put a long script in a file and run the file`);
   const cwdRaw = typeof args.cwd === "string" && args.cwd.trim() ? args.cwd.trim() : env.cwd;
   const cwd = path.resolve(env.cwd || ".", cwdRaw || ".");
   if (!isDir(cwd)) throw new OpError(`cwd is not an existing directory: ${cwd}`);
-  if (running.some((r) => r.name === name)) throw new OpError(`a job named ${name} is already running — stop it first or pick another name`);
+  if (op === "watch") {
+    const every = args.every;
+    if (!Number.isInteger(every) || every < WATCH_EVERY_MIN || every > WATCH_EVERY_MAX) {
+      throw new OpError(`\`every\` must be a whole number of minutes, ${WATCH_EVERY_MIN}..${WATCH_EVERY_MAX}`);
+    }
+    const taken = allWatches.find((w) => w.name === name);
+    if (taken && taken.threadId !== env.selfThreadId) throw new OpError(`another thread already watches ${name} — pick another name`);
+    const mine = allWatches.filter((w) => w.threadId === env.selfThreadId && w.name !== name).length;
+    if (mine >= WATCHES_PER_THREAD) throw new OpError(`this thread already has ${mine} watches (cap ${WATCHES_PER_THREAD})`);
+    return { ...base, command, cwd, every };
+  }
+  if (running.some((r) => r.name === name && r.kind === "job")) throw new OpError(`a job named ${name} is already running — stop it first or pick another name`);
   const mineRunning = running.filter((r) => r.threadId === env.selfThreadId && r.kind === "job").length;
   if (mineRunning >= JOBS_RUNNING_PER_THREAD) throw new OpError(`this thread already has ${mineRunning} jobs running (cap ${JOBS_RUNNING_PER_THREAD})`);
   return { ...base, command, cwd };
 }
 
-function formatJobList(rows, selfThreadId, now) {
+function formatJobList(rows, selfThreadId, now, watches) {
   const mine = rows.filter((r) => r.threadId === selfThreadId && r.kind === "job");
+  const myWatches = (watches || []).filter((w) => w.threadId === selfThreadId);
   const running = mine.filter((r) => r.state === "running").sort((a, b) => b.startedAt - a.startedAt);
   const settled = mine.filter((r) => r.state !== "running").sort((a, b) => b.startedAt - a.startedAt);
-  if (mine.length === 0) return "No jobs in this thread. `start {name, command}` runs one the app owns.";
+  if (mine.length === 0 && myWatches.length === 0) return "No jobs or watches in this thread. `start {name, command}` runs one the app owns; `watch {name, command, every}` checks one on a schedule.";
   const line = (r) => `- ${r.name} · ${jobStateWords(r, now)} · in ${r.cwd}${r.lastLine ? ` · last: ${r.lastLine}` : ""}`;
-  const out = [`Jobs of this thread (${running.length} running):`, ...running.map(line)];
-  if (settled.length) out.push("", "Ended:", ...settled.map(line));
-  out.push("", "`log {name}` reads one's output.");
+  const out = [];
+  if (mine.length) {
+    out.push(`Jobs of this thread (${running.length} running):`, ...running.map(line));
+    if (settled.length) out.push("", "Ended:", ...settled.map(line));
+  }
+  if (myWatches.length) {
+    if (out.length) out.push("");
+    out.push(`Watches of this thread (${myWatches.length}):`);
+    for (const w of myWatches) {
+      const state = w.status === "fail" ? "FAILING" : w.status === "pass" ? "passing" : "not run yet";
+      const ran = typeof w.lastRunAt === "number" ? ` · ran ${durationWords(now - w.lastRunAt)} ago` : "";
+      out.push(`- ${w.name} · ${state} · every ${w.everyMin} min${ran}${w.lastLine ? ` · last: ${w.lastLine}` : ""}`);
+    }
+  }
+  out.push("", "`log {name}` reads a job's (or a watch's latest run's) output.");
   return out.join("\n");
 }
 
@@ -3129,7 +3176,8 @@ function performJobOp(env, args, now, deps) {
   if (!JOB_OPS.includes(args.op)) throw new OpError(`\`op\` must be one of ${JOB_OPS.join(" | ")}`);
   if (!env.jobsDir) throw new OpError("jobs are not wired in this session (an older app?)");
   const rows = jobRows(env.jobsDir, alive);
-  if (args.op === "list") return { message: formatJobList(rows, env.selfThreadId, now) };
+  const watches = args.op === "list" || args.op === "watch" || args.op === "unwatch" ? readWatchesFile(env.jobsDir) : [];
+  if (args.op === "list") return { message: formatJobList(rows, env.selfThreadId, now, watches) };
   if (args.op === "log") {
     const name = jobName(args);
     const row = findJob(rows, name, env.selfThreadId);
@@ -3141,7 +3189,7 @@ function performJobOp(env, args, now, deps) {
     return { message: [head, ...(lines.length ? lines : ["(no output yet)"])].join("\n") };
   }
   if (!env.jobsInboxPath) throw new OpError("jobs are not wired in this session (an older app?)");
-  const entry = buildJobRequest(args, env, rows, now, isDir);
+  const entry = buildJobRequest(args, env, rows, now, isDir, watches);
   fs.mkdirSync(path.dirname(env.jobsInboxPath), { recursive: true });
   // Append-only: one syscall, no read, no tmp — every live thread may do this at once.
   fs.appendFileSync(env.jobsInboxPath, `${JSON.stringify(entry)}\n`);
@@ -3149,7 +3197,11 @@ function performJobOp(env, args, now, deps) {
     message:
       entry.op === "start"
         ? `Queued: the app starts ${entry.name} within ~5 s in ${entry.cwd}, detached — it outlives this session. \`list\` confirms it is running; \`log {name: "${entry.name}"}\` reads its output; one line arrives in this thread when it ends.`
-        : `Queued: the app stops ${entry.name} within ~5 s (its whole process tree); one line arrives in this thread when it has.`,
+        : entry.op === "watch"
+          ? `Queued: the app runs ${entry.name} every ${entry.every} min while it is open (each run ≤ 120 s; exit 0 = passing). One line arrives in this thread when it starts failing and one when it recovers; a failing watch is on Home's Needs you.`
+          : entry.op === "unwatch"
+            ? `Queued: the app stops watching ${entry.name}.`
+            : `Queued: the app stops ${entry.name} within ~5 s (its whole process tree); one line arrives in this thread when it has.`,
   };
 }
 
@@ -3167,15 +3219,21 @@ const JOB_TOOL = {
     "back as one line in this thread); it outlives the session; read its output with `log`, never by " +
     "attaching to it; when it ends exactly one line arrives in this thread (`job capture ended: exit " +
     "0 after 42 min`). Use a job for anything that must keep running — a daemon, a capture, a long " +
-    "backfill — instead of backgrounding it yourself with `&` or Start-Process.",
+    "backfill — instead of backgrounding it yourself with `&` or Start-Process. WATCHES: watch {name, " +
+    "command, every, cwd?} has the app run a short check every `every` minutes (≥ 5) while it is open " +
+    "— each run is cut at 120 s, exit 0 is passing, anything else failing — and a failing watch is one " +
+    "Needs-you row on Home plus ONE line in this thread when it starts failing (and one when it " +
+    "recovers); unwatch {name} ends it. Watch what must keep happening (a capture still writing rows, " +
+    "a feed still fresh), not what you are doing right now.",
   inputSchema: {
     type: "object",
     properties: {
       op: { type: "string", enum: JOB_OPS },
       name: { type: "string", description: "1–48 of A-Z a-z 0-9 _ . - ; unique among running jobs." },
-      command: { type: "string", description: "start: the PowerShell command line (≤ 2000 characters). Its exit code is the last native command's, or `exit N`." },
-      cwd: { type: "string", description: "start: the working directory (absolute, or relative to this thread's). Default: this thread's." },
+      command: { type: "string", description: "start / watch: the PowerShell command line (≤ 2000 characters). Its exit code is the last native command's, or `exit N`." },
+      cwd: { type: "string", description: "start / watch: the working directory (absolute, or relative to this thread's). Default: this thread's." },
       lines: { type: "integer", description: "log: how many lines (default 40, max 400)." },
+      every: { type: "integer", description: "watch: minutes between runs (5 to 10080)." },
     },
     required: ["op"],
   },
@@ -3671,6 +3729,9 @@ module.exports = {
   JOB_OPS,
   jobState,
   jobRows,
+  readWatchesFile,
+  WATCH_EVERY_MIN,
+  WATCHES_PER_THREAD,
   jobLogTail,
   buildJobRequest,
   performJobOp,

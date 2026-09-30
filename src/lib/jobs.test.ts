@@ -17,8 +17,18 @@ import {
   __resetJobsForTests,
   JOB_COMMAND_CAP,
   HOME_JOBS_ENDED_MS,
+  parseWatches,
+  watchOutcome,
+  watchEdge,
+  watchEdgeLine,
+  isWatchDue,
+  failingWatches,
+  orderWatches,
+  watchSummary,
+  useWatches,
   type JobRow,
   type JobsIO,
+  type Watch,
 } from "./jobs";
 import { inboxTypedLine, parseInboxFile, APP_POST_FROM_ID } from "./pageStore";
 
@@ -191,6 +201,11 @@ describe("runJobsPass — one tick, IO injected", () => {
         return true;
       },
       post: async (t, text) => calls.push(`post ${t} ${text}`),
+      watch: async (t, n, c, cwd, every) => calls.push(`watch ${t} ${n} ${c} ${cwd} ${every}`),
+      unwatch: async (t, n) => calls.push(`unwatch ${t} ${n}`),
+      readWatches: async () => "[]",
+      runWatch: async (n) => calls.push(`run ${n}`),
+      recordWatch: async (n, id, status, last) => calls.push(`record ${n} ${id} ${status} ${last}`),
       ...over,
     };
     return Object.assign(io, { calls });
@@ -251,5 +266,128 @@ describe("the app's own inbox line is typed as the app's (SWIT-109)", () => {
     );
     expect(inboxTypedLine(posts[0])).toBe("[switchboard] job a ended: exit 0 after 1 min");
     expect(inboxTypedLine(posts[1])).toBe('[from thread "gamma"] look');
+  });
+});
+
+describe("watches (SWIT-110)", () => {
+  beforeEach(() => __resetJobsForTests());
+
+  const w = (over: Partial<Watch> = {}): Watch => ({
+    name: "prices",
+    threadId: T,
+    command: "python check.py",
+    cwd: "C:\\work",
+    everyMin: 15,
+    createdAt: 0,
+    lastRunAt: null,
+    lastJobId: null,
+    judgedJobId: null,
+    status: "unknown",
+    lastLine: "",
+    changedAt: null,
+    ...over,
+  });
+
+  it("the inbox carries watch / unwatch; the cadence is checked", () => {
+    const line = (o: Record<string, unknown>) => `${JSON.stringify(o)}\n`;
+    const raw =
+      line({ op: "watch", threadId: T, name: "itf", command: "python itf.py", every: 15 }) +
+      line({ op: "watch", threadId: T, name: "fast", command: "x", every: 4 }) +
+      line({ op: "watch", threadId: T, name: "frac", command: "x", every: 5.5 }) +
+      line({ op: "unwatch", threadId: T, name: "itf" });
+    expect(parseJobsInbox(raw)).toEqual([
+      { op: "watch", id: "", threadId: T, name: "itf", command: "python itf.py", cwd: null, every: 15, at: "" },
+      { op: "unwatch", id: "", threadId: T, name: "itf", at: "" },
+    ]);
+  });
+
+  it("parseWatches is tolerant", () => {
+    const parsed = parseWatches(JSON.stringify([{ name: "a", threadId: T, everyMin: 5, status: "weird" }, { name: "no thread" }, 3]));
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].status).toBe("unknown");
+    expect(parseWatches("nope")).toEqual([]);
+  });
+
+  it("a run's reading, and THE EDGE: into failing (a first failure counts) and back out, nothing else", () => {
+    expect(watchOutcome(row())).toBeNull();
+    expect(watchOutcome(row({ exit: exit(0) }))).toBe("pass");
+    expect(watchOutcome(row({ exit: exit(1) }))).toBe("fail");
+    expect(watchOutcome(row({ exit: exit(124, NOW, true) }))).toBe("fail");
+    expect(watchOutcome(row({ alive: false }))).toBe("fail");
+    expect(watchEdge("unknown", "fail")).toBe("failing");
+    expect(watchEdge("pass", "fail")).toBe("failing");
+    expect(watchEdge("fail", "fail")).toBeNull();
+    expect(watchEdge("fail", "pass")).toBe("recovered");
+    expect(watchEdge("pass", "pass")).toBeNull();
+    expect(watchEdge("unknown", "pass")).toBeNull();
+    expect(watchEdgeLine("prices", "failing", "exit 1", "0 rows in the last hour")).toBe("watch prices failing: exit 1 · 0 rows in the last hour");
+    expect(watchEdgeLine("prices", "recovered", "", "x")).toBe("watch prices passing again");
+  });
+
+  it("due-ness: never run, or every minutes since the last start, and never while a run is in flight", () => {
+    const running = row({ id: "r1" });
+    const done = row({ id: "r2", exit: exit(0) });
+    expect(isWatchDue(w(), [], NOW)).toBe(true);
+    expect(isWatchDue(w({ lastRunAt: NOW - 14 * MIN, lastJobId: "r2" }), [done], NOW)).toBe(false);
+    expect(isWatchDue(w({ lastRunAt: NOW - 15 * MIN, lastJobId: "r2" }), [done], NOW)).toBe(true);
+    expect(isWatchDue(w({ lastRunAt: NOW - 60 * MIN, lastJobId: "r1" }), [running], NOW)).toBe(false);
+    // A pruned or unknown run id does not block.
+    expect(isWatchDue(w({ lastRunAt: NOW - 60 * MIN, lastJobId: "gone" }), [], NOW)).toBe(true);
+  });
+
+  it("Home: the failing ones (newest change first) and the fold's order (failing first, then by name)", () => {
+    const list = [w({ name: "b", status: "pass" }), w({ name: "c", status: "fail", changedAt: 1 }), w({ name: "a", status: "fail", changedAt: 2 }), w({ name: "d" })];
+    expect(failingWatches(list).map((x) => x.name)).toEqual(["a", "c"]);
+    expect(orderWatches(list).map((x) => x.name)).toEqual(["a", "c", "b", "d"]);
+    expect(watchSummary(w({ status: "fail", lastRunAt: NOW - 3 * MIN }), NOW)).toBe("failing · every 15 min · ran 3 min ago");
+    expect(watchSummary(w(), NOW)).toBe("not run yet · every 15 min");
+  });
+
+  it("the pass judges a finished run ONCE, posts only on an edge, runs what is due, and publishes", async () => {
+    const snap = JSON.stringify([
+      { id: "run1", name: "prices", threadId: T, kind: "watch-run", watch: "prices", startedAt: NOW - 20 * MIN, alive: false, exit: { code: 1, endedAt: NOW - 19 * MIN, timedOut: false }, lastLine: "0 rows" },
+    ]);
+    const watches = [
+      w({ name: "prices", status: "pass", lastRunAt: NOW - 20 * MIN, lastJobId: "run1" }),
+      w({ name: "itf", status: "pass", lastRunAt: NOW - 5 * MIN, lastJobId: null }),
+      w({ name: "fresh" }),
+    ];
+    let reads = 0;
+    const calls: string[] = [];
+    const io: JobsIO = {
+      takeInbox: async () => "",
+      start: async () => {},
+      stop: async () => {},
+      snapshot: async () => snap,
+      notify: async () => true,
+      post: async (_t, text) => calls.push(`post ${text}`),
+      watch: async () => {},
+      unwatch: async () => {},
+      readWatches: async () => {
+        reads += 1;
+        return JSON.stringify(watches);
+      },
+      runWatch: async (n) => {
+        calls.push(`run ${n}`);
+        if (n === "fresh") throw new Error("cwd gone");
+      },
+      recordWatch: async (n, id, status, last) => calls.push(`record ${n} ${id} ${status} ${last}`),
+    };
+    await runJobsPass(io, NOW);
+    expect(calls).toEqual([
+      "record prices run1 fail 0 rows",
+      "post watch prices failing: exit 1 · 0 rows",
+      "run prices",
+      "run fresh",
+      "post watch fresh failing: could not start · cwd gone",
+    ]);
+    expect(reads).toBe(2);
+    // Already judged: no second record, no second line.
+    watches[0] = { ...watches[0], status: "fail", judgedJobId: "run1", lastRunAt: NOW };
+    watches[2] = { ...watches[2], status: "fail", lastRunAt: NOW };
+    calls.length = 0;
+    await runJobsPass(io, NOW + 1000);
+    expect(calls).toEqual([]);
+    expect(typeof useWatches).toBe("function");
   });
 });

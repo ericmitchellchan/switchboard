@@ -653,12 +653,13 @@ pub fn states_of(dir: &Path, index: &JobsIndex) -> Vec<(JobState, Option<ExitInf
 }
 
 /// The start-time guards that need the index, pure over the records and
-/// their states: a unique name among RUNNING jobs (all threads — the name is
-/// how the agent and the page say which one), and ≤ JOBS_RUNNING_PER_THREAD
-/// running `job`s per thread.
+/// their states: a unique name among RUNNING jobs of the same kind (all
+/// threads — the name is how the agent and the page say which one; a watch's
+/// run carries its watch's name, and one run of a watch at a time), and ≤
+/// JOBS_RUNNING_PER_THREAD running `job`s per thread.
 pub fn start_conflict(records: &[JobRecord], states: &[JobState], thread_id: &str, name: &str, kind: &str) -> Option<String> {
     let running = || records.iter().zip(states).filter(|(_, s)| **s == JobState::Running).map(|(r, _)| r);
-    if running().any(|r| r.name == name) {
+    if running().any(|r| r.name == name && r.kind == kind) {
         return Some(format!("a job named {} is already running — stop it first or pick another name", name));
     }
     if kind == "job" {
@@ -770,9 +771,16 @@ fn settled_at(rec: &JobRecord, exit: Option<&ExitInfo>) -> u64 {
 
 /// Which records to PRUNE, pure: never a running one. A `job` whose line was
 /// posted and that settled more than JOB_KEEP_MS ago; a watch's runs past
-/// the newest WATCH_RUNS_KEPT settled ones; then, over JOBS_INDEX_CAP, the
-/// oldest settled records until it fits.
-pub fn prune_plan(records: &[JobRecord], states: &[(JobState, Option<ExitInfo>)], now: u64) -> Vec<String> {
+/// the newest WATCH_RUNS_KEPT settled ones, and every settled run of a watch
+/// that no longer exists (`watches` = the names in watches.json; None when
+/// that file is unreadable, and then no run is judged orphaned); then, over
+/// JOBS_INDEX_CAP, the oldest settled records until it fits.
+pub fn prune_plan(
+    records: &[JobRecord],
+    states: &[(JobState, Option<ExitInfo>)],
+    now: u64,
+    watches: Option<&std::collections::HashSet<String>>,
+) -> Vec<String> {
     let mut drop: Vec<String> = Vec::new();
     let settled = |i: usize| states[i].0 != JobState::Running && (records[i].kind != "job" || records[i].notified_at.is_some());
     for i in 0..records.len() {
@@ -786,9 +794,10 @@ pub fn prune_plan(records: &[JobRecord], states: &[(JobState, Option<ExitInfo>)]
             by_watch.entry(records[i].watch.as_deref().unwrap_or("")).or_default().push(i);
         }
     }
-    for (_, mut runs) in by_watch {
+    for (watch, mut runs) in by_watch {
         runs.sort_by_key(|&i| std::cmp::Reverse(records[i].started_at));
-        for &i in runs.iter().skip(WATCH_RUNS_KEPT) {
+        let orphaned = watches.map(|w| !w.contains(watch)).unwrap_or(false);
+        for &i in runs.iter().skip(if orphaned { 0 } else { WATCH_RUNS_KEPT }) {
             drop.push(records[i].id.clone());
         }
     }
@@ -897,7 +906,8 @@ pub fn snapshot(dir: &Path) -> Result<serde_json::Value, String> {
         }
     }
     let states: Vec<(JobState, Option<ExitInfo>)> = probes.iter().map(|(s, e, _)| (*s, e.clone())).collect();
-    let dropped = prune_plan(&index.jobs, &states, now);
+    let watch_names = read_watches(dir).ok().map(|w| w.watches.into_iter().map(|w| w.name).collect::<std::collections::HashSet<_>>());
+    let dropped = prune_plan(&index.jobs, &states, now, watch_names.as_ref());
     let mut rows = Vec::new();
     let mut kept = Vec::new();
     for (rec, (state, exit, alive)) in index.jobs.iter().zip(probes) {
@@ -965,6 +975,263 @@ pub fn take_inbox(path: &Path) -> Result<String, String> {
 
 fn mirror_raw() -> Result<String, String> {
     std::fs::read_to_string(super::threads_path()?).map_err(|e| format!("threads mirror unreadable: {}", e))
+}
+
+// ── Watches (SWIT-110) ───────────────────────────────────────────────────────
+//
+// Eric: the Kalshi capture wrote zero prices for a month unnoticed; "Are we
+// now collecting ITF?". A WATCH is a job on a schedule with a pass/fail
+// reading: `watches.json` in the jobs dir is app-owned (these commands are
+// its one writer, under WATCHES_LOCK — taken BEFORE JOBS_LOCK, never after),
+// and while the app runs, App's 5s pass starts each due watch as a short
+// `watch-run` job (WATCH_TIMEOUT_SECS, enforced by the supervisor). Exit ≠ 0
+// (or a timeout, or a lost run) is failing. The pass→fail and fail→pass
+// EDGES are the frontend's (lib/jobs.ts `watchEdge`); these commands only
+// record what happened.
+
+pub const WATCH_TIMEOUT_SECS: u32 = 120;
+pub const WATCH_EVERY_MIN: u32 = 5;
+/// A week.
+pub const WATCH_EVERY_MAX: u32 = 7 * 24 * 60;
+pub const WATCHES_PER_THREAD: usize = 8;
+pub const WATCHES_CAP: usize = 64;
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Watch {
+    pub name: String,
+    pub thread_id: String,
+    pub command: String,
+    pub cwd: String,
+    pub every_min: u32,
+    pub created_at: u64,
+    #[serde(default)]
+    pub last_run_at: Option<u64>,
+    /// The newest run's job id.
+    #[serde(default)]
+    pub last_job_id: Option<String>,
+    /// The run the current `status` was read from (so a run is judged once).
+    #[serde(default)]
+    pub judged_job_id: Option<String>,
+    /// `unknown` until the first run is judged, then `pass` | `fail`.
+    #[serde(default = "unknown_status")]
+    pub status: String,
+    #[serde(default)]
+    pub last_line: String,
+    /// When `status` last changed.
+    #[serde(default)]
+    pub changed_at: Option<u64>,
+}
+
+fn unknown_status() -> String {
+    "unknown".into()
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct WatchesFile {
+    pub version: u32,
+    pub watches: Vec<Watch>,
+}
+
+pub static WATCHES_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Missing = none; unparseable = an error, never rewritten (read_index's rule).
+pub fn read_watches(dir: &Path) -> Result<WatchesFile, String> {
+    match std::fs::read_to_string(dir.join("watches.json")) {
+        Ok(raw) => {
+            let raw = raw.trim_start_matches('\u{feff}');
+            if raw.trim().is_empty() {
+                return Ok(WatchesFile { version: 1, watches: Vec::new() });
+            }
+            serde_json::from_str(raw).map_err(|e| format!("watches.json is unreadable ({}) — not rewriting it", e))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(WatchesFile { version: 1, watches: Vec::new() }),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+pub fn write_watches(dir: &Path, file: &WatchesFile) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let tmp = dir.join("watches.json.tmp");
+    let body = serde_json::to_string_pretty(&WatchesFile { version: 1, watches: file.watches.clone() }).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, dir.join("watches.json")).map_err(|e| e.to_string())
+}
+
+pub struct WatchSpec<'a> {
+    pub thread_id: &'a str,
+    pub name: &'a str,
+    pub command: &'a str,
+    pub cwd: Option<&'a str>,
+    pub every_min: u32,
+}
+
+/// SET (the inbox's `watch`): every job guard, then the schedule's own — a
+/// cadence of WATCH_EVERY_MIN..=WATCH_EVERY_MAX minutes, a name no OTHER
+/// thread's watch holds (the same thread re-setting it REPLACES it and its
+/// reading starts over), ≤ WATCHES_PER_THREAD per thread, ≤ WATCHES_CAP.
+pub fn set_watch(dir: &Path, mirror_raw: &str, spec: &WatchSpec, now: u64) -> Result<Watch, String> {
+    if !super::valid_thread_id(spec.thread_id) {
+        return Err("invalid thread id".into());
+    }
+    let thread_dir = super::working_dir_from_mirror(mirror_raw, spec.thread_id)?;
+    if !job_name_ok(spec.name) {
+        return Err(format!("watch name must be {} or fewer of A-Z a-z 0-9 _ . -", JOB_NAME_MAX));
+    }
+    let command = command_ok(spec.command)?;
+    let cwd = match spec.cwd {
+        Some(c) if !c.trim().is_empty() => cwd_ok(c)?,
+        _ => cwd_ok(&thread_dir.to_string_lossy())?,
+    };
+    if spec.every_min < WATCH_EVERY_MIN || spec.every_min > WATCH_EVERY_MAX {
+        return Err(format!("every must be {}..={} minutes", WATCH_EVERY_MIN, WATCH_EVERY_MAX));
+    }
+    let _guard = WATCHES_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let mut file = read_watches(dir)?;
+    if let Some(other) = file.watches.iter().find(|w| w.name == spec.name && w.thread_id != spec.thread_id) {
+        return Err(format!("another thread already watches {} — pick another name", other.name));
+    }
+    file.watches.retain(|w| w.name != spec.name);
+    let mine = file.watches.iter().filter(|w| w.thread_id == spec.thread_id).count();
+    if mine >= WATCHES_PER_THREAD {
+        return Err(format!("this thread already has {} watches (cap {})", mine, WATCHES_PER_THREAD));
+    }
+    if file.watches.len() >= WATCHES_CAP {
+        return Err(format!("{} watches already (cap {})", file.watches.len(), WATCHES_CAP));
+    }
+    let watch = Watch {
+        name: spec.name.to_string(),
+        thread_id: spec.thread_id.to_string(),
+        command,
+        cwd: cwd.to_string_lossy().into_owned(),
+        every_min: spec.every_min,
+        created_at: now,
+        last_run_at: None,
+        last_job_id: None,
+        judged_job_id: None,
+        status: unknown_status(),
+        last_line: String::new(),
+        changed_at: None,
+    };
+    file.watches.push(watch.clone());
+    write_watches(dir, &file)?;
+    Ok(watch)
+}
+
+/// REMOVE (the inbox's `unwatch`, or the user's). `thread_id` Some = only
+/// that thread's own watch; None = the user's hand on Home.
+pub fn remove_watch(dir: &Path, thread_id: Option<&str>, name: &str) -> Result<(), String> {
+    let _guard = WATCHES_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let mut file = read_watches(dir)?;
+    let Some(i) = file.watches.iter().position(|w| w.name == name) else {
+        return Err(format!("no watch named {}", name));
+    };
+    if let Some(t) = thread_id {
+        if file.watches[i].thread_id != t {
+            return Err(format!("{} is another thread's watch", name));
+        }
+    }
+    file.watches.remove(i);
+    write_watches(dir, &file)
+}
+
+/// RUN one watch now (App's pass decides it is due): a `watch-run` job with
+/// the watch's name, thread, command and cwd and the WATCH_TIMEOUT_SECS
+/// timeout. `lastRunAt` moves either way — a run that could not START is
+/// recorded as failing with the reason as its line, and is tried again at
+/// the next due time, not on every tick.
+pub fn run_watch(
+    dir: &Path,
+    mirror_raw: &str,
+    name: &str,
+    now: u64,
+    spawn: &dyn Fn(&Path, &str, &Path) -> Result<(u32, u64), String>,
+) -> Result<JobRecord, String> {
+    let _guard = WATCHES_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let mut file = read_watches(dir)?;
+    let Some(i) = file.watches.iter().position(|w| w.name == name) else {
+        return Err(format!("no watch named {}", name));
+    };
+    let w = file.watches[i].clone();
+    let spec = StartSpec {
+        thread_id: &w.thread_id,
+        name: &w.name,
+        command: &w.command,
+        cwd: Some(&w.cwd),
+        kind: "watch-run",
+        watch: Some(&w.name),
+        timeout_secs: WATCH_TIMEOUT_SECS,
+    };
+    let result = start_job(dir, mirror_raw, &spec, spawn);
+    let entry = &mut file.watches[i];
+    entry.last_run_at = Some(now);
+    match &result {
+        Ok(rec) => entry.last_job_id = Some(rec.id.clone()),
+        Err(e) => {
+            if entry.status != "fail" {
+                entry.changed_at = Some(now);
+            }
+            entry.status = "fail".into();
+            entry.judged_job_id = None;
+            entry.last_line = format!("could not start: {}", e).chars().take(LAST_LINE_CAP).collect();
+        }
+    }
+    write_watches(dir, &file)?;
+    result
+}
+
+/// RECORD a finished run's reading. Only the watch's CURRENT run can be
+/// recorded (a stale judgement of an older run is refused), once.
+pub fn record_watch(dir: &Path, name: &str, job_id: &str, status: &str, last_line: &str, now: u64) -> Result<(), String> {
+    if status != "pass" && status != "fail" {
+        return Err("status must be pass or fail".into());
+    }
+    let _guard = WATCHES_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let mut file = read_watches(dir)?;
+    let Some(w) = file.watches.iter_mut().find(|w| w.name == name) else {
+        return Err(format!("no watch named {}", name));
+    };
+    if w.last_job_id.as_deref() != Some(job_id) {
+        return Err(format!("{} is not the current run of {}", job_id, name));
+    }
+    if w.judged_job_id.as_deref() == Some(job_id) {
+        return Ok(());
+    }
+    if w.status != status {
+        w.changed_at = Some(now);
+    }
+    w.status = status.into();
+    w.judged_job_id = Some(job_id.into());
+    w.last_line = last_line.chars().take(LAST_LINE_CAP).collect();
+    write_watches(dir, &file)
+}
+
+#[tauri::command]
+pub async fn watches_read() -> Result<String, String> {
+    let file = read_watches(&jobs_dir()?)?;
+    serde_json::to_string(&file.watches).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn watch_set(thread_id: String, name: String, command: String, cwd: Option<String>, every_min: u32) -> Result<(), String> {
+    let spec = WatchSpec { thread_id: &thread_id, name: &name, command: &command, cwd: cwd.as_deref(), every_min };
+    set_watch(&jobs_dir()?, &mirror_raw()?, &spec, now_ms()).map(|_| ())
+}
+
+/// `thread_id` None = the user (Home's two-click `unwatch`).
+#[tauri::command]
+pub async fn watch_remove(thread_id: Option<String>, name: String) -> Result<(), String> {
+    remove_watch(&jobs_dir()?, thread_id.as_deref(), &name)
+}
+
+#[tauri::command]
+pub async fn watch_run(name: String) -> Result<(), String> {
+    run_watch(&jobs_dir()?, &mirror_raw()?, &name, now_ms(), &spawn_detached).map(|_| ())
+}
+
+#[tauri::command]
+pub async fn watch_record(name: String, job_id: String, status: String, last_line: String) -> Result<(), String> {
+    record_watch(&jobs_dir()?, &name, &job_id, &status, &last_line, now_ms())
 }
 
 // ── Commands ─────────────────────────────────────────────────────────────────
@@ -1272,7 +1539,8 @@ mod tests {
             (JobState::Running, None),
         ];
         states.extend((0..8).map(|_| (JobState::Ended, exit(now))));
-        let dropped = prune_plan(&records, &states, now);
+        let dropped = prune_plan(&records, &states, now, Some(&std::collections::HashSet::from(["w".to_string()])));
+        assert!(!prune_plan(&records, &states, now, Some(&std::collections::HashSet::new())).iter().any(|d| d == "run"), "a running run is never an orphan");
         assert!(dropped.contains(&"old".to_string()));
         assert!(!dropped.contains(&"old2".to_string()), "its line was never posted");
         assert!(!dropped.contains(&"recent".to_string()) && !dropped.contains(&"run".to_string()));
@@ -1296,6 +1564,85 @@ mod tests {
         let mut plan = kill_plan(100, 50, &children, &created);
         plan.sort();
         assert_eq!(plan, vec![(101, 60), (102, 70)]);
+    }
+
+    #[test]
+    fn a_watch_is_set_replaced_capped_and_removed_by_its_own_thread() {
+        let d = temp_dir("watch");
+        let work = temp_dir("wwork");
+        let m = mirror(&work);
+        let spec = |name: &'static str, every_min: u32| WatchSpec { thread_id: THREAD, name, command: "python check.py", cwd: None, every_min };
+        assert!(set_watch(&d, &m, &spec("prices", 4), 1).unwrap_err().contains("5..="));
+        assert!(set_watch(&d, &m, &spec("prices", WATCH_EVERY_MAX + 1), 1).is_err());
+        assert!(set_watch(&d, &m, &spec("bad name", 5), 1).is_err());
+        let w = set_watch(&d, &m, &spec("prices", 15), 1).unwrap();
+        assert_eq!((w.status.as_str(), w.cwd.clone()), ("unknown", work.to_string_lossy().into_owned()));
+        // The same thread re-setting it replaces it (one entry, a fresh reading).
+        set_watch(&d, &m, &spec("prices", 30), 2).unwrap();
+        let file = read_watches(&d).unwrap();
+        assert_eq!(file.watches.len(), 1);
+        assert_eq!(file.watches[0].every_min, 30);
+        // Another thread cannot take the name, and cannot remove it.
+        let other = "9999aaaa-0b7d-4c1e-9a55-1234567890ab";
+        let m2 = serde_json::json!({"threads": [
+            {"id": THREAD, "workingDir": work.to_string_lossy()},
+            {"id": other, "workingDir": work.to_string_lossy()},
+        ]})
+        .to_string();
+        let theirs = WatchSpec { thread_id: other, ..spec("prices", 15) };
+        assert!(set_watch(&d, &m2, &theirs, 3).unwrap_err().contains("another thread"));
+        assert!(remove_watch(&d, Some(other), "prices").unwrap_err().contains("another thread"));
+        // The per-thread cap.
+        for i in 1..WATCHES_PER_THREAD {
+            let name: &'static str = Box::leak(format!("w{i}").into_boxed_str());
+            set_watch(&d, &m, &spec(name, 5), 4).unwrap();
+        }
+        assert!(set_watch(&d, &m, &spec("one-more", 5), 5).unwrap_err().contains("cap 8"));
+        // Removal: the owner, or the user (None).
+        remove_watch(&d, Some(THREAD), "prices").unwrap();
+        remove_watch(&d, None, "w1").unwrap();
+        assert!(remove_watch(&d, None, "w1").unwrap_err().contains("no watch"));
+        assert_eq!(read_watches(&d).unwrap().watches.len(), WATCHES_PER_THREAD - 2);
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn a_run_is_a_timed_watch_run_job_recorded_once_and_a_failed_start_reads_failing() {
+        let d = temp_dir("wrun");
+        let work = temp_dir("wrwork");
+        let m = mirror(&work);
+        set_watch(&d, &m, &WatchSpec { thread_id: THREAD, name: "itf", command: "python itf.py", cwd: None, every_min: 5 }, 1).unwrap();
+        let fake = |_: &Path, _: &str, _: &Path| -> Result<(u32, u64), String> { Ok((u32::MAX - 9, 1)) };
+        let rec = run_watch(&d, &m, "itf", 100, &fake).unwrap();
+        assert_eq!((rec.kind.as_str(), rec.watch.as_deref(), rec.timeout_secs), ("watch-run", Some("itf"), WATCH_TIMEOUT_SECS));
+        assert!(std::fs::read_to_string(d.join(&rec.id).join("run.ps1")).unwrap().contains("$timeoutMs = 120000"));
+        let w = &read_watches(&d).unwrap().watches[0];
+        assert_eq!((w.last_run_at, w.last_job_id.clone()), (Some(100), Some(rec.id.clone())));
+        // Only the current run is recorded, once.
+        assert!(record_watch(&d, "itf", "j-old", "fail", "x", 200).is_err());
+        assert!(record_watch(&d, "itf", &rec.id, "maybe", "x", 200).is_err());
+        record_watch(&d, "itf", &rec.id, "fail", "0 prices captured", 200).unwrap();
+        record_watch(&d, "itf", &rec.id, "pass", "ignored", 300).unwrap();
+        let w = &read_watches(&d).unwrap().watches[0];
+        assert_eq!((w.status.as_str(), w.last_line.as_str(), w.changed_at), ("fail", "0 prices captured", Some(200)));
+        // A run that cannot start moves lastRunAt and reads failing, with why.
+        let broken = |_: &Path, _: &str, _: &Path| -> Result<(u32, u64), String> { Err("no powershell".into()) };
+        assert_eq!(run_watch(&d, &m, "itf", 400, &broken).unwrap_err(), "no powershell");
+        let w = &read_watches(&d).unwrap().watches[0];
+        assert_eq!((w.status.as_str(), w.last_run_at), ("fail", Some(400)));
+        assert!(w.last_line.contains("could not start: no powershell"));
+        assert!(run_watch(&d, &m, "nope", 1, &fake).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn a_watch_run_and_an_agent_job_may_share_a_name() {
+        let recs = vec![JobRecord { watch: Some("itf".into()), ..rec("j1", "itf", "watch-run") }];
+        let running = vec![JobState::Running];
+        assert!(start_conflict(&recs, &running, THREAD, "itf", "job").is_none());
+        assert!(start_conflict(&recs, &running, THREAD, "itf", "watch-run").unwrap().contains("already running"), "one run of a watch at a time");
     }
 
     fn discovery_children(edges: &[(u32, u32)]) -> HashMap<u32, Vec<u32>> {

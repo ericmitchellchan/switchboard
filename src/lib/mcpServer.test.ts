@@ -3056,7 +3056,7 @@ describe("the job tool (SWIT-109) — the app runs it, the server only queues an
   it("the tool table states the contract in one paragraph", () => {
     const tool = srv.JOB_TOOL;
     expect(tool.name).toBe("job");
-    expect(tool.inputSchema.properties.op.enum).toEqual(["start", "stop", "list", "log"]);
+    expect(tool.inputSchema.properties.op.enum).toEqual(["start", "stop", "list", "log", "watch", "unwatch"]);
     expect(tool.inputSchema.required).toEqual(["op"]);
     expect(tool.description).toMatch(/the Switchboard APP starts and owns/);
     expect(tool.description).toMatch(/keeps running when this conversation ends/);
@@ -3066,5 +3066,89 @@ describe("the job tool (SWIT-109) — the app runs it, the server only queues an
     expect(mcpServerSource).toContain("SWITCHBOARD_JOBS_INBOX");
     expect(mcpServerSource).toContain("SWITCHBOARD_JOBS_DIR");
     expect(srv.JOB_LOG_LINES_MAX).toBe(JOB_LOG_LINES_MAX);
+  });
+});
+
+// ── SWIT-110: watches — a job on a schedule with a pass/fail reading ─────────
+
+describe("the job tool's watches (SWIT-110)", () => {
+  type JobEnv = { jobsInboxPath?: string; jobsDir?: string; selfThreadId?: string; cwd?: string };
+  const srv = server as unknown as {
+    JOB_TOOL: { description: string; inputSchema: { properties: Record<string, unknown> } };
+    performJobOp: (env: JobEnv, args: Record<string, unknown>, now: number, deps?: { alive?: (pid: number) => boolean; isDir?: (p: string) => boolean }) => { message: string };
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const fs = require("fs") as {
+    mkdtempSync: (p: string) => string;
+    mkdirSync: (p: string, o?: { recursive: boolean }) => void;
+    writeFileSync: (p: string, d: string) => void;
+    readFileSync: (p: string, e: string) => string;
+    rmSync: (p: string, o: { recursive: boolean; force: boolean }) => void;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const os = require("os") as { tmpdir: () => string };
+  const SELF = "3f1c2a9e-0b7d-4c1e-9a55-1234567890ab";
+  const deps = { alive: () => true, isDir: () => true };
+
+  function world(watches: Array<Record<string, unknown>>) {
+    const root = fs.mkdtempSync(`${os.tmpdir()}/swb-watch-`).split("\\").join("/");
+    const jobsDir = `${root}/jobs`;
+    fs.mkdirSync(jobsDir, { recursive: true });
+    fs.writeFileSync(`${jobsDir}/watches.json`, JSON.stringify({ version: 1, watches }));
+    const env: JobEnv = { jobsInboxPath: `${root}/jobs-inbox.json`, jobsDir, selfThreadId: SELF, cwd: root };
+    return { root, env, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
+  }
+  const watch = (name: string, over: Record<string, unknown> = {}) => ({
+    name,
+    threadId: SELF,
+    command: "python check.py",
+    cwd: "C:\\work",
+    everyMin: 15,
+    createdAt: 1,
+    status: "unknown",
+    lastLine: "",
+    ...over,
+  });
+
+  it("watch / unwatch queue requests the app's parse reads; the cadence, the name and the cap are checked early", () => {
+    const w = world([watch("theirs", { threadId: "other" }), watch("mine")]);
+    try {
+      expect(srv.performJobOp(w.env, { op: "watch", name: "itf", command: "python itf_fresh.py", every: 15 }, NOW, deps).message).toMatch(/every 15 min/);
+      expect(srv.performJobOp(w.env, { op: "unwatch", name: "mine" }, NOW, deps).message).toMatch(/stops watching mine/);
+      const parsed = parseJobsInbox(fs.readFileSync(w.env.jobsInboxPath as string, "utf-8"));
+      expect(parsed.map((p) => p.op)).toEqual(["watch", "unwatch"]);
+      expect(parsed[0]).toMatchObject({ op: "watch", name: "itf", command: "python itf_fresh.py", every: 15, threadId: SELF });
+      const go = (args: Record<string, unknown>) => () => srv.performJobOp(w.env, args, NOW, deps);
+      expect(go({ op: "watch", name: "a", command: "x", every: 4 })).toThrow(/5\.\.10080/);
+      expect(go({ op: "watch", name: "a", command: "x", every: 7.5 })).toThrow(/whole number/);
+      expect(go({ op: "watch", name: "theirs", command: "x", every: 5 })).toThrow(/another thread already watches theirs/);
+      expect(go({ op: "unwatch", name: "theirs" })).toThrow(/this thread has no watch named theirs/);
+      expect(go({ op: "unwatch", name: "nope" })).toThrow(/no watch named nope/);
+    } finally {
+      w.cleanup();
+    }
+  });
+
+  it("list shows this thread's watches with their reading", () => {
+    const w = world([
+      watch("prices", { status: "fail", lastRunAt: NOW - 3 * 60_000, lastLine: "0 rows in the last hour" }),
+      watch("itf", { status: "pass", everyMin: 60 }),
+      watch("theirs", { threadId: "other" }),
+    ]);
+    try {
+      const list = srv.performJobOp(w.env, { op: "list" }, NOW, deps).message;
+      expect(list).toContain("Watches of this thread (2):");
+      expect(list).toContain("- prices · FAILING · every 15 min · ran 3 min ago · last: 0 rows in the last hour");
+      expect(list).toContain("- itf · passing · every 60 min");
+      expect(list).not.toContain("theirs");
+    } finally {
+      w.cleanup();
+    }
+  });
+
+  it("the description carries the watch contract", () => {
+    expect(srv.JOB_TOOL.description).toMatch(/WATCHES: watch \{name, command, every, cwd\?\}/);
+    expect(srv.JOB_TOOL.description).toMatch(/ONE line in this thread when it starts failing/);
+    expect(srv.JOB_TOOL.inputSchema.properties).toHaveProperty("every");
   });
 });
