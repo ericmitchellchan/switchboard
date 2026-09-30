@@ -8,9 +8,9 @@ import {
   SHOW_CAP,
   kbRelativePath,
   parseShowsFile,
-  repoDirOf,
-  repoFileListed,
+  repoFileOpens,
   showTargetFor,
+  showsPass,
   type ShowContext,
 } from "./showIntent";
 
@@ -21,6 +21,21 @@ function ctx(over: Partial<ShowContext> = {}): ShowContext {
 }
 
 describe("parseShowsFile", () => {
+  it("carries `where: cwd` (review of 49ebb20, #1); an unknown value is dropped, never the entry", () => {
+    const raw = JSON.stringify({
+      shows: [
+        { id: "o3", address: "README.md", at: "", where: "cwd" },
+        { id: "o2", address: "b.md", at: "", where: "elsewhere" },
+        { id: "o1", address: "a.md", at: "" },
+      ],
+    });
+    expect(parseShowsFile(raw)).toEqual([
+      { id: "o3", address: "README.md", at: "", where: "cwd" },
+      { id: "o2", address: "b.md", at: "" },
+      { id: "o1", address: "a.md", at: "" },
+    ]);
+  });
+
   it("reads the server's shape, newest first", () => {
     const raw = JSON.stringify({
       version: 1,
@@ -90,26 +105,43 @@ describe("kbRelativePath — an absolute path inside the knowledge base", () => 
   });
 });
 
-describe("repoFileListed / repoDirOf — a show opens NOTHING for a repo file that is not there", () => {
-  const entries = [
-    { name: "specs", is_dir: true },
-    { name: "README.md", is_dir: false },
-    { name: "gamma-metric-design.md", is_dir: false },
-  ];
+describe("repoFileOpens — a show opens NOTHING for a repo file the viewer cannot render (review of 49ebb20, #3)", () => {
+  it("is the viewer's own read: resolves → opens; rejects (missing, a folder, binary, over the cap) → nothing", async () => {
+    expect(await repoFileOpens(() => Promise.resolve("# spec"))).toBe(true);
+    expect(await repoFileOpens(() => Promise.resolve(""))).toBe(true); // an empty file is still a file
+    expect(await repoFileOpens(() => Promise.reject(new Error("file too large for the inline viewer (600 KB > 512 KB limit)")))).toBe(false);
+    expect(await repoFileOpens(() => Promise.reject(new Error("stream did not contain valid UTF-8")))).toBe(false);
+    expect(await repoFileOpens(() => Promise.reject(new Error("not a file")))).toBe(false);
+  });
+});
 
-  it("the directory to list is the path's parent; the project root is the empty string", () => {
-    expect(repoDirOf("specs/sextant/gamma-metric-design.md")).toBe("specs/sextant");
-    expect(repoDirOf("README.md")).toBe("");
-    expect(repoDirOf("admin-panel/README.md")).toBe("admin-panel");
+describe("showsPass — a failed read is no listing, never a baseline (review of 49ebb20, #2)", () => {
+  const raw = JSON.stringify({
+    version: 1,
+    shows: [
+      { id: "o3", address: "c.md", at: "" },
+      { id: "o2", address: "b.md", at: "" },
+      { id: "o1", address: "a.md", at: "" },
+    ],
   });
 
-  it("the file must be IN the listing — by name, case-insensitively, and as a file", () => {
-    expect(repoFileListed(entries, "specs/sextant/gamma-metric-design.md")).toBe(true);
-    expect(repoFileListed(entries, "readme.MD")).toBe(true);
-    expect(repoFileListed(entries, "specs/sextant/missing.md")).toBe(false);
-    expect(repoFileListed(entries, "specs")).toBe(false); // a directory is not a file
-    expect(repoFileListed([], "README.md")).toBe(false);
-    expect(repoFileListed(entries, "specs/")).toBe(false);
+  it("a failed read SKIPS the tick — on the first tick too — so nothing is baselined and nothing replays later", () => {
+    expect(showsPass(undefined, null)).toEqual({ kind: "skip" });
+    expect(showsPass(new Set(["o1"]), null)).toEqual({ kind: "skip" });
+    // The next good read is then the baseline — the stored shows are old news.
+    expect(showsPass(undefined, raw)).toEqual({ kind: "baseline", ids: ["o3", "o2", "o1"] });
+  });
+
+  it("a missing file (\"\") is a real, empty listing: the baseline is empty and a later show opens", () => {
+    expect(showsPass(undefined, "")).toEqual({ kind: "baseline", ids: [] });
+    const pass = showsPass(new Set(), raw);
+    expect(pass.kind === "open" && pass.shows.map((s) => s.id)).toEqual(["o1", "o2", "o3"]);
+  });
+
+  it("after the baseline: the unseen shows, oldest first", () => {
+    const pass = showsPass(new Set(["o1"]), raw);
+    expect(pass.kind === "open" && pass.shows.map((s) => s.id)).toEqual(["o2", "o3"]);
+    expect(showsPass(new Set(["o1", "o2", "o3"]), raw)).toEqual({ kind: "open", shows: [] });
   });
 });
 
@@ -216,5 +248,37 @@ describe("showTargetFor — the address resolver the Evidence rows use, plus the
       kind: "kb-doc",
       path: "switchboard/features/y/new-spec.md",
     });
+  });
+
+  it("`where: cwd` — the server FOUND the file under the thread's cwd: it opens as that file, and the KB is never asked (review of 49ebb20, #1)", () => {
+    const misses: string[] = [];
+    // personal-kb/README.md and registry.json exist — and must not shadow the repo's own.
+    const c = ctx({ kbDocs: ["README.md", "registry.json", "specs/a.md"], onKbMiss: (a) => misses.push(a) });
+    expect(showTargetFor("README.md", c, "cwd")?.artifact).toEqual({ kind: "repo-file", project: "lodestar", path: "README.md" });
+    expect(showTargetFor("registry.json", c, "cwd")?.artifact).toEqual({ kind: "repo-file", project: "lodestar", path: "registry.json" });
+    expect(showTargetFor("specs/a.md", c, "cwd")?.artifact).toEqual({ kind: "repo-file", project: "lodestar", path: "specs/a.md" });
+    expect(misses).toEqual([]);
+    // Re-based like every other repo path.
+    expect(showTargetFor("README.md", ctx({ kbDocs: ["README.md"], pathPrefix: "apps/desktop/" }), "cwd")?.artifact).toEqual({
+      kind: "repo-file",
+      project: "lodestar",
+      path: "apps/desktop/README.md",
+    });
+    // An old entry (no field) keeps the old order: the KB list first.
+    expect(showTargetFor("README.md", c)?.artifact).toEqual({ kind: "kb-doc", path: "README.md" });
+  });
+
+  it("`where: cwd` in a folder no registry project holds: only a folder INSIDE the knowledge base opens it, as that KB doc", () => {
+    const kbThread = ctx({
+      projectKey: null,
+      workingDir: "C:\\Users\\eric\\projects\\personal-kb\\switchboard",
+      kbDocs: ["switchboard/features/x/requirements.md"],
+    });
+    expect(showTargetFor("features/x/requirements.md", kbThread, "cwd")?.artifact).toEqual({
+      kind: "kb-doc",
+      path: "switchboard/features/x/requirements.md",
+    });
+    expect(showTargetFor("README.md", ctx({ projectKey: null, workingDir: "C:/Users/eric/scratch" }), "cwd")).toBeNull();
+    expect(showTargetFor("README.md", ctx({ projectKey: null, workingDir: null }), "cwd")).toBeNull();
   });
 });

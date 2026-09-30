@@ -25,6 +25,7 @@ import { parseInboxFile } from "./pageStore";
 import { parseBacklogInbox } from "./backlogStore";
 import { parseSetsFile } from "./artifactSets";
 import { parseShowsFile, showTargetFor, SHOW_CAP, SHOW_ADDRESS_CAP } from "./showIntent";
+import { parseSurfaceQuery } from "./surfaceParams";
 // Source text of the two loopback predicates, for the byte-identical check.
 import viewStoreSource from "./viewStore.ts?raw";
 import mcpServerSource from "../../src-tauri/resources/mcp/switchboard-mcp.cjs?raw";
@@ -1306,8 +1307,15 @@ describe("the page tool — op show (SWIT-102): put an existing doc or file in f
       threadDir: string,
       args: Record<string, unknown>,
       now: number,
-      env?: { cwd?: string; exists?: (p: string) => boolean }
-    ) => { show: { id: string; address: string; at: string }; message: string };
+      env?: {
+        cwd?: string;
+        exists?: (p: string) => boolean;
+        inspect?: (p: string) => { kind: "missing" | "dir" | "file"; size: number; text: boolean };
+      }
+    ) => { show: { id: string; address: string; at: string; where?: string }; message: string };
+    SHOW_READ_CAP: number;
+    surfaceQueryOk: (q: string) => boolean;
+    inspectPath: (p: string) => { kind: string; size: number; text: boolean };
     performOp: (threadDir: string, args: Record<string, unknown>, now: number) => string;
     SHOW_CAP: number;
     SHOW_ADDRESS_CAP: number;
@@ -1371,8 +1379,8 @@ describe("the page tool — op show (SWIT-102): put an existing doc or file in f
     try {
       const env = { cwd: CWD, exists: () => true };
       const first = shows.performShowOp(dir, { op: "show", address: "specs/a.md" }, NOW, env);
-      expect(first.show).toEqual({ id: "o1", address: "specs/a.md", at: "2026-08-31T10:00:00.000Z" });
-      expect(first.message).toBe("specs/a.md is opening in the panel beside the terminal.");
+      expect(first.show).toEqual({ id: "o1", address: "specs/a.md", at: "2026-08-31T10:00:00.000Z", where: "cwd" });
+      expect(first.message).toMatch(/^specs\/a\.md opens in the panel beside the terminal when this thread's folder belongs to a registry project/);
       const second = shows.performShowOp(dir, { op: "show", address: "mock.html" }, NOW + 1000, env);
       expect(second.show.id).toBe("o2");
       const file = JSON.parse(nodeFs.readFileSync(nodePath.join(dir, "shows.json"), "utf8"));
@@ -1380,8 +1388,8 @@ describe("the page tool — op show (SWIT-102): put an existing doc or file in f
       expect(file.shows.map((s: { id: string }) => s.id)).toEqual(["o2", "o1"]);
       // The app's parser reads exactly this shape.
       expect(parseShowsFile(JSON.stringify(file))).toEqual([
-        { id: "o2", address: "mock.html", at: "2026-08-31T10:00:01.000Z" },
-        { id: "o1", address: "specs/a.md", at: "2026-08-31T10:00:00.000Z" },
+        { id: "o2", address: "mock.html", at: "2026-08-31T10:00:01.000Z", where: "cwd" },
+        { id: "o1", address: "specs/a.md", at: "2026-08-31T10:00:00.000Z", where: "cwd" },
       ]);
       // The cap: 25 more shows keep the newest 20, and ids keep counting up
       // (a trimmed id is never re-minted — the app's seen-set stays honest).
@@ -1392,8 +1400,8 @@ describe("the page tool — op show (SWIT-102): put an existing doc or file in f
       expect(capped.shows[capped.shows.length - 1].id).toBe("o8");
       expect(parseShowsFile(JSON.stringify(capped))).toHaveLength(SHOW_CAP);
       // Through the page tool's own entry point; page.json is never written.
-      expect(shows.performOp(dir, { op: "show", address: "surface:lodestar/trading" }, NOW)).toBe(
-        "surface:lodestar/trading is opening in the panel beside the terminal."
+      expect(shows.performOp(dir, { op: "show", address: "surface:lodestar/trading" }, NOW)).toMatch(
+        /^surface:lodestar\/trading opens in the panel beside the terminal if it names a page Switchboard has registered/
       );
       expect(nodeFs.existsSync(nodePath.join(dir, "page.json"))).toBe(false);
       // The pure page half refuses it rather than pretending to write a page.
@@ -1415,6 +1423,8 @@ describe("the page tool — op show (SWIT-102): put an existing doc or file in f
       const asked: string[] = [];
       const missing = { cwd: CWD, exists: (p: string) => (asked.push(p), false) };
       const kbDoc = shows.performShowOp(dir, { op: "show", address: "switchboard/features/x/requirements.md" }, NOW, missing);
+      // Not under cwd: no `where` — the app may resolve it as a KB doc.
+      expect(kbDoc.show.where).toBeUndefined();
       expect(kbDoc.message).toMatch(/^Recorded — but switchboard\/features\/x\/requirements\.md is not a file under this thread's working directory/);
       expect(kbDoc.message).toMatch(/opens ONLY if Switchboard can resolve it as a knowledge-base doc .* or a file in this thread's project; otherwise nothing opens\.$/);
       // The existence check is cwd + the relative address (the server's cwd is the thread's).
@@ -1435,6 +1445,79 @@ describe("the page tool — op show (SWIT-102): put an existing doc or file in f
         "view:v1#h:summary is opening in the panel beside the terminal."
       );
       expect(() => shows.performShowOp(dir, { op: "show", address: "view:v2" }, NOW, missing)).toThrow(/no view with id v2/);
+    } finally {
+      nodeFs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("REFUSES what the viewer cannot render — a folder, an oversize file, a binary file — and records nothing (review of 49ebb20, #3)", () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-shows-"));
+    try {
+      const probe = (info: { kind: "missing" | "dir" | "file"; size: number; text: boolean }) => ({ cwd: CWD, inspect: () => info });
+      expect(() => shows.performShowOp(dir, { op: "show", address: "specs/sextant" }, NOW, probe({ kind: "dir", size: 0, text: false }))).toThrow(
+        /specs\/sextant is a folder — show opens a file/
+      );
+      expect(() =>
+        shows.performShowOp(dir, { op: "show", address: "data/big.json" }, NOW, probe({ kind: "file", size: shows.SHOW_READ_CAP + 1, text: false }))
+      ).toThrow(/data\/big\.json is 513 KB — the panel's viewer reads files up to 512 KB/);
+      expect(() => shows.performShowOp(dir, { op: "show", address: "shot.png" }, NOW, probe({ kind: "file", size: 900, text: false }))).toThrow(
+        /shot\.png is not a text file/
+      );
+      // The absolute form gets the same checks (it opens only as a KB doc, which is text too).
+      expect(() =>
+        shows.performShowOp(dir, { op: "show", address: "C:/Users/eric/projects/personal-kb/switchboard" }, NOW, probe({ kind: "dir", size: 0, text: false }))
+      ).toThrow(/is a folder/);
+      expect(nodeFs.existsSync(nodePath.join(dir, "shows.json"))).toBe(false);
+      // The cap is explorer.rs MAX_READ_BYTES.
+      expect(shows.SHOW_READ_CAP).toBe(512 * 1024);
+    } finally {
+      nodeFs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("inspectPath is the real probe: a folder, a text file, a binary file, a missing path", () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-inspect-"));
+    try {
+      nodeFs.writeFileSync(nodePath.join(dir, "a.md"), "# héllo");
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      (require("fs") as { writeFileSync: (p: string, d: Uint8Array) => void }).writeFileSync(
+        nodePath.join(dir, "b.bin"),
+        new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x00, 0xc3])
+      );
+      expect(shows.inspectPath(dir)).toEqual({ kind: "dir", size: 0, text: false });
+      expect(shows.inspectPath(nodePath.join(dir, "a.md"))).toMatchObject({ kind: "file", text: true });
+      expect(shows.inspectPath(nodePath.join(dir, "b.bin"))).toMatchObject({ kind: "file", text: false });
+      expect(shows.inspectPath(nodePath.join(dir, "nope.md")).kind).toBe("missing");
+    } finally {
+      nodeFs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a page address whose params the app's strict parser rejects is refused, not reported as opening (review of 49ebb20, #3)", () => {
+    expect(() => norm("surface:lodestar/trading?Bad=1")).toThrow(/has params the page would refuse/);
+    expect(() => norm("surface:lodestar/trading?date=")).toThrow(/has params the page would refuse/);
+    expect(() => norm("surface:lodestar/trading?a=1&a=2")).toThrow(/has params the page would refuse/);
+    expect(() => norm(`surface:lodestar/trading?a=${"x".repeat(121)}`)).toThrow(/has params the page would refuse/);
+    const nine = Array.from({ length: 9 }, (_, i) => `k${i}=v`).join("&");
+    expect(() => norm(`surface:lodestar/trading?${nine}`)).toThrow(/has params the page would refuse/);
+    expect(norm("surface:lodestar/trading?instrument=NQ&date=2026-06-05").form).toBe("surface");
+    // The mirror agrees with the app's parser on every case above.
+    for (const q of ["Bad=1", "date=", "a=1&a=2", nine, "instrument=NQ&date=2026-06-05", ""]) {
+      expect(shows.surfaceQueryOk(q)).toBe(parseSurfaceQuery(q) !== null);
+    }
+  });
+
+  it("a path FOUND under cwd is recorded `where: cwd` and opens as that file — never a KB doc of the same path (review of 49ebb20, #1)", () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-shows-"));
+    try {
+      const found = shows.performShowOp(dir, { op: "show", address: "README.md" }, NOW, { cwd: CWD, exists: () => true });
+      expect(found.show.where).toBe("cwd");
+      const [stored] = parseShowsFile(nodeFs.readFileSync(nodePath.join(dir, "shows.json"), "utf8"));
+      // personal-kb/README.md exists in the KB list — and still does not win.
+      const ctx = { threadId: "t1", kbDocs: ["README.md", "registry.json"], projectKey: "lodestar", kbRoot: "C:/Users/eric/projects/personal-kb" };
+      expect(showTargetFor(stored.address, ctx, stored.where)?.artifact).toEqual({ kind: "repo-file", project: "lodestar", path: "README.md" });
+      // Without the field (an entry written before it existed) the old order holds.
+      expect(showTargetFor(stored.address, ctx)?.artifact).toEqual({ kind: "kb-doc", path: "README.md" });
     } finally {
       nodeFs.rmSync(dir, { recursive: true, force: true });
     }

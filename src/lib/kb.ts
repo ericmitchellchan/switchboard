@@ -200,11 +200,20 @@ export function __resetKbCacheForTests(): void {
 //     worth of new misses share ONE `kb_list`, and an address that simply is
 //     not a KB doc (every repo path on the page) never asks again. Never a
 //     loop: a failed refresh stays remembered too.
-//   · ONE-SHOT OPEN (`resolveWithFreshKbDocs`): a click, the turn-end hook,
-//     the agent's `show`. The memory above would be wrong here — an address
-//     seen BEFORE its file existed is remembered as a miss — so a one-shot
-//     that misses refreshes once and resolves again, every time. One
-//     `kb_list` per open that missed; an open is an event, not a poll.
+//   · ONE-SHOT OPEN (`resolveWithFreshKbDocs`): a click, the agent's
+//     `show`. The memory above would be wrong here — an address seen BEFORE
+//     its file existed is remembered as a miss — so a one-shot that misses
+//     refreshes once and resolves again, every time. One `kb_list` per open
+//     that missed.
+//   · THE TURN-END HOOK runs on every settle, which is poll-shaped, not an
+//     event — so it does NOT come through `resolveWithFreshKbDocs`: it
+//     resolves against the cached list and pays its one refresh only after
+//     every stand-down and the offer-once check (nextThing.decideTurnSettle,
+//     review of 49ebb20, #5).
+// Either way a miss is only REPORTED for an address that could be a KB doc
+// (evidenceModel.couldBeKbDoc — a KB-listed extension): `Cargo.toml`,
+// `v0.16.0` and `e.g` are file-shaped words in a turn line, never a reason
+// to ask for the list.
 //
 // A refresh that changes the list notifies `subscribeDocList`, so a row that
 // was plain text or a repo link becomes the KB doc without another paint

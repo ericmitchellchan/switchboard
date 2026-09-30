@@ -10,7 +10,11 @@ import {
   offerNextThing,
   clearNextThingOffer,
   __resetNextThingOffers,
+  decideTurnSettle,
+  isNextThingOffered,
+  resolveOpenable,
   type NextThingContext,
+  type TurnSettleDeps,
 } from "./nextThing";
 import {
   mergePage,
@@ -203,5 +207,109 @@ describe("the page-focus one-shot", () => {
     unsubscribe();
     requestPageFocus("th1", "decisions");
     expect(notified).toBe(1);
+  });
+});
+
+describe("ONE resolver: the cwd→project re-base rides every path (review of 49ebb20, #7)", () => {
+  const sub: NextThingContext = { ...ctx, pathPrefix: "apps/desktop/" };
+
+  it("a repo path in a To do row, a reviewFirst and an Evidence-style address re-base the same way `show` does", () => {
+    expect(resolveAddress("src/x.md", sub)?.artifact).toEqual({ kind: "repo-file", project: "switchboard", path: "apps/desktop/src/x.md" });
+    expect(resolveOpenable("src/x.md", sub)).toEqual({ kind: "repo-file", project: "switchboard", path: "apps/desktop/src/x.md" });
+    expect(openableAddressIn("fix src/x.md next", sub)?.artifact).toEqual({ kind: "repo-file", project: "switchboard", path: "apps/desktop/src/x.md" });
+    const page = mergePage({ ...parsePageFile(""), items: [item("i1", "update src/x.md")] }, {}, []);
+    const next = nextThingFor(page, sub);
+    expect(next?.why === "todo" && next.artifact).toEqual({ kind: "repo-file", project: "switchboard", path: "apps/desktop/src/x.md" });
+    // A multi-repo project addresses its files as <repo>/….
+    expect(resolveOpenable("specs/a.md", { ...ctx, projectKey: "kyde", pathPrefix: "admin-panel/" })).toEqual({
+      kind: "repo-file",
+      project: "kyde",
+      path: "admin-panel/specs/a.md",
+    });
+  });
+
+  it("never re-bases a KB doc, a page state or a view", () => {
+    expect(resolveOpenable("switchboard/spec.md", sub)).toEqual({ kind: "kb-doc", path: "switchboard/spec.md" });
+    expect(resolveOpenable("surface:lodestar/trading", sub)).toEqual({ kind: "surface", project: "lodestar", page: "trading" });
+    expect(resolveAddress("view:v1", sub)?.artifact).toEqual({ kind: "view", threadId: "th1", viewId: "v1" });
+  });
+
+  it("a reviewFirst carries the TOKEN that resolved, so a click re-resolves it and not the whole line (review nit)", () => {
+    const page = mergePage(
+      { ...parsePageFile(""), turns: [{ at: "2026-09-30T10:00:00Z", lines: ["did it"], reviewFirst: "(src/x.md)" }] },
+      {},
+      []
+    );
+    const next = nextThingFor(page, sub);
+    expect(next?.why).toBe("review");
+    if (next?.why !== "review") return;
+    expect(next.address).toBe("(src/x.md)");
+    expect(next.token).toBe("src/x.md");
+    expect(resolveOpenable(next.token!, sub)).toEqual(next.artifact);
+  });
+});
+
+describe("decideTurnSettle — the checks before the KB refresh (review of 49ebb20, #5)", () => {
+  const todoPage = (title: string) => mergePage({ ...parsePageFile(""), items: [item("i1", title)] }, {}, []);
+  const deps = (over: Partial<TurnSettleDeps> = {}): TurnSettleDeps & { refreshes: number } => {
+    const d = {
+      refreshes: 0,
+      ctx: { threadId: "th1", projectKey: "switchboard", pathPrefix: "" },
+      kbDocs: ["switchboard/spec.md"] as readonly string[] | null,
+      refreshKbDocs: async () => {
+        d.refreshes += 1;
+        return ["switchboard/spec.md", "switchboard/new.md"];
+      },
+      previewActive: () => false,
+      intentRecent: () => false,
+      ...over,
+    };
+    return d;
+  };
+
+  it("a dotted word in a To do row costs NO refresh — it could never be a KB doc", async () => {
+    for (const title of ["bump Cargo.toml", "ship v0.16.0", "e.g the thing"]) {
+      __resetNextThingOffers();
+      const d = deps();
+      await decideTurnSettle(todoPage(title), d);
+      expect(d.refreshes).toBe(0);
+    }
+  });
+
+  it("every stand-down comes BEFORE the refresh: preview being read, the agent's own show, already offered", async () => {
+    const page = todoPage("write switchboard/new.md");
+    const preview = deps({ previewActive: () => true });
+    expect((await decideTurnSettle(page, preview)).act).toBe("stand-down");
+    expect(preview.refreshes).toBe(0);
+    const intent = deps({ intentRecent: () => true });
+    expect(await decideTurnSettle(page, intent)).toMatchObject({ act: "stand-down", reason: "intent" });
+    expect(intent.refreshes).toBe(0);
+    // Already offered (App recorded the open): the next settle, against the
+    // list the refresh left cached, stands down with no IPC.
+    const first = await decideTurnSettle(page, deps());
+    expect(first.act).toBe("open");
+    if (first.act !== "open") return;
+    offerNextThing("th1", first.next.offerKey);
+    const warm = deps({ kbDocs: ["switchboard/spec.md", "switchboard/new.md"] });
+    expect(await decideTurnSettle(page, warm)).toMatchObject({ act: "stand-down", reason: "offered" });
+    expect(warm.refreshes).toBe(0);
+    // …and against a still-stale list the refreshed answer is checked too.
+    const stale = deps();
+    expect(await decideTurnSettle(page, stale)).toMatchObject({ act: "stand-down", reason: "offered" });
+  });
+
+  it("an open that survived the checks and missed the KB list refreshes ONCE and opens the KB doc", async () => {
+    const d = deps();
+    const decision = await decideTurnSettle(todoPage("write switchboard/new.md"), d);
+    expect(d.refreshes).toBe(1);
+    expect(decision.act === "open" && decision.next.artifact).toEqual({ kind: "kb-doc", path: "switchboard/new.md" });
+    expect(isNextThingOffered("th1", decision.act === "open" ? decision.next.offerKey : "")).toBe(false); // App records it
+  });
+
+  it("nothing next / questions / a reviewFirst ticket key — no refresh either", async () => {
+    const d = deps();
+    expect((await decideTurnSettle(mergePage(parsePageFile(""), {}, []), d)).act).toBe("none");
+    expect((await decideTurnSettle(rendered([question("q1")], []), d)).act).toBe("questions");
+    expect(d.refreshes).toBe(0);
   });
 });

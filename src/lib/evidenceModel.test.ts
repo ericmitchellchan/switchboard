@@ -3,6 +3,8 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  couldBeKbDoc,
+  KB_DOC_EXTENSIONS,
   evidenceKindOf,
   groupEvidence,
   isPathShaped,
@@ -242,5 +244,31 @@ describe("latchViewKey (SWIT-70 review fix F2 — a failed spec read retries)", 
 
   it("every read failing latches nothing that matches a non-empty list", () => {
     expect(latchViewKey(["a"], [])).not.toBe(["a"].join("\n"));
+  });
+});
+
+describe("the KB miss is reported only for an address that could BE a KB doc (review of 49ebb20, #5)", () => {
+  it("couldBeKbDoc: a KB-listed extension (kb.rs DOC_EXTENSIONS), any case", () => {
+    expect(KB_DOC_EXTENSIONS).toEqual(["md", "html", "htm", "jsx", "tsx", "mmd", "json"]);
+    for (const a of ["README.md", "a/b.HTML", "x/mock.jsx", "d.mmd", "registry.json", "x.view.json"]) expect(couldBeKbDoc(a)).toBe(true);
+    for (const a of ["Cargo.toml", "v0.16.0", "e.g", "src/App.rs", "notes", "a/b"]) expect(couldBeKbDoc(a)).toBe(false);
+  });
+
+  it("resolveDocTarget calls onKbMiss for a plausible doc and stays quiet for a dotted word", () => {
+    const misses: string[] = [];
+    const miss = (a: string) => misses.push(a);
+    for (const a of ["Cargo.toml", "v0.16.0", "e.g", "src/App.rs"]) resolveDocTarget(a, ["x.md"], "p", miss);
+    expect(misses).toEqual([]);
+    resolveDocTarget("switchboard/new.md", ["x.md"], "p", miss);
+    expect(misses).toEqual(["switchboard/new.md"]);
+  });
+
+  it("pathPrefix re-bases a repo file (the cwd→project place), never a KB doc", () => {
+    expect(resolveDocTarget("src/x.md", ["x.md"], "lodestar", undefined, "apps/desktop/")).toEqual({
+      kind: "repo-file",
+      project: "lodestar",
+      path: "apps/desktop/src/x.md",
+    });
+    expect(resolveDocTarget("x.md", ["x.md"], "lodestar", undefined, "apps/desktop/")).toEqual({ kind: "kb-doc", path: "x.md" });
   });
 });

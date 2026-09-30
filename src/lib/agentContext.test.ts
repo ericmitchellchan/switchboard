@@ -22,7 +22,9 @@ import {
   PANEL_REPORT_SENTENCE,
   BRIEF_READ_SENTENCE,
   artifactRef,
+  assembleLaunchContext,
   buildBacklogItemLine,
+  buildSpawnContextParts,
   buildPageContractLine,
   buildSendReference,
   buildSpawnContext,
@@ -760,5 +762,84 @@ describe("backlog item spawn context (SWIT-64)", () => {
     expect(long).toContain("…'. Start there.");
     expect(long).toContain("(op link, itemId ok)");
     expect(Array.from(long).length).toBeLessThanOrEqual(SPAWN_CONTEXT_MAX);
+  });
+});
+
+// ─── The launch line's budget (review of 49ebb20, #4; review of daaad36, #2) ─
+
+describe("assembleLaunchContext — SPAWN_CONTEXT_MAX caps the JOINED line, and it gives ground least-important first", () => {
+  const DEEP_DOC: Artifact = { kind: "kb-doc", path: `switchboard/${"deep-folder/".repeat(22)}requirements.md` };
+  const LONG_ITEM = { id: "b".repeat(64), text: "é".repeat(600) };
+  const LONG_LABELS = { count: 999, labels: ["x".repeat(200), "y".repeat(200), "z".repeat(200), "w".repeat(200)] };
+  const SURFACE: Artifact = { kind: "surface", project: "lodestar", page: "trading", params: { instrument: "N".repeat(120) } };
+
+  it("WORST CASE — brief clause, the longest decisions, a long panel ref with pins, the longest backlog item: the contract, the brief clause and the backlog sentence survive WHOLE", () => {
+    for (const artifact of [DEEP_DOC, SURFACE]) {
+      const parts = buildSpawnContextParts(artifact, 12, { kbRoot: KB_ROOT, backlogItem: LONG_ITEM });
+      const line = assembleLaunchContext({ ...parts, contract: true, hasBrief: true, decisions: LONG_LABELS }) as string;
+      expect(Array.from(line).length).toBeLessThanOrEqual(SPAWN_CONTEXT_MAX);
+      expect(line.startsWith(buildPageContractLine(null, { hasBrief: true }))).toBe(true);
+      expect(line).toContain(PANEL_REPORT_SENTENCE);
+      expect(line).toContain(BRIEF_READ_SENTENCE);
+      const backlog = buildBacklogItemLine(LONG_ITEM);
+      expect(line.endsWith(backlog)).toBe(true);
+      expect(line).toContain(`(op link, itemId ${"b".repeat(64)}).`);
+      assertShellSafe(line);
+    }
+  });
+
+  it("the reviewer's case (a kb-doc panel ref + a backlog item + the brief clause: 2108 joined) keeps the link instruction", () => {
+    const parts = buildSpawnContextParts(DEEP_DOC, 3, { kbRoot: KB_ROOT, backlogItem: { id: "bmf1x2a01", text: "t".repeat(300) } });
+    const naive = [buildPageContractLine(LONG_LABELS, { hasBrief: true }), parts.panel, parts.backlog].join(" ");
+    expect(Array.from(naive).length).toBeGreaterThan(SPAWN_CONTEXT_MAX); // the old join would have cut the tail
+    const line = assembleLaunchContext({ ...parts, contract: true, hasBrief: true, decisions: LONG_LABELS }) as string;
+    expect(line).toContain("record it with the backlog tool (op link, itemId bmf1x2a01).");
+    expect(Array.from(line).length).toBeLessThanOrEqual(SPAWN_CONTEXT_MAX);
+  });
+
+  it("the ORDER of giving ground: the panel's detail first, then the decision labels, then the panel, then the decisions", () => {
+    const parts = buildSpawnContextParts(DEEP_DOC, 5, { kbRoot: KB_ROOT, backlogItem: { id: "i1", text: "an item" } });
+    expect(parts.panelShort).not.toBeNull();
+    const decisions = { count: 3, labels: ["alpha", "beta", "gamma"] };
+    const full = assembleLaunchContext({ ...parts, contract: true, hasBrief: false, decisions }) as string;
+    expect(full).toContain("5 pins in .pins.json alongside");
+    expect(full).toContain("the newest: alpha; beta; gamma");
+    const len = (s: string) => Array.from(s).length;
+    // 1 char short of whole: the panel loses its pin clause, the labels stay.
+    const step1 = assembleLaunchContext({ ...parts, contract: true, hasBrief: false, decisions }, len(full) - 1) as string;
+    expect(step1).not.toContain("pins in .pins.json");
+    expect(step1).toContain(parts.panelShort as string);
+    expect(step1).toContain("the newest: alpha; beta; gamma");
+    // Tighter: the labels drop one by one, the count stays.
+    const step2 = assembleLaunchContext({ ...parts, contract: true, hasBrief: false, decisions }, len(step1) - 1) as string;
+    expect(step2).toContain("the newest: alpha; beta)");
+    expect(step2).toContain(parts.panelShort as string);
+    // Tighter still: the panel goes, then the decisions clause.
+    const noPanel = assembleLaunchContext({ ...parts, contract: true, hasBrief: false, decisions: { count: 3, labels: [] } }, 10_000)!;
+    const withoutPanel = assembleLaunchContext(
+      { ...parts, panel: null, panelShort: null, contract: true, hasBrief: false, decisions: { count: 3, labels: [] } },
+      10_000
+    )!;
+    const step4 = assembleLaunchContext({ ...parts, contract: true, hasBrief: false, decisions }, len(withoutPanel))!;
+    expect(step4).toBe(withoutPanel);
+    expect(noPanel.length).toBeGreaterThan(withoutPanel.length);
+    const bare = assembleLaunchContext({ ...parts, panel: null, panelShort: null, contract: true, hasBrief: false, decisions: null }, 10_000)!;
+    expect(assembleLaunchContext({ ...parts, contract: true, hasBrief: false, decisions }, len(bare))).toBe(bare);
+    expect(bare).toContain("(op link, itemId i1).");
+  });
+
+  it("no page tools: no contract, no brief, no decisions — the panel and the backlog item alone; nothing at all is null", () => {
+    const parts = buildSpawnContextParts(DOC, 0, { kbRoot: KB_ROOT, backlogItem: { id: "i1", text: "x" } });
+    const line = assembleLaunchContext({ ...parts, contract: false, hasBrief: true, decisions: LONG_LABELS })!;
+    expect(line).not.toContain("PAGE beside the terminal");
+    expect(line).not.toContain("decision");
+    expect(line).toBe(`${parts.panel} ${parts.backlog}`);
+    expect(assembleLaunchContext({ panel: null, panelShort: null, backlog: "", contract: false, hasBrief: false, decisions: null })).toBeNull();
+  });
+
+  it("buildSpawnContext is unchanged: parts joined", () => {
+    const opts = { kbRoot: KB_ROOT, backlogItem: { id: "i1", text: "x" } };
+    const parts = buildSpawnContextParts(DOC, 2, opts);
+    expect(buildSpawnContext(DOC, 2, opts)).toBe(`${parts.panel} ${parts.backlog}`);
   });
 });

@@ -120,24 +120,25 @@ import {
 import { clearDevServerSession, setPreviewOpenCheck, sessionDirFor } from "./lib/devServer";
 import { dirtyCount, flushDrafts } from "./lib/editor";
 import {
-  buildSpawnContext,
+  assembleLaunchContext,
+  buildSpawnContextParts,
+  type SpawnContextParts,
   refOptions,
   sanitizeForTypedLine,
   getKbRootForContext,
   setKbRootForContext,
   setScrollbackRootForContext,
   setThreadsRootForContext,
-  buildPageContractLine,
   type StandingDecisions,
 } from "./lib/agentContext";
 import { runPromotionPass, promotionPassReason, PROMOTION_POLL_MS } from "./lib/threadPromotion";
 import { parsePageFile, parseAnswersFile, parseInboxFile, parseRetractedFile, mergePage, conventionLine, postTimes, countUnreadTimes, nextPassEntry, loadInboxSeen, markInboxSeen, countQuestionStates, requestPageFocus, type ConventionEntry, type ThreadPassEntry } from "./lib/pageStore";
-import { nextThingFor, offerNextThing, clearNextThingOffer } from "./lib/nextThing";
-import { resolveWithFreshKbDocs } from "./lib/kb";
+import { decideTurnSettle, offerNextThing, clearNextThingOffer } from "./lib/nextThing";
+import { getCachedDocList, refreshDocList, resolveWithFreshKbDocs } from "./lib/kb";
 import { requestReportAnchor } from "./lib/reportStore";
 import { parseSetsFile, setArtifactFor } from "./lib/artifactSets";
-import { parseShowsFile, showTargetFor, repoDirOf, repoFileListed } from "./lib/showIntent";
-import { explorerProjects, explorerList, registerExplorerActions, quickThreadTarget, sessionRepoOptions, useSessionRepos, projectKeyForDir, projectPlaceForDir } from "./lib/explorer";
+import { repoFileOpens, showTargetFor, showsPass } from "./lib/showIntent";
+import { explorerProjects, explorerRead, registerExplorerActions, quickThreadTarget, sessionRepoOptions, useSessionRepos, projectKeyForDir, projectPlaceForDir } from "./lib/explorer";
 import {
   configureBacklogIO,
   initBacklog,
@@ -246,7 +247,7 @@ function waitForSessionShellReady(sessionId: string): Promise<void> {
 //
 // Never throws and never blocks the launch: a missing/unreadable sidecar just
 // means zero pins.
-async function resolveSpawnContext(sessionId: string, threadId: string): Promise<string | null> {
+async function resolveSpawnContext(sessionId: string, threadId: string): Promise<SpawnContextParts> {
   // A SET announces the member it is SHOWING (SWIT-79) — a frame is not on
   // screen, its current item is.
   const raw = artifactFor(sessionId);
@@ -256,7 +257,7 @@ async function resolveSpawnContext(sessionId: string, threadId: string): Promise
   // panel the sentence stands alone; with one it follows the panel clause.
   const item = backlogItemForThread(threadId);
   const backlogItem = item ? { id: item.id, text: item.text } : null;
-  if (!artifact) return buildSpawnContext(null, 0, { backlogItem });
+  if (!artifact) return buildSpawnContextParts(null, 0, { backlogItem });
   let pinCount = 0;
   // Both FILE kinds can carry pins now: a KB doc's sidecar sits next to it, a
   // repo file's is mirrored into the hidden `_repo-pins/` KB tree. pinTargetFor
@@ -269,7 +270,7 @@ async function resolveSpawnContext(sessionId: string, threadId: string): Promise
   // periodic save last happened to write.
   if (artifact.kind === "session") {
     await flushTerminalTranscript(artifact.sessionId);
-    return buildSpawnContext(artifact, 0, {
+    return buildSpawnContextParts(artifact, 0, {
       ...refOptions(),
       sessionName: artifactShortTitle(artifact),
       backlogItem,
@@ -297,7 +298,7 @@ async function resolveSpawnContext(sessionId: string, threadId: string): Promise
       }
     }
   }
-  return buildSpawnContext(artifact, pinCount, {
+  return buildSpawnContextParts(artifact, pinCount, {
     ...refOptions(),
     // A surface's anchor vocabulary is the PAGE's (registry pinHint).
     anchorHint:
@@ -860,7 +861,7 @@ export default function App() {
       }
       // T8 seam 1: what this tab's panel shows, re-derived HERE so every spawn
       // carries current context and a failure degrades to no flag at all.
-      let panelContext: string | null = null;
+      let panelContext: SpawnContextParts = { panel: null, panelShort: null, backlog: "" };
       try {
         panelContext = await resolveSpawnContext(sessionId, threadId);
       } catch (err) {
@@ -901,15 +902,21 @@ export default function App() {
         }
       }
       // The page one-liner rides ONLY when the tools actually attached (a
-      // sentence about a tool that does not exist would be a lie), and FIRST,
-      // so a long panel ref truncates its own tail.
-      const context = [mcpConfig ? buildPageContractLine(standing, { hasBrief }) : null, panelContext]
-        .filter((s): s is string => s !== null && s.length > 0)
-        .join(" ");
+      // sentence about a tool that does not exist would be a lie), and FIRST.
+      // The JOINED line is what SPAWN_CONTEXT_MAX caps, so the join is
+      // budget-aware (review of 49ebb20, #4): the panel's detail and the
+      // decision labels give ground before the contract or the backlog
+      // item id could ever be cut.
+      const context = assembleLaunchContext({
+        ...panelContext,
+        contract: mcpConfig !== null,
+        hasBrief,
+        decisions: standing,
+      });
       const line = launchCommand({
         chatSessionId: thread.chatSessionId,
         resume,
-        appendSystemPrompt: context.length > 0 ? context : null,
+        appendSystemPrompt: context,
         mcpConfig,
       });
       log.info(`Thread launch id=${threadId} session=${sessionId} exists=${resume}: ${line}`);
@@ -1748,8 +1755,11 @@ export default function App() {
           listThreadViews(threadId),
           readThreadFile(threadId, "sets.json"),
           // Its own catch: a failed shows read must never take the views and
-          // sets down with it.
-          readThreadFile(threadId, "shows.json").catch(() => ""),
+          // sets down with it — and it is NULL, not "": a failed read is no
+          // listing at all, so it can never become the baseline (review of
+          // 49ebb20, #2 — an empty baseline replayed every stored show on
+          // the next good tick). showsPass skips the block for this tick.
+          readThreadFile(threadId, "shows.json").catch(() => null),
         ]);
         if (cancelled) return;
         let seen = seenViewsRef.current.get(threadId);
@@ -1784,51 +1794,55 @@ export default function App() {
             openInPanel(sessionId, setArtifactFor(threadId, set), { preview: true });
           }
         }
-        const shows = parseShowsFile(showsRaw);
-        const seenShows = seenShowsRef.current.get(threadId);
-        if (!seenShows) {
-          seenShowsRef.current.set(threadId, new Set(shows.map((s) => s.id)));
-        } else {
-          // Oldest unseen first, so a burst lands with the newest in front.
-          for (const show of [...shows].reverse()) {
+        const pass = showsPass(seenShowsRef.current.get(threadId), showsRaw);
+        if (pass.kind === "baseline") {
+          seenShowsRef.current.set(threadId, new Set(pass.ids));
+        } else if (pass.kind === "open" && pass.shows.length > 0) {
+          const seenShows = seenShowsRef.current.get(threadId)!;
+          // The agent's path is relative to the THREAD'S working directory
+          // (that is what the server checked); a repo file is addressed from
+          // the project root — `place.prefix` is the difference.
+          let place: { key: string; prefix: string } | null = null;
+          try {
+            place = projectPlaceForDir(await explorerProjects(), workingDir);
+          } catch {
+            // no registry — a repo path opens nothing; the rest still resolves
+          }
+          for (const show of pass.shows) {
             if (seenShows.has(show.id)) continue;
-            // The agent's path is relative to the THREAD'S working directory
-            // (that is what the server checked); a repo file is addressed
-            // from the project root — `place.prefix` is the difference.
-            let place: { key: string; prefix: string } | null = null;
-            try {
-              place = projectPlaceForDir(await explorerProjects(), workingDir);
-            } catch {
-              // no registry — a repo path opens nothing; the rest still resolves
-            }
             const hit = await resolveWithFreshKbDocs((kbDocs, onKbMiss) =>
-              showTargetFor(show.address, {
-                threadId,
-                kbDocs,
-                projectKey: place?.key ?? null,
-                pathPrefix: place?.prefix ?? "",
-                kbRoot: getKbRootForContext(),
-                onKbMiss,
-              })
+              showTargetFor(
+                show.address,
+                {
+                  threadId,
+                  kbDocs,
+                  projectKey: place?.key ?? null,
+                  pathPrefix: place?.prefix ?? "",
+                  kbRoot: getKbRootForContext(),
+                  workingDir,
+                  onKbMiss,
+                },
+                show.where
+              )
             );
             // A repo path resolves SYNTACTICALLY (the Evidence rule) — for a
-            // show that is not enough: a file that is not there must open
-            // nothing, not an error card in front of the user.
-            let missing = false;
-            if (hit && hit.artifact.kind === "repo-file") {
-              try {
-                const entries = await explorerList(hit.artifact.project, repoDirOf(hit.artifact.path));
-                missing = !repoFileListed(entries, hit.artifact.path);
-              } catch {
-                missing = true; // no such directory (or the guard refused it)
-              }
-            }
+            // show that is not enough: a file the viewer cannot render (not
+            // there, a folder, binary, over explorer_read's cap) must open
+            // nothing, not an error card in front of the user. The test is
+            // the viewer's own read.
+            const readable =
+              hit === null ||
+              hit.artifact.kind !== "repo-file" ||
+              (await repoFileOpens(() => {
+                const a = hit.artifact as Extract<Artifact, { kind: "repo-file" }>;
+                return explorerRead(a.project, a.path);
+              }));
             // Marked seen only AFTER the awaits: a tick cancelled mid-resolve
             // (this effect re-runs on every session churn) leaves the show
             // unseen, and the next tick takes it — never dropped, never twice.
             if (cancelled) return;
             seenShows.add(show.id);
-            if (!hit || missing) {
+            if (!hit || !readable) {
               log.info(`Show intent: thread=${threadId} show=${show.id} ${show.address} — nothing resolves, nothing opened`);
               continue;
             }
@@ -1951,9 +1965,11 @@ export default function App() {
   // the thing being read, in front (`isPreviewActive`); (2) a view the agent
   // showed in the same turn is the intent poll's to open, and it wins for
   // INTENT_GRACE_MS (a view, a set, or a `show`). The KB doc list is loaded
-  // when the cache is cold and REFRESHED ONCE when an address misses it
-  // (kb.resolveWithFreshKbDocs, SWIT-101) — so a KB doc the agent wrote this
-  // turn is never mis-read as a repo file.
+  // when the cache is cold and REFRESHED ONCE when an address that could be
+  // a KB doc misses it (SWIT-101) — but only AFTER every stand-down and the
+  // offer-once check (nextThing.decideTurnSettle), so a settle that opens
+  // nothing costs no `kb_list` — and a KB doc the agent wrote this turn is
+  // still never mis-read as a repo file.
   const prevStatusRef = useRef(new Map<string, AgentStatus>());
   const settleTurn = useCallback(async (sessionId: string) => {
     const thread = findThreadBySessionId(sessionId);
@@ -1972,40 +1988,57 @@ export default function App() {
         parseInboxFile(inboxRaw),
         parseRetractedFile(retractedRaw)
       );
-      let projectKey: string | null = null;
+      // ONE resolver (review of 49ebb20, #7): the thread's place in its
+      // project — key AND the cwd→project re-base — exactly as the page's
+      // rows and the agent's `show` resolve.
+      let place: { key: string; prefix: string } | null = null;
       try {
-        projectKey = projectKeyForDir(await explorerProjects(), thread.workingDir);
+        place = projectPlaceForDir(await explorerProjects(), thread.workingDir);
       } catch {
         // no registry — a repo path stays plain text, the rest still resolves
       }
-      // SWIT-101: a one-shot resolve — an address that misses the cached KB
-      // list refreshes it once before the repo fallback is believed.
-      const next = await resolveWithFreshKbDocs((kbDocs, onKbMiss) =>
-        nextThingFor(page, { threadId, kbDocs, projectKey, onKbMiss })
-      );
-      if (!next) {
+      // The thread's session may have moved under the awaits (a revive).
+      const hostNow = () =>
+        findThreadBySessionId(sessionId)?.id === threadId ? sessionId : getThreadById(threadId)?.sessionId ?? null;
+      // FIRST against the CACHED list — no IPC (review of 49ebb20, #5: the
+      // fresh-list resolve ran on nearly every settle, before the checks
+      // that make most settles a no-op). A cold cache is loaded once; the
+      // one refresh happens inside decideTurnSettle, after the stand-downs,
+      // and only for a real KB miss that fell back to a repo file.
+      let kbDocs = getCachedDocList();
+      if (kbDocs === null) kbDocs = await refreshDocList().catch(() => null);
+      const decision = await decideTurnSettle(page, {
+        ctx: { threadId, projectKey: place?.key ?? null, pathPrefix: place?.prefix ?? "" },
+        kbDocs,
+        refreshKbDocs: () => refreshDocList(),
+        previewActive: () => {
+          const h = hostNow();
+          return h !== null && isPreviewActive(h);
+        },
+        intentRecent: () => Date.now() - (lastIntentOpenRef.current.get(threadId) ?? 0) < INTENT_GRACE_MS,
+      });
+      if (decision.act === "none") {
         clearNextThingOffer(threadId);
         return;
       }
-      // The thread's session may have moved under the await (a revive).
-      const host = findThreadBySessionId(sessionId)?.id === threadId ? sessionId : getThreadById(threadId)?.sessionId ?? null;
+      const host = hostNow();
       if (!host) return;
-      if (next.why === "questions") {
-        if (!offerNextThing(threadId, next.offerKey)) return;
-        log.info(`Next thing: thread=${threadId} — ${next.label}`);
+      if (decision.act === "questions") {
+        if (!offerNextThing(threadId, decision.next.offerKey)) return;
+        log.info(`Next thing: thread=${threadId} — ${decision.next.label}`);
         requestPageFocus(threadId, "decisions");
         activatePageTab(host);
         return;
       }
-      // A reviewFirst that names nothing openable (a ticket key) is the
-      // page's line to print; there is nothing for the hook to open.
-      if (next.artifact === null) return;
-      if (isPreviewActive(host)) {
-        log.info(`Next thing: thread=${threadId} — ${next.label} (stood down: the preview is being read)`);
+      if (decision.act === "stand-down") {
+        // A reviewFirst that names nothing openable (a ticket key) is the
+        // page's line to print; there is nothing for the hook to open.
+        if (decision.reason === "preview") {
+          log.info(`Next thing: thread=${threadId} — ${decision.next.label} (stood down: the preview is being read)`);
+        }
         return;
       }
-      const lastIntent = lastIntentOpenRef.current.get(threadId) ?? 0;
-      if (Date.now() - lastIntent < INTENT_GRACE_MS) return;
+      const next = decision.next;
       if (!offerNextThing(threadId, next.offerKey)) return;
       log.info(`Next thing: thread=${threadId} — ${next.label} (opened behind the page)`);
       if (next.artifact.kind === "view" && next.anchor) {

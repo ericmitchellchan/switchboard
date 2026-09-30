@@ -822,6 +822,71 @@ const SHOW_SURFACE_RE = /^surface:[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+(\?.*)?$/; // su
 const SHOW_FORMS =
   "a knowledge-base doc path (relative to the knowledge-base root), a file path relative to this thread's working directory, surface:<project>/<page>[?k=v] or view:<id>[#h:<heading-slug>]";
 
+// src/lib/surfaceParams.ts's STRICT query rule, mirrored (review of 49ebb20,
+// #3): an address whose params the app's `parseSurfaceQuery` rejects opens
+// NOTHING there, so it is refused here instead of reported as opening.
+const SURFACE_PARAM_MAX_KEYS = 8;
+const SURFACE_PARAM_VALUE_MAX = 120;
+const SURFACE_PARAM_KEY_RE = /^[a-z][a-zA-Z0-9_]*$/;
+function surfaceQueryOk(query) {
+  if (query.length === 0) return true;
+  let pairs;
+  try {
+    pairs = new URLSearchParams(query);
+  } catch {
+    return false;
+  }
+  const seen = new Set();
+  for (const [key, value] of pairs) {
+    if (!SURFACE_PARAM_KEY_RE.test(key) || seen.has(key)) return false;
+    if (value.length === 0 || value.length > SURFACE_PARAM_VALUE_MAX) return false;
+    seen.add(key);
+    if (seen.size > SURFACE_PARAM_MAX_KEYS) return false;
+  }
+  return true;
+}
+
+// What the app's repo-file viewer can render — mirrors explorer.rs's
+// `read_at` (review of 49ebb20, #3): a FILE, at most MAX_READ_BYTES, UTF-8
+// text (`fs::read_to_string` refuses anything else). A path that fails it
+// would open an error card, so `show` refuses it by name instead.
+const SHOW_READ_CAP = 512 * 1024; // explorer.rs MAX_READ_BYTES — change one, change the other
+
+/** The real filesystem probe: {kind: "missing" | "dir" | "file", size, text}.
+ *  Tests inject their own. */
+function inspectPath(p) {
+  let st;
+  try {
+    st = fs.statSync(p);
+  } catch {
+    return { kind: "missing", size: 0, text: false };
+  }
+  if (st.isDirectory()) return { kind: "dir", size: 0, text: false };
+  if (!st.isFile()) return { kind: "missing", size: 0, text: false };
+  if (st.size > SHOW_READ_CAP) return { kind: "file", size: st.size, text: false };
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(fs.readFileSync(p));
+    return { kind: "file", size: st.size, text: true };
+  } catch {
+    return { kind: "file", size: st.size, text: false };
+  }
+}
+
+/** Refuse a path the viewer could not render, by name. */
+function assertOpenable(address, info) {
+  if (info.kind === "dir") {
+    throw new OpError(`${address} is a folder — show opens a file; name a file inside it`);
+  }
+  if (info.kind === "file" && info.size > SHOW_READ_CAP) {
+    throw new OpError(
+      `${address} is ${Math.ceil(info.size / 1024)} KB — the panel's viewer reads files up to ${SHOW_READ_CAP / 1024} KB, so nothing would open`
+    );
+  }
+  if (info.kind === "file" && !info.text) {
+    throw new OpError(`${address} is not a text file (the panel's viewer renders text — markdown, html, source) — nothing would open`);
+  }
+}
+
 /** Classify + normalize a `show` address. Pure: `cwd` and the thread's view
  *  ids are passed in. Returns `{address, form}` — form is `view` | `surface` |
  *  `path` (relative, forward slashes) | `absolute` (outside cwd; the app opens
@@ -850,6 +915,13 @@ function normalizeShowAddress(raw, cwd, viewIds) {
   if (a.startsWith("surface:")) {
     if (!SHOW_SURFACE_RE.test(a)) {
       throw new OpError(`${JSON.stringify(a)} is not a page address — surface:<project>/<page>?key=value`);
+    }
+    const q = a.indexOf("?");
+    if (q !== -1 && !surfaceQueryOk(a.slice(q + 1))) {
+      throw new OpError(
+        `${JSON.stringify(a)} has params the page would refuse — up to ${SURFACE_PARAM_MAX_KEYS} key=value pairs, ` +
+          `each key [a-z][a-zA-Z0-9_]* used once, each value 1–${SURFACE_PARAM_VALUE_MAX} chars`
+      );
     }
     return { address: a, form: "surface" };
   }
@@ -888,33 +960,67 @@ function readShowsFile(file) {
   }
 }
 
-/** `page` op `show`. `env` = {cwd, exists} — injected by the tests; the real
- *  server uses its own working directory (claude's — the thread's) and the
- *  filesystem. The RESULT says plainly when nothing may open. */
+/** `page` op `show`. `env` = {cwd, exists?, inspect?} — injected by the
+ *  tests; the real server uses its own working directory (claude's — the
+ *  thread's) and the filesystem. A bare `exists` probe (older tests) reads as
+ *  "a readable text file" when it answers true.
+ *
+ *  THE RESULT IS HONEST (review of 49ebb20, #3): a folder, an oversize or a
+ *  binary file is REFUSED by name (nothing is recorded — the viewer could
+ *  not render it); a page is "opening" only if its project/page is registered
+ *  in Switchboard, which this server cannot see, so it says so; and a file
+ *  under the working directory opens only when that folder belongs to a
+ *  registry project — which this server cannot see either, so it says so.
+ *  A path FOUND under the working directory is recorded `where: "cwd"`: the
+ *  app then opens that file and never a knowledge-base doc of the same path
+ *  (review of 49ebb20, #1 — `README.md` in a repo thread opened
+ *  personal-kb/README.md). */
 function performShowOp(threadDir, args, now, env) {
   const cwd = (env && env.cwd) || process.cwd();
-  const exists = (env && env.exists) || ((p) => fs.existsSync(p));
+  const inspect =
+    (env && env.inspect) ||
+    (env && env.exists
+      ? (p) => (env.exists(p) ? { kind: "file", size: 0, text: true } : { kind: "missing", size: 0, text: false })
+      : inspectPath);
   const { address, form } = normalizeShowAddress(args.address, cwd, listViewIds(path.join(threadDir, "views")));
-  if (form === "absolute" && !exists(address)) {
-    throw new OpError(`no file at ${address} — nothing to open`);
+  let underCwd = false;
+  if (form === "absolute") {
+    const info = inspect(address);
+    if (info.kind === "missing") throw new OpError(`no file at ${address} — nothing to open`);
+    assertOpenable(address, info);
+  } else if (form === "path") {
+    const info = inspect(path.join(cwd, address));
+    if (info.kind !== "missing") {
+      assertOpenable(address, info);
+      underCwd = true;
+    }
   }
   const file = path.join(threadDir, "shows.json");
   const shows = readShowsFile(file);
   const show = { id: nextId(shows, "o"), address, at: new Date(now).toISOString() };
+  if (underCwd) show.where = "cwd";
   const next = { version: 1, shows: [show, ...shows].slice(0, SHOW_CAP) };
   fs.mkdirSync(threadDir, { recursive: true });
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(next, null, 2));
   fs.renameSync(tmp, file);
   const opening = `${address} is opening in the panel beside the terminal.`;
-  const message =
-    form === "view" || form === "surface"
-      ? opening
-      : form === "absolute"
-        ? `Recorded — but ${address} is outside this thread's working directory, so it opens ONLY if it sits inside the knowledge base; otherwise nothing opens.`
-        : exists(path.join(cwd, address))
-          ? opening
-          : `Recorded — but ${address} is not a file under this thread's working directory, so it opens ONLY if Switchboard can resolve it as a knowledge-base doc (a path relative to the knowledge-base root) or a file in this thread's project; otherwise nothing opens.`;
+  let message;
+  if (form === "view") {
+    message = opening;
+  } else if (form === "surface") {
+    message =
+      `${address} opens in the panel beside the terminal if it names a page Switchboard has registered ` +
+      "(this server cannot see that list — an unregistered project or page opens nothing).";
+  } else if (form === "absolute") {
+    message = `Recorded — but ${address} is outside this thread's working directory, so it opens ONLY if it sits inside the knowledge base; otherwise nothing opens.`;
+  } else if (underCwd) {
+    message =
+      `${address} opens in the panel beside the terminal when this thread's folder belongs to a registry project ` +
+      "(every registered repo does; a folder outside them opens nothing unless it is inside the knowledge base).";
+  } else {
+    message = `Recorded — but ${address} is not a file under this thread's working directory, so it opens ONLY if Switchboard can resolve it as a knowledge-base doc (a path relative to the knowledge-base root) or a file in this thread's project; otherwise nothing opens.`;
+  }
   return { show, message };
 }
 
@@ -2144,7 +2250,10 @@ const PAGE_TOOL = {
     "path relative to the knowledge-base root (switchboard/features/x/requirements.md); a " +
     "file path relative to this thread's working directory (specs/design.md renders as a " +
     "document, mock.html as a page); surface:<project>/<page>?key=value; view:<id> (add " +
-    "#h:<heading-slug> for a report heading). A ticket key or a URL opens nothing. The " +
+    "#h:<heading-slug> for a report heading). A file that exists under your working " +
+    "directory is always THAT file — a knowledge-base doc of the same path never shadows it. " +
+    "A folder, a binary file or one over 512 KB is refused (the viewer renders text). " +
+    "A ticket key or a URL opens nothing. The " +
     "result says when the address may not resolve — then nothing opens. The last 20 shows " +
     "are kept; a new report is made with the view tool (kind report), not this op. " +
     "KEEP THE BRIEF CURRENT — rewrite it at every seam (a finding lands, a decision is made, " +
@@ -2500,6 +2609,9 @@ module.exports = {
   performShowOp,
   SHOW_CAP,
   SHOW_ADDRESS_CAP,
+  SHOW_READ_CAP,
+  surfaceQueryOk,
+  inspectPath,
   buildViewSpec,
   buildViewSet,
   performViewOp,

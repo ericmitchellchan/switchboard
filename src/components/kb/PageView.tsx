@@ -126,10 +126,9 @@ import {
   takePageFocus,
   peekPageFocus,
 } from "../../lib/pageStore";
-import { nextThingFor, openableAddressIn } from "../../lib/nextThing";
+import { nextThingFor, openableAddressIn, resolveOpenable } from "../../lib/nextThing";
 import type { AnswerNote, DismissedQuestion, InboxPost, PageAnswer, PageBrief, PageItem, PageQuestion, RenderedPage, SettledQuestion } from "../../lib/pageStore";
 import { TEXT_LINK } from "../kit";
-import { parseSurfaceAddress } from "../../lib/surfaceParams";
 import { answerQuestion, openArtifact, openInPanel, getActiveTabSession, submitToThread } from "../../lib/panelStore";
 import type { OpenableArtifact } from "../../lib/panelStore";
 import { batchSendTarget, BATCH_NOT_LIVE } from "../../lib/viewNotes";
@@ -140,7 +139,6 @@ import {
   latchViewKey,
   mergeScannedEvidence,
   mergeViewEvidence,
-  resolveDocTarget,
   viewAnchorOfAddress,
 } from "../../lib/evidenceModel";
 import { requestReportAnchor } from "../../lib/reportStore";
@@ -148,7 +146,7 @@ import type { EvidenceGroupId, ThreadViewRow } from "../../lib/evidenceModel";
 import { useScannedEvidence } from "../../lib/evidenceScan";
 import { getCachedDocList, noteKbMiss, refreshDocList, resolveWithFreshKbDocs, subscribeDocList } from "../../lib/kb";
 import { explorerProjects, listThreadViews, markThreadAnswersSent, readThreadView, retractThreadEvidence } from "../../lib/ipc";
-import { projectKeyForDir } from "../../lib/explorer";
+import { projectPlaceForDir } from "../../lib/explorer";
 import { getThreads } from "../../lib/threadStore";
 import { parseViewSpec } from "../../lib/viewStore";
 import { OptionRow } from "./OptionRow";
@@ -386,40 +384,55 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
   const activeGroup = groups.find((g) => g.id === groupId) ?? groups[0] ?? null;
 
   // The doc/file link rule's context: the REAL KB doc list (a KB row must
-  // exist to link) and the thread's own project key (a repo path resolves
-  // syntactically against it — evidenceModel.resolveDocTarget).
+  // exist to link) and the thread's place in its project (a repo path
+  // resolves syntactically against it — nextThing.resolveOpenable).
   // SWIT-101: the list is SUBSCRIBED, not seeded once — a doc created after it
   // loaded missed forever and opened as a missing repo file. Every resolve
   // below reports a miss to `noteKbMiss` (one coalesced kb_list per NEW
   // address, remembered), and whoever refreshes the list — this page, the
   // turn-end hook, an agent `show` — re-renders it here.
   const kbDocs: readonly string[] | null = useSyncExternalStore(subscribeDocList, getCachedDocList);
-  const [projectKey, setProjectKey] = useState<string | null>(null);
+  // ONE resolver (review of 49ebb20, #7): the thread's PLACE in its project —
+  // the key AND the prefix that re-bases a path written relative to the
+  // thread's working directory onto the project root (a thread in a
+  // subdirectory, a multi-repo project) — the same `projectPlaceForDir` the
+  // agent's `show` and the turn-end hook use, so an address opens the same
+  // file from every surface.
+  const [place, setPlace] = useState<{ key: string; prefix: string } | null>(null);
   useEffect(() => {
     if (getCachedDocList() !== null) return;
     refreshDocList().catch(() => {});
   }, []);
   useEffect(() => {
     let cancelled = false;
-    setProjectKey(null);
+    setPlace(null);
     const dir = getThreads().find((t) => t.id === threadId)?.workingDir;
     if (!dir) return;
     explorerProjects()
       .then((projects) => {
-        if (!cancelled) setProjectKey(projectKeyForDir(projects, dir));
+        if (!cancelled) setPlace(projectPlaceForDir(projects, dir));
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
   }, [threadId]);
-  const linkTarget = (address: string): OpenableArtifact | null =>
-    parseSurfaceAddress(address) ?? resolveDocTarget(address, kbDocs, projectKey, noteKbMiss);
+  const resolveCtx = useMemo(
+    () => ({
+      threadId,
+      kbDocs,
+      projectKey: place?.key ?? null,
+      pathPrefix: place?.prefix ?? "",
+      onKbMiss: noteKbMiss,
+    }),
+    [threadId, kbDocs, place]
+  );
+  const linkTarget = (address: string): OpenableArtifact | null => resolveOpenable(address, resolveCtx);
   // The CLICK re-asks (SWIT-101): a row that fell back to a repo file may
   // name a KB doc written after its one remembered miss — a one-shot open
   // refreshes the list once and resolves again before anything opens.
   const lateTarget = (address: string): Promise<OpenableArtifact | null> =>
-    resolveWithFreshKbDocs((docs, onKbMiss) => resolveDocTarget(address, docs, projectKey, onKbMiss));
+    resolveWithFreshKbDocs((docs, onKbMiss) => resolveOpenable(address, { ...resolveCtx, kbDocs: docs, onKbMiss }));
   // A `view:` address opens the view artifact in the ONE preview slot beside
   // this thread (SWIT-69) — a view has no full-width screen, so no modifier.
   const openViewAddress = useCallback(
@@ -446,8 +459,8 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
   // the hook cannot disagree about WHAT is next; a click here opens it
   // focused where the hook opens it behind.
   const nextThing = useMemo(
-    () => nextThingFor(page, { threadId, kbDocs, projectKey, onKbMiss: noteKbMiss }),
-    [page, threadId, kbDocs, projectKey]
+    () => nextThingFor(page, resolveCtx),
+    [page, resolveCtx]
   );
   const rootRef = useRef<HTMLDivElement | null>(null);
   const scrollToBlock = useCallback((block: string) => {
@@ -507,13 +520,18 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
     return "var(--text-secondary)";
   };
 
-  const renderAddress = (address: string, opts: { accent?: boolean; fontSize?: number } = {}) => {
+  const renderAddress = (address: string, opts: { accent?: boolean; fontSize?: number; resolveAs?: string | null } = {}) => {
     const { accent = false, fontSize } = opts;
-    const color = accent ? "var(--accent)" : addressColor(address);
+    // `resolveAs`: the token INSIDE the printed text that resolved (the
+    // `start here →` line prints the turn's reviewFirst verbatim, and a click
+    // must re-resolve the token nextThingFor found in it, not the whole
+    // string — review of 49ebb20, nit).
+    const key = opts.resolveAs ?? address;
+    const color = accent ? "var(--accent)" : addressColor(key);
     // SWIT-73: `view:<id>#h:<slug>` names a heading INSIDE a report — the
     // anchor rides reportStore's one-shot; the open is the ordinary view
     // open. A malformed fragment made the whole address plain upstream.
-    const viewHit = viewAnchorOfAddress(address);
+    const viewHit = viewAnchorOfAddress(key);
     if (viewHit !== null) {
       return (
         <AddressButton
@@ -529,12 +547,12 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
         />
       );
     }
-    const target = linkTarget(address);
+    const target = linkTarget(key);
     return (
       <EvidenceAddress
         address={address}
         target={target}
-        lateTarget={target?.kind === "repo-file" ? () => lateTarget(address) : undefined}
+        lateTarget={target?.kind === "repo-file" ? () => lateTarget(key) : undefined}
         accent={accent}
         color={color}
         fontSize={fontSize}
@@ -547,7 +565,7 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
   // openableAddressIn) — or null when the item names nothing openable, which
   // leaves the LINK column empty rather than printing a dead address.
   const itemLink = (item: PageItem) => {
-    const hit = openableAddressIn(`${item.title} ${item.note ?? ""}`, { threadId, kbDocs, projectKey, onKbMiss: noteKbMiss });
+    const hit = openableAddressIn(`${item.title} ${item.note ?? ""}`, resolveCtx);
     return hit ? renderAddress(hit.address, { fontSize: 10.5 }) : null;
   };
 
@@ -583,7 +601,7 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
         {nextThing?.why === "review" ? (
           <div style={{ display: "flex", gap: 6, alignItems: "baseline", minWidth: 0, fontFamily: MONO, fontSize: 11, marginTop: 2 }}>
             <span style={{ flex: "none", color: "var(--text-faint)" }}>start here →</span>
-            {renderAddress(nextThing.address, { accent: true })}
+            {renderAddress(nextThing.address, { accent: true, resolveAs: nextThing.token })}
           </div>
         ) : nextThing ? (
           <div style={{ display: "flex", gap: 6, alignItems: "baseline", minWidth: 0, fontFamily: MONO, fontSize: 11, marginTop: 2 }}>

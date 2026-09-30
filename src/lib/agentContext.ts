@@ -346,6 +346,73 @@ export function buildSpawnContext(
   return sanitizeForTypedLine(panel ? `${panel} ${backlog}` : backlog, SPAWN_CONTEXT_MAX);
 }
 
+/** The spawn context as PARTS (review of 49ebb20, #4), for the launch line's
+ *  budget-aware join (`assembleLaunchContext`): the panel sentence, the same
+ *  claim WITHOUT its detail (the pin clause, the surface pin instructions —
+ *  null when there is nothing to shorten), and the backlog sentence. */
+export type SpawnContextParts = { panel: string | null; panelShort: string | null; backlog: string };
+
+export function buildSpawnContextParts(
+  artifact: Artifact | null,
+  pinCount: number,
+  opts: RefOptions = {}
+): SpawnContextParts {
+  const panel = buildPanelSpawnContext(artifact, pinCount, opts);
+  let panelShort: string | null = null;
+  if (panel && artifact && artifact.kind !== "question" && artifact.kind !== "session") {
+    const ref = artifactRef(artifact, opts);
+    const short = sanitizeForTypedLine(`Workstation context: panel shows ${ref}.`, SPAWN_CONTEXT_MAX);
+    panelShort = ref.length > 0 && short.length < panel.length ? short : null;
+  }
+  return { panel, panelShort, backlog: buildBacklogItemLine(opts.backlogItem) };
+}
+
+/** THE LAUNCH LINE'S BUDGET (review of 49ebb20, #4). SPAWN_CONTEXT_MAX caps
+ *  the JOINED `--append-system-prompt` text — the page contract (+ the brief
+ *  clause) + the standing decisions + the panel context + the backlog item —
+ *  not any one builder, and the old join cut its TAIL: at worst the backlog
+ *  instruction lost `itemId <id>`, the one thing that makes it actionable.
+ *  Now the join is budget-aware and gives ground from the LEAST important
+ *  part first:
+ *    1. everything whole;
+ *    2. the panel context without its detail (`panelShort` — the claim and
+ *       the ref, no pin clause or pin instructions);
+ *    3. fewer decision labels (3 → 2 → 1 → 0: the count and the rule stay);
+ *    4. the panel context dropped;
+ *    5. the decisions clause dropped.
+ *  The page contract (with its brief clause) and the backlog sentence are
+ *  never cut — their caps keep them well under the budget together (the
+ *  tests assert the worst case). Order on the line is unchanged: contract,
+ *  brief, decisions, panel, backlog. Null when there is nothing to say.
+ *  `contract` = the page tools attached (a sentence about a tool that does
+ *  not exist would be a lie — no contract, no brief, no decisions). */
+export type LaunchContextParts = SpawnContextParts & {
+  contract: boolean;
+  hasBrief: boolean;
+  decisions: StandingDecisions | null;
+};
+
+export function assembleLaunchContext(parts: LaunchContextParts, max: number = SPAWN_CONTEXT_MAX): string | null {
+  const head = parts.contract ? pageContractHead(parts.hasBrief) : "";
+  const decisionsFor = (named: number) => (parts.contract ? standingDecisionsClause(parts.decisions, named).trim() : "");
+  const join = (decisions: string, panel: string | null) =>
+    sanitizeForTypedLine(
+      [head, decisions, panel ?? "", parts.backlog].filter((s) => s.length > 0).join(" "),
+      Number.MAX_SAFE_INTEGER
+    );
+  const fits = (line: string) => Array.from(line).length <= max;
+  const panelShort = parts.panelShort ?? parts.panel;
+  const attempts: string[] = [join(decisionsFor(DECISION_LABELS_NAMED), parts.panel)];
+  for (let named = DECISION_LABELS_NAMED; named >= 0; named -= 1) attempts.push(join(decisionsFor(named), panelShort));
+  attempts.push(join(decisionsFor(0), null), join("", null));
+  for (const line of attempts) {
+    if (fits(line)) return line.length > 0 ? line : null;
+  }
+  // Unreachable with today's caps (asserted); a hard cap all the same.
+  const last = sanitizeForTypedLine(attempts[attempts.length - 1], max);
+  return last.length > 0 ? last : null;
+}
+
 /** The panel half of the spawn one-liner (everything before SWIT-64). */
 function buildPanelSpawnContext(
   artifact: Artifact | null,
@@ -523,12 +590,18 @@ export function getScrollbackRootForContext(): string | null {
  *  Deliberately SHORT — the full behavioural contract (R2 language rules, R3
  *  tab rules) rides in the page tool's own DESCRIPTION, which travels over
  *  MCP with no shell-line limits and refreshes every session; this line only
- *  tells the agent the page exists and to use the tool. Composed FIRST in
- *  the joined context so a long panel ref truncates its own tail, never this. */
+ *  tells the agent the page exists and to use the tool. On the launch line it
+ *  is composed through `assembleLaunchContext`, which never cuts it. */
 export function buildPageContractLine(
   decisions: StandingDecisions | null = null,
   opts: { hasBrief?: boolean } = {}
 ): string {
+  return sanitizeForTypedLine(pageContractHead(opts.hasBrief === true) + standingDecisionsClause(decisions), SPAWN_CONTEXT_MAX);
+}
+
+/** The contract sentences + (SWIT-104) the brief clause — the part of the
+ *  launch line that is never cut. */
+function pageContractHead(hasBrief: boolean): string {
   const base =
     "This thread has a PAGE beside the terminal — the one surface the user reads. " +
     "After each turn of work, record what happened with the page tool and keep its " +
@@ -541,8 +614,7 @@ export function buildPageContractLine(
     PANEL_REPORT_SENTENCE;
   // SWIT-104: the brief clause rides BEFORE the standing decisions — "read
   // the page first" is the instruction the rest depends on.
-  const brief = opts.hasBrief === true ? ` ${BRIEF_READ_SENTENCE}` : "";
-  return sanitizeForTypedLine(base + brief + standingDecisionsClause(decisions), SPAWN_CONTEXT_MAX);
+  return hasBrief ? `${base} ${BRIEF_READ_SENTENCE}` : base;
 }
 
 /** SWIT-104: THE PAGE ALREADY HOLDS A BRIEF. "Refresh my memory… where
@@ -590,11 +662,11 @@ export const DECISION_LABEL_MAX = 80;
  *  with zero decisions — a sentence about nothing is noise. Each label is
  *  sanitized on its own before joining so a label's cut never eats the
  *  separator. */
-function standingDecisionsClause(decisions: StandingDecisions | null): string {
+function standingDecisionsClause(decisions: StandingDecisions | null, labelsNamed: number = DECISION_LABELS_NAMED): string {
   if (!decisions || !Number.isFinite(decisions.count) || decisions.count <= 0) return "";
   const count = Math.trunc(decisions.count);
   const named = decisions.labels
-    .slice(0, DECISION_LABELS_NAMED)
+    .slice(0, Math.max(0, labelsNamed))
     .map((l) => sanitizeForTypedLine(l, DECISION_LABEL_MAX))
     .filter((l) => l.length > 0);
   const newest = named.length > 0 ? `; the newest: ${named.join("; ")}` : "";

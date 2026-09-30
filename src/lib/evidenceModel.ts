@@ -275,18 +275,45 @@ export function mergeViewEvidence(
  *  remembered), a one-shot open runs inside `kb.resolveWithFreshKbDocs`
  *  (refresh once, resolve again). Every resolver path — Evidence rows,
  *  reviewFirst, To do links, the turn-end hook, the agent's `show` — comes
- *  through here, so they all get it. */
+ *  through here, so they all get it.
+ *
+ *  A miss is reported ONLY for an address that could BE a KB doc
+ *  (`couldBeKbDoc`: the KB lists nothing but DOC_EXTENSIONS files) — any
+ *  dotted token in a turn line (`Cargo.toml`, `v0.16.0`, `e.g`) is file-
+ *  shaped, and each used to cost a `kb_list` on the turn-end path (review of
+ *  49ebb20, #5).
+ *
+ *  `pathPrefix` (review of 49ebb20, #7 — ONE resolver) re-bases a repo path
+ *  from the THREAD'S WORKING DIRECTORY onto the project root
+ *  (`explorer.projectPlaceForDir`): `apps/desktop/` for a thread in a
+ *  subdirectory, `<repo>/` in a multi-repo project, `""` at a single-repo
+ *  root. Every resolver path passes it, so an address resolves the same way
+ *  in an Evidence row, `start here`, the To do link, the turn-end open and
+ *  the agent's `show`. Never applied to a KB doc. */
 export function resolveDocTarget(
   address: string,
   kbDocs: readonly string[] | null,
   projectKey: string | null,
-  onKbMiss?: (address: string) => void
+  onKbMiss?: (address: string) => void,
+  pathPrefix: string = ""
 ): OpenableArtifact | null {
   const kind = evidenceKindOf(address);
   if (kind !== "doc" && kind !== "file") return null;
   const a = address.trim();
   if (kbDocs !== null && kbDocs.includes(a)) return { kind: "kb-doc", path: a };
-  if (kbDocs !== null) onKbMiss?.(a);
-  if (projectKey !== null && a.includes("/")) return { kind: "repo-file", project: projectKey, path: a };
+  if (kbDocs !== null && couldBeKbDoc(a)) onKbMiss?.(a);
+  if (projectKey !== null && a.includes("/")) return { kind: "repo-file", project: projectKey, path: `${pathPrefix}${a}` };
   return null;
+}
+
+/** The extensions the knowledge base LISTS — mirrors kb.rs `DOC_EXTENSIONS`
+ *  (change one, change the other). A path with any other extension cannot be
+ *  in the KB doc list, so missing it there is not news. */
+export const KB_DOC_EXTENSIONS: readonly string[] = ["md", "html", "htm", "jsx", "tsx", "mmd", "json"];
+
+/** Could this address be a KB doc the cached list has not caught up with?
+ *  Only when its extension is one the KB lists. Pure. */
+export function couldBeKbDoc(address: string): boolean {
+  const m = /\.([A-Za-z0-9]{1,8})$/.exec(address.trim());
+  return m !== null && KB_DOC_EXTENSIONS.includes(m[1].toLowerCase());
 }
