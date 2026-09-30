@@ -29,10 +29,11 @@
 //
 // AGENT SESSIONS ONLY, for the rewrite and the nudge. Ky's terminals only ever
 // run claude; ours also run plain shells and log tails, which have no scars to
-// wipe and would only blink. `agentSeen` (sticky) is what tells them apart —
-// the status detector's agent detection or claude's frame on screen at a
-// settle. A plain shell still gets the resync: that is about xterm, not
-// claude.
+// wipe and would only blink. `agentSeen` is what tells them apart: claude's
+// frame on the live screen makes a session one at once, and
+// AGENT_ABSENT_SETTLES settles in a row without it (claude exited, `pnpm dev`
+// took the tab) make it a shell again. A plain shell still gets the resync:
+// that is about xterm, not claude.
 //
 // NOT PORTED from Ky's settle: the driven-turn `pinBottom` park. Ky parks the
 // pane at the prompt when the user drove the turn; here the host FOLLOWS the
@@ -60,6 +61,27 @@ export const REPAINT_SETTLE_MS = 1_500;
  *  back to the prompt. */
 export const REPAINT_DWELL_MS = 600;
 
+/** A rewrite whose parse callback has not come back in this long is abandoned:
+ *  the pane is unhidden, the flag cleared and a WARN logged. The parse is tens
+ *  of ms (a full 10 000-line buffer a few hundred); only a lost callback gets
+ *  here, and without it the pane would stay invisible while the scrollback
+ *  save, status detection and the host follow — all gated on the flag — stop. */
+export const REWRITE_WATCHDOG_MS = 5_000;
+
+/** A snapshot longer than this (UTF-16 units) is not rewritten: the scroll
+ *  range is re-synced instead and the dirty count dropped, so a huge
+ *  scrollback does not pay a long hidden parse every turn. 10 000 lines × 100
+ *  columns of plain text is ~1M; colour runs can double it. */
+export const REWRITE_MAX_SNAPSHOT = 4_000_000;
+
+/** A parse slower than this is logged as a WARN — the number to judge the cap by. */
+export const REWRITE_SLOW_MS = 250;
+
+/** Consecutive settles with no claude frame on the live screen before a session
+ *  stops counting as an agent session (claude exited; a shell or a `pnpm dev`
+ *  log owns the tab now). */
+export const AGENT_ABSENT_SETTLES = 3;
+
 /** The slice of a live terminal the settle works with. Structural, so tests
  *  pass a plain object; the registry builds the real one over xterm. */
 export type RepaintTerminal = {
@@ -86,7 +108,11 @@ export type RepaintTerminal = {
   focus(): void;
   /** The WHOLE buffer, modes included — what a reset must put back. */
   serialize(): string;
-  /** Hide/show the terminal element for the parse. */
+  /** Bracketed-paste mode as the program set it — read BEFORE the reset,
+   *  which turns it off until the snapshot's parse re-arms it. */
+  bracketedPaste?(): boolean;
+  /** Make the terminal element invisible (or visible again) for the parse,
+   *  WITHOUT taking focus from it. */
   setHidden(hidden: boolean): void;
   reset(): void;
   resize(cols: number, rows: number): void;
@@ -133,19 +159,29 @@ type RepaintState = {
    *  the reader-side ones (scrolled up, wheel moving, selecting) for the dwell
    *  at the bottom; the rest for the next settle or the next layout change. */
   pendingWhy: RepaintDeferWhy | null;
-  /** A rewrite is mutating the terminal, through its async parse. */
+  /** A rewrite is mutating the terminal — through its async parse and, on
+   *  purpose, until the microtask after its write callback (see rewrite()). */
   rewriting: boolean;
+  /** Increments per rewrite; a callback or watchdog acts only on its own. */
+  rewriteSeq: number;
+  watchdog: ReturnType<typeof setTimeout> | null;
+  /** While rewriting: the snapshot (what the terminal WAS and is about to be
+   *  again) and its bracketed-paste mode, for readers that cannot wait. */
+  snapshot: string | null;
+  bracketedAtSnapshot: boolean | null;
+  /** Work that must not meet the half-parsed terminal (a paste). */
+  afterRewrite: Array<() => void>;
   /** When the reader's wheel last moved over this terminal. */
   lastWheelAt: number;
   /** When the last narrow-frame nudge fired. */
   narrowNudgeAt: number;
   dwellTimer: ReturnType<typeof setTimeout> | null;
-  /** An agent (claude) has drawn in this session — sticky. The rewrite and
-   *  the nudge are for such sessions only; a plain shell gets the resync and
-   *  nothing else (repaintPlan's `agent`). Set by the status detector's agent
-   *  detection (`noteRepaintAgent`) or by claude's frame being on screen at a
-   *  settle, whichever comes first. */
+  /** claude's frame is (or was, within AGENT_ABSENT_SETTLES settles) on this
+   *  session's screen. The rewrite and the nudge are for such sessions only; a
+   *  plain shell gets the resync and nothing else (repaintPlan's `agent`). */
   agentSeen: boolean;
+  /** Settles in a row that showed no claude frame. */
+  agentAbsentSettles: number;
 };
 
 const sessions = new Map<string, RepaintState>();
@@ -160,36 +196,62 @@ function stateFor(sessionId: string): RepaintState {
       pending: false,
       pendingWhy: null,
       rewriting: false,
+      rewriteSeq: 0,
+      watchdog: null,
+      snapshot: null,
+      bracketedAtSnapshot: null,
+      afterRewrite: [],
       lastWheelAt: 0,
       narrowNudgeAt: 0,
       dwellTimer: null,
       agentSeen: false,
+      agentAbsentSettles: 0,
     };
     sessions.set(sessionId, s);
   }
   return s;
 }
 
-/** The status detector saw an agent in this session (its first non-idle
- *  status — a plain shell never leaves idle). Sticky until the session is
- *  forgotten. */
-export function noteRepaintAgent(sessionId: string): void {
-  const s = stateFor(sessionId);
-  if (s.agentSeen) return;
-  s.agentSeen = true;
-  log.debug(`repaint: agent seen id=${sessionId} by=status`);
+/** Is claude's frame on the live screen? (False on a read failure.) */
+function screenShowsAgent(term: RepaintTerminal): boolean {
+  try {
+    return agentOnScreen(term);
+  } catch {
+    return false;
+  }
 }
 
-/** The other way in: claude's frame is on the live screen right now. */
-function noteAgentOnScreen(sessionId: string, s: RepaintState, term: RepaintTerminal): void {
-  if (s.agentSeen) return;
-  try {
-    if (!agentOnScreen(term)) return;
-  } catch {
+/** A settle's verdict on whether this is an AGENT session. Seen on screen →
+ *  yes, at once. Not seen → still yes until AGENT_ABSENT_SETTLES settles in a
+ *  row have shown no claude frame: claude exited and a shell or a log tail
+ *  owns the tab, which has no scars to wipe and would only blink. The status
+ *  detector is deliberately NOT an input: its agent detection is sticky, so
+ *  after claude exits every burst of shell output reads as a running agent. */
+function trackAgentAtSettle(sessionId: string, s: RepaintState, term: RepaintTerminal): void {
+  if (screenShowsAgent(term)) {
+    if (!s.agentSeen) log.debug(`repaint: agent seen id=${sessionId}`);
+    s.agentSeen = true;
+    s.agentAbsentSettles = 0;
     return;
   }
+  if (!s.agentSeen) return;
+  s.agentAbsentSettles += 1;
+  if (s.agentAbsentSettles >= AGENT_ABSENT_SETTLES) {
+    s.agentSeen = false;
+    s.agentAbsentSettles = 0;
+    log.info(
+      `repaint: agent gone id=${sessionId} — no claude frame for ${AGENT_ABSENT_SETTLES} settles; rewrites and nudges stop`
+    );
+  }
+}
+
+/** Outside a settle (a pane resize, a show): claude's frame on screen makes it
+ *  an agent session; its absence proves nothing there. */
+function noteAgentOnScreen(sessionId: string, s: RepaintState, term: RepaintTerminal): void {
+  if (s.agentSeen || !screenShowsAgent(term)) return;
   s.agentSeen = true;
-  log.debug(`repaint: agent seen id=${sessionId} by=screen`);
+  s.agentAbsentSettles = 0;
+  log.debug(`repaint: agent seen id=${sessionId}`);
 }
 
 /** Every LIVE PTY chunk written into the session's terminal: count it and
@@ -243,6 +305,47 @@ export function isRepaintRewriting(sessionId: string): boolean {
   return sessions.get(sessionId)?.rewriting === true;
 }
 
+/** While a rewrite is in flight: the snapshot it took — the buffer as it was
+ *  and is about to be again. A reader that must hand the buffer on NOW (the
+ *  floating window's handoff) uses it instead of the half-parsed terminal.
+ *  Null when no rewrite is in flight. */
+export function repaintSnapshot(sessionId: string): string | null {
+  const s = sessions.get(sessionId);
+  return s?.rewriting ? s.snapshot : null;
+}
+
+/** While a rewrite is in flight: the bracketed-paste mode the program had set
+ *  (the reset turns it off until the parse re-arms it). Null otherwise — read
+ *  the terminal. */
+export function repaintBracketedPaste(sessionId: string): boolean | null {
+  const s = sessions.get(sessionId);
+  return s?.rewriting ? s.bracketedAtSnapshot : null;
+}
+
+/** Run `fn` now — or, while a rewrite is parsing, once it is done, abandoned
+ *  or forgotten. For work that must not meet the reset terminal: xterm's paste
+ *  reads bracketed-paste mode, which reads OFF between the reset and the
+ *  parse, and a multi-line paste then goes to claude as several Enters. */
+export function whenRepaintIdle(sessionId: string, fn: () => void): void {
+  const s = sessions.get(sessionId);
+  if (!s?.rewriting) {
+    fn();
+    return;
+  }
+  s.afterRewrite.push(fn);
+}
+
+function flushAfterRewrite(sessionId: string, s: RepaintState): void {
+  const queued = s.afterRewrite.splice(0);
+  for (const fn of queued) {
+    try {
+      fn();
+    } catch (err) {
+      log.warn(`repaint: deferred work failed id=${sessionId}: ${err}`);
+    }
+  }
+}
+
 /** Output bytes since the last clean rewrite (0 for an unknown session). */
 export function repaintDirtyBytes(sessionId: string): number {
   return sessions.get(sessionId)?.dirtyBytes ?? 0;
@@ -256,6 +359,10 @@ export function forgetRepaint(sessionId: string): void {
   if (s.settleTimer) clearTimeout(s.settleTimer);
   cancelDwell(s);
   sessions.delete(sessionId);
+  // A paste queued behind a rewrite is still the user's: it goes now. The
+  // watchdog stays armed on purpose — if the rewrite's callback never comes,
+  // it is what unhides the element.
+  flushAfterRewrite(sessionId, s);
 }
 
 /** Is the pending repaint one the reader coming back to the bottom can
@@ -311,7 +418,7 @@ function settle(sessionId: string): void {
     log.warn(`repaint: onSettle failed id=${sessionId}: ${err}`);
   }
 
-  noteAgentOnScreen(sessionId, s, term);
+  trackAgentAtSettle(sessionId, s, term);
 
   // The narrow-frame read comes FIRST, off the intact screen: a rewrite
   // starting below resets the buffer synchronously, and the detector would
@@ -423,7 +530,18 @@ function repaint(sessionId: string, cause: string): void {
  *  HIDDEN while it runs: the reset collapses the viewport to line 1 and the
  *  replay scrolls the whole session past, which a reader at the bottom sees
  *  as "the thread snapped to the top". The parse is tens of ms, so hiding
- *  costs a frame or two of pane background.
+ *  costs a frame or two of pane background. The hide is OPACITY, not
+ *  visibility (the registry's `setHidden`): a visibility-hidden element
+ *  cannot hold focus, so the helper textarea blurred to <body> and keystrokes
+ *  typed during the parse went nowhere; an opacity-0 one keeps it, and looks
+ *  exactly the same (the pane shows its own background either way).
+ *
+ *  WHAT A RESET TAKES THAT THE SNAPSHOT DOES NOT PUT BACK, measured or read in
+ *  xterm 5.5: the mouse ENCODING (SGR ?1006 / ?1016 — the addon re-arms the
+ *  tracking mode but not the encoding; the registry's serialize appends it),
+ *  the texture atlas (reset fires onBufferChange, which clears it — it is
+ *  rebuilt on the next frame) and any search highlights (Ctrl+F's decorations
+ *  are cleared; searching again finds the same text). Accepted.
  *
  *  THE WHOLE BUFFER, no scrollback cap — a capped snapshot silently destroys
  *  everything above the cap (the old widen reflow kept 3000 of 10000 lines). */
@@ -437,16 +555,61 @@ function rewrite(
 ): void {
   const startedAt = Date.now();
   const dirtyBefore = s.dirtyBytes;
-  s.rewriting = true;
+  let snap: string;
   try {
-    // Focus is a casualty of the hide: visibility:hidden on an ancestor of
-    // the focused element (xterm's helper textarea) blurs it to <body>, and
-    // nothing restores it. Record BEFORE hiding.
-    const hadFocus = term.hasFocus();
-    const snap = term.serialize();
-    log.info(
-      `repaint: rewrite begin id=${sessionId} cause=${cause} dirtyBytes=${dirtyBefore} grid=${term.cols}x${term.rows}->${cols}x${rows} snapBytes=${snap.length}`
+    snap = term.serialize();
+  } catch (err) {
+    log.warn(`repaint: rewrite failed id=${sessionId} cause=${cause}: ${err}`);
+    return;
+  }
+  // A buffer too large to re-lay cheaply: resync instead, and drop the dirty
+  // count so every settle does not pay the serialize again.
+  if (snap.length > REWRITE_MAX_SNAPSHOT) {
+    s.dirtyBytes = 0;
+    log.warn(
+      `repaint: rewrite skipped id=${sessionId} cause=${cause} snapBytes=${snap.length} over ${REWRITE_MAX_SNAPSHOT}`
     );
+    io?.resyncViewport(sessionId, cause);
+    return;
+  }
+
+  const seq = ++s.rewriteSeq;
+  s.rewriting = true;
+  s.snapshot = snap;
+  s.bracketedAtSnapshot = safeRead(() => term.bracketedPaste?.() ?? null, null);
+  // Recorded BEFORE hiding: the hide is opacity (the element keeps focus, so
+  // keystrokes still reach the PTY during the parse); if focus is lost anyway
+  // it is given back below.
+  const hadFocus = safeRead(() => term.hasFocus(), false);
+  log.info(
+    `repaint: rewrite begin id=${sessionId} cause=${cause} dirtyBytes=${dirtyBefore} grid=${term.cols}x${term.rows}->${cols}x${rows} snapBytes=${snap.length}`
+  );
+
+  // The flag, the snapshot and the deferred work end together — and never
+  // twice: whichever of the callback's microtask and the watchdog comes first.
+  const finish = (why: "done" | "watchdog" | "failed"): void => {
+    if (s.rewriteSeq !== seq || !s.rewriting) return;
+    if (s.watchdog) clearTimeout(s.watchdog);
+    s.watchdog = null;
+    s.rewriting = false;
+    s.snapshot = null;
+    s.bracketedAtSnapshot = null;
+    if (why !== "done") log.warn(`repaint: rewrite ${why} id=${sessionId} cause=${cause} — unhidden, flag cleared`);
+    flushAfterRewrite(sessionId, s);
+  };
+
+  s.watchdog = setTimeout(() => {
+    s.watchdog = null;
+    if (s.rewriteSeq !== seq || !s.rewriting) return;
+    try {
+      term.setHidden(false);
+    } catch {
+      /* the element is gone */
+    }
+    finish("watchdog");
+  }, REWRITE_WATCHDOG_MS);
+
+  try {
     term.setHidden(true);
     term.reset();
     if (term.cols !== cols || term.rows !== rows) term.resize(cols, rows);
@@ -455,33 +618,51 @@ function rewrite(
     // settle.
     s.dirtyBytes = 0;
     term.write(snap, () => {
-      // The parse window is async — the session can be disposed (or its
-      // terminal replaced) before this fires.
+      if (s.rewriteSeq !== seq) return; // a later rewrite owns the terminal
+      // The parse window is async — the session can be disposed (the terminal
+      // gone), or restarted in place (the same terminal, but cleanupSession
+      // forgot this state and cleared the buffer) before this fires.
       const live = io?.getTerminal(sessionId);
       const ours = !!live && live.instance === term.instance;
+      const restarted = ours && sessions.get(sessionId) !== s;
+      const parseMs = Date.now() - startedAt;
       try {
-        if (ours) {
+        if (restarted) {
+          // The snapshot parsed AFTER the restart's clear and re-laid the old
+          // transcript under the new shell. Its output is queued behind this
+          // callback, so a reset here leaves exactly what a fresh shell wants.
+          term.reset();
+          log.info(`repaint: rewrite discarded id=${sessionId} cause=${cause} — the session restarted during the parse`);
+        } else if (ours) {
           restoreAfterRewrite(sessionId, term);
           term.refresh();
           // The reset zeroed xterm's scroll-area bookkeeping and the replay
-          // rebuilt the buffer under it; xterm re-syncs by itself on its next
-          // frame, and this makes the DOM range match the buffer regardless
-          // (from buffer state — it cannot move the reader).
+          // rebuilt the buffer under it; this makes the DOM range match the
+          // buffer (from buffer state — it cannot move the reader).
           io?.resyncViewport(sessionId, "rewrite");
         }
-        log.info(
-          `repaint: rewrite done id=${sessionId} cause=${cause} parseMs=${Date.now() - startedAt} live=${ours}`
-        );
+        const line = `repaint: rewrite done id=${sessionId} cause=${cause} parseMs=${parseMs} snapBytes=${snap.length} live=${ours}`;
+        if (parseMs > REWRITE_SLOW_MS) log.warn(line);
+        else log.info(line);
       } catch (err) {
         log.warn(`repaint: restore failed id=${sessionId} cause=${cause}: ${err}`);
       } finally {
         // Unhide unconditionally — the element must never stay invisible.
         term.setHidden(false);
-        // Give back what the hide took, only if it held focus going in.
-        if (hadFocus && ours) term.focus();
-        s.rewriting = false;
-        if (ours) io?.onRewritten?.(sessionId);
+        if (hadFocus && ours && !restarted && !safeRead(() => term.hasFocus(), true)) term.focus();
+        // The re-anchor hook runs NOW, inside the callback, while the cursor
+        // is where the snapshot put it — before any output queued behind the
+        // snapshot is parsed.
+        if (ours && !restarted) io?.onRewritten?.(sessionId);
       }
+      // THE FLAG IS CLEARED ONE MICROTASK LATER, ON PURPOSE. xterm 5.5 runs a
+      // write's callback from inside the parse loop (WriteBuffer._innerWrite)
+      // and fires onWriteParsed for the whole batch only AFTER the loop — so a
+      // flag cleared here would let that batch's onWriteParsed (the
+      // snapshot's) reach the status detector as if it were output. A
+      // microtask runs after the synchronous fire and before any timer, so
+      // the batch that carried the snapshot is exactly the one withheld.
+      queueMicrotask(() => finish("done"));
     });
   } catch (err) {
     // The element is hidden before the fallible steps — never leave the pane
@@ -491,8 +672,16 @@ function rewrite(
     } catch {
       /* the element is gone */
     }
-    s.rewriting = false;
+    finish("failed");
     log.warn(`repaint: rewrite failed id=${sessionId} cause=${cause}: ${err}`);
+  }
+}
+
+function safeRead<T>(read: () => T, fallback: T): T {
+  try {
+    return read();
+  } catch {
+    return fallback;
   }
 }
 

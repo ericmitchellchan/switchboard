@@ -1,6 +1,6 @@
 import type { Session, SavedSession, SavedWorkspace } from "../types";
 import type { PaneNode } from "./paneLayout";
-import { serializeTerminal, getTerminal, isSessionDirty, clearSessionDirty } from "./terminal";
+import { serializeTerminal, isSessionDirty, clearSessionDirty } from "./terminal";
 import { capSerialized } from "./scrollbackRestore";
 import { saveScrollback, saveThreads } from "./ipc";
 import {
@@ -29,7 +29,6 @@ export function buildSavedWorkspace(
   sessionCounter: number
 ): SavedWorkspace {
   const savedSessions: SavedSession[] = sessions.map((s) => {
-    const inst = getTerminal(s.id);
     return {
       id: s.id,
       name: s.name,
@@ -37,8 +36,6 @@ export function buildSavedWorkspace(
       working_dir: s.working_dir,
       repoColor: s.repoColor,
       group: s.group,
-      cols: inst?.terminal.cols,
-      rows: inst?.terminal.rows,
     };
   });
 

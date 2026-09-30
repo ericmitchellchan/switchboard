@@ -12,8 +12,6 @@ export interface Session extends SessionInfo {
   repoColor?: string;
   group?: string;
   restoredFromId?: string;
-  cols?: number;
-  rows?: number;
 }
 
 export interface RepoConfig {
@@ -59,8 +57,9 @@ export interface SavedSession {
   working_dir: string;
   repoColor?: string;
   group?: string;
-  cols?: number;
-  rows?: number;
+  // No cols/rows since SWIT-103: every terminal is the pinned grid
+  // (lib/terminalGrid.ts). An older blob that still carries them is read
+  // tolerantly and the fields are ignored.
 }
 
 export interface SavedWorkspace {

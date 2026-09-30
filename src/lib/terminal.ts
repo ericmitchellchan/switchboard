@@ -14,7 +14,12 @@
 // anything. Showing a terminal is refresh + re-sync + land, never a resize.
 
 import { log } from "./logger";
-import { isRepaintRewriting } from "./repaintRunner";
+import {
+  isRepaintRewriting,
+  repaintBracketedPaste,
+  repaintSnapshot,
+  whenRepaintIdle,
+} from "./repaintRunner";
 import {
   getTerminal,
   getAllTerminalIds,
@@ -165,6 +170,25 @@ export function landTerminalView(
   if (opts?.focus) instance.terminal.focus();
 }
 
+/** Is bracketed-paste mode on in this session's terminal? Mid-rewrite
+ *  (SWIT-103) the reset turns every mode off until the snapshot's parse re-arms
+ *  it, so the value the program had set is read from the rewrite instead —
+ *  a multi-line composer send must not go unbracketed (each newline an Enter)
+ *  because it landed in those few ms. Undefined when there is no terminal. */
+export function bracketedPasteModeOf(sessionId: string): boolean | undefined {
+  const during = repaintBracketedPaste(sessionId);
+  if (during !== null) return during;
+  return getTerminal(sessionId)?.terminal.modes.bracketedPasteMode;
+}
+
+/** Paste into the session's terminal the way Ctrl+V does (xterm's own paste:
+ *  bracketed when the program asked for it). Mid-rewrite it waits for the
+ *  parse to finish — xterm reads bracketed-paste mode at paste time, and it
+ *  reads OFF between the reset and the parse. */
+export function pasteIntoTerminal(sessionId: string, text: string): void {
+  whenRepaintIdle(sessionId, () => getTerminal(sessionId)?.terminal.paste(text));
+}
+
 /** The user sent something from OUTSIDE the terminal (the composer): take
  *  them to the prompt — xterm's history AND the pane — the way typing into the
  *  terminal does by itself, so the echoed message is in view. */
@@ -223,6 +247,13 @@ export function serializeTerminal(sessionId: string): string | null {
 export function plainTextTerminal(sessionId: string): string | null {
   const instance = getTerminal(sessionId);
   if (!instance) return null;
+  // Mid-rewrite (SWIT-103) the buffer is reset and half re-laid: an empty or
+  // truncated transcript. Null = "no read this time" — the evidence scan
+  // waits for the next output, the transcript flush keeps the older file.
+  if (isRepaintRewriting(sessionId)) {
+    log.debug(`Skipping plain-text read for session id=${sessionId}: a rewrite is in flight`);
+    return null;
+  }
   try {
     const buf = instance.terminal.buffer.active;
     const lines: string[] = [];
@@ -262,7 +293,11 @@ export function serializeForPip(
   const instance = getTerminal(sessionId);
   if (!instance) return null;
   try {
-    const text = instance.serializeAddon.serialize();
+    // Mid-rewrite (SWIT-103) the terminal is reset and half re-laid; the
+    // rewrite's own snapshot IS the buffer as it was and is about to be
+    // again (modes included, like this serialize), and every PTY chunk the
+    // mirror receives after it lands behind it in both windows.
+    const text = repaintSnapshot(sessionId) ?? instance.serializeAddon.serialize();
     return {
       text,
       cols: instance.terminal.cols,

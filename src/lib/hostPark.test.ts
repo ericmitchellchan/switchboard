@@ -115,8 +115,13 @@ describe("isTypedInput", () => {
     expect(isTypedInput("\x03")).toBe(true);
   });
 
-  it("a paste is not typing", () => {
-    expect(isTypedInput("\x1b[200~git status\rls\x1b[201~")).toBe(false);
+  it("a paste into the terminal parks like typing — bracketed or plain", () => {
+    expect(isTypedInput("\x1b[200~git status\rls\x1b[201~")).toBe(true);
+    expect(isTypedInput("\x1b[200~\x1b[201~")).toBe(true);
+    expect(isTypedInput("pasted without brackets\r")).toBe(true);
+  });
+
+  it("nothing is not input", () => {
     expect(isTypedInput("")).toBe(false);
   });
 

@@ -42,7 +42,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { writeToSession } from "../lib/ipc";
-import { getTerminal, landTerminalAtPrompt } from "../lib/terminal";
+import { bracketedPasteModeOf, getTerminal, landTerminalAtPrompt } from "../lib/terminal";
 import { findThreadBySessionId, markChatStarted, getThreadActions } from "../lib/threadStore";
 import { saveThreadsToDisk } from "../lib/workspace";
 import { log } from "../lib/logger";
@@ -109,10 +109,11 @@ export function Composer({ sessionId }: { sessionId: string }) {
   });
 
   // Auto-grow. Height is set imperatively (not via rows) so the box tracks
-  // wrapped lines too. The pane's ResizeObserver sees the resulting container
-  // height change and drives the EXISTING fit pipeline — grow-only policy,
-  // debounce, settle pass — exactly as a divider drag does. There is no resize
-  // logic here, and there must not be.
+  // wrapped lines too. The pane gets shorter over the pinned terminal grid
+  // (SWIT-103) exactly as a divider drag makes it narrower: the pane's
+  // ResizeObserver keeps the content's bottom in view and resyncs the scroll
+  // range, and nothing resizes the terminal. There is no resize logic here,
+  // and there must not be.
   useEffect(() => {
     const ta = textareaRef.current;
     if (!ta) return;
@@ -181,7 +182,8 @@ export function Composer({ sessionId }: { sessionId: string }) {
     }
 
     const composed = composeSend(composeMessage(text, paths), {
-      bracketed: getTerminal(sessionId)?.terminal.modes.bracketedPasteMode,
+      // Read through the helper: mid-rewrite the reset reads it OFF (SWIT-103).
+      bracketed: bracketedPasteModeOf(sessionId),
     });
     // Empty / whitespace-only and nothing attached: a no-op. Never a bare Enter.
     if (!composed) return;

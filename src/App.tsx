@@ -21,7 +21,7 @@ import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
 import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, listThreadViews, readThreadFile, threadFilesStamp, writeThreadAnswer, appendConvention, writeThreadPost, saveTranscript, readBacklog, writeBacklog, takeBacklogInbox } from "./lib/ipc";
-import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, refreshAllTerminalViews, clearSessionDirty, isSessionDirty, serializeForPip, plainTextTerminal, getSessionWriteCount, setTerminalScreenVisible } from "./lib/terminal";
+import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, refreshAllTerminalViews, clearSessionDirty, isSessionDirty, serializeForPip, plainTextTerminal, getSessionWriteCount, setTerminalScreenVisible, pasteIntoTerminal } from "./lib/terminal";
 import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing, sendPipHost } from "./lib/pipBridge";
 import { bumpSessionGeneration, addSessionInputListener, getSessionGeneration } from "./lib/terminalRegistry";
 import { TERMINAL_COLS, TERMINAL_ROWS } from "./lib/terminalGrid";
@@ -987,8 +987,8 @@ export default function App() {
         void launchClaudeInSession(info.id, thread.id);
         if (opts?.renameOnCreate) {
           // NOW, not on a timer (review fix): the new pane's terminal focuses
-          // itself from more than one place (its visibility effect, the
-          // show-fit's `shouldFocus` a few frames later) and no delay is
+          // itself from more than one place (its visibility effect's
+          // `landTerminalView` focus, xterm's own focus on mount) and no delay is
           // guaranteed to land after the last of them. The title box commits
           // on blur, so it is the box that holds its ground — ThreadTitleEditor
           // ignores a blur into xterm's helper textarea that no pointer
@@ -2781,14 +2781,10 @@ export default function App() {
         return;
       }
 
-      // Paste into the focused terminal session (respects bracketed paste mode)
+      // Paste into the focused terminal session (respects bracketed paste
+      // mode; held while a turn-end rewrite is parsing — SWIT-103)
       const sessionId = effectiveActiveIdRef.current;
-      if (sessionId) {
-        const instance = getTerminal(sessionId);
-        if (instance) {
-          instance.terminal.paste(text);
-        }
-      }
+      if (sessionId) pasteIntoTerminal(sessionId, text);
     });
 
     return () => {
@@ -2919,12 +2915,7 @@ export default function App() {
           .join(" ");
 
         const sessionId = effectiveActiveIdRef.current;
-        if (sessionId) {
-          const instance = getTerminal(sessionId);
-          if (instance) {
-            instance.terminal.paste(formatted);
-          }
-        }
+        if (sessionId) pasteIntoTerminal(sessionId, formatted);
       }, DROP_CLAIM_DEFER_MS);
     });
 
@@ -3004,8 +2995,6 @@ export default function App() {
               repoColor: saved.repoColor,
               group: saved.group,
               restoredFromId: saved.id,
-              cols: saved.cols,
-              rows: saved.rows,
             });
             initTaskDetector(info.id);
           } catch (err) {

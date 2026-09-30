@@ -62,6 +62,7 @@ import {
   parkTarget,
   type HostGeometry,
 } from "./hostPark";
+import { snapshotModeSuffix } from "./repaintPlan";
 import {
   configureRepaintIO,
   forgetRepaint,
@@ -140,9 +141,10 @@ export type SessionHooks = {
   /** The PTY exited (fires after the exit tail is written). */
   onExited?: () => void;
   /** The turn-end clean rewrite re-laid the buffer (same text, the row count
-   *  above the cursor may have moved). onWriteParsed was WITHHELD for the
-   *  whole parse — it re-emits the transcript, not a turn — so anything that
-   *  tracks a buffer position re-anchors here. */
+   *  above the cursor may have moved). Called from INSIDE the snapshot write's
+   *  callback, with the cursor where the snapshot put it; the onWriteParsed of
+   *  the batch that carried the snapshot is WITHHELD (it is a replay, not a
+   *  turn), so anything that tracks a buffer position re-anchors here. */
   onBufferRewritten?: (terminal: Terminal) => void;
 };
 
@@ -597,6 +599,14 @@ function queueFollow(sessionId: string, entry: Entry): void {
 // sequencing; this is the live terminal it works on).
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** xterm's active mouse encoding (DEFAULT | SGR | SGR_PIXELS). Private API;
+ *  absent → null, which appends nothing. */
+function mouseEncodingOf(term: Terminal): string | null {
+  const enc = (term as unknown as { _core?: { coreMouseService?: { activeEncoding?: unknown } } })
+    ._core?.coreMouseService?.activeEncoding;
+  return typeof enc === "string" ? enc : null;
+}
+
 function repaintHandle(entry: Entry): RepaintTerminal {
   const term = entry.terminal;
   return {
@@ -619,10 +629,18 @@ function repaintHandle(entry: Entry): RepaintTerminal {
     // in headless Chrome (SWIT-103): serialize → reset → write comes back
     // with the same rows, the same baseY, the same cursor cell and the modes
     // re-armed; a hidden cursor (claude hides it) survives the reset by
-    // itself, so nothing is appended for it.
-    serialize: () => entry.serializeAddon.serialize(),
+    // itself, so nothing is appended for it. The mouse ENCODING is (the reset
+    // puts it back to DEFAULT and the addon only re-arms the tracking mode).
+    serialize: () =>
+      entry.serializeAddon.serialize() +
+      snapshotModeSuffix({ mouseEncoding: mouseEncodingOf(term) }),
+    bracketedPaste: () => term.modes.bracketedPasteMode,
+    // OPACITY, not visibility: a visibility-hidden element cannot hold focus,
+    // so the helper textarea blurred and keystrokes typed during the parse went
+    // to <body>. Opacity 0 keeps focus and looks the same — the pane's own
+    // background shows through either way.
     setHidden: (hidden) => {
-      if (term.element) term.element.style.visibility = hidden ? "hidden" : "";
+      if (term.element) term.element.style.opacity = hidden ? "0" : "";
     },
     reset: () => term.reset(),
     resize: (cols, rows) => term.resize(cols, rows),
@@ -769,9 +787,9 @@ export function acquireTerminal(
     const inputListeners = sessionInputListeners.get(sessionId);
     if (inputListeners) for (const fn of inputListeners) fn(data);
     writeToSession(sessionId, data).catch(console.error);
-    // Typing takes the reader to the prompt: xterm scrolls its own history
-    // there on input, and on a pane shorter than the grid the PANE has to
-    // come too or the keystrokes land below the fold.
+    // Typing or pasting takes the reader to the prompt: xterm scrolls its own
+    // history there on input, and on a pane shorter than the grid the PANE
+    // has to come too or the text lands below the fold.
     if (isTypedInput(data)) parkTerminalHost(sessionId);
   });
   terminal.onResize(({ cols, rows }) => {
@@ -787,7 +805,12 @@ export function acquireTerminal(
   terminal.onWriteParsed(() => {
     // The turn-end rewrite re-emits the transcript into a reset terminal:
     // that is not output, and the status detector must not read a new turn
-    // out of it (it re-anchors through onBufferRewritten when the parse ends).
+    // out of it. The runner keeps the flag up until the microtask AFTER the
+    // snapshot's write callback, and xterm fires this for the batch after
+    // running that callback — so the batch that carried the snapshot is the
+    // one skipped (the detector re-anchored through onBufferRewritten inside
+    // the callback). A live chunk parsed in that same batch is skipped with
+    // it; the next chunk's parse reads from the re-anchored row and covers it.
     if (isRepaintRewriting(sessionId)) return;
     sessionHooks.get(sessionId)?.onWriteParsed?.(terminal);
     queueFollow(sessionId, entry);

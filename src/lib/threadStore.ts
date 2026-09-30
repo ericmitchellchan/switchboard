@@ -984,8 +984,9 @@ export function clearThreadRenameRequest(threadId: string): void {
 
 /** The title box a `+` opened must not be closed by the new pane's terminal
  *  taking focus (SWIT-56 review). The box commits on blur, and a terminal
- *  focuses itself from several places (the pane's visibility effect, the
- *  show-fit's `shouldFocus` a few frames after mount) — none of them a user
+ *  focuses itself from several places (the pane's visibility effect —
+ *  `landTerminalView`'s focus when the tab is shown — and xterm's own focus
+ *  on mount) — none of them a user
  *  gesture, all of them after the box has opened. So a blur that lands in
  *  xterm's helper textarea, with NO pointer gesture since the box opened and
  *  inside the settle window, is a programmatic steal: the box holds focus

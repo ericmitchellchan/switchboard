@@ -100,6 +100,24 @@ export type RepaintInput = {
   selecting?: boolean;
 };
 
+/** What a rewrite must append to its snapshot so the reset takes nothing the
+ *  program had set. The serialize addon re-arms the mouse TRACKING mode
+ *  (?1000/?1002/?1003) but not the mouse ENCODING, and xterm's reset puts the
+ *  encoding back to DEFAULT — so a program that asked for SGR reports (?1006,
+ *  or ?1016 pixels) would get the old X10 byte encoding after every rewrite.
+ *  `mouseEncoding` is xterm's own name for the active encoding
+ *  (`coreMouseService.activeEncoding`: DEFAULT | SGR | SGR_PIXELS). */
+export function snapshotModeSuffix(modes: { mouseEncoding?: string | null }): string {
+  switch (modes.mouseEncoding) {
+    case "SGR":
+      return "\x1b[?1006h";
+    case "SGR_PIXELS":
+      return "\x1b[?1016h";
+    default:
+      return "";
+  }
+}
+
 /** Decide what an idle-time repaint should do. Pure. */
 export function planRepaint(input: RepaintInput): RepaintPlan {
   if (input.streaming) return { action: "defer", why: "streaming" };

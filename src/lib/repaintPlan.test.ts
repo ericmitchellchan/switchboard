@@ -11,6 +11,7 @@ import {
   DIRTY_OUTPUT_THRESHOLD,
   WHEEL_QUIET_MS,
   planRepaint,
+  snapshotModeSuffix,
   type RepaintInput,
 } from "./repaintPlan";
 
@@ -153,6 +154,19 @@ describe("planRepaint — a session no agent has drawn in", () => {
       cols: 100,
       rows: 40,
     });
+  });
+});
+
+describe("snapshotModeSuffix — what the reset takes and the addon does not put back", () => {
+  it("re-arms SGR mouse encoding (?1006) and SGR pixels (?1016)", () => {
+    expect(snapshotModeSuffix({ mouseEncoding: "SGR" })).toBe("\x1b[?1006h");
+    expect(snapshotModeSuffix({ mouseEncoding: "SGR_PIXELS" })).toBe("\x1b[?1016h");
+  });
+
+  it("adds nothing for the default encoding or an unreadable one", () => {
+    expect(snapshotModeSuffix({ mouseEncoding: "DEFAULT" })).toBe("");
+    expect(snapshotModeSuffix({ mouseEncoding: null })).toBe("");
+    expect(snapshotModeSuffix({})).toBe("");
   });
 });
 

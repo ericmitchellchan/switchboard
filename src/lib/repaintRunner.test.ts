@@ -8,20 +8,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NARROW_NUDGE_MIN_MS } from "./bufferSignals";
 import { DIRTY_OUTPUT_THRESHOLD, WHEEL_QUIET_MS } from "./repaintPlan";
 import {
+  AGENT_ABSENT_SETTLES,
   REPAINT_DWELL_MS,
   REPAINT_SETTLE_MS,
+  REWRITE_MAX_SNAPSHOT,
+  REWRITE_WATCHDOG_MS,
   __resetRepaintForTests,
   configureRepaintIO,
   forgetRepaint,
   isRepaintRewriting,
-  noteRepaintAgent,
   noteRepaintOutput,
   noteRepaintScroll,
   noteRepaintWheel,
+  repaintBracketedPaste,
   repaintDirtyBytes,
+  repaintSnapshot,
   requestRepaint,
+  whenRepaintIdle,
   type RepaintTerminal,
 } from "./repaintRunner";
+
+/** Let the microtask the runner clears its flag in run. */
+const microtask = () => Promise.resolve();
 
 const rule = (n: number) => "─".repeat(n);
 
@@ -33,9 +41,16 @@ const NARROW_FRAME = ["● this whole turn wrapped at", "  forty columns", rule(
 type Fake = {
   term: RepaintTerminal;
   calls: string[];
-  /** Finish the rewrite's async parse. */
+  /** Finish the rewrite's async parse (the callback alone). */
   finishWrite: () => void;
-  set: (over: Partial<{ lines: string[]; laidOut: boolean; selecting: boolean; focused: boolean; viewportY: number; baseY: number; alt: boolean; cols: number; rows: number; serializeThrows: boolean }>) => void;
+  /** Finish it in xterm 5.5's REAL order: WriteBuffer._innerWrite runs the
+   *  chunk's callback inside its loop, then fires onWriteParsed for the batch
+   *  synchronously after the loop. Returns what a registry-style onWriteParsed
+   *  guard saw: was the rewrite flag still up when the batch's event fired? */
+  finishWriteLikeXterm: () => { rewritingAtParsedEvent: boolean };
+  /** Take the pending write callback without running it. */
+  takeCallback: () => () => void;
+  set: (over: Partial<{ lines: string[]; laidOut: boolean; selecting: boolean; focused: boolean; viewportY: number; baseY: number; alt: boolean; cols: number; rows: number; serializeThrows: boolean; snap: string; bracketed: boolean }>) => void;
 };
 
 function fake(): Fake {
@@ -50,6 +65,8 @@ function fake(): Fake {
     cols: 100,
     rows: 40,
     serializeThrows: false,
+    snap: "SNAP",
+    bracketed: true,
   };
   const calls: string[] = [];
   let done: (() => void) | null = null;
@@ -83,10 +100,14 @@ function fake(): Fake {
     serialize: () => {
       if (st.serializeThrows) throw new Error("serialize blew up");
       calls.push("serialize");
-      return "SNAP";
+      return st.snap;
     },
+    bracketedPaste: () => st.bracketed,
     setHidden: (hidden) => calls.push(hidden ? "hide" : "show"),
-    reset: () => calls.push("reset"),
+    reset: () => {
+      calls.push("reset");
+      st.bracketed = false; // a reset turns every mode off
+    },
     resize: (c, r) => {
       calls.push(`resize ${c}x${r}`);
       st.cols = c;
@@ -113,6 +134,18 @@ function fake(): Fake {
       const cb = done;
       done = null;
       cb?.();
+    },
+    finishWriteLikeXterm: () => {
+      const cb = done;
+      done = null;
+      cb?.(); // inside _innerWrite's loop
+      // …then, after the loop, synchronously: this._onWriteParsed.fire()
+      return { rewritingAtParsedEvent: isRepaintRewriting("s1") };
+    },
+    takeCallback: () => {
+      const cb = done ?? (() => {});
+      done = null;
+      return cb;
     },
     set: (over) => Object.assign(st, over),
   };
@@ -168,7 +201,7 @@ describe("repaintRunner", () => {
       expect(repaintDirtyBytes("s1")).toBe(40);
     });
 
-    it("a streamed turn gets the clean rewrite, in order, hidden for the parse", () => {
+    it("a streamed turn gets the clean rewrite, in order, hidden for the parse", async () => {
       stream();
       settleNow();
       expect(f.calls).toEqual(["serialize", "hide", "reset", "write SNAP"]);
@@ -185,10 +218,26 @@ describe("repaintRunner", () => {
         "refresh",
         "show",
       ]);
-      expect(isRepaintRewriting("s1")).toBe(false);
       expect(rewritten).toEqual(["s1"]);
       // …and the scroll range is re-measured over the re-laid buffer.
       expect(resyncs).toEqual(["rewrite"]);
+      // The flag stays up until the microtask after the callback (next test).
+      expect(isRepaintRewriting("s1")).toBe(true);
+      await microtask();
+      expect(isRepaintRewriting("s1")).toBe(false);
+    });
+
+    it("the batch that carried the snapshot is withheld from onWriteParsed — in xterm's real order", async () => {
+      // xterm 5.5 runs the write callback, THEN fires onWriteParsed for the
+      // batch. A flag cleared inside the callback would let the replay reach
+      // the status detector (re-arming its done timer after the re-anchor).
+      stream();
+      settleNow();
+      const seen = f.finishWriteLikeXterm();
+      expect(rewritten).toEqual(["s1"]); // the re-anchor ran inside the callback
+      expect(seen.rewritingAtParsedEvent).toBe(true); // …and the batch is skipped
+      await microtask();
+      expect(isRepaintRewriting("s1")).toBe(false); // the next batch is live output
     });
 
     it("never resizes on the pin — the grid is a constant", () => {
@@ -348,8 +397,9 @@ describe("repaintRunner", () => {
     });
 
     it("a wheel over a claude parked on a prompt polls nothing — that defer waits for a settle", () => {
+      stream(10);
+      settleNow(); // claude at rest: an agent session
       f.set({ lines: ["● Bash(git push)", "Do you want to proceed?", "❯ 1. Yes", "  2. No"] });
-      noteRepaintAgent("s1");
       stream();
       settleNow(); // deferred: mid-turn
       f.set({ lines: IDLE_FRAME }); // answered, but no settle yet
@@ -391,10 +441,19 @@ describe("repaintRunner", () => {
   });
 
   describe("the rewrite", () => {
-    it("gives focus back only when the terminal held it going in", () => {
+    it("keeps focus through the hide — nothing to give back (the hide is opacity)", () => {
       f.set({ focused: true });
       stream();
       settleNow();
+      f.finishWrite();
+      expect(f.calls).not.toContain("focus");
+    });
+
+    it("gives focus back if the terminal held it going in and lost it during the parse", () => {
+      f.set({ focused: true });
+      stream();
+      settleNow();
+      f.set({ focused: false });
       f.finishWrite();
       expect(f.calls[f.calls.length - 1]).toBe("focus");
     });
@@ -419,11 +478,21 @@ describe("repaintRunner", () => {
       expect(resyncs).toEqual([]);
     });
 
-    it("a throw before the write never leaves the pane hidden or the flag stuck", () => {
+    it("a serialize that throws touches nothing: no hide, no reset, no flag", () => {
       f.set({ serializeThrows: true });
       stream();
       settleNow();
-      expect(f.calls).toEqual(["show"]);
+      expect(f.calls).toEqual([]);
+      expect(isRepaintRewriting("s1")).toBe(false);
+    });
+
+    it("a snapshot over the cap is not rewritten: resynced, and the dirty count dropped", () => {
+      f.set({ snap: "x".repeat(REWRITE_MAX_SNAPSHOT + 1) });
+      stream();
+      settleNow();
+      expect(f.calls).toEqual(["serialize"]);
+      expect(resyncs).toEqual(["settle"]);
+      expect(repaintDirtyBytes("s1")).toBe(0);
       expect(isRepaintRewriting("s1")).toBe(false);
     });
 
@@ -431,6 +500,99 @@ describe("repaintRunner", () => {
       f.set({ cols: 84 });
       requestRepaint("s1", "ro"); // clean buffer, off the pin
       expect(f.calls).toEqual(["serialize", "hide", "reset", "resize 100x40", "write SNAP"]);
+    });
+  });
+
+  describe("a callback that never comes (the watchdog)", () => {
+    it("unhides the pane, clears the flag and releases deferred work", () => {
+      stream();
+      settleNow();
+      let pasted = false;
+      whenRepaintIdle("s1", () => (pasted = true));
+      vi.advanceTimersByTime(REWRITE_WATCHDOG_MS - 1);
+      expect(isRepaintRewriting("s1")).toBe(true);
+      vi.advanceTimersByTime(1);
+      expect(f.calls[f.calls.length - 1]).toBe("show");
+      expect(isRepaintRewriting("s1")).toBe(false);
+      expect(pasted).toBe(true);
+    });
+
+    it("a callback that does come disarms it", async () => {
+      stream();
+      settleNow();
+      f.finishWrite();
+      await microtask();
+      const shows = f.calls.filter((c) => c === "show").length;
+      vi.advanceTimersByTime(REWRITE_WATCHDOG_MS * 2);
+      expect(f.calls.filter((c) => c === "show").length).toBe(shows);
+    });
+
+    it("a late callback after the watchdog does not touch a NEWER rewrite", async () => {
+      stream();
+      settleNow();
+      const late = f.takeCallback(); // the first rewrite's callback, held back
+      vi.advanceTimersByTime(REWRITE_WATCHDOG_MS);
+      expect(isRepaintRewriting("s1")).toBe(false);
+      stream();
+      settleNow(); // a second rewrite starts
+      expect(isRepaintRewriting("s1")).toBe(true);
+      const before = f.calls.length;
+      late(); // the first one's callback finally arrives
+      await microtask();
+      expect(f.calls.length).toBe(before); // no restore, no unhide, nothing
+      expect(isRepaintRewriting("s1")).toBe(true);
+      f.finishWrite(); // the second one's own callback ends it
+      await microtask();
+      expect(isRepaintRewriting("s1")).toBe(false);
+    });
+  });
+
+  describe("readers during the parse", () => {
+    it("see the snapshot and the pre-reset bracketed-paste mode, then nothing", async () => {
+      expect(repaintSnapshot("s1")).toBeNull();
+      stream();
+      settleNow();
+      expect(repaintSnapshot("s1")).toBe("SNAP");
+      expect(repaintBracketedPaste("s1")).toBe(true); // the reset read false
+      f.finishWrite();
+      await microtask();
+      expect(repaintSnapshot("s1")).toBeNull();
+      expect(repaintBracketedPaste("s1")).toBeNull();
+    });
+
+    it("a paste waits for the parse — xterm would read bracketed mode OFF", async () => {
+      const order: string[] = [];
+      whenRepaintIdle("s1", () => order.push("idle-now"));
+      stream();
+      settleNow();
+      whenRepaintIdle("s1", () => order.push("after"));
+      expect(order).toEqual(["idle-now"]);
+      f.finishWrite();
+      expect(order).toEqual(["idle-now"]); // not inside the callback either
+      await microtask();
+      expect(order).toEqual(["idle-now", "after"]);
+    });
+
+    it("a paste queued behind a rewrite still goes when the session is forgotten", () => {
+      stream();
+      settleNow();
+      let pasted = false;
+      whenRepaintIdle("s1", () => (pasted = true));
+      forgetRepaint("s1");
+      expect(pasted).toBe(true);
+    });
+  });
+
+  describe("a restart inside the parse window", () => {
+    it("re-resets the terminal instead of laying the old transcript under the new shell", async () => {
+      stream();
+      settleNow();
+      forgetRepaint("s1"); // App.handleRestartSession → cleanupSessionListeners
+      f.finishWrite();
+      expect(f.calls.slice(4)).toEqual(["reset", "show"]);
+      expect(rewritten).toEqual([]); // the detector is not re-anchored to the old frame
+      expect(resyncs).toEqual([]);
+      await microtask();
     });
   });
 
@@ -524,24 +686,50 @@ describe("repaintRunner", () => {
       expect(bounces).toEqual([]);
     });
 
-    it("becomes an agent session when the status detector says so", () => {
-      f.set({ lines: SHELL });
-      stream(500_000);
-      noteRepaintAgent("s1");
-      settleNow();
-      expect(f.calls).toContain("reset");
-    });
-
-    it("becomes one when claude's frame shows up on screen, and stays one after it leaves", () => {
+    it("becomes one the moment claude's frame shows up on screen", () => {
       f.set({ lines: SHELL });
       stream(10);
       settleNow();
       f.set({ lines: IDLE_FRAME });
-      stream(10);
-      settleNow(); // claude's frame seen — still under the threshold
-      expect(f.calls).toEqual([]);
+      stream();
+      settleNow();
+      expect(f.calls).toContain("reset");
+    });
 
-      f.set({ lines: SHELL }); // claude exited back to the shell
+    it(`stops being one after ${AGENT_ABSENT_SETTLES} settles without claude's frame (claude exited, pnpm dev took the tab)`, async () => {
+      stream(10);
+      settleNow(); // claude at rest: an agent session
+      f.set({ lines: SHELL }); // claude exited to the shell
+      for (let i = 1; i < AGENT_ABSENT_SETTLES; i++) {
+        stream();
+        settleNow();
+        expect(f.calls).toContain("reset"); // still rewritten while absence is short
+        f.finishWrite();
+        await microtask();
+        f.calls.length = 0;
+      }
+      stream(500_000);
+      settleNow(); // the Nth absent settle: a shell again
+      expect(f.calls).toEqual([]);
+      stream(500_000);
+      settleNow();
+      expect(f.calls).toEqual([]);
+    });
+
+    it("a claude frame between absent settles resets the count", async () => {
+      stream(10);
+      settleNow();
+      for (let round = 0; round < 3; round++) {
+        f.set({ lines: SHELL });
+        for (let i = 1; i < AGENT_ABSENT_SETTLES; i++) {
+          stream(10);
+          settleNow();
+        }
+        f.set({ lines: IDLE_FRAME });
+        stream(10);
+        settleNow();
+      }
+      f.set({ lines: SHELL });
       stream();
       settleNow();
       expect(f.calls).toContain("reset");

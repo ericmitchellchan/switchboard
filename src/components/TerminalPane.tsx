@@ -16,7 +16,7 @@ import {
   followTerminalHost,
   noteTerminalHostScroll,
 } from "../lib/terminalRegistry";
-import { forgetRepaint, noteRepaintAgent, noteRepaintWheel, requestRepaint } from "../lib/repaintRunner";
+import { forgetRepaint, noteRepaintWheel, requestRepaint } from "../lib/repaintRunner";
 import { routeWheelToHost } from "../lib/hostPark";
 import {
   initDetector,
@@ -128,11 +128,6 @@ function wireSession(sessionId: string) {
   const onStatus = (id: string, status: AgentStatus) => {
     // The PTY ended: there is no claude frame left to heal (SWIT-100).
     if (status === "exited") forgetResumeHeal(id);
-    // A session leaves "idle" only once the detector has seen Claude
-    // Code-specific output — a plain shell never does. That is what makes it
-    // an AGENT session for the turn-end rewrite and the narrow-frame nudge
-    // (SWIT-103): a shell or a log tail gets neither.
-    else if (status !== "idle") noteRepaintAgent(id);
     getCbs()?.onStatusChange(id, status);
   };
 
@@ -196,9 +191,12 @@ function wireSession(sessionId: string) {
     },
     onBufferRewritten: (terminal: Terminal) => {
       // The turn-end clean rewrite re-laid the buffer (SWIT-103). Nothing
-      // happened as far as status goes — the registry withheld onWriteParsed
-      // for the parse — but the row the detector anchors its delta on may
-      // have moved.
+      // happened as far as status goes, but the row the detector anchors its
+      // delta on may have moved. This runs inside the snapshot write's
+      // callback, and the registry withholds the onWriteParsed xterm fires for
+      // that batch right after (repaintRunner keeps the flag up one microtask
+      // past the callback) — so the detector is re-anchored and NOT fed the
+      // replay, which would read as a cursor blink and re-arm its done timer.
       const buf = terminal.buffer.active;
       syncDetectorPosition(sessionId, buf.baseY + buf.cursorY);
     },

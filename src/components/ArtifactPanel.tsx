@@ -1052,9 +1052,9 @@ export function ArtifactPanel({
           // one. `minWidth: 0` is the LocalhostView lesson applied: this is a
           // flex item wrapping a terminal whose min-content width is its
           // columns, and without it the panel would overflow at the 260px
-          // floor instead of letting the terminal scroll horizontally (which
-          // the existing grow-only policy already handles — no resize code
-          // lives here either).
+          // floor instead of letting the pane scroll over the pinned 100×40
+          // grid (SWIT-103 — the terminal never resizes; no resize code lives
+          // here either).
           <div
             style={{
               flex: 1,

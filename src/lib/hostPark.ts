@@ -80,17 +80,19 @@ export function isFollowing(target: number, scrollTop: number, rowHeight: number
   return scrollTop >= target - rowHeight;
 }
 
-/** Is this `onData` chunk the user TYPING — the thing that takes the pane to
- *  the prompt? xterm's onData also carries what the terminal itself answers
- *  (focus in/out reports when the program asked for them, mouse reports,
- *  cursor-position replies) and pastes; none of those is a reason to move the
- *  pane — a click into the terminal must not yank a reader who scrolled the
- *  pane up. Every one of them is an ESC-led sequence, and so are arrow and
- *  function keys, which are left out with them: the next printable key,
- *  Enter, Backspace or Ctrl+key parks. */
+/** Is this `onData` chunk the user's INPUT — the thing that takes the pane to
+ *  the prompt? Typing and pasting are: a paste into the terminal is the user
+ *  putting text at the prompt exactly as typing is (bracketed or not —
+ *  unbracketed it is plain text anyway). xterm's onData ALSO carries what the
+ *  terminal answers by itself (focus in/out reports when the program asked for
+ *  them, mouse reports, cursor-position replies); none of those is a reason to
+ *  move the pane — a click into the terminal must not yank a reader who
+ *  scrolled the pane up. Every one of them is an ESC-led sequence, and so are
+ *  arrow and function keys, which are left out with them: the next printable
+ *  key, Enter, Backspace, Ctrl+key or paste parks. */
 export function isTypedInput(data: string): boolean {
-  const typed = data.replace(/\x1b\[200~[\s\S]*?\x1b\[201~/g, "");
-  return typed.length > 0 && typed.charCodeAt(0) !== 0x1b;
+  if (data.startsWith("\x1b[200~")) return true; // a bracketed paste
+  return data.length > 0 && data.charCodeAt(0) !== 0x1b;
 }
 
 export type WheelRoute = {
