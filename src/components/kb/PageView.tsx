@@ -1,8 +1,12 @@
 // THE ✦ PAGE (SWIT-48; re-cut SWIT-67/68/69/77/78) — a thread's one living
 // page, rendered from pageStore's merge. Ky's thread panel is the reference:
 // ONE page — a one-paragraph SUMMARY (theme + the newest turn's first line),
-// an optional `start here →` line (the turn's reviewFirst address), then Open
-// questions · To do · What happened · Evidence · Decided · Done · Dropped. "What
+// an optional `start here →` line (the turn's reviewFirst address), then
+// Where things stand (SWIT-104 — the agent's standing brief, when it wrote
+// one: the goal, then Established / Dead / Live lead / Waiting on you) · Open
+// questions · This turn · To do · Findings (SWIT-106 — the agent's ledger:
+// verdict pill · claim · n · report · age) · Evidence · Decided · Done ·
+// Dropped. "What
 // happened" sits deliberately BELOW the material that needs the user: the
 // reason to open the page comes first (Ky's rule, and Eric's, verbatim).
 //
@@ -114,14 +118,18 @@ import {
   applyRetractions,
   isOpenItem,
   DECISION_ADDRESS_PREFIX,
+  briefSections,
+  questionAddress,
+  dismissErrorNote,
   subscribePageFocus,
   pageFocusNonce,
   takePageFocus,
   peekPageFocus,
+  neighbourAfterDismiss,
 } from "../../lib/pageStore";
-import { nextThingFor, openableAddressIn } from "../../lib/nextThing";
-import type { AnswerNote, InboxPost, PageAnswer, PageItem, PageQuestion, RenderedPage, SettledQuestion } from "../../lib/pageStore";
-import { parseSurfaceAddress } from "../../lib/surfaceParams";
+import { nextThingFor, openableAddressIn, resolveOpenable } from "../../lib/nextThing";
+import type { AnswerNote, DismissedQuestion, InboxPost, PageAnswer, PageBrief, PageItem, PageQuestion, RenderedPage, SettledQuestion } from "../../lib/pageStore";
+import { TEXT_LINK } from "../kit";
 import { answerQuestion, openArtifact, openInPanel, getActiveTabSession, submitToThread } from "../../lib/panelStore";
 import type { OpenableArtifact } from "../../lib/panelStore";
 import { batchSendTarget, BATCH_NOT_LIVE } from "../../lib/viewNotes";
@@ -132,21 +140,22 @@ import {
   latchViewKey,
   mergeScannedEvidence,
   mergeViewEvidence,
-  resolveDocTarget,
   viewAnchorOfAddress,
+  projectViewOfAddress,
 } from "../../lib/evidenceModel";
 import { requestReportAnchor } from "../../lib/reportStore";
+import { viewOwnerKey } from "../../lib/viewStore";
 import type { EvidenceGroupId, ThreadViewRow } from "../../lib/evidenceModel";
 import { useScannedEvidence } from "../../lib/evidenceScan";
-import { getCachedDocList, refreshDocList } from "../../lib/kb";
+import { getCachedDocList, noteKbMiss, refreshDocList, resolveWithFreshKbDocs, subscribeDocList } from "../../lib/kb";
 import { explorerProjects, listThreadViews, markThreadAnswersSent, readThreadView, retractThreadEvidence } from "../../lib/ipc";
-import { projectKeyForDir } from "../../lib/explorer";
+import { projectPlaceForDir } from "../../lib/explorer";
 import { getThreads } from "../../lib/threadStore";
 import { parseViewSpec } from "../../lib/viewStore";
 import { OptionRow } from "./OptionRow";
 import { log } from "../../lib/logger";
-import { itemPill, titleCase } from "../../lib/statusPill";
-import { Age, ARTIFACT_GRID, ColumnHeads, Fold, PageBlock, StatusPill, TODO_GRID, TURN_GRID, TypeTabs } from "./PageBlock";
+import { itemPill, titleCase, verdictTone } from "../../lib/statusPill";
+import { Age, ARTIFACT_GRID, ColumnHeads, FINDING_GRID, Fold, PageBlock, StatusPill, TODO_GRID, TURN_GRID, TypeTabs } from "./PageBlock";
 
 const MONO = "var(--font-mono)";
 /** The reading face (Ky's `font-sans`): bodies, not chrome. */
@@ -353,44 +362,80 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
     },
     [threadId, refresh]
   );
+  // SWIT-105: `not needed` on an open question — the SAME app write as the
+  // evidence `×` (retracted.json, under `question:<id>`), the same in-flight
+  // state (the retractions share one tmp file, so one write at a time across
+  // both controls), and the same rule for leaving: the card goes when the
+  // merged files say so (`refresh`), never from local hide state. A failed
+  // write rejects — the block prints it beside Send.
+  const dismissQuestion = useCallback(
+    async (questionId: string) => {
+      const address = questionAddress(questionId);
+      setRetracting(address);
+      try {
+        await retractThreadEvidence(threadId, address);
+        refresh();
+      } finally {
+        setRetracting(null);
+      }
+    },
+    [threadId, refresh]
+  );
   const groups = useMemo(() => groupEvidence(evidence), [evidence]);
   const [groupId, setGroupId] = useState<EvidenceGroupId>("recent");
   useEffect(() => setGroupId("recent"), [threadId]);
   const activeGroup = groups.find((g) => g.id === groupId) ?? groups[0] ?? null;
 
   // The doc/file link rule's context: the REAL KB doc list (a KB row must
-  // exist to link) and the thread's own project key (a repo path resolves
-  // syntactically against it — evidenceModel.resolveDocTarget).
-  const [kbDocs, setKbDocs] = useState<readonly string[] | null>(() => getCachedDocList());
-  const [projectKey, setProjectKey] = useState<string | null>(null);
+  // exist to link) and the thread's place in its project (a repo path
+  // resolves syntactically against it — nextThing.resolveOpenable).
+  // SWIT-101: the list is SUBSCRIBED, not seeded once — a doc created after it
+  // loaded missed forever and opened as a missing repo file. Every resolve
+  // below reports a miss to `noteKbMiss` (one coalesced kb_list per NEW
+  // address, remembered), and whoever refreshes the list — this page, the
+  // turn-end hook, an agent `show` — re-renders it here.
+  const kbDocs: readonly string[] | null = useSyncExternalStore(subscribeDocList, getCachedDocList);
+  // ONE resolver (review of 49ebb20, #7): the thread's PLACE in its project —
+  // the key AND the prefix that re-bases a path written relative to the
+  // thread's working directory onto the project root (a thread in a
+  // subdirectory, a multi-repo project) — the same `projectPlaceForDir` the
+  // agent's `show` and the turn-end hook use, so an address opens the same
+  // file from every surface.
+  const [place, setPlace] = useState<{ key: string; prefix: string } | null>(null);
   useEffect(() => {
     if (getCachedDocList() !== null) return;
-    let cancelled = false;
-    refreshDocList()
-      .then((docs) => {
-        if (!cancelled) setKbDocs(docs);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
+    refreshDocList().catch(() => {});
   }, []);
   useEffect(() => {
     let cancelled = false;
-    setProjectKey(null);
+    setPlace(null);
     const dir = getThreads().find((t) => t.id === threadId)?.workingDir;
     if (!dir) return;
     explorerProjects()
       .then((projects) => {
-        if (!cancelled) setProjectKey(projectKeyForDir(projects, dir));
+        if (!cancelled) setPlace(projectPlaceForDir(projects, dir));
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
   }, [threadId]);
-  const linkTarget = (address: string): OpenableArtifact | null =>
-    parseSurfaceAddress(address) ?? resolveDocTarget(address, kbDocs, projectKey);
+  const resolveCtx = useMemo(
+    () => ({
+      threadId,
+      kbDocs,
+      projectKey: place?.key ?? null,
+      pathPrefix: place?.prefix ?? "",
+      onKbMiss: noteKbMiss,
+    }),
+    [threadId, kbDocs, place]
+  );
+  const linkTarget = (address: string): OpenableArtifact | null => resolveOpenable(address, resolveCtx);
+  // The CLICK re-asks (SWIT-101): a row that fell back to a repo file may
+  // name a KB doc written after its one remembered miss — a one-shot open
+  // refreshes the list once and resolves again before anything opens.
+  const lateTarget = (address: string): Promise<OpenableArtifact | null> =>
+    resolveWithFreshKbDocs((docs, onKbMiss) => resolveOpenable(address, { ...resolveCtx, kbDocs: docs, onKbMiss }));
   // A `view:` address opens the view artifact in the ONE preview slot beside
   // this thread (SWIT-69) — a view has no full-width screen, so no modifier.
   const openViewAddress = useCallback(
@@ -417,8 +462,8 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
   // the hook cannot disagree about WHAT is next; a click here opens it
   // focused where the hook opens it behind.
   const nextThing = useMemo(
-    () => nextThingFor(page, { threadId, kbDocs, projectKey }),
-    [page, threadId, kbDocs, projectKey]
+    () => nextThingFor(page, resolveCtx),
+    [page, resolveCtx]
   );
   const rootRef = useRef<HTMLDivElement | null>(null);
   const scrollToBlock = useCallback((block: string) => {
@@ -478,13 +523,38 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
     return "var(--text-secondary)";
   };
 
-  const renderAddress = (address: string, opts: { accent?: boolean; fontSize?: number } = {}) => {
+  const renderAddress = (address: string, opts: { accent?: boolean; fontSize?: number; resolveAs?: string | null } = {}) => {
     const { accent = false, fontSize } = opts;
-    const color = accent ? "var(--accent)" : addressColor(address);
+    // `resolveAs`: the token INSIDE the printed text that resolved (the
+    // `start here →` line prints the turn's reviewFirst verbatim, and a click
+    // must re-resolve the token nextThingFor found in it, not the whole
+    // string — review of 49ebb20, nit).
+    const key = opts.resolveAs ?? address;
+    const color = accent ? "var(--accent)" : addressColor(key);
     // SWIT-73: `view:<id>#h:<slug>` names a heading INSIDE a report — the
     // anchor rides reportStore's one-shot; the open is the ordinary view
     // open. A malformed fragment made the whole address plain upstream.
-    const viewHit = viewAnchorOfAddress(address);
+    // SWIT-107: `view:<project>/<id>[#h:<slug>]` — a report the PROJECT owns;
+    // it opens beside this thread (or full width with Ctrl) with no thread
+    // behind it, its heading riding the same one-shot under the project key.
+    const projectViewHit = projectViewOfAddress(key);
+    if (projectViewHit !== null) {
+      return (
+        <AddressButton
+          text={address}
+          title="open this project report beside the thread (Ctrl: full width)"
+          accent={accent}
+          color={color}
+          fontSize={fontSize}
+          onOpen={(modifier) => {
+            const artifact = { kind: "view" as const, project: projectViewHit.project, viewId: projectViewHit.viewId };
+            if (projectViewHit.anchor) requestReportAnchor(viewOwnerKey(artifact), artifact.viewId, projectViewHit.anchor);
+            openArtifact(artifact, { modifier });
+          }}
+        />
+      );
+    }
+    const viewHit = viewAnchorOfAddress(key);
     if (viewHit !== null) {
       return (
         <AddressButton
@@ -500,7 +570,17 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
         />
       );
     }
-    return <EvidenceAddress address={address} target={linkTarget(address)} accent={accent} color={color} fontSize={fontSize} />;
+    const target = linkTarget(key);
+    return (
+      <EvidenceAddress
+        address={address}
+        target={target}
+        lateTarget={target?.kind === "repo-file" ? () => lateTarget(key) : undefined}
+        accent={accent}
+        color={color}
+        fontSize={fontSize}
+      />
+    );
   };
 
   // SWIT-95 (Ky's To do LINK column): the first openable address inside an
@@ -508,7 +588,7 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
   // openableAddressIn) — or null when the item names nothing openable, which
   // leaves the LINK column empty rather than printing a dead address.
   const itemLink = (item: PageItem) => {
-    const hit = openableAddressIn(`${item.title} ${item.note ?? ""}`, { threadId, kbDocs, projectKey });
+    const hit = openableAddressIn(`${item.title} ${item.note ?? ""}`, resolveCtx);
     return hit ? renderAddress(hit.address, { fontSize: 10.5 }) : null;
   };
 
@@ -544,7 +624,7 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
         {nextThing?.why === "review" ? (
           <div style={{ display: "flex", gap: 6, alignItems: "baseline", minWidth: 0, fontFamily: MONO, fontSize: 11, marginTop: 2 }}>
             <span style={{ flex: "none", color: "var(--text-faint)" }}>start here →</span>
-            {renderAddress(nextThing.address, { accent: true })}
+            {renderAddress(nextThing.address, { accent: true, resolveAs: nextThing.token })}
           </div>
         ) : nextThing ? (
           <div style={{ display: "flex", gap: 6, alignItems: "baseline", minWidth: 0, fontFamily: MONO, fontSize: 11, marginTop: 2 }}>
@@ -565,9 +645,17 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
                     const host = getActiveTabSession();
                     if (!host) return;
                     if (nextThing.artifact.kind === "view" && nextThing.anchor) {
-                      requestReportAnchor(threadId, nextThing.artifact.viewId, nextThing.anchor);
+                      requestReportAnchor(viewOwnerKey(nextThing.artifact), nextThing.artifact.viewId, nextThing.anchor);
                     }
-                  openInPanel(host, nextThing.artifact, { preview: true });
+                  const artifact = nextThing.artifact;
+                  if (artifact.kind !== "repo-file") {
+                    openInPanel(host, artifact, { preview: true });
+                    return;
+                  }
+                  // A repo fallback re-asks the KB list at the click (SWIT-101).
+                  void lateTarget(nextThing.address)
+                    .catch(() => null)
+                    .then((late) => openInPanel(host, late ?? artifact, { preview: true }));
                 }}
               />
             )}
@@ -575,7 +663,9 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
         ) : null}
       </div>
 
-      <DecisionsBlock threadId={threadId} page={page} seenAt={seenAt} />
+      {page.brief && <BriefBlock brief={page.brief} isNew={isNewSince(page.brief.updatedAt, seenAt)} />}
+
+      <DecisionsBlock threadId={threadId} page={page} seenAt={seenAt} retracting={retracting} onDismiss={dismissQuestion} />
 
       {(page.latestTurn || page.updates.length > 0) && (
         <PageBlock title="This turn">
@@ -611,6 +701,38 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
           ))}
           {page.openItems.map((i) => (
             <ItemRow key={i.id} item={i} link={itemLink(i)} />
+          ))}
+        </PageBlock>
+      )}
+
+      {/* SWIT-106: THE FINDINGS LEDGER, after To do — what the work has
+          established, newest first. The report opens exactly like an
+          Evidence address (renderAddress: the same resolver, the same
+          click-time KB re-resolve for a report written seconds ago). */}
+      {page.findings.length > 0 && (
+        <PageBlock title="Findings" dataPageBlock="findings">
+          <ColumnHeads grid={FINDING_GRID} labels={["Verdict", "Claim", "n", "Report", { label: "Updated", right: true }]} />
+          {page.findings.map((f) => (
+            <div
+              key={f.id}
+              className="page-block-row"
+              style={{ display: "grid", ...FINDING_GRID, columnGap: 11, alignItems: "center", padding: "7px 0", borderBottom: "1px solid var(--border)" }}
+            >
+              <span style={{ minWidth: 0 }}>
+                <StatusPill word={f.verdict} tone={verdictTone(f.verdict)} />
+              </span>
+              <span title={f.claim} style={{ minWidth: 0, fontSize: 12.5, lineHeight: 1.45, color: "var(--text-primary)" }}>
+                {f.claim}
+              </span>
+              <span
+                title={f.n ?? undefined}
+                style={{ minWidth: 0, fontFamily: MONO, fontSize: 10.5, color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+              >
+                {f.n ?? "—"}
+              </span>
+              <span style={{ minWidth: 0, overflow: "hidden" }}>{f.report ? renderAddress(f.report, { fontSize: 10.5 }) : null}</span>
+              <Age at={f.updatedAt} isNew={isNewSince(f.updatedAt, seenAt)} />
+            </div>
           ))}
         </PageBlock>
       )}
@@ -667,7 +789,9 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
         </PageBlock>
       )}
 
-      {page.settledQuestions.length > 0 && <DecidedSection rows={page.settledQuestions} />}
+      {(page.settledQuestions.length > 0 || page.dismissedQuestions.length > 0) && (
+        <DecidedSection rows={page.settledQuestions} dismissed={page.dismissedQuestions} />
+      )}
 
       {page.doneItems.length > 0 && (
         <PageBlock title="Done" note={page.doneFolded > 0 ? `+ ${page.doneFolded} more` : undefined}>
@@ -680,6 +804,71 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
 
       {page.droppedItems.length > 0 && <DroppedSection rows={page.droppedItems} itemLink={itemLink} />}
     </div>
+  );
+}
+
+/** The facts-row label voice (FactsRow.tsx's LABEL): small mono capitals. */
+const BRIEF_LABEL: CSSProperties = {
+  fontFamily: MONO,
+  fontSize: 9.5,
+  textTransform: "uppercase",
+  letterSpacing: "0.08em",
+  color: "var(--text-faint)",
+  paddingTop: 3,
+};
+const BRIEF_LINE: CSSProperties = { fontFamily: READING, fontSize: 12.5, lineHeight: 1.5, color: "var(--text-primary)" };
+/** label · lines. */
+const BRIEF_GRID: CSSProperties = { gridTemplateColumns: "104px minmax(0,1fr)" };
+
+/** WHERE THINGS STAND (SWIT-104) — the standing brief, the first block under
+ *  the summary: the goal as a line, then the agent's four short lists, each
+ *  under a small label (the facts-row voice). The block's age sits beside
+ *  the title — a brief is only as good as it is recent. The one colour is
+ *  the rule the rest of the page follows: amber marks what waits on the user
+ *  (the `Waiting on you` label), nothing else. Pure presentation — the
+ *  shape, caps and the non-empty lists are pageStore's (`briefSections`). */
+function BriefBlock({ brief, isNew }: { brief: PageBrief; isNew: boolean }) {
+  const sections = briefSections(brief);
+  const dated = !Number.isNaN(Date.parse(brief.updatedAt));
+  return (
+    <PageBlock
+      title="Where things stand"
+      dataPageBlock="brief"
+      note={
+        dated ? (
+          <>
+            rewritten <Age at={brief.updatedAt} isNew={isNew} />
+          </>
+        ) : undefined
+      }
+    >
+      {brief.goal && (
+        <div style={{ ...BRIEF_LINE, padding: "8px 0 7px", borderBottom: sections.length > 0 ? "1px solid var(--border)" : "none" }}>
+          {brief.goal}
+        </div>
+      )}
+      {sections.map((s, i) => (
+        <div
+          key={s.key}
+          style={{
+            display: "grid",
+            ...BRIEF_GRID,
+            columnGap: 11,
+            padding: "7px 0",
+            borderBottom: i < sections.length - 1 ? "1px solid var(--border)" : "none",
+          }}
+        >
+          <span style={{ ...BRIEF_LABEL, color: s.key === "waiting" ? "var(--tone-amber)" : "var(--text-faint)" }}>{s.label}</span>
+          <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+            {s.lines.map((l, j) => (
+              <span key={j} style={BRIEF_LINE}>
+                {l}
+              </span>
+            ))}
+          </div>
+        </div>
+      ))}
+    </PageBlock>
   );
 }
 
@@ -741,10 +930,18 @@ function DecisionsBlock({
   threadId,
   page,
   seenAt,
+  retracting,
+  onDismiss,
 }: {
   threadId: string;
   page: RenderedPage;
   seenAt: number | null;
+  /** The retracted.json address whose write is in flight on this page (an
+   *  evidence `×` or a question's `not needed`) — one write at a time. */
+  retracting: string | null;
+  /** SWIT-105: record `question:<id>` as dismissed and re-read the page.
+   *  Rejects when the write failed. */
+  onDismiss: (questionId: string) => Promise<void>;
 }) {
   // The overlay between an action and the poll that shows it on the page:
   // answers saved HERE (until the files carry them), ids SENT here (until
@@ -880,6 +1077,49 @@ function DecisionsBlock({
   };
   const keepFocus = (e: { preventDefault: () => void }) => e.preventDefault();
 
+  /** SWIT-105: `not needed` — the user does not need this one answered. The
+   *  card leaves when the poll shows the dismissal (the host re-reads at
+   *  once); a failed write is one line beside Send and the card stays. A
+   *  keyboard dismissal hands focus to a neighbouring card's `not needed`
+   *  (else Send) first, so it does not land on `body` when the card goes. */
+  //
+  // Review of c178f2f, #5: the hand-off used to run straight after the write
+  // resolved — but the host clears `retracting` in the same tick, React has
+  // not committed it yet, so every neighbour was still `disabled` and
+  // `.focus()` on it did nothing: focus fell to <body> when the card went.
+  // Now the dismissal only RECORDS where focus should go; the effect below
+  // moves it once `retracting` is null in the COMMITTED tree (the neighbours
+  // enabled again). The target rule is `neighbourAfterDismiss` (pageStore).
+  const pendingFocusRef = useRef<{ idsAtClick: string[]; dismissedId: string } | null>(null);
+  const dismissButtons = () => Array.from(rootRef.current?.querySelectorAll<HTMLButtonElement>("[data-dismiss]") ?? []);
+  useEffect(() => {
+    if (retracting !== null) return;
+    const pending = pendingFocusRef.current;
+    if (pending === null) return;
+    pendingFocusRef.current = null;
+    const buttons = dismissButtons();
+    const target = neighbourAfterDismiss(pending.idsAtClick, pending.dismissedId, buttons.map((b) => b.dataset.dismiss ?? ""));
+    const el = target !== null ? buttons.find((b) => b.dataset.dismiss === target) : rootRef.current?.querySelector<HTMLButtonElement>("[data-send]");
+    el?.focus();
+  }, [retracting]);
+  const dismiss = async (q: PageQuestion, button: HTMLButtonElement) => {
+    if (frozen || retracting !== null) return;
+    setNote(null);
+    // Recorded BEFORE the write: the effect is gated on `retracting` going
+    // back to null, which happens only after this write settles — whichever
+    // of React's commit and this continuation runs first.
+    pendingFocusRef.current =
+      document.activeElement === button
+        ? { idsAtClick: dismissButtons().map((b) => b.dataset.dismiss ?? ""), dismissedId: q.id }
+        : null;
+    try {
+      await onDismiss(q.id);
+    } catch (err) {
+      pendingFocusRef.current = null; // a failed dismissal moves nothing
+      setNote(dismissErrorNote(err));
+    }
+  };
+
   const send = async () => {
     if ((decided === 0 && !hasDraft) || frozen) return;
     setSending(true);
@@ -1010,6 +1250,29 @@ function DecisionsBlock({
                   {chosen ? "decided" : "open"}
                 </span>
                 {chosen && <span style={UNSENT} title={UNSENT_TITLE}>{UNSENT_WORD}</span>}
+                {/* SWIT-105: only an OPEN question is dismissed — a decided
+                    one is corrected with `change`. keepFocus: a click must
+                    not blur (and so save) a box being typed in. */}
+                {!chosen && (
+                  <button
+                    type="button"
+                    className="page-textlink"
+                    data-dismiss={q.id}
+                    disabled={frozen || retracting !== null}
+                    onMouseDown={keepFocus}
+                    onClick={(e) => void dismiss(q, e.currentTarget)}
+                    title="Take this question off the page — you do not need it answered. The agent can ask again if it comes to matter."
+                    style={{
+                      ...TEXT_LINK,
+                      flex: "none",
+                      marginTop: 0,
+                      opacity: retracting === questionAddress(q.id) ? 0.4 : 1,
+                      cursor: frozen || retracting !== null ? "default" : "pointer",
+                    }}
+                  >
+                    not needed
+                  </button>
+                )}
               </div>
               {rec && (
                 <div style={{ marginLeft: CARD_INDENT, fontSize: 12, color: "var(--text-secondary)" }}>
@@ -1103,6 +1366,7 @@ function DecisionsBlock({
           {note?.kind === "error" && <span style={{ color: "var(--text-muted)" }}>{note.text}</span>}
           <button
             type="button"
+            data-send=""
             disabled={cannotSend}
             onMouseDown={keepFocus}
             onClick={() => void send()}
@@ -1124,11 +1388,13 @@ function DecisionsBlock({
 }
 
 /** DECIDED (SWIT-77): the settled questions, folded behind a count —
- *  `you: <answer>` for the user's, `settled: <answer>` for the agent's. */
-function DecidedSection({ rows }: { rows: SettledQuestion[] }) {
+ *  `you: <answer>` for the user's, `settled: <answer>` for the agent's, and
+ *  (SWIT-105) the questions the user took off the page as `dismissed`,
+ *  after them — history, in the same fold. */
+function DecidedSection({ rows, dismissed }: { rows: SettledQuestion[]; dismissed: DismissedQuestion[] }) {
   return (
     <PageBlock title="Decided">
-      <Fold label="decided" count={rows.length}>
+      <Fold label="decided" count={rows.length + dismissed.length}>
         {rows.map(({ question, answer, by }) => (
           <div key={question.id} style={{ ...DENSE_ROW, flexDirection: "column", gap: 2 }}>
             <span style={{ fontSize: 12.5, color: "var(--text-primary)", lineHeight: 1.45 }}>{question.text}</span>
@@ -1136,6 +1402,12 @@ function DecidedSection({ rows }: { rows: SettledQuestion[] }) {
               <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)" }}>{by === "agent" ? "settled: " : "you: "}</span>
               {answer}
             </span>
+          </div>
+        ))}
+        {dismissed.map(({ question }) => (
+          <div key={question.id} style={{ ...DENSE_ROW, flexDirection: "column", gap: 2 }}>
+            <span style={{ fontSize: 12.5, color: "var(--text-secondary)", lineHeight: 1.45 }}>{question.text}</span>
+            <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)" }}>dismissed</span>
           </div>
         ))}
       </Fold>
@@ -1270,16 +1542,20 @@ function AddressButton({
  *  the same rule as a destination click (the preview slot beside this thread;
  *  Ctrl = full width). Anything else — a ticket key, a PR, an unresolved
  *  path, a malformed surface query — prints as plain text, no link. The
- *  caller resolves; this component only draws. */
+ *  caller resolves; this component only draws. `lateTarget` (SWIT-101) is the
+ *  caller's one-shot re-resolve for a row that fell back to a repo file: the
+ *  click awaits it and opens what it says, else the target it was drawn with. */
 function EvidenceAddress({
   address,
   target,
+  lateTarget,
   accent = false,
   color,
   fontSize = 11,
 }: {
   address: string;
   target: OpenableArtifact | null;
+  lateTarget?: () => Promise<OpenableArtifact | null>;
   accent?: boolean;
   color?: string;
   fontSize?: number;
@@ -1316,7 +1592,15 @@ function EvidenceAddress({
       accent={accent}
       color={color}
       fontSize={fontSize}
-      onOpen={(modifier) => openArtifact(target, { modifier })}
+      onOpen={(modifier) => {
+        if (!lateTarget) {
+          openArtifact(target, { modifier });
+          return;
+        }
+        void lateTarget()
+          .catch(() => null)
+          .then((late) => openArtifact(late ?? target, { modifier }));
+      }}
     />
   );
 }

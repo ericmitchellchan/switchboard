@@ -800,6 +800,18 @@ export function clearWaiting(
   }
 }
 
+/** The terminal's buffer was reset and re-laid from its own snapshot (the
+ *  turn-end clean rewrite, SWIT-103) — same text, possibly a different row
+ *  count above the cursor. Re-anchor the position tracking WITHOUT reading
+ *  anything: a stale anchor makes the next real chunk look like a cleared
+ *  terminal (every tail line re-scanned as new) when the cursor landed
+ *  higher. Status, timers and sticky state are untouched — nothing happened. */
+export function syncDetectorPosition(sessionId: string, cursorAbsY: number): void {
+  const state = detectors.get(sessionId);
+  if (!state || state.lastProcessedCursorY < 0) return;
+  state.lastProcessedCursorY = cursorAbsY;
+}
+
 export function markExited(
   sessionId: string,
   onStatusChange: (sessionId: string, status: AgentStatus) => void

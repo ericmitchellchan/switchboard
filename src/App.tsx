@@ -21,9 +21,10 @@ import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
 import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, listThreadViews, readThreadFile, threadFilesStamp, writeThreadAnswer, appendConvention, writeThreadPost, saveTranscript, readBacklog, writeBacklog, takeBacklogInbox } from "./lib/ipc";
-import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty, isSessionDirty, serializeForPip, plainTextTerminal, getSessionWriteCount, setTerminalScreenVisible } from "./lib/terminal";
+import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, refreshAllTerminalViews, clearSessionDirty, isSessionDirty, serializeForPip, plainTextTerminal, getSessionWriteCount, setTerminalScreenVisible, pasteIntoTerminal } from "./lib/terminal";
 import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing, sendPipHost } from "./lib/pipBridge";
 import { bumpSessionGeneration, addSessionInputListener, getSessionGeneration } from "./lib/terminalRegistry";
+import { TERMINAL_COLS, TERMINAL_ROWS } from "./lib/terminalGrid";
 import {
   initThreadStore,
   remapThreadSessionsInStore,
@@ -55,6 +56,8 @@ import {
   createChatStartDetector,
   defaultThreadTitle,
   explicitThreadTitle,
+  autoThreadTitle,
+  isTitleEditorOpen,
   requestThreadRename,
   quickCreateWorkingDir,
   publishSessionStatuses,
@@ -119,22 +122,26 @@ import {
 import { clearDevServerSession, setPreviewOpenCheck, sessionDirFor } from "./lib/devServer";
 import { dirtyCount, flushDrafts } from "./lib/editor";
 import {
-  buildSpawnContext,
+  assembleLaunchContext,
+  buildSpawnContextParts,
+  type SpawnContextParts,
   refOptions,
   sanitizeForTypedLine,
+  getKbRootForContext,
   setKbRootForContext,
   setScrollbackRootForContext,
   setThreadsRootForContext,
-  buildPageContractLine,
   type StandingDecisions,
 } from "./lib/agentContext";
 import { runPromotionPass, promotionPassReason, PROMOTION_POLL_MS } from "./lib/threadPromotion";
 import { parsePageFile, parseAnswersFile, parseInboxFile, parseRetractedFile, mergePage, conventionLine, postTimes, countUnreadTimes, nextPassEntry, loadInboxSeen, markInboxSeen, countQuestionStates, requestPageFocus, type ConventionEntry, type ThreadPassEntry } from "./lib/pageStore";
-import { nextThingFor, offerNextThing, clearNextThingOffer } from "./lib/nextThing";
-import { getCachedDocList, refreshDocList } from "./lib/kb";
+import { decideTurnSettle, offerNextThing, clearNextThingOffer } from "./lib/nextThing";
+import { getCachedDocList, refreshDocList, resolveWithFreshKbDocs } from "./lib/kb";
 import { requestReportAnchor } from "./lib/reportStore";
+import { viewOwnerKey } from "./lib/viewStore";
 import { parseSetsFile, setArtifactFor } from "./lib/artifactSets";
-import { explorerProjects, registerExplorerActions, quickThreadTarget, sessionRepoOptions, useSessionRepos, projectKeyForDir } from "./lib/explorer";
+import { repoFileOpens, showTargetFor, showsPass } from "./lib/showIntent";
+import { explorerProjects, explorerRead, registerExplorerActions, quickThreadTarget, sessionRepoOptions, useSessionRepos, projectKeyForDir, projectPlaceForDir } from "./lib/explorer";
 import {
   configureBacklogIO,
   initBacklog,
@@ -159,7 +166,6 @@ import { BackButton } from "./components/BackButton";
 import { ThreadsScreen } from "./components/ThreadsScreen";
 import { ProjectView } from "./components/ProjectView";
 import { findSurface } from "./surfaces/registry";
-import { enqueueFit } from "./lib/fitQueue";
 import { useRoute, navigate, readRouteFromUrl, getNavState } from "./lib/route";
 import {
   loadWorkspaceFromStorage,
@@ -243,7 +249,7 @@ function waitForSessionShellReady(sessionId: string): Promise<void> {
 //
 // Never throws and never blocks the launch: a missing/unreadable sidecar just
 // means zero pins.
-async function resolveSpawnContext(sessionId: string, threadId: string): Promise<string | null> {
+async function resolveSpawnContext(sessionId: string, threadId: string): Promise<SpawnContextParts> {
   // A SET announces the member it is SHOWING (SWIT-79) — a frame is not on
   // screen, its current item is.
   const raw = artifactFor(sessionId);
@@ -253,7 +259,7 @@ async function resolveSpawnContext(sessionId: string, threadId: string): Promise
   // panel the sentence stands alone; with one it follows the panel clause.
   const item = backlogItemForThread(threadId);
   const backlogItem = item ? { id: item.id, text: item.text } : null;
-  if (!artifact) return buildSpawnContext(null, 0, { backlogItem });
+  if (!artifact) return buildSpawnContextParts(null, 0, { backlogItem });
   let pinCount = 0;
   // Both FILE kinds can carry pins now: a KB doc's sidecar sits next to it, a
   // repo file's is mirrored into the hidden `_repo-pins/` KB tree. pinTargetFor
@@ -266,7 +272,7 @@ async function resolveSpawnContext(sessionId: string, threadId: string): Promise
   // periodic save last happened to write.
   if (artifact.kind === "session") {
     await flushTerminalTranscript(artifact.sessionId);
-    return buildSpawnContext(artifact, 0, {
+    return buildSpawnContextParts(artifact, 0, {
       ...refOptions(),
       sessionName: artifactShortTitle(artifact),
       backlogItem,
@@ -294,7 +300,7 @@ async function resolveSpawnContext(sessionId: string, threadId: string): Promise
       }
     }
   }
-  return buildSpawnContext(artifact, pinCount, {
+  return buildSpawnContextParts(artifact, pinCount, {
     ...refOptions(),
     // A surface's anchor vocabulary is the PAGE's (registry pinHint).
     anchorHint:
@@ -444,8 +450,9 @@ export default function App() {
     setTerminalScreenVisible(route.screen === "terminal");
   }, [route.screen]);
 
-  // No wrapper needed — the fitQueue's per-session debounce (150ms) naturally
-  // coalesces the ResizeObserver events that fire during sidebar width transition.
+  // No wrapper needed — a pane resize never refits the (pinned) terminal, and
+  // TerminalPane debounces the one re-sync it asks for (150ms), which coalesces
+  // the ResizeObserver events that fire during the sidebar width transition.
   const cycleSidebar = rawCycleSidebar;
 
   const [searchOpen, setSearchOpen] = useState(false);
@@ -773,9 +780,9 @@ export default function App() {
       const gen = bumpSessionGeneration(sessionId);
 
       try {
-        // Spawn the new PTY at the live terminal's grid — xterm keeps its
-        // real cols/rows across restart, and omitting them spawned the shell
-        // at the 120x30 default until the next fit SIGWINCHed it.
+        // Spawn the new PTY at the live terminal's grid — the pinned one
+        // (terminalGrid.ts; ipc fills it in if the instance is gone). The
+        // PTY must start there: nothing resizes it afterwards.
         await restartSession(
           sessionId,
           session.name,
@@ -857,7 +864,7 @@ export default function App() {
       }
       // T8 seam 1: what this tab's panel shows, re-derived HERE so every spawn
       // carries current context and a failure degrades to no flag at all.
-      let panelContext: string | null = null;
+      let panelContext: SpawnContextParts = { panel: null, panelShort: null, backlog: "" };
       try {
         panelContext = await resolveSpawnContext(sessionId, threadId);
       } catch (err) {
@@ -881,6 +888,9 @@ export default function App() {
       // EVERY spawn from the same two files the page renders — never cached
       // on the record — and a failed read is no clause, not a failed launch.
       let standing: StandingDecisions | null = null;
+      // SWIT-104: whether that page already holds a BRIEF rides the same
+      // read — the launch line then says to `page read` first.
+      let hasBrief = false;
       if (mcpConfig) {
         try {
           const [pageRaw, answersRaw] = await Promise.all([
@@ -889,20 +899,27 @@ export default function App() {
           ]);
           const merged = mergePage(parsePageFile(pageRaw), parseAnswersFile(answersRaw), []);
           standing = { count: merged.decisions.length, labels: merged.decisions.map((d) => d.label) };
+          hasBrief = merged.brief !== null;
         } catch (err) {
           log.warn(`Standing decisions unavailable for thread id=${threadId}: ${err}`);
         }
       }
       // The page one-liner rides ONLY when the tools actually attached (a
-      // sentence about a tool that does not exist would be a lie), and FIRST,
-      // so a long panel ref truncates its own tail.
-      const context = [mcpConfig ? buildPageContractLine(standing) : null, panelContext]
-        .filter((s): s is string => s !== null && s.length > 0)
-        .join(" ");
+      // sentence about a tool that does not exist would be a lie), and FIRST.
+      // The JOINED line is what SPAWN_CONTEXT_MAX caps, so the join is
+      // budget-aware (review of 49ebb20, #4): the panel's detail and the
+      // decision labels give ground before the contract or the backlog
+      // item id could ever be cut.
+      const context = assembleLaunchContext({
+        ...panelContext,
+        contract: mcpConfig !== null,
+        hasBrief,
+        decisions: standing,
+      });
       const line = launchCommand({
         chatSessionId: thread.chatSessionId,
         resume,
-        appendSystemPrompt: context.length > 0 ? context : null,
+        appendSystemPrompt: context,
         mcpConfig,
       });
       log.info(`Thread launch id=${threadId} session=${sessionId} exists=${resume}: ${line}`);
@@ -986,8 +1003,8 @@ export default function App() {
         void launchClaudeInSession(info.id, thread.id);
         if (opts?.renameOnCreate) {
           // NOW, not on a timer (review fix): the new pane's terminal focuses
-          // itself from more than one place (its visibility effect, the
-          // show-fit's `shouldFocus` a few frames later) and no delay is
+          // itself from more than one place (its visibility effect's
+          // `landTerminalView` focus, xterm's own focus on mount) and no delay is
           // guaranteed to land after the last of them. The title box commits
           // on blur, so it is the box that holds its ground — ThreadTitleEditor
           // ignores a blur into xterm's helper textarea that no pointer
@@ -1427,6 +1444,41 @@ export default function App() {
   // (`pageStore.nextPassEntry`), because seen is device-local state, not one
   // of the stamped files: a cached count lied for a tick after a tab switch.
   const threadPassCacheRef = useRef(new Map<string, ThreadPassEntry>());
+  // SWIT-105 — A THREAD NAMES ITSELF. A thread the user never named is
+  // `New thread` until someone types a title; the agent's first page THEME
+  // already says what it is about. So the pass that reads page.json (stamp
+  // moved) hands the theme here: `threadStore.autoThreadTitle` is the rule
+  // (null unless the title is EXACTLY the default — a user's name, or a
+  // cleared box's `repo · date`, is never touched), applied at most ONCE per
+  // thread per app session, through the PRIMITIVES (renameThread +
+  // renameSessionLocal + the session IPC — the one-name rule's own calls, so
+  // the tab follows and there is no handler ping-pong).
+  const autoTitledRef = useRef(new Set<string>());
+  const applyThemeTitle = useCallback(
+    (threadId: string, theme: string | null) => {
+      if (autoTitledRef.current.has(threadId)) return;
+      const before = getThreadById(threadId);
+      if (!before) return;
+      // Review of c178f2f, #7: stand down while a title box is open on this
+      // thread or its tab (its Enter/blur would commit `New thread` back —
+      // the next page change tries again), and never clear a pending
+      // rename-on-create request (the box still opens, holding this title).
+      const title = autoThreadTitle(before.title, theme, {
+        editorOpen: isTitleEditorOpen(threadId, before.sessionId),
+      });
+      if (title === null) return;
+      autoTitledRef.current.add(threadId);
+      log.info(`Thread id=${threadId} named from its page theme: ${title}`);
+      renameThread(threadId, title, { keepRenameRequest: true });
+      void saveThreadsToDisk();
+      const after = getThreadById(threadId);
+      if (after?.sessionId) {
+        renameSessionLocal(after.sessionId, after.title);
+        renameSession(after.sessionId, after.title).catch(console.error);
+      }
+    },
+    [renameSessionLocal]
+  );
   useEffect(() => {
     let cancelled = false;
     let busy = false;
@@ -1442,7 +1494,8 @@ export default function App() {
         // SWIT-69: open-question counts ride the same pass — the rail row's
         // dim `· N` marker (the filled `?` chip is retired; words, not glyphs).
         // SWIT-77 review fix: decided-but-UNSENT answers are counted on the
-        // same read of the same two files, so an unsent batch shows from the
+        // same read of the same three files (page.json, answers.json and —
+        // SWIT-105 — retracted.json's dismissals), so an unsent batch shows from the
         // rail and from Home, not only on the page.
         const questions: Record<string, number> = {};
         const unsent: Record<string, number> = {};
@@ -1495,14 +1548,22 @@ export default function App() {
           const entry: ThreadPassEntry = { stamp, questions: 0, unsent: 0, postsAt: [] };
           threadPassCacheRef.current.set(t.id, entry);
           try {
-            const [pageRaw, answersRaw] = await Promise.all([
+            const [pageRaw, answersRaw, retractedRaw] = await Promise.all([
               readThreadFile(t.id, "page.json"),
               readThreadFile(t.id, "answers.json"),
+              // SWIT-105: a dismissed question (`question:<id>` in the app's
+              // retracted.json — one of the stamped files, so a dismissal
+              // moves the stamp and lands here) is not open either.
+              readThreadFile(t.id, "retracted.json"),
             ]);
             if (cancelled) return;
+            const pageFile = parsePageFile(pageRaw);
+            // SWIT-105: a thread still titled `New thread` takes its name
+            // from the first page theme — once, and never over a user's name.
+            applyThemeTitle(t.id, pageFile.theme);
             // SWIT-77: an agent-resolved question is not open either; an
             // answered one with no (or a stale) sentAt is unsent.
-            const counts = countQuestionStates(parsePageFile(pageRaw).questions, parseAnswersFile(answersRaw));
+            const counts = countQuestionStates(pageFile.questions, parseAnswersFile(answersRaw), parseRetractedFile(retractedRaw));
             entry.questions = counts.open;
             entry.unsent = counts.unsent;
             if (counts.open > 0) questions[t.id] = counts.open;
@@ -1677,11 +1738,22 @@ export default function App() {
   // `sets.json` in the thread dir, read beside the views/ listing, the same
   // baseline rule, an unseen set id opening ONE set tab of those views.
   const seenSetsRef = useRef(new Map<string, Set<string>>());
+  // SWIT-102: the agent's SHOWS (`page` op `show {address}`) ride the same
+  // poll — `shows.json` in the thread dir, the same baseline rule (nothing
+  // replays after a restart), an unseen show opening the doc / file / page /
+  // view it names in the preview slot, FOCUSED: an explicit request, unlike
+  // the turn-end hook's open-behind. The address goes through the resolver
+  // the Evidence rows and nextThingFor use (showIntent.showTargetFor →
+  // nextThing.resolveAddress), inside kb.resolveWithFreshKbDocs so a KB doc
+  // written seconds ago is found (SWIT-101). An address nothing resolves
+  // opens nothing — the tool result already said so.
+  const seenShowsRef = useRef(new Map<string, Set<string>>());
   useEffect(() => {
     if (route.screen !== "terminal" || !activeSessionId) return;
     const thread = findThreadBySessionId(activeSessionId);
     if (!thread) return;
     const threadId = thread.id;
+    const workingDir = thread.workingDir;
     const sessionId = activeSessionId;
     let cancelled = false;
     let busy = false;
@@ -1689,7 +1761,16 @@ export default function App() {
       if (busy) return;
       busy = true;
       try {
-        const [ids, setsRaw] = await Promise.all([listThreadViews(threadId), readThreadFile(threadId, "sets.json")]);
+        const [ids, setsRaw, showsRaw] = await Promise.all([
+          listThreadViews(threadId),
+          readThreadFile(threadId, "sets.json"),
+          // Its own catch: a failed shows read must never take the views and
+          // sets down with it — and it is NULL, not "": a failed read is no
+          // listing at all, so it can never become the baseline (review of
+          // 49ebb20, #2 — an empty baseline replayed every stored show on
+          // the next good tick). showsPass skips the block for this tick.
+          readThreadFile(threadId, "shows.json").catch(() => null),
+        ]);
         if (cancelled) return;
         let seen = seenViewsRef.current.get(threadId);
         if (!seen) {
@@ -1721,6 +1802,66 @@ export default function App() {
             log.info(`Set intent: thread=${threadId} set=${set.id} (${set.ids.length}) — opening as one tab`);
             lastIntentOpenRef.current.set(threadId, Date.now());
             openInPanel(sessionId, setArtifactFor(threadId, set), { preview: true });
+          }
+        }
+        const pass = showsPass(seenShowsRef.current.get(threadId), showsRaw);
+        if (pass.kind === "baseline") {
+          seenShowsRef.current.set(threadId, new Set(pass.ids));
+        } else if (pass.kind === "open" && pass.shows.length > 0) {
+          const seenShows = seenShowsRef.current.get(threadId)!;
+          // The agent's path is relative to the THREAD'S working directory
+          // (that is what the server checked); a repo file is addressed from
+          // the project root — `place.prefix` is the difference.
+          let place: { key: string; prefix: string } | null = null;
+          try {
+            place = projectPlaceForDir(await explorerProjects(), workingDir);
+          } catch {
+            // no registry — a repo path opens nothing; the rest still resolves
+          }
+          for (const show of pass.shows) {
+            if (seenShows.has(show.id)) continue;
+            const hit = await resolveWithFreshKbDocs((kbDocs, onKbMiss) =>
+              showTargetFor(
+                show.address,
+                {
+                  threadId,
+                  kbDocs,
+                  projectKey: place?.key ?? null,
+                  pathPrefix: place?.prefix ?? "",
+                  kbRoot: getKbRootForContext(),
+                  workingDir,
+                  onKbMiss,
+                },
+                show.where
+              )
+            );
+            // A repo path resolves SYNTACTICALLY (the Evidence rule) — for a
+            // show that is not enough: a file the viewer cannot render (not
+            // there, a folder, binary, over explorer_read's cap) must open
+            // nothing, not an error card in front of the user. The test is
+            // the viewer's own read.
+            const readable =
+              hit === null ||
+              hit.artifact.kind !== "repo-file" ||
+              (await repoFileOpens(() => {
+                const a = hit.artifact as Extract<Artifact, { kind: "repo-file" }>;
+                return explorerRead(a.project, a.path);
+              }));
+            // Marked seen only AFTER the awaits: a tick cancelled mid-resolve
+            // (this effect re-runs on every session churn) leaves the show
+            // unseen, and the next tick takes it — never dropped, never twice.
+            if (cancelled) return;
+            seenShows.add(show.id);
+            if (!hit || !readable) {
+              log.info(`Show intent: thread=${threadId} show=${show.id} ${show.address} — nothing resolves, nothing opened`);
+              continue;
+            }
+            log.info(`Show intent: thread=${threadId} show=${show.id} ${show.address} — opening in the preview slot, focused`);
+            lastIntentOpenRef.current.set(threadId, Date.now());
+            if (hit.artifact.kind === "view" && hit.anchor) {
+              requestReportAnchor(viewOwnerKey(hit.artifact), hit.artifact.viewId, hit.anchor);
+            }
+            openInPanel(sessionId, hit.artifact, { preview: true });
           }
         }
       } catch {
@@ -1833,9 +1974,12 @@ export default function App() {
   // (1) the preview is the strip's ACTIVE tab — an open-behind would REPLACE
   // the thing being read, in front (`isPreviewActive`); (2) a view the agent
   // showed in the same turn is the intent poll's to open, and it wins for
-  // INTENT_GRACE_MS. The KB doc list is refreshed when the cache is still
-  // cold (no PageView has mounted yet) — one IPC, once, so a KB address is
-  // never mis-read as a repo file.
+  // INTENT_GRACE_MS (a view, a set, or a `show`). The KB doc list is loaded
+  // when the cache is cold and REFRESHED ONCE when an address that could be
+  // a KB doc misses it (SWIT-101) — but only AFTER every stand-down and the
+  // offer-once check (nextThing.decideTurnSettle), so a settle that opens
+  // nothing costs no `kb_list` — and a KB doc the agent wrote this turn is
+  // still never mis-read as a repo file.
   const prevStatusRef = useRef(new Map<string, AgentStatus>());
   const settleTurn = useCallback(async (sessionId: string) => {
     const thread = findThreadBySessionId(sessionId);
@@ -1854,41 +1998,61 @@ export default function App() {
         parseInboxFile(inboxRaw),
         parseRetractedFile(retractedRaw)
       );
-      let projectKey: string | null = null;
+      // ONE resolver (review of 49ebb20, #7): the thread's place in its
+      // project — key AND the cwd→project re-base — exactly as the page's
+      // rows and the agent's `show` resolve.
+      let place: { key: string; prefix: string } | null = null;
       try {
-        projectKey = projectKeyForDir(await explorerProjects(), thread.workingDir);
+        place = projectPlaceForDir(await explorerProjects(), thread.workingDir);
       } catch {
         // no registry — a repo path stays plain text, the rest still resolves
       }
-      const kbDocs = getCachedDocList() ?? (await refreshDocList().catch(() => null));
-      const next = nextThingFor(page, { threadId, kbDocs, projectKey });
-      if (!next) {
+      // The thread's session may have moved under the awaits (a revive).
+      const hostNow = () =>
+        findThreadBySessionId(sessionId)?.id === threadId ? sessionId : getThreadById(threadId)?.sessionId ?? null;
+      // FIRST against the CACHED list — no IPC (review of 49ebb20, #5: the
+      // fresh-list resolve ran on nearly every settle, before the checks
+      // that make most settles a no-op). A cold cache is loaded once; the
+      // one refresh happens inside decideTurnSettle, after the stand-downs,
+      // and only for a real KB miss that fell back to a repo file.
+      let kbDocs = getCachedDocList();
+      if (kbDocs === null) kbDocs = await refreshDocList().catch(() => null);
+      const decision = await decideTurnSettle(page, {
+        ctx: { threadId, projectKey: place?.key ?? null, pathPrefix: place?.prefix ?? "" },
+        kbDocs,
+        refreshKbDocs: () => refreshDocList(),
+        previewActive: () => {
+          const h = hostNow();
+          return h !== null && isPreviewActive(h);
+        },
+        intentRecent: () => Date.now() - (lastIntentOpenRef.current.get(threadId) ?? 0) < INTENT_GRACE_MS,
+      });
+      if (decision.act === "none") {
         clearNextThingOffer(threadId);
         return;
       }
-      // The thread's session may have moved under the await (a revive).
-      const host = findThreadBySessionId(sessionId)?.id === threadId ? sessionId : getThreadById(threadId)?.sessionId ?? null;
+      const host = hostNow();
       if (!host) return;
-      if (next.why === "questions") {
-        if (!offerNextThing(threadId, next.offerKey)) return;
-        log.info(`Next thing: thread=${threadId} — ${next.label}`);
+      if (decision.act === "questions") {
+        if (!offerNextThing(threadId, decision.next.offerKey)) return;
+        log.info(`Next thing: thread=${threadId} — ${decision.next.label}`);
         requestPageFocus(threadId, "decisions");
         activatePageTab(host);
         return;
       }
-      // A reviewFirst that names nothing openable (a ticket key) is the
-      // page's line to print; there is nothing for the hook to open.
-      if (next.artifact === null) return;
-      if (isPreviewActive(host)) {
-        log.info(`Next thing: thread=${threadId} — ${next.label} (stood down: the preview is being read)`);
+      if (decision.act === "stand-down") {
+        // A reviewFirst that names nothing openable (a ticket key) is the
+        // page's line to print; there is nothing for the hook to open.
+        if (decision.reason === "preview") {
+          log.info(`Next thing: thread=${threadId} — ${decision.next.label} (stood down: the preview is being read)`);
+        }
         return;
       }
-      const lastIntent = lastIntentOpenRef.current.get(threadId) ?? 0;
-      if (Date.now() - lastIntent < INTENT_GRACE_MS) return;
+      const next = decision.next;
       if (!offerNextThing(threadId, next.offerKey)) return;
       log.info(`Next thing: thread=${threadId} — ${next.label} (opened behind the page)`);
       if (next.artifact.kind === "view" && next.anchor) {
-        requestReportAnchor(threadId, next.artifact.viewId, next.anchor);
+        requestReportAnchor(viewOwnerKey(next.artifact), next.artifact.viewId, next.anchor);
       }
       openInPanel(host, next.artifact, { preview: true, focus: false });
     } catch (err) {
@@ -2008,8 +2172,10 @@ export default function App() {
       if (payload.sessionId !== sessionId || snapshotSent) return;
       const snapshot = serializeForPip(sessionId);
       const text = snapshot?.text ?? "";
-      const cols = snapshot?.cols ?? 80;
-      const rows = snapshot?.rows ?? 24;
+      // The pinned grid when there is no terminal to ask (SWIT-103) — the
+      // mirror is created at the same constants, so it must not be told 80×24.
+      const cols = snapshot?.cols ?? TERMINAL_COLS;
+      const rows = snapshot?.rows ?? TERMINAL_ROWS;
       log.info(`PiP ready id=${sessionId}, sending snapshot length=${text.length} cols=${cols} rows=${rows}`);
       void sendPipOutput(sessionId, { type: "snapshot", text, cols, rows }).catch((e) =>
         log.warn(`PiP snapshot send failed: ${e}`)
@@ -2546,9 +2712,9 @@ export default function App() {
 
             Rendered as a SIBLING above TerminalPane (whose root is `flex: 1`
             inside the panel's column), so it costs no layout while there is no
-            offer and, when one appears, the resulting height change goes
-            through the pane's existing ResizeObserver → fitQueue → grow-only
-            policy like any other. Same component, same rules, same wording —
+            offer and, when one appears, the resulting height change is a pane
+            move over the pinned terminal grid like any other (SWIT-103 —
+            nothing resizes). Same component, same rules, same wording —
             not a second implementation that could drift. */}
         <DevServerOffer session={session} compact={false} framed />
         <TerminalPane
@@ -2778,14 +2944,10 @@ export default function App() {
         return;
       }
 
-      // Paste into the focused terminal session (respects bracketed paste mode)
+      // Paste into the focused terminal session (respects bracketed paste
+      // mode; held while a turn-end rewrite is parsing — SWIT-103)
       const sessionId = effectiveActiveIdRef.current;
-      if (sessionId) {
-        const instance = getTerminal(sessionId);
-        if (instance) {
-          instance.terminal.paste(text);
-        }
-      }
+      if (sessionId) pasteIntoTerminal(sessionId, text);
     });
 
     return () => {
@@ -2916,12 +3078,7 @@ export default function App() {
           .join(" ");
 
         const sessionId = effectiveActiveIdRef.current;
-        if (sessionId) {
-          const instance = getTerminal(sessionId);
-          if (instance) {
-            instance.terminal.paste(formatted);
-          }
-        }
+        if (sessionId) pasteIntoTerminal(sessionId, formatted);
       }, DROP_CLAIM_DEFER_MS);
     });
 
@@ -3001,8 +3158,6 @@ export default function App() {
               repoColor: saved.repoColor,
               group: saved.group,
               restoredFromId: saved.id,
-              cols: saved.cols,
-              rows: saved.rows,
             });
             initTaskDetector(info.id);
           } catch (err) {
@@ -3207,37 +3362,28 @@ export default function App() {
       // Clear corrupt texture atlases (cheap, safe)
       clearAllTextureAtlases();
 
-      // Re-enable lost WebGL contexts after GPU settles, then re-fit
+      // Re-enable lost WebGL contexts after GPU settles, then repaint every
+      // showing terminal and re-measure its scroll range. No fit: the grid is
+      // pinned (SWIT-103), so a wake resizes nothing — but the display scaling
+      // can have changed while asleep (dock → undock), and the re-sync is what
+      // re-points xterm's scroller at the fresh renderer's row height.
       setTimeout(() => {
         recoverAllWebGL();
-        for (const id of getAllTerminalIds()) {
-          const inst = getTerminal(id);
-          if (!inst?.terminal.element?.parentElement) continue;
-          enqueueFit(id, "wake", {}, 0);
-        }
+        refreshAllTerminalViews("wake");
       }, GPU_SETTLE_MS);
     };
 
     // --- Visibility change (alt-tab back) ---
     // WebView2 may discard GPU-rendered content when backgrounded.
     // Unlike sleep/wake, the WebGL context isn't lost — just the render surface is stale.
+    // Nothing is saved on the way out any more: the reader's place is buffer
+    // state (viewportY), nothing resizes or reflows while the window is away,
+    // and the re-sync on the way back writes the DOM scroller FROM the buffer.
     const handleVisibilityChange = () => {
-      const ids = getAllTerminalIds();
-      if (document.visibilityState === "hidden") {
-        log.info(`Window hidden — saving scroll positions for ${ids.length} terminals`);
-        for (const id of ids) {
-          saveScrollPosition(id);
-        }
-        return;
-      }
-      log.info(`Window became visible, refreshing ${ids.length} terminals`);
+      if (document.visibilityState === "hidden") return;
+      log.info(`Window became visible, refreshing ${getAllTerminalIds().length} terminals`);
       clearAllTextureAtlases();
-      for (const id of ids) {
-        const inst = getTerminal(id);
-        if (!inst?.terminal.element?.parentElement) continue;
-        const saved = getSavedScrollPosition(id);
-        enqueueFit(id, "visibility", { savedScroll: saved }, 0);
-      }
+      refreshAllTerminalViews("visibility");
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
@@ -3932,6 +4078,7 @@ function ProjectScreen({ menuHidden }: { menuHidden: boolean }) {
     <ProjectView
       project={effective.project}
       page={effective.page}
+      view={effective.view}
       params={effective.params}
       active={active}
       menuHidden={menuHidden}

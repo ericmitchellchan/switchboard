@@ -59,6 +59,7 @@ import { log } from "./logger";
 import type { ConventionEntry } from "./pageStore";
 import { surfaceLabel } from "../surfaces/registry";
 import { encodeSurfaceParams, sanitizeSurfaceParams, surfaceParamsSuffix } from "./surfaceParams";
+import { TERMINAL_COLS } from "./terminalGrid";
 // SETS (SWIT-79) — the pure fold/split/position rules; this store applies
 // them and keeps the per-set position map. artifactSets imports nothing back.
 import {
@@ -410,14 +411,23 @@ export function panelWidthFromDrag(
 // at the terminal's measured cell width, clamped like any width. A width the
 // user dragged is the user's and is never recomputed. With no measurement
 // (no terminal yet, a hidden screen) the old constant stands, and when the
-// window cannot afford 100 columns the clamp floor wins — the grow-only grid
-// then starts narrower and the visible horizontal scrollbar is the fallback.
+// window cannot afford 100 columns the clamp floor wins — the grid is still
+// 100 columns (it is pinned, SWIT-103), the pane is narrower than it, and the
+// host's visible horizontal scrollbar reaches the rest.
+//
+// Since SWIT-103 this rule is what makes the pinned grid FIT by default: the
+// terminal is exactly TERMINAL_COLS wide whatever the pane measures, so a
+// default panel that leaves the pane that width shows the whole grid with no
+// horizontal bar.
 
-/** The column count the default width protects. */
-export const TERMINAL_COLS = 100;
+/** The column count the default width protects — THE terminal grid's
+ *  (terminalGrid.ts is the one place it is defined; re-exported here for the
+ *  width rule's callers and tests). */
+export { TERMINAL_COLS };
 
-/** Pixels the terminal host adds beside the grid: the 5px viewport scrollbar
- *  plus fit slack (a fit rounds down to whole cells). */
+/** Pixels the terminal host needs beside the grid so no horizontal bar shows:
+ *  the host's own 5px vertical scrollbar (present when the pane is shorter
+ *  than the grid) plus sub-pixel slack. */
 export const TERMINAL_GUTTER = 8;
 
 /** Is the stored width still the untouched default? (The width the default
@@ -542,7 +552,8 @@ export function describeArtifact(artifact: Artifact): ArtifactDescription {
       return {
         icon: FILE_ICON,
         crumbs: [
-          { text: "view", tone: "dim" },
+          // SWIT-107: a project view names its project where a thread's says `view`.
+          { text: artifact.project !== undefined ? `${artifact.project} · report` : "view", tone: "dim" },
           { text: artifact.viewId, tone: artifact.drill ? "dim" : "bright" },
           ...(artifact.drill ? [{ text: artifact.drill.key, tone: "bright" as const }] : []),
         ],
@@ -690,7 +701,15 @@ export function sanitizeArtifact(raw: unknown): Artifact | null {
       // strip never loses a tab to a version skew. T6: an optional drill key
       // (a drilled child); a malformed one is dropped and the record is the
       // parent — a stale key must never make a tab unrenderable.
-      if (!isNonEmptyString(raw.threadId) || !isNonEmptyString(raw.viewId)) return null;
+      // SWIT-107: the OWNER is a thread OR a registry project — exactly one.
+      // A project key is the registry's word alphabet; anything else (or
+      // both owners at once) is not a view this app wrote.
+      if (!isNonEmptyString(raw.viewId)) return null;
+      const threadOwner = isNonEmptyString(raw.threadId) ? raw.threadId : null;
+      const projectOwner =
+        typeof raw.project === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(raw.project) ? raw.project : null;
+      if ((threadOwner === null) === (projectOwner === null)) return null;
+      const owner = projectOwner !== null ? { project: projectOwner } : { threadId: threadOwner as string };
       const drill = raw.drill;
       const key =
         typeof drill === "object" && drill !== null && isNonEmptyString((drill as Record<string, unknown>).key)
@@ -703,15 +722,11 @@ export function sanitizeArtifact(raw: unknown): Artifact | null {
         typeof raw.block === "number" && Number.isInteger(raw.block) && raw.block >= 1 && raw.block <= 999
           ? raw.block
           : null;
-      return key !== null
-        ? {
-            kind: "view",
-            threadId: raw.threadId,
-            viewId: raw.viewId,
-            ...(block !== null ? { block } : {}),
-            drill: { key },
-          }
-        : { kind: "view", threadId: raw.threadId, viewId: raw.viewId };
+      const rest =
+        key !== null
+          ? { viewId: raw.viewId, ...(block !== null ? { block } : {}), drill: { key } }
+          : { viewId: raw.viewId };
+      return { kind: "view", ...owner, ...rest } as Artifact;
     }
     case "question":
       // SWIT-51 — the write-back tab. Two ids; the question's text lives on
@@ -794,7 +809,9 @@ export function artifactIdentity(artifact: Artifact): string {
       // A drilled child is its OWN tab (T6): one parent, many children.
       // SWIT-73: the block joins the identity — the same key drilled from two
       // embedded views is two children.
-      return `view:${artifact.threadId}:${artifact.viewId}${
+      // SWIT-107: a PROJECT view's owner reads `@<project>` — never a thread
+      // id (a uuid), so the two owners cannot share an identity.
+      return `view:${artifact.project !== undefined ? `@${artifact.project}` : artifact.threadId}:${artifact.viewId}${
         artifact.block !== undefined ? `#b${artifact.block}` : ""
       }${artifact.drill ? `/${artifact.drill.key}` : ""}`;
     case "question":
@@ -2100,7 +2117,13 @@ export function inheritPanel(source: Artifact | null, newSessionId: string): boo
   // would put the OLD thread's document into the new thread's strip — the
   // wrong content with a confident face. The new thread gets its own ✦ page
   // from ensurePageTab.
-  if (artifact.kind === "page" || artifact.kind === "view" || artifact.kind === "question") {
+  // SWIT-107: a PROJECT view is not thread-scoped — it opens with no thread
+  // at all — so it rides into the new thread like a doc does.
+  if (
+    artifact.kind === "page" ||
+    (artifact.kind === "view" && artifact.project === undefined) ||
+    artifact.kind === "question"
+  ) {
     return false;
   }
   openInPanel(newSessionId, artifact);
@@ -2956,7 +2979,14 @@ export function useActiveTabArtifact(): Artifact | null {
 /** The artifact kinds a Phase A click can open. `localhost` is excluded by
  *  type: it has no full-width screen to navigate to (Phase B), so including it
  *  would make `fullWidthRoute` partial for no gain. */
-export type OpenableArtifact = Extract<Artifact, { kind: "kb-doc" | "repo-file" | "surface" }>;
+export type OpenableArtifact =
+  | Extract<Artifact, { kind: "kb-doc" | "repo-file" | "surface" }>
+  | ProjectViewArtifact;
+
+/** SWIT-107: a view a registry PROJECT owns — openable like a doc (a KB tree
+ *  row, a `view:<project>/<id>` Evidence address, `show`) because it needs no
+ *  thread, and it has a full-width screen (the project route's `view`). */
+export type ProjectViewArtifact = Extract<Artifact, { kind: "view"; project: string }>;
 
 /** Everything the decision depends on. Passed explicitly so the rule is
  *  testable without a route store, a window, or a session list. */
@@ -2994,6 +3024,10 @@ export function fullWidthRoute(target: OpenableArtifact): Route {
       return target.params
         ? { screen: "project", project: target.project, page: target.page, params: target.params }
         : { screen: "project", project: target.project, page: target.page };
+    case "view":
+      // SWIT-107: the project screen's view identity. A drilled child or an
+      // embedded block opens as its report/parent — full width is the view.
+      return { screen: "project", project: target.project, view: target.viewId };
   }
 }
 
@@ -3028,8 +3062,11 @@ export function fullWidthRoute(target: OpenableArtifact): Route {
  *  | any screen      | on       | yes            | navigate          |
  *  | any screen      | either   | no             | navigate          | */
 export function decideOpen(target: OpenableArtifact, ctx: OpenContext): OpenDecision {
-  const wantsPanel =
-    target.kind === "surface" ? !ctx.modifier : ctx.screen === "terminal" ? !ctx.modifier : ctx.modifier;
+  // SWIT-107: a PROJECT VIEW follows the surface rule — a report is read
+  // BESIDE the thread working on it, from any screen; Ctrl+click (or no
+  // thread) is the full-width escape.
+  const besideByDefault = target.kind === "surface" || target.kind === "view";
+  const wantsPanel = besideByDefault ? !ctx.modifier : ctx.screen === "terminal" ? !ctx.modifier : ctx.modifier;
   if (wantsPanel && ctx.sessionId) {
     return {
       action: "panel",

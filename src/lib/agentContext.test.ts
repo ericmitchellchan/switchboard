@@ -19,8 +19,12 @@ import {
   TRANSCRIPT_SUFFIX,
   DECISION_LABELS_NAMED,
   DECISION_LABEL_MAX,
+  PANEL_REPORT_SENTENCE,
+  BRIEF_READ_SENTENCE,
   artifactRef,
+  assembleLaunchContext,
   buildBacklogItemLine,
+  buildSpawnContextParts,
   buildPageContractLine,
   buildSendReference,
   buildSpawnContext,
@@ -560,6 +564,126 @@ describe("buildPageContractLine + standing decisions (SWIT-58)", () => {
   });
 });
 
+describe("buildPageContractLine — a report stays in the panel (SWIT-102)", () => {
+  // The longest standing-decisions clause there can be: three labels at the cap.
+  const FULL: { count: number; labels: string[] } = {
+    count: 999,
+    labels: ["a".repeat(DECISION_LABEL_MAX * 2), "b".repeat(DECISION_LABEL_MAX * 2), "c".repeat(DECISION_LABEL_MAX * 2)],
+  };
+
+  it("says it plainly: the panel, the view tool, never claude.ai unless asked for a link, page show for what exists", () => {
+    const line = buildPageContractLine();
+    expect(line).toContain(
+      "A report, brief, summary or 'artifact' the user asks for goes IN THE PANEL: write a .md file in the repo and open it with the view tool (kind report)."
+    );
+    expect(line).toContain(
+      "Never publish it to claude.ai (the Artifact tool, Claude Docs) unless the user asks for a link to share."
+    );
+    expect(line).toContain("To put an existing doc or file in front of the user, use the page tool (op show).");
+    // The words a user actually says are all claimed.
+    for (const word of ["report", "brief", "summary", "'artifact'", "IN THE PANEL"]) expect(line).toContain(word);
+  });
+
+  it("the sentence survives the typed-line sanitizer VERBATIM — nothing in it is a shell metacharacter", () => {
+    expect(sanitizeForTypedLine(PANEL_REPORT_SENTENCE, SPAWN_CONTEXT_MAX)).toBe(PANEL_REPORT_SENTENCE);
+    expect(PANEL_REPORT_SENTENCE).not.toMatch(/["\\$%`\u201C-\u201F\n]/);
+    expect(buildPageContractLine()).toContain(PANEL_REPORT_SENTENCE);
+    // And once more through the launch line's own re-sanitize (threadStore).
+    const launch = launchCommand({ chatSessionId: "abc-123", resume: false, appendSystemPrompt: buildPageContractLine() });
+    expect(launch).toContain(PANEL_REPORT_SENTENCE);
+    expect((launch.match(/"/g) ?? []).length).toBe(2);
+  });
+
+  it("stays whole, inside SPAWN_CONTEXT_MAX, WITH the longest standing-decisions clause after it", () => {
+    const line = buildPageContractLine(FULL);
+    expect(line.length).toBeLessThanOrEqual(SPAWN_CONTEXT_MAX);
+    expect(line).toContain(PANEL_REPORT_SENTENCE);
+    expect(line).toContain("already made 999 decisions on this page");
+    // Nothing was cut: the clause's own last words are the line's last words.
+    expect(line.endsWith("and do not re-ask what they settle.")).toBe(true);
+    expect(line).not.toMatch(/…$/);
+    // The budget, stated: the contract alone, and at its longest — what is
+    // left of the 2000 is the panel ref's (it is composed after this line).
+    expect(buildPageContractLine().length).toBeLessThan(800);
+    expect(line.length).toBeLessThan(1200);
+  });
+
+  it("with a worst-case panel context behind it the contract is still whole (the panel's tail is what truncates)", () => {
+    const panel = buildSpawnContext({ kind: "surface", project: "lodestar", page: "trading" }, 3, {
+      kbRoot: KB_ROOT,
+      anchorHint: "trade:<id>, bar:<iso>, row:<key>",
+      backlogItem: { id: "b1", text: "x".repeat(400) },
+    });
+    const joined = [buildPageContractLine(FULL), panel].join(" ");
+    const launch = launchCommand({ chatSessionId: "abc-123", resume: true, appendSystemPrompt: joined });
+    expect(launch).toContain(PANEL_REPORT_SENTENCE);
+    expect(launch).toContain("and do not re-ask what they settle.");
+    expect(launch).toContain("Workstation context: panel shows surface lodestar/trading");
+  });
+});
+
+describe("buildPageContractLine — the page already holds a brief (SWIT-104)", () => {
+  const FULL: { count: number; labels: string[] } = {
+    count: 999,
+    labels: ["a".repeat(DECISION_LABEL_MAX * 2), "b".repeat(DECISION_LABEL_MAX * 2), "c".repeat(DECISION_LABEL_MAX * 2)],
+  };
+
+  it("says so, and says to read the page FIRST — only when there is a brief", () => {
+    const line = buildPageContractLine(null, { hasBrief: true });
+    expect(line).toContain(
+      "This page already holds a BRIEF of where things stand — call the page tool (op read) FIRST, before anything else, and rewrite the brief whenever it goes stale."
+    );
+    expect(line).toContain(BRIEF_READ_SENTENCE);
+    // No brief, no clause: a sentence about nothing is noise.
+    expect(buildPageContractLine()).not.toContain("BRIEF of where things stand");
+    expect(buildPageContractLine(null, {})).toBe(buildPageContractLine());
+    expect(buildPageContractLine(null, { hasBrief: false })).toBe(buildPageContractLine());
+    expect(line.split("\n")).toHaveLength(1);
+  });
+
+  it("survives the typed-line sanitizer VERBATIM and the launch line's own re-sanitize", () => {
+    expect(sanitizeForTypedLine(BRIEF_READ_SENTENCE, SPAWN_CONTEXT_MAX)).toBe(BRIEF_READ_SENTENCE);
+    expect(BRIEF_READ_SENTENCE).not.toMatch(/["\\$%`\u201C-\u201F\n]/);
+    const launch = launchCommand({
+      chatSessionId: "abc-123",
+      resume: true,
+      appendSystemPrompt: buildPageContractLine(null, { hasBrief: true }),
+    });
+    expect(launch).toContain(BRIEF_READ_SENTENCE);
+    expect((launch.match(/"/g) ?? []).length).toBe(2);
+  });
+
+  it("stays whole inside SPAWN_CONTEXT_MAX with the panel sentence before it AND the longest standing-decisions clause after it", () => {
+    const line = buildPageContractLine(FULL, { hasBrief: true });
+    expect(line.length).toBeLessThanOrEqual(SPAWN_CONTEXT_MAX);
+    expect(line).toContain(PANEL_REPORT_SENTENCE);
+    expect(line).toContain(BRIEF_READ_SENTENCE);
+    expect(line).toContain("already made 999 decisions on this page");
+    // Order: the panel sentence, then the brief, then the decisions — and nothing was cut.
+    expect(line.indexOf(PANEL_REPORT_SENTENCE)).toBeLessThan(line.indexOf(BRIEF_READ_SENTENCE));
+    expect(line.indexOf(BRIEF_READ_SENTENCE)).toBeLessThan(line.indexOf("The user has already made"));
+    expect(line.endsWith("and do not re-ask what they settle.")).toBe(true);
+    expect(line).not.toMatch(/…$/);
+    // The budget, stated: what is left of the 2000 is the panel ref's.
+    expect(buildPageContractLine(null, { hasBrief: true }).length).toBeLessThan(950);
+    expect(line.length).toBeLessThan(1350);
+  });
+
+  it("with a worst-case panel context behind it the whole contract is still there (the panel's tail is what truncates)", () => {
+    const panel = buildSpawnContext({ kind: "surface", project: "lodestar", page: "trading" }, 3, {
+      kbRoot: KB_ROOT,
+      anchorHint: "trade:<id>, bar:<iso>, row:<key>",
+      backlogItem: { id: "b1", text: "x".repeat(400) },
+    });
+    const joined = [buildPageContractLine(FULL, { hasBrief: true }), panel].join(" ");
+    const launch = launchCommand({ chatSessionId: "abc-123", resume: true, appendSystemPrompt: joined });
+    expect(launch).toContain(PANEL_REPORT_SENTENCE);
+    expect(launch).toContain(BRIEF_READ_SENTENCE);
+    expect(launch).toContain("and do not re-ask what they settle.");
+    expect(launch).toContain("Workstation context: panel shows surface lodestar/trading");
+  });
+});
+
 describe("anchored pin references + surface spawn context (3d)", () => {
   const SURFACE: Artifact = { kind: "surface", project: "lodestar", page: "trading" };
 
@@ -638,5 +762,84 @@ describe("backlog item spawn context (SWIT-64)", () => {
     expect(long).toContain("…'. Start there.");
     expect(long).toContain("(op link, itemId ok)");
     expect(Array.from(long).length).toBeLessThanOrEqual(SPAWN_CONTEXT_MAX);
+  });
+});
+
+// ─── The launch line's budget (review of 49ebb20, #4; review of daaad36, #2) ─
+
+describe("assembleLaunchContext — SPAWN_CONTEXT_MAX caps the JOINED line, and it gives ground least-important first", () => {
+  const DEEP_DOC: Artifact = { kind: "kb-doc", path: `switchboard/${"deep-folder/".repeat(22)}requirements.md` };
+  const LONG_ITEM = { id: "b".repeat(64), text: "é".repeat(600) };
+  const LONG_LABELS = { count: 999, labels: ["x".repeat(200), "y".repeat(200), "z".repeat(200), "w".repeat(200)] };
+  const SURFACE: Artifact = { kind: "surface", project: "lodestar", page: "trading", params: { instrument: "N".repeat(120) } };
+
+  it("WORST CASE — brief clause, the longest decisions, a long panel ref with pins, the longest backlog item: the contract, the brief clause and the backlog sentence survive WHOLE", () => {
+    for (const artifact of [DEEP_DOC, SURFACE]) {
+      const parts = buildSpawnContextParts(artifact, 12, { kbRoot: KB_ROOT, backlogItem: LONG_ITEM });
+      const line = assembleLaunchContext({ ...parts, contract: true, hasBrief: true, decisions: LONG_LABELS }) as string;
+      expect(Array.from(line).length).toBeLessThanOrEqual(SPAWN_CONTEXT_MAX);
+      expect(line.startsWith(buildPageContractLine(null, { hasBrief: true }))).toBe(true);
+      expect(line).toContain(PANEL_REPORT_SENTENCE);
+      expect(line).toContain(BRIEF_READ_SENTENCE);
+      const backlog = buildBacklogItemLine(LONG_ITEM);
+      expect(line.endsWith(backlog)).toBe(true);
+      expect(line).toContain(`(op link, itemId ${"b".repeat(64)}).`);
+      assertShellSafe(line);
+    }
+  });
+
+  it("the reviewer's case (a kb-doc panel ref + a backlog item + the brief clause: 2108 joined) keeps the link instruction", () => {
+    const parts = buildSpawnContextParts(DEEP_DOC, 3, { kbRoot: KB_ROOT, backlogItem: { id: "bmf1x2a01", text: "t".repeat(300) } });
+    const naive = [buildPageContractLine(LONG_LABELS, { hasBrief: true }), parts.panel, parts.backlog].join(" ");
+    expect(Array.from(naive).length).toBeGreaterThan(SPAWN_CONTEXT_MAX); // the old join would have cut the tail
+    const line = assembleLaunchContext({ ...parts, contract: true, hasBrief: true, decisions: LONG_LABELS }) as string;
+    expect(line).toContain("record it with the backlog tool (op link, itemId bmf1x2a01).");
+    expect(Array.from(line).length).toBeLessThanOrEqual(SPAWN_CONTEXT_MAX);
+  });
+
+  it("the ORDER of giving ground: the panel's detail first, then the decision labels, then the panel, then the decisions", () => {
+    const parts = buildSpawnContextParts(DEEP_DOC, 5, { kbRoot: KB_ROOT, backlogItem: { id: "i1", text: "an item" } });
+    expect(parts.panelShort).not.toBeNull();
+    const decisions = { count: 3, labels: ["alpha", "beta", "gamma"] };
+    const full = assembleLaunchContext({ ...parts, contract: true, hasBrief: false, decisions }) as string;
+    expect(full).toContain("5 pins in .pins.json alongside");
+    expect(full).toContain("the newest: alpha; beta; gamma");
+    const len = (s: string) => Array.from(s).length;
+    // 1 char short of whole: the panel loses its pin clause, the labels stay.
+    const step1 = assembleLaunchContext({ ...parts, contract: true, hasBrief: false, decisions }, len(full) - 1) as string;
+    expect(step1).not.toContain("pins in .pins.json");
+    expect(step1).toContain(parts.panelShort as string);
+    expect(step1).toContain("the newest: alpha; beta; gamma");
+    // Tighter: the labels drop one by one, the count stays.
+    const step2 = assembleLaunchContext({ ...parts, contract: true, hasBrief: false, decisions }, len(step1) - 1) as string;
+    expect(step2).toContain("the newest: alpha; beta)");
+    expect(step2).toContain(parts.panelShort as string);
+    // Tighter still: the panel goes, then the decisions clause.
+    const noPanel = assembleLaunchContext({ ...parts, contract: true, hasBrief: false, decisions: { count: 3, labels: [] } }, 10_000)!;
+    const withoutPanel = assembleLaunchContext(
+      { ...parts, panel: null, panelShort: null, contract: true, hasBrief: false, decisions: { count: 3, labels: [] } },
+      10_000
+    )!;
+    const step4 = assembleLaunchContext({ ...parts, contract: true, hasBrief: false, decisions }, len(withoutPanel))!;
+    expect(step4).toBe(withoutPanel);
+    expect(noPanel.length).toBeGreaterThan(withoutPanel.length);
+    const bare = assembleLaunchContext({ ...parts, panel: null, panelShort: null, contract: true, hasBrief: false, decisions: null }, 10_000)!;
+    expect(assembleLaunchContext({ ...parts, contract: true, hasBrief: false, decisions }, len(bare))).toBe(bare);
+    expect(bare).toContain("(op link, itemId i1).");
+  });
+
+  it("no page tools: no contract, no brief, no decisions — the panel and the backlog item alone; nothing at all is null", () => {
+    const parts = buildSpawnContextParts(DOC, 0, { kbRoot: KB_ROOT, backlogItem: { id: "i1", text: "x" } });
+    const line = assembleLaunchContext({ ...parts, contract: false, hasBrief: true, decisions: LONG_LABELS })!;
+    expect(line).not.toContain("PAGE beside the terminal");
+    expect(line).not.toContain("decision");
+    expect(line).toBe(`${parts.panel} ${parts.backlog}`);
+    expect(assembleLaunchContext({ panel: null, panelShort: null, backlog: "", contract: false, hasBrief: false, decisions: null })).toBeNull();
+  });
+
+  it("buildSpawnContext is unchanged: parts joined", () => {
+    const opts = { kbRoot: KB_ROOT, backlogItem: { id: "i1", text: "x" } };
+    const parts = buildSpawnContextParts(DOC, 2, opts);
+    expect(buildSpawnContext(DOC, 2, opts)).toBe(`${parts.panel} ${parts.backlog}`);
   });
 });

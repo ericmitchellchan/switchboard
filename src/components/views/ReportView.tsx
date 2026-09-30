@@ -232,7 +232,7 @@ export default function ReportView({
   spec,
   markdown,
   error,
-  threadId,
+  owner,
   viewId,
   artifact,
   active,
@@ -240,7 +240,7 @@ export default function ReportView({
   spec: ViewSpec;
   markdown: string | null;
   error: string | null;
-  threadId: string;
+  owner: string;
   viewId: string;
   artifact: ViewArtifact;
   active: boolean;
@@ -260,7 +260,7 @@ export default function ReportView({
   const anchorRequest = useSyncExternalStore(subscribeReportAnchor, reportAnchorNonce);
   useEffect(() => {
     if (markdown === null) return;
-    const anchor = takeReportAnchor(threadId, viewId);
+    const anchor = takeReportAnchor(owner, viewId);
     if (!anchor) return;
     let tries = 0;
     let timer = 0;
@@ -274,7 +274,7 @@ export default function ReportView({
     };
     find();
     return () => window.clearTimeout(timer);
-  }, [threadId, viewId, markdown, anchorRequest]);
+  }, [owner, viewId, markdown, anchorRequest]);
 
   const sourcePath = spec.source.type === "file" ? spec.source.path : "";
   return (
@@ -307,7 +307,7 @@ export default function ReportView({
                       key={segKey(seg, ri)}
                       seg={seg}
                       report={spec}
-                      threadId={threadId}
+                      owner={owner}
                       viewId={viewId}
                       artifact={artifact}
                       active={active}
@@ -320,7 +320,7 @@ export default function ReportView({
                   key={segKey(row.segments[0], ri)}
                   seg={row.segments[0]}
                   report={spec}
-                  threadId={threadId}
+                  owner={owner}
                   viewId={viewId}
                   artifact={artifact}
                   active={active}
@@ -346,7 +346,7 @@ function segKey(seg: ReportSegment, rowIndex: number): string {
 function Segment({
   seg,
   report,
-  threadId,
+  owner,
   viewId,
   artifact,
   active,
@@ -354,7 +354,7 @@ function Segment({
 }: {
   seg: ReportSegment;
   report: ViewSpec;
-  threadId: string;
+  owner: string;
   viewId: string;
   artifact: ViewArtifact;
   active: boolean;
@@ -377,7 +377,7 @@ function Segment({
         block={seg.block}
         body={seg.body}
         report={report}
-        threadId={threadId}
+        owner={owner}
         viewId={viewId}
         artifact={artifact}
         active={active}
@@ -506,7 +506,7 @@ function EmbeddedView({
   block,
   body,
   report,
-  threadId,
+  owner,
   viewId,
   artifact,
   active,
@@ -515,7 +515,7 @@ function EmbeddedView({
   block: number;
   body: string;
   report: ViewSpec;
-  threadId: string;
+  owner: string;
   viewId: string;
   artifact: ViewArtifact;
   active: boolean;
@@ -525,7 +525,7 @@ function EmbeddedView({
     () => parseInlineViewSpec(stripBlockWidth(body), block, report),
     [body, block, report]
   );
-  const data = useInlineViewData(threadId, derived.spec);
+  const data = useInlineViewData(owner, derived.spec);
   if (derived.spec === null) {
     return <BlockError block={block} kind="view" error={derived.error ?? "malformed"} packed={packed} />;
   }
@@ -538,7 +538,7 @@ function EmbeddedView({
         meta={data.meta}
         loading={data.loading}
         rerun={data.rerun}
-        threadId={threadId}
+        owner={owner}
         viewId={viewId}
         artifact={artifact}
         active={active}

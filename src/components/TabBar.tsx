@@ -11,6 +11,7 @@ import { STATUS_CONFIGS } from "../lib/statusConfig";
 import { tabRepoSuffix } from "../lib/tabLabel";
 import { Icon } from "./icons";
 import { TodosButton } from "./BacklogPanel";
+import { noteTitleEditor } from "../lib/threadStore";
 
 interface TopBarProps {
   route: Route;
@@ -246,6 +247,13 @@ function SessionName({
       inputRef.current.select();
     }
   }, [editing]);
+  // Review of c178f2f, #7b: the auto-name from a page theme waits while this
+  // box is open (its commit would write the old name back over it).
+  useEffect(() => {
+    if (!editing) return;
+    noteTitleEditor(session.id, true);
+    return () => noteTitleEditor(session.id, false);
+  }, [editing, session.id]);
 
   const commit = () => {
     if (value.trim() && value.trim() !== session.name) {

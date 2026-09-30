@@ -290,7 +290,16 @@ fn threads_data_dir() -> Result<std::path::PathBuf, String> {
 /// retracted.json — the app's overlay of evidence rows taken off the page.
 /// SWIT-79 adds sets.json — the MCP server's view SETS (`view show` with
 /// `set:`), read by the view-intent poll beside the views/ listing.
-const THREAD_FILES: [&str; 5] = ["page.json", "answers.json", "inbox.json", "retracted.json", "sets.json"];
+/// SWIT-102 adds shows.json — the MCP server's SHOWS (`page` op `show`: put
+/// an existing doc or file in front of the user), read by the same poll.
+const THREAD_FILES: [&str; 6] = [
+    "page.json",
+    "answers.json",
+    "inbox.json",
+    "retracted.json",
+    "sets.json",
+    "shows.json",
+];
 
 /// Thread ids are frontend-minted uuids (threadStore.mintUuid). Anything
 /// outside the uuid alphabet is refused outright — there is no path form to
@@ -336,8 +345,8 @@ async fn read_thread_file(thread_id: String, name: String) -> Result<String, Str
 }
 
 /// A change stamp over a thread's page files: the max mtime (ms since epoch)
-/// of page.json / answers.json / inbox.json / retracted.json / sets.json, a
-/// missing file counting 0. The frontend's 5s pass compares it tick-to-tick and skips the
+/// of page.json / answers.json / inbox.json / retracted.json / sets.json /
+/// shows.json, a missing file counting 0. The frontend's 5s pass compares it tick-to-tick and skips the
 /// reads when nothing moved — a per-thread stat instead of three reads per
 /// thread per tick. Same guard posture as read_thread_file: the id is validated and
 /// the names come from the fixed THREAD_FILES set, so nothing caller-named
@@ -428,7 +437,25 @@ mod thread_stamp_tests {
         // SWIT-79: sets.json (the MCP server's view sets) is the fifth.
         assert!(THREAD_FILES.contains(&"retracted.json"));
         assert!(THREAD_FILES.contains(&"sets.json"));
-        assert_eq!(THREAD_FILES.len(), 5);
+        // SWIT-102: shows.json (the MCP server's `page` op `show`) is the sixth.
+        assert!(THREAD_FILES.contains(&"shows.json"));
+        assert_eq!(THREAD_FILES.len(), 6);
+    }
+
+    #[test]
+    fn a_show_moves_the_stamp_and_no_other_name_joins_the_set() {
+        // SWIT-102: the view-intent poll reads shows.json through
+        // read_thread_file, so the name must be in the closed set — and, being
+        // in it, a write moves the stamp like any other thread file.
+        let dir = temp_dir("shows");
+        assert_eq!(max_mtime_ms(&dir, &THREAD_FILES), 0);
+        std::fs::write(dir.join("shows.json"), "{\"version\":1,\"shows\":[]}").unwrap();
+        assert!(max_mtime_ms(&dir, &THREAD_FILES) > 0);
+        // The allowlist is exact: a near-miss name is not a thread file.
+        for name in ["show.json", "shows.json.tmp", "Shows.json", "../shows.json", "views/shows.json"] {
+            assert!(!THREAD_FILES.contains(&name), "{name} must not be readable");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -449,7 +476,10 @@ const RETRACTED_CAP: usize = 200;
 /// refused too: those rows are synthesized from answers.json at the merge and
 /// are corrected on their question, never taken off — the merge ignores the
 /// prefix as well (pageStore.isRetracted), so a hand-edited file cannot hide
-/// one either.
+/// one either. SWIT-105: a `question:<id>` address is how an OPEN question is
+/// DISMISSED (`not needed` on its card) — the same file, the same command,
+/// the same guard; the frontend folds it out of every "is it open" reading
+/// until the agent re-asks the id (pageStore.questionDismissedAt).
 const RETRACTED_ADDRESS_CAP: usize = 500;
 const DECISION_ADDRESS_PREFIX: &str = "decision:";
 
@@ -562,6 +592,27 @@ mod retracted_evidence_tests {
         // A decision row is corrected on its question, never retracted.
         assert!(!valid_evidence_address("decision:q1"));
         assert!(valid_evidence_address("decisions/q1.md"));
+        // SWIT-105: dismissing an open question writes `question:<id>` through
+        // this same guard — it must pass, and stay distinct from a decision.
+        assert!(valid_evidence_address("question:q1"));
+        assert!(valid_evidence_address("question:my-stable-id"));
+    }
+
+    #[test]
+    fn a_dismissed_question_is_one_entry_that_a_re_dismissal_re_stamps() {
+        // SWIT-105: the entry is `{address: "question:<id>", at}` like any
+        // other; dismissing the same question again (after a re-ask brought
+        // it back) MOVES its stamp, which is what makes the second dismissal
+        // newer than the re-ask.
+        let first = retract_evidence_address(&[], "question:q1", "2026-09-30T10:00:00.000Z");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0]["address"], "question:q1");
+        let with_row = retract_evidence_address(&first, "docs/a.md", "2026-09-30T10:05:00.000Z");
+        let again = retract_evidence_address(&with_row, "question:q1", "2026-09-30T11:00:00.000Z");
+        assert_eq!(again.len(), 2);
+        assert_eq!(again[0]["address"], "question:q1");
+        assert_eq!(again[0]["at"], "2026-09-30T11:00:00.000Z");
+        assert_eq!(again[1]["address"], "docs/a.md");
     }
 }
 
@@ -1440,7 +1491,7 @@ async fn prepare_thread_launch(app: tauri::AppHandle, thread_id: String) -> Resu
         None if dev_copy.exists() => dev_copy,
         None => return Err("switchboard-mcp.cjs not found in resources".into()),
     };
-    let config = serde_json::json!({
+    let mut config = serde_json::json!({
         "mcpServers": {
             "switchboard": {
                 "command": "node",
@@ -1466,6 +1517,15 @@ async fn prepare_thread_launch(app: tauri::AppHandle, thread_id: String) -> Resu
             }
         }
     });
+    // SWIT-107: the registry, so `view` with `scope: "project"` (a report's
+    // default) can find the project — and the repo — the thread's working
+    // directory belongs to. Absent when the KB root does not resolve: the
+    // server then keeps every view in its thread and says so.
+    if let Some(registry) = explorer::registry_path() {
+        if let Some(env) = config.pointer_mut("/mcpServers/switchboard/env").and_then(|e| e.as_object_mut()) {
+            env.insert("SWITCHBOARD_REGISTRY".to_string(), serde_json::Value::String(registry));
+        }
+    }
     let config_path = thread_dir.join("mcp-config.json");
     std::fs::write(
         &config_path,
@@ -2474,6 +2534,9 @@ fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         explorer::explorer_list,
         explorer::explorer_read,
         explorer::explorer_write,
+        explorer::list_project_views,
+        explorer::read_project_view,
+        explorer::read_project_view_data,
         write_file,
         confirm_app_close,
         open_pip_window,

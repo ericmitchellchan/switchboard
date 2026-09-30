@@ -16,6 +16,10 @@ import {
   TURN_LINE_CAP,
   EVIDENCE_CAP,
   QUESTION_CAP,
+  QUESTION_KEEP_CAP,
+  neighbourAfterDismiss,
+  dismissSuccessNote,
+  noteReplacesForm as noteReplacesFormForDismiss,
   DONE_FOLD,
   countUnreadPosts,
   postTimes,
@@ -47,7 +51,25 @@ import {
   applyRetractions,
   isOpenItem,
   RETRACTED_CAP,
+  parseBrief,
+  briefSections,
+  questionAddress,
+  questionDismissedAt,
+  QUESTION_ADDRESS_PREFIX,
+  dismissErrorNote,
+  BRIEF_LISTS,
+  BRIEF_GOAL_CAP,
+  BRIEF_LINE_CAP,
+  BRIEF_LINES_CAP,
+  parseFindings,
+  FINDING_VERDICTS,
+  FINDING_CAP,
+  FINDING_CLAIM_CAP,
+  FINDING_N_CAP,
+  FINDING_REPORT_CAP,
 } from "./pageStore";
+import { statusTone, verdictTone } from "./statusPill";
+import { evidenceKindOf } from "./evidenceModel";
 import type { PageQuestion, RetractedEvidence } from "./pageStore";
 
 const PAGE = {
@@ -119,7 +141,25 @@ describe("parsePageFile (tolerant)", () => {
     expect(p.turns).toHaveLength(TURN_CAP);
     expect(p.turns[0].lines).toHaveLength(TURN_LINE_CAP);
     expect(p.evidence).toHaveLength(EVIDENCE_CAP);
-    expect(p.questions).toHaveLength(QUESTION_CAP);
+    // Review of c178f2f, #3: questions are NOT cut at the open cap — all 40
+    // survive (the file holds only what the server let in, ≤ QUESTION_KEEP_CAP).
+    expect(p.questions).toHaveLength(40);
+    expect(QUESTION_CAP).toBe(20);
+    const huge = parsePageFile(JSON.stringify({ questions: Array.from({ length: QUESTION_KEEP_CAP + 30 }, (_, i) => ({ id: `q${i}`, text: "t" })) }));
+    expect(huge.questions).toHaveLength(QUESTION_KEEP_CAP);
+  });
+
+  it("an OPEN question behind twenty answered/dismissed ones stays on the page (review of c178f2f, #3)", () => {
+    // Newest first, as the server writes: 25 newer questions the user
+    // answered, then the one still open.
+    const questions = [
+      ...Array.from({ length: 25 }, (_, i) => ({ id: `n${i}`, text: `newer ${i}`, askedAt: "2026-09-30T10:00:00Z" })),
+      { id: "old", text: "still open", askedAt: "2026-09-01T10:00:00Z" },
+    ];
+    const answers: Record<string, { text: string; at: string; resolvedBy: "user" }> = {};
+    for (let i = 0; i < 25; i++) answers[`n${i}`] = { text: "yes", at: "2026-09-30T11:00:00Z", resolvedBy: "user" };
+    const merged = mergePage(parsePageFile(JSON.stringify({ questions })), parseAnswersFile(JSON.stringify(answers)), []);
+    expect(merged.openQuestions.map((q) => q.id)).toEqual(["old"]);
   });
 });
 
@@ -508,6 +548,172 @@ describe("mergePage", () => {
   });
 });
 
+describe("the findings ledger (SWIT-106)", () => {
+  const ROW = { id: "f1", claim: "Debt by 02:00 predicts the Europe-open block", verdict: "lead", n: "264 nights", report: "view:model4-debt", updatedAt: "2026-09-29T02:41:00Z" };
+
+  it("parses a well-formed ledger; the merge sorts it newest first by updatedAt", () => {
+    const p = parsePageFile(
+      JSON.stringify({ findings: [ROW, { id: "f2", claim: "Charm dominates quiet nights", verdict: "open", n: 4, report: null, updatedAt: "2026-09-30T09:00:00Z" }] })
+    );
+    expect(p.findings).toEqual([ROW, { id: "f2", claim: "Charm dominates quiet nights", verdict: "open", n: "4", report: null, updatedAt: "2026-09-30T09:00:00Z" }]);
+    expect(mergePage(p, {}, []).findings.map((f) => f.id)).toEqual(["f2", "f1"]);
+    expect(mergePage(parsePageFile(JSON.stringify({ findings: [ROW] })), {}, []).isEmpty).toBe(false);
+    expect(mergePage(EMPTY_PAGE, {}, []).findings).toEqual([]);
+  });
+
+  it("a malformed entry drops ALONE — no id, no claim, an unknown verdict, a repeat; fields are cut to the caps; not an array → none", () => {
+    const p = parsePageFile(
+      JSON.stringify({
+        ...PAGE,
+        findings: [
+          ROW,
+          { claim: "no id", verdict: "open" },
+          { id: "f3", verdict: "open" },
+          { id: "f4", claim: "maybe", verdict: "maybe" },
+          { id: "f1", claim: "dup", verdict: "dead" },
+          null,
+          { id: "f5", claim: ` ${"c".repeat(FINDING_CLAIM_CAP + 9)} `, verdict: "dead", n: "n".repeat(FINDING_N_CAP + 5), report: "r".repeat(FINDING_REPORT_CAP + 5) },
+        ],
+      })
+    );
+    expect(p.findings.map((f) => f.id)).toEqual(["f1", "f5"]);
+    expect(p.findings[1]).toMatchObject({ claim: "c".repeat(FINDING_CLAIM_CAP), n: "n".repeat(FINDING_N_CAP), report: "r".repeat(FINDING_REPORT_CAP), updatedAt: "" });
+    expect(p.theme).toBe(PAGE.theme); // the rest of the page is untouched
+    expect(parseFindings({ f1: ROW })).toEqual([]);
+    expect(parseFindings(Array.from({ length: FINDING_CAP + 5 }, (_, i) => ({ ...ROW, id: `f${i}` })))).toHaveLength(FINDING_CAP);
+  });
+
+  it("the verdict pill tone: lead = the accent, fact = neutral, open = amber, dead = dim — not statusTone's reading of `open`", () => {
+    expect(FINDING_VERDICTS.map((v) => [v, verdictTone(v)])).toEqual([
+      ["lead", "green"],
+      ["open", "amber"],
+      ["fact", "neutral"],
+      ["dead", "dim"],
+    ]);
+    expect(statusTone("open")).toBe("blue"); // why the verdict has its own rule
+  });
+
+  it("the old `finding:<id>` evidence form still reads as an ordinary row", () => {
+    expect(evidenceKindOf("finding:gamma-1")).toBe("other");
+  });
+});
+
+describe("a dismissed question (SWIT-105)", () => {
+  const ASKED = "2026-09-30T10:00:00.000Z";
+  const qs = parsePageFile(
+    JSON.stringify({
+      questions: [
+        { id: "q1", text: "A?", askedAt: ASKED },
+        { id: "q2", text: "B?", askedAt: ASKED },
+        { id: "q3", text: "C?", askedAt: ASKED, answer: "moot", answeredAt: "2026-09-30T10:30:00Z" },
+      ],
+    })
+  );
+  const gone = (id: string, at: string): RetractedEvidence => ({ address: questionAddress(id), at });
+
+  it("questionAddress / questionDismissedAt: dismissed until a re-ask NEWER (by a whole second) than the dismissal", () => {
+    expect(questionAddress("q1")).toBe("question:q1");
+    expect(QUESTION_ADDRESS_PREFIX).toBe("question:");
+    const q = { id: "q1", askedAt: ASKED };
+    expect(questionDismissedAt(q, [])).toBeNull();
+    expect(questionDismissedAt(q, [gone("q1", "2026-09-30T11:00:00Z")])).toBe("2026-09-30T11:00:00Z");
+    expect(questionDismissedAt(q, [gone("q1", "2026-09-30T10:00:00.900Z")])).not.toBeNull(); // same second
+    expect(questionDismissedAt({ id: "q1", askedAt: "2026-09-30T12:00:00Z" }, [gone("q1", "2026-09-30T11:00:00Z")])).toBeNull(); // re-asked
+    expect(questionDismissedAt({ id: "q1", askedAt: "" }, [gone("q1", "2026-09-30T11:00:00Z")])).not.toBeNull(); // unparseable stays dismissed
+    expect(questionDismissedAt(q, [gone("q2", "2026-09-30T11:00:00Z"), { address: "q1", at: "2026-09-30T11:00:00Z" }])).toBeNull();
+  });
+
+  it("isQuestionOpen / countQuestionStates honour it; with no retractions nothing changes", () => {
+    const r = [gone("q1", "2026-09-30T11:00:00Z")];
+    expect(isQuestionOpen(qs.questions[0], {}, r)).toBe(false);
+    expect(isQuestionOpen(qs.questions[0], {})).toBe(true);
+    expect(countQuestionStates(qs.questions, {}, r)).toEqual({ open: 1, unsent: 0 });
+    expect(countQuestionStates(qs.questions, {})).toEqual({ open: 2, unsent: 0 });
+  });
+
+  it("the merge takes it out of Open questions, the batch and Home's list, and lists it under dismissedQuestions — never a decision", () => {
+    const m = mergePage(qs, {}, [], [gone("q1", "2026-09-30T11:00:00Z"), gone("q3", "2026-09-30T11:00:00Z")]);
+    expect(m.openQuestions.map((q) => q.id)).toEqual(["q2"]);
+    expect(m.decisionQuestions.map((q) => q.id)).toEqual(["q2"]);
+    // q3 was SETTLED — an answer outranks a dismissal; it stays a decision.
+    expect(m.dismissedQuestions).toEqual([{ question: qs.questions[0], at: "2026-09-30T11:00:00Z" }]);
+    expect(m.decisions.map((d) => d.address)).toEqual(["decision:q3"]);
+    expect(m.evidence.some((e) => e.address.startsWith(QUESTION_ADDRESS_PREFIX))).toBe(false);
+    // A user answer to a dismissed question wins too (it is answered, not dismissed).
+    const answered = mergePage(qs, { q1: { text: "yes", at: "2026-09-30T12:00:00Z" } }, [], [gone("q1", "2026-09-30T11:00:00Z")]);
+    expect(answered.dismissedQuestions).toEqual([]);
+    expect(answered.unsentDecisions.map((a) => a.question.id)).toEqual(["q1"]);
+    // No retractions: the pre-SWIT-105 merge.
+    expect(mergePage(qs, {}, []).dismissedQuestions).toEqual([]);
+  });
+
+  it("dismissErrorNote keeps the card: an error note, never a success", () => {
+    expect(dismissErrorNote(new Error("disk full"))).toEqual({ kind: "error", text: "not dismissed — disk full" });
+    expect(noteReplacesForm(dismissErrorNote("x"))).toBe(false);
+  });
+});
+
+describe("the standing brief (SWIT-104)", () => {
+  const BRIEF = {
+    goal: "A gamma measure of our own that a discretionary trader can lean on live.",
+    established: ["all-expiry sum is about 0.58 of the vendor total"],
+    dead: ["level effects beyond price motion"],
+    lead: ["overnight hedging debt vs the Europe open"],
+    waiting: ["the book", "the state variable"],
+    updatedAt: "2026-09-29T18:00:00.000Z",
+  };
+
+  it("parses a well-formed brief onto the page, and the merge carries it", () => {
+    const p = parsePageFile(JSON.stringify({ brief: BRIEF }));
+    expect(p.brief).toEqual(BRIEF);
+    const merged = mergePage(p, {}, []);
+    expect(merged.brief).toEqual(BRIEF);
+    // A page holding ONLY a brief is not the empty page.
+    expect(merged.isEmpty).toBe(false);
+    expect(mergePage(EMPTY_PAGE, {}, []).brief).toBeNull();
+  });
+
+  it("a malformed brief is ABSENT, never a broken page — the rest still parses", () => {
+    for (const junk of [null, 7, "a brief", ["a", "list"], {}, { goal: "", dead: [] }, { goal: 9, established: "not a list", updatedAt: "t" }]) {
+      const p = parsePageFile(JSON.stringify({ ...PAGE, brief: junk }));
+      expect(p.brief).toBeNull();
+      expect(p.theme).toBe(PAGE.theme);
+      expect(p.items).toHaveLength(3);
+    }
+    expect(parseBrief(undefined)).toBeNull();
+  });
+
+  it("a malformed LINE drops alone; caps are applied on the way in", () => {
+    const b = parseBrief({
+      goal: `  ${"g".repeat(BRIEF_GOAL_CAP + 40)}  `,
+      established: ["kept", 4, null, "   ", "  trimmed  ", "l".repeat(BRIEF_LINE_CAP + 10)],
+      dead: Array.from({ length: BRIEF_LINES_CAP + 3 }, (_, i) => `d${i}`),
+      lead: "not an array",
+      extra: "ignored",
+    })!;
+    expect(b.goal).toBe("g".repeat(BRIEF_GOAL_CAP));
+    expect(b.established).toEqual(["kept", "trimmed", "l".repeat(BRIEF_LINE_CAP)]);
+    expect(b.dead).toHaveLength(BRIEF_LINES_CAP);
+    expect(b.dead[0]).toBe("d0");
+    expect(b.lead).toEqual([]);
+    expect(b.waiting).toEqual([]);
+    expect(b.updatedAt).toBe(""); // no stamp — the block prints no age
+    expect("extra" in b).toBe(false);
+  });
+
+  it("briefSections: the non-empty lists, in page order, with the words the page prints", () => {
+    expect(briefSections(parseBrief(BRIEF)!)).toEqual([
+      { key: "established", label: "Established", lines: BRIEF.established },
+      { key: "dead", label: "Dead", lines: BRIEF.dead },
+      { key: "lead", label: "Live lead", lines: BRIEF.lead },
+      { key: "waiting", label: "Waiting on you", lines: BRIEF.waiting },
+    ]);
+    expect(briefSections(parseBrief({ goal: "g", waiting: ["w"] })!)).toEqual([{ key: "waiting", label: "Waiting on you", lines: ["w"] }]);
+    expect(briefSections(parseBrief({ goal: "only a goal" })!)).toEqual([]);
+    expect(BRIEF_LISTS.map((l) => l.key)).toEqual(["established", "dead", "lead", "waiting"]);
+  });
+});
+
 describe("the correctable record (SWIT-78)", () => {
   const T0 = "2026-09-08T10:00:00Z";
   const T1 = "2026-09-08T11:00:00Z";
@@ -717,5 +923,22 @@ describe("nextPassEntry (the stamp gate's cached branch, 0.9.x hygiene review fi
     expect(nextPassEntry(cached, 1_700_000, seenAfterOpeningB)).toEqual({ reread: false, questions: 1, unsent: 2, unread: 0 });
     // A post newer than the stamp still counts — the stamp is a moment, not a reset.
     expect(nextPassEntry(cached, 1_700_000, T1 + 1)).toEqual({ reread: false, questions: 1, unsent: 2, unread: 1 });
+  });
+});
+
+describe("review of c178f2f — the keyboard `not needed` hand-off and Home's dismissal note", () => {
+  it("#5 — focus goes to the NEXT card still on the page, else the previous, else null (Send) — by id, whether or not the dismissed card has left yet", () => {
+    const atClick = ["q1", "q2", "q3"];
+    expect(neighbourAfterDismiss(atClick, "q2", ["q1", "q2", "q3"])).toBe("q3"); // the card has not left yet
+    expect(neighbourAfterDismiss(atClick, "q2", ["q1", "q3"])).toBe("q3"); // it has — no off-by-one
+    expect(neighbourAfterDismiss(atClick, "q3", ["q1", "q2", "q3"])).toBe("q2"); // the last card → the one before
+    expect(neighbourAfterDismiss(atClick, "q2", ["q1"])).toBe("q1"); // the next one went too
+    expect(neighbourAfterDismiss(["q1"], "q1", ["q1"])).toBeNull(); // the only card → Send
+    expect(neighbourAfterDismiss(atClick, "zz", atClick)).toBeNull();
+  });
+
+  it("nit — Home's `not needed` saved note replaces the card's form (a success)", () => {
+    expect(dismissSuccessNote()).toEqual({ kind: "success", text: "not needed · off the page" });
+    expect(noteReplacesFormForDismiss(dismissSuccessNote())).toBe(true);
   });
 });

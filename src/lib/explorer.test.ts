@@ -12,6 +12,8 @@ import {
   liveProjectFor,
   mergeFileRead,
   mergeSessionRepos,
+  projectKeyForDir,
+  projectPlaceForDir,
   quickThreadTarget,
   sessionRepoOptions,
   sessionsForProject,
@@ -401,6 +403,36 @@ describe("liveProjectFor / projectKeyForDir", () => {
     expect(liveProjectFor(projects, "")).toBe("local");
     expect(liveProjectFor(projects, "C:\\")).toBe("local");
     expect(liveProjectFor(projects, "/")).toBe("local");
+  });
+
+  it("projectPlaceForDir (SWIT-102): the key plus the prefix that makes a cwd-relative path project-relative", () => {
+    // The common case: a single-repo project, the thread at its root.
+    expect(projectPlaceForDir(projects, "C:\\Users\\ericm\\projects\\lodestar")).toEqual({ key: "lodestar", prefix: "" });
+    expect(projectPlaceForDir(projects, "c:/users/ericm/projects/lodestar/")).toEqual({ key: "lodestar", prefix: "" });
+    // A thread working in a SUBDIRECTORY: its relative paths start there.
+    expect(projectPlaceForDir(projects, "C:\\Users\\ericm\\projects\\lodestar\\apps\\desktop")).toEqual({
+      key: "lodestar",
+      prefix: "apps/desktop/",
+    });
+    // A multi-repo project addresses files as <repo name>/… (explorer.rs resolve_repo_rel).
+    expect(projectPlaceForDir(projects, "C:/Users/ericm/projects/kyde-labs/admin-panel")).toEqual({
+      key: "kyde",
+      prefix: "admin-panel/",
+    });
+    expect(projectPlaceForDir(projects, "C:/Users/ericm/projects/kyde-labs/admin-panel/app/ui")).toEqual({
+      key: "kyde",
+      prefix: "admin-panel/app/ui/",
+    });
+    // The inner repo wins when checkouts nest; nothing matches → null.
+    const nested = [project("outer", ["C:/p"]), project("inner", ["C:/p/apps/web"])];
+    expect(projectPlaceForDir(nested, "C:/p/apps/web/src")).toEqual({ key: "inner", prefix: "src/" });
+    expect(projectPlaceForDir(nested, "C:/p/tools")).toEqual({ key: "outer", prefix: "tools/" });
+    expect(projectPlaceForDir(projects, "C:\\Users\\ericm\\projects\\lodestar-old")).toBeNull();
+    expect(projectPlaceForDir(projects, "")).toBeNull();
+    // Agrees with projectKeyForDir on WHICH project, always.
+    for (const dir of ["C:/Users/ericm/projects/lodestar/src", "C:/Users/ericm/projects/kyde-labs/react-native-app", "C:/nope"]) {
+      expect(projectPlaceForDir(projects, dir)?.key ?? null).toBe(projectKeyForDir(projects, dir));
+    }
   });
 });
 

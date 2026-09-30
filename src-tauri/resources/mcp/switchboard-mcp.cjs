@@ -9,10 +9,14 @@
 // one file shipped as a plain Tauri resource. Runs on any Node ≥ 18.
 //
 // ONE WRITER, ONE FILE: this process is the SOLE writer of its thread's
-// page.json, and (SWIT-64) ONE OF MANY APPENDERS to the app-wide
+// page.json (its brief — SWIT-104 — and findings ledger — SWIT-106 —
+// included; and of views/, sets.json and — SWIT-102 — shows.json beside
+// it), and (SWIT-64) ONE OF MANY APPENDERS to the app-wide
 // backlog-inbox.json — an append-only NDJSON file with one taker (the app),
 // never of backlog.json, which the app alone rewrites after draining the
-// inbox (the app writes answers.json / inbox.json; the rendered page is
+// inbox (the app writes answers.json / inbox.json / retracted.json — this
+// process only READS answers.json and, since SWIT-105, retracted.json's
+// `question:<id>` dismissals; the rendered page is
 // a merge — see src/lib/pageStore.ts, whose parser this file's shapes MUST
 // round-trip through; the vitest suite asserts exactly that). Thread identity
 // arrives by ENV (SWITCHBOARD_THREAD_DIR), so tools carry no thread-id param
@@ -36,9 +40,21 @@ const path = require("path");
 const TURN_CAP = 30;
 const TURN_LINE_CAP = 6;
 const EVIDENCE_CAP = 60;
-const QUESTION_CAP = 20;
+const QUESTION_CAP = 20; // OPEN questions — `ask` refuses a 21st (answered / dismissed ones do not count)
+/** Review of c178f2f, #3: every question the page HOLDS — open, answered,
+ *  settled, dismissed — up to this many. The app's parser keeps exactly as
+ *  many (pageStore.QUESTION_KEEP_CAP), so nothing this server writes is ever
+ *  dropped on the way in; before, the parser kept the newest 20 of ANY state,
+ *  and with dismissals loosening the open cap an open question past the 20th
+ *  vanished from the page, the rail and Home while `page read` listed it. A
+ *  NEW question on a page already at this cap is refused (never an
+ *  eviction: a decided question is a standing decision). */
+const QUESTION_KEEP_CAP = 200;
 const TEXT_CAP = 500; // any single text field — a page line is a sentence, not a document
-const OPTION_CAP = 60; // an ask option is a short choice, not a paragraph (SWIT-69)
+const OPTION_CAP = 60; // an ask option is a short choice, not a paragraph (SWIT-69; a longer one is trimmed — SWIT-105)
+/** SWIT-105: a dismissed question's address in the app's retracted.json —
+ *  mirrors pageStore.QUESTION_ADDRESS_PREFIX. */
+const QUESTION_ADDRESS_PREFIX = "question:";
 const REVIEW_FIRST_CAP = 300; // a turn's reviewFirst is an ADDRESS, not prose (SWIT-67)
 const WHY_CAP = 240; // an ask's `why` is ONE line on the recommendation (SWIT-77, Ky's cap)
 /** SWIT-58: what an `ask` wants back. decision = a choice that shapes this
@@ -58,6 +74,31 @@ const DROP_EVIDENCE_CAP = 20;
  *  reached only through itemOp drop — the distinction from close (done) is
  *  the point, so it is never a value you can slip into an update. */
 const ITEM_STATES = ["todo", "in_progress", "waiting", "done"];
+/** SWIT-104: THE STANDING BRIEF — where things stand, rewritten whole at
+ *  every seam. `goal` is one sentence; the four lists are short lines. Caps
+ *  mirrored in pageStore.ts (BRIEF_*). */
+const BRIEF_GOAL_CAP = 300;
+const BRIEF_LINE_CAP = 200;
+const BRIEF_LINES_CAP = 6;
+/** The brief's four lists, in the order the page draws them. */
+const BRIEF_LISTS = ["established", "dead", "lead", "waiting"];
+/** SWIT-104: `page read` answers with at most this many characters. Raised
+ *  from 6000 (review of daaad36, #1): the BRIEF is never clipped in `read`
+ *  (an obedient agent reads, then replaces the brief WHOLE — a clipped read
+ *  would truncate it for good), and the brief at its caps is ~5.5k on its
+ *  own; 8000 leaves every section header its room at the tightest level. */
+const READ_CAP = 8000;
+/** SWIT-106: THE FINDINGS LEDGER — claim · verdict · n · report. The verdict
+ *  words are the one-platform mock's (lead · open · fact · dead). Caps
+ *  mirrored in pageStore.ts (FINDING_*). */
+const FINDING_VERDICTS = ["lead", "open", "fact", "dead"];
+const FINDING_CAP = 60;
+const FINDING_CLAIM_CAP = 240;
+const FINDING_N_CAP = 40;
+const FINDING_REPORT_CAP = 300; // an address, like reviewFirst / show
+/** The retired evidence form an older thread used for a finding — still
+ *  rendered, never written again (op finding is the way). */
+const FINDING_ADDRESS_PREFIX = "finding:";
 
 // ── Pure core ────────────────────────────────────────────────────────────────
 
@@ -73,13 +114,23 @@ function parsePage(raw) {
     return empty;
   }
   if (typeof data !== "object" || data === null || Array.isArray(data)) return empty;
-  return {
+  const page = {
     theme: typeof data.theme === "string" && data.theme.length > 0 ? data.theme : null,
     turns: Array.isArray(data.turns) ? data.turns : [],
     evidence: Array.isArray(data.evidence) ? data.evidence : [],
     questions: Array.isArray(data.questions) ? data.questions : [],
     items: Array.isArray(data.items) ? data.items : [],
   };
+  // SWIT-104: the brief rides through every other op untouched. The key
+  // exists only while there is one, so a page with no brief serializes as it
+  // always did.
+  if (typeof data.brief === "object" && data.brief !== null && !Array.isArray(data.brief)) {
+    page.brief = data.brief;
+  }
+  // SWIT-106: the findings ledger, the same way — present only while it
+  // holds something.
+  if (Array.isArray(data.findings) && data.findings.length > 0) page.findings = data.findings;
+  return page;
 }
 
 class OpError extends Error {}
@@ -93,6 +144,87 @@ function text(v, field) {
     throw new OpError(`${field} is too long (${t.length} chars; the cap is ${TEXT_CAP} — detail belongs in evidence rows, tickets or files, not page prose)`);
   }
   return t;
+}
+
+/** SWIT-105: an `ask` option (or its `default`) over OPTION_CAP is cut at a
+ *  word boundary and ends in `…` — never longer than the cap, never a halved
+ *  surrogate pair. A short one passes through untouched. Pure. */
+/** Review of c178f2f, #6: the cut works on GRAPHEMES (Intl.Segmenter — in
+ *  every Node this server runs on), never code units, so a flag's second
+ *  regional indicator, a ZWJ sequence's tail or a combining mark is never
+ *  orphaned from its base. The cap is still OPTION_CAP code units (what the
+ *  page measures); the `…` takes the last one. */
+const GRAPHEMES = typeof Intl === "object" && typeof Intl.Segmenter === "function" ? new Intl.Segmenter(undefined, { granularity: "grapheme" }) : null;
+function graphemesOf(t) {
+  return GRAPHEMES ? Array.from(GRAPHEMES.segment(t), (g) => g.segment) : Array.from(t);
+}
+
+function trimOption(opt) {
+  if (opt.length <= OPTION_CAP) return opt;
+  const parts = graphemesOf(opt);
+  let head = "";
+  let n = 0;
+  while (n < parts.length && head.length + parts[n].length <= OPTION_CAP - 1) {
+    head += parts[n];
+    n += 1;
+  }
+  // A cut that lands on a whole word (the next grapheme is a space) keeps
+  // it; otherwise back up to the last space, when there is one past halfway.
+  if (parts[n] !== " ") {
+    const space = head.lastIndexOf(" ");
+    if (space >= OPTION_CAP / 2) head = head.slice(0, space);
+  }
+  return `${head.replace(/[\s,;:.\-–—]+$/, "")}…`;
+}
+
+/** SWIT-105: the ids of the questions the USER DISMISSED as not needed — a
+ *  `question:<id>` entry in the app's retracted.json (READ-only here) that is
+ *  not older than the ask; a re-ask stamps a newer askedAt and the question
+ *  is back. Mirrors pageStore.questionDismissedAt (whole seconds; an
+ *  unparseable stamp stays dismissed). `retracted` = the file as parsed JSON.
+ *  Pure. */
+function dismissedQuestionIds(page, retracted) {
+  const list =
+    retracted && Array.isArray(retracted.evidence) ? retracted.evidence : Array.isArray(retracted) ? retracted : [];
+  const dismissedAt = new Map();
+  for (const r of list) {
+    if (!r || typeof r.address !== "string" || !r.address.startsWith(QUESTION_ADDRESS_PREFIX)) continue;
+    const id = r.address.slice(QUESTION_ADDRESS_PREFIX.length);
+    if (!dismissedAt.has(id)) dismissedAt.set(id, typeof r.at === "string" ? r.at : "");
+  }
+  const out = new Set();
+  if (dismissedAt.size === 0) return out;
+  for (const q of page.questions) {
+    if (!q || typeof q.id !== "string" || !dismissedAt.has(q.id)) continue;
+    const asked = Date.parse(q.askedAt);
+    const gone = Date.parse(dismissedAt.get(q.id));
+    if (!Number.isFinite(asked) || !Number.isFinite(gone) || Math.floor(asked / 1000) <= Math.floor(gone / 1000)) {
+      out.add(q.id);
+    }
+  }
+  return out;
+}
+
+/** One of the brief's lists (SWIT-104): absent → []; a bare string is one
+ *  line; blank lines drop; more than the cap, or a line over its cap, is a
+ *  VISIBLE error — the brief is a summary, and a silently cut line would be
+ *  a fact the user never sees. Pure; throws OpError. */
+function briefLines(v, field) {
+  if (v === undefined || v === null) return [];
+  const list = typeof v === "string" ? [v] : v;
+  if (!Array.isArray(list) || list.some((l) => typeof l !== "string")) {
+    throw new OpError(`${field} must be an array of short plain lines`);
+  }
+  const lines = list.map((l) => l.trim()).filter((l) => l.length > 0);
+  if (lines.length > BRIEF_LINES_CAP) {
+    throw new OpError(`${field} has ${lines.length} lines; the cap is ${BRIEF_LINES_CAP} — the brief is a summary: fold lines together or drop the ones that no longer matter`);
+  }
+  for (const l of lines) {
+    if (l.length > BRIEF_LINE_CAP) {
+      throw new OpError(`a line in ${field} is too long (${l.length} chars; the cap is ${BRIEF_LINE_CAP}) — one short line each; detail belongs in a report or an evidence row`);
+    }
+  }
+  return lines;
 }
 
 function nextId(list, prefix) {
@@ -115,7 +247,7 @@ function nextId(list, prefix) {
  *  answers.json — READ-only, so one-writer-per-file holds), so the question
  *  cap counts OPEN questions rather than every question ever asked (review:
  *  a lifetime cap would refuse forever with advice that cannot unblock it). */
-function applyOp(page, args, now, answeredIds = new Set()) {
+function applyOp(page, args, now, answeredIds = new Set(), dismissedIds = new Set()) {
   const at = new Date(now).toISOString();
   const op = args && args.op;
   // SWIT-77: a question is SETTLED by the user's answer (answers.json, the
@@ -124,6 +256,11 @@ function applyOp(page, args, now, answeredIds = new Set()) {
   // re-ask refusal.
   const settled = (q) =>
     !!q && (answeredIds.has(q.id) || (typeof q.answeredAt === "string" && q.answeredAt.length > 0));
+  // SWIT-105: a question the user DISMISSED as not needed (`dismissedIds`,
+  // from the app's retracted.json — read-only here) is not settled — it can
+  // be re-asked, which brings it back — but it is not open either: it is off
+  // the page, so it does not count against the cap.
+  const isOpen = (q) => !!q && !settled(q) && !dismissedIds.has(q.id);
   switch (op) {
     case "theme": {
       const t = text(args.text, "text");
@@ -159,6 +296,16 @@ function applyOp(page, args, now, answeredIds = new Set()) {
     }
     case "evidence": {
       const address = text(args.address, "address");
+      // SWIT-106: a finding is a ledger row with a verdict now, not an
+      // evidence row — rows an older thread wrote in this form still render.
+      if (address.startsWith(FINDING_ADDRESS_PREFIX)) {
+        // Review of 4f016e1, #4: live threads still carry rows in this form —
+        // say how to clear the old one once the finding is in the ledger.
+        throw new OpError(
+          `a finding is not an evidence row — record it with op finding {claim, verdict, n?, report?} (the page's Findings ledger), ` +
+            `then remove the old row with op drop_evidence {addresses: [${JSON.stringify(address)}]} so the claim is not listed twice`
+        );
+      }
       const label = text(args.label, "label");
       const status =
         typeof args.status === "string" && args.status.trim().length > 0
@@ -204,20 +351,32 @@ function applyOp(page, args, now, answeredIds = new Set()) {
     }
     case "ask": {
       const t = text(args.text, "text");
-      const options = Array.isArray(args.options)
+      // SWIT-69: an option is a SHORT choice — long ones wrap into paragraphs
+      // the multiple-choice list cannot carry. SWIT-105: a long one is
+      // TRIMMED (at a word boundary, with `…`), not refused — the refusal
+      // cost a whole round trip for a choice that read fine cut — and the
+      // result names what was cut.
+      const trimmed = [];
+      // The options as the agent WROTE them, before any cut — a `default`
+      // names one of these (review of c178f2f, #6).
+      const fullOptions = Array.isArray(args.options)
         ? args.options
             .filter((o) => typeof o === "string" && o.trim().length > 0)
-            .map((o) => {
-              const opt = text(o, "an option");
-              // SWIT-69: an option is a SHORT choice — long ones wrap into
-              // paragraphs the multiple-choice list cannot carry.
-              if (opt.length > OPTION_CAP) {
-                throw new OpError(`an option is too long (${opt.length} chars; the cap is ${OPTION_CAP}) — keep options short; detail belongs in the question text`);
-              }
-              return opt;
-            })
             .slice(0, 6)
+            .map((o) => text(o, "an option"))
         : [];
+      const options = fullOptions.map((opt) => {
+        const short = trimOption(opt);
+        if (short !== opt) trimmed.push(short);
+        return short;
+      });
+      if (trimmed.length > 0 && new Set(options).size !== options.length) {
+        throw new OpError(`two options read the same once trimmed to ${OPTION_CAP} chars (${trimmed.map((o) => `"${o}"`).join(", ")}) — shorten them so they differ`);
+      }
+      const trimNote =
+        trimmed.length > 0
+          ? ` Trimmed ${trimmed.length} option${trimmed.length === 1 ? "" : "s"} to ${OPTION_CAP} chars: ${trimmed.map((o) => `"${o}"`).join(", ")} — keep options short; detail belongs in the question text.`
+          : "";
       // SWIT-58 — a question says WHAT KIND of answer it wants and PROPOSES
       // one. `kind` defaults to decision (the common case); `default` must be
       // one of the options, so the proposal is a real choice the UI can list
@@ -232,8 +391,15 @@ function applyOp(page, args, now, answeredIds = new Set()) {
         if (typeof args.default !== "string" || args.default.trim().length === 0) {
           throw new OpError("default must be one of the options (a non-empty string)");
         }
-        dflt = args.default.trim();
-        if (!options.includes(dflt)) {
+        // SWIT-105 / review of c178f2f, #6: the default is matched against the
+        // UNTRIMMED options first (two long options can share their first ~57
+        // chars, and trimming the default before matching accepted one that
+        // named a different option), then mapped to that option's trimmed
+        // form; naming the trimmed form itself also works.
+        const want = args.default.trim();
+        const at = fullOptions.indexOf(want);
+        dflt = at !== -1 ? options[at] : options.includes(want) ? want : null;
+        if (dflt === null) {
           throw new OpError(`default must be one of the options (${options.length === 0 ? "none were given" : options.map((o) => `"${o}"`).join(", ")})`);
         }
       }
@@ -261,19 +427,29 @@ function applyOp(page, args, now, answeredIds = new Set()) {
           throw new OpError(`question ${id} was already settled — its answer is evidence row decision:${id}; reuse it instead of re-asking`);
         }
         const questions = page.questions.map((q, i) => (i === existingIndex ? asked : q));
+        // SWIT-105: re-asking an id the user DISMISSED brings it back (the
+        // new askedAt is newer than the dismissal) — say that it had been.
+        const back = dismissedIds.has(id)
+          ? `Question ${id} is back on the page — the user had dismissed it as not needed, so it should be here only because the answer now matters.`
+          : `Question ${id} replaced on the page (superseded).`;
         return {
           page: { ...page, questions },
-          message: `Question ${id} replaced on the page (superseded). ${arrives}`,
+          message: `${back} ${arrives}${trimNote}`,
         };
       }
-      const open = page.questions.filter((q) => q && !settled(q)).length;
+      const open = page.questions.filter(isOpen).length;
       if (open >= QUESTION_CAP) {
         throw new OpError(`${QUESTION_CAP} questions are already OPEN on the page — wait for answers before asking more`);
+      }
+      if (page.questions.length >= QUESTION_KEEP_CAP) {
+        throw new OpError(
+          `the page already holds ${QUESTION_KEEP_CAP} questions, the most it keeps — its decisions stand; re-ask an existing id instead of a new one`
+        );
       }
       const questions = [asked, ...page.questions];
       return {
         page: { ...page, questions },
-        message: `Question ${id} recorded on the page. ${arrives} Do not ask it again.`,
+        message: `Question ${id} recorded on the page. ${arrives} Do not ask it again.${trimNote}`,
       };
     }
     case "resolve": {
@@ -291,7 +467,7 @@ function applyOp(page, args, now, answeredIds = new Set()) {
       const questions = page.questions.map((q, i) =>
         i === index ? { ...q, answer, answeredAt: at, resolvedBy: "agent" } : q
       );
-      const stillOpen = questions.filter((q) => q && !settled(q)).length;
+      const stillOpen = questions.filter(isOpen).length;
       return {
         page: { ...page, questions },
         message: `Question ${id} resolved (evidence row decision:${id}, status settled). ${stillOpen} still open on the page.`,
@@ -351,9 +527,597 @@ function applyOp(page, args, now, answeredIds = new Set()) {
       }
       throw new OpError('itemOp must be "add", "update", "close" or "drop"');
     }
+    case "brief": {
+      // SWIT-104: THE STANDING BRIEF — where things stand, for a reader who
+      // has been away for days. WHOLE-REPLACE: the agent rewrites it at every
+      // seam, so a field left out is a field that no longer stands. Passing
+      // only empty fields clears it.
+      const given = (v) => v !== undefined && v !== null;
+      if (!given(args.goal) && !BRIEF_LISTS.some((f) => given(args[f]))) {
+        throw new OpError(
+          `brief needs at least one of goal, ${BRIEF_LISTS.join(", ")} — and it is REPLACED whole, so pass everything that still stands`
+        );
+      }
+      let goal = null;
+      if (given(args.goal)) {
+        if (typeof args.goal !== "string") throw new OpError("goal must be one sentence (a string)");
+        const g = args.goal.trim();
+        if (g.length > BRIEF_GOAL_CAP) {
+          throw new OpError(`goal is too long (${g.length} chars; the cap is ${BRIEF_GOAL_CAP}) — one sentence on what this work is for`);
+        }
+        goal = g.length > 0 ? g : null;
+      }
+      const brief = { goal };
+      for (const f of BRIEF_LISTS) brief[f] = briefLines(args[f], f);
+      brief.updatedAt = at;
+      const had = typeof page.brief === "object" && page.brief !== null;
+      if (goal === null && BRIEF_LISTS.every((f) => brief[f].length === 0)) {
+        const { brief: _gone, ...rest } = page;
+        return { page: rest, message: had ? "Brief cleared." : "Brief cleared — there was none." };
+      }
+      return {
+        page: { ...page, brief },
+        message: `${had ? "Brief rewritten" : "Brief written"} — it is the first block on the page. Rewrite it whole at the next seam.`,
+      };
+    }
+    case "finding": {
+      // SWIT-106 — THE FINDINGS LEDGER: what the work has established, one
+      // row per claim, with a verdict, the sample it rests on and the report
+      // behind it. Same id = the SAME row, updated in place (a claim moves
+      // from open to lead to fact, it is not re-filed); findingOp drop
+      // removes one.
+      const findings = Array.isArray(page.findings) ? page.findings.filter((f) => f && typeof f.id === "string") : [];
+      const withFindings = (list) => {
+        if (list.length > 0) return { ...page, findings: list };
+        const { findings: _gone, ...rest } = page;
+        return rest;
+      };
+      if (args.findingOp !== undefined && args.findingOp !== null && args.findingOp !== "drop") {
+        throw new OpError('findingOp must be "drop" (or omitted, to add or update)');
+      }
+      if (args.findingOp === "drop") {
+        const id = text(args.id, "id");
+        if (!findings.some((f) => f.id === id)) throw new OpError(`no finding with id ${id} — the page lists them (op read too)`);
+        return { page: withFindings(findings.filter((f) => f.id !== id)), message: `Finding ${id} dropped.` };
+      }
+      const id = args.id === undefined || args.id === null ? null : text(args.id, "id");
+      if (id !== null && !/^[A-Za-z0-9_-]{1,40}$/.test(id)) {
+        throw new OpError("id must be a short stable key (letters, digits, _ and -; ≤ 40) — or omit it and one is minted");
+      }
+      const prev = id === null ? undefined : findings.find((f) => f.id === id);
+      const given = (v) => v !== undefined && v !== null;
+      // A new finding needs a claim and a verdict; an update keeps what it
+      // does not name (Ky's evidence rule: omitting a field is not erasing it).
+      if (!prev && !given(args.claim)) throw new OpError("claim is required — ONE sentence saying what was found");
+      if (!prev && !given(args.verdict)) throw new OpError(`verdict is required — one of ${FINDING_VERDICTS.join(", ")}`);
+      let claim = prev ? prev.claim : null;
+      if (given(args.claim)) {
+        claim = text(args.claim, "claim");
+        if (claim.length > FINDING_CLAIM_CAP) {
+          throw new OpError(`claim is too long (${claim.length} chars; the cap is ${FINDING_CLAIM_CAP}) — one sentence; the detail is the report`);
+        }
+      }
+      let verdict = prev ? prev.verdict : null;
+      if (given(args.verdict)) {
+        if (!FINDING_VERDICTS.includes(args.verdict)) {
+          throw new OpError(`verdict must be one of ${FINDING_VERDICTS.join(", ")} (lead = worth chasing; open = not settled; fact = established; dead = ruled out)`);
+        }
+        verdict = args.verdict;
+      }
+      // n and report: omitted keeps; "" or null CLEARS (the only way to take
+      // a report off a finding).
+      let n = prev && typeof prev.n === "string" ? prev.n : null;
+      if (args.n !== undefined) {
+        if (args.n === null || (typeof args.n === "string" && args.n.trim().length === 0)) n = null;
+        else if (typeof args.n === "number" && Number.isFinite(args.n)) n = String(args.n);
+        else if (typeof args.n === "string") n = args.n.trim();
+        else throw new OpError("n must be a short string (\"264 nights\", \"10 tests\") or a number");
+        if (n !== null && n.length > FINDING_N_CAP) {
+          throw new OpError(`n is too long (${n.length} chars; the cap is ${FINDING_N_CAP}) — the sample size, e.g. "264 nights"`);
+        }
+      }
+      let report = prev && typeof prev.report === "string" ? prev.report : null;
+      if (args.report !== undefined) {
+        if (args.report === null || (typeof args.report === "string" && args.report.trim().length === 0)) report = null;
+        else {
+          report = text(args.report, "report");
+          if (report.length > FINDING_REPORT_CAP) {
+            throw new OpError(`report is too long (${report.length} chars; the cap is ${FINDING_REPORT_CAP}) — it is an address (view:<id>, a doc or file path, surface:<project>/<page>), not prose`);
+          }
+        }
+      }
+      const row = { id: prev ? prev.id : id ?? nextId(findings, "f"), claim, verdict, n, report, updatedAt: at };
+      if (prev) {
+        return {
+          page: withFindings(findings.map((f) => (f.id === prev.id ? row : f))),
+          message: `Finding ${row.id} updated (${verdict}).`,
+        };
+      }
+      if (findings.length >= FINDING_CAP) {
+        throw new OpError(`${FINDING_CAP} findings are already on the page — drop the ones that no longer matter (findingOp drop) before adding more`);
+      }
+      return {
+        page: withFindings([row, ...findings]),
+        message: `Finding ${row.id} recorded (${verdict}) in the page's Findings ledger. Update it by id as the verdict moves; never file it twice.`,
+      };
+    }
+    case "show":
+      // SWIT-102: `show` writes shows.json, never page.json — performOp routes
+      // it to performShowOp before this function is reached.
+      throw new OpError("show does not write the page — it is recorded in shows.json (performShowOp)");
+    case "read":
+      // SWIT-104: `read` writes nothing — performOp routes it to
+      // performReadOp before this function is reached.
+      throw new OpError("read does not write the page — it returns it (performReadOp)");
     default:
-      throw new OpError('op must be one of "theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item"');
+      throw new OpError('op must be one of "theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "brief", "finding", "show", "read"');
   }
+}
+
+// ── Read (SWIT-104) — the page, as compact plain text ────────────────────────
+// `page` op `read` is how a RESUMED agent sees its own page: theme, the brief,
+// the open questions (with ids), the open items, the standing decisions, the
+// findings, the last three turns. It writes nothing. Bounded: every line
+// OUTSIDE THE BRIEF is clipped and every list is cut (newest first, with a
+// `+ N more` line) at one of a few progressively tighter levels until the
+// whole text fits READ_CAP — the TURNS go first, then the decisions, the
+// questions and the findings (review of daaad36, #1). THE BRIEF IS NEVER
+// CLIPPED: the tool tells the agent to read first and replace the brief
+// WHOLE, so a clipped brief in `read` would be written back clipped forever.
+
+const READ_TURNS = 3;
+const READ_LEVELS = [
+  { clip: 240, turns: 3, decisions: 12, questions: 20, findings: 20, items: 30, ids: true },
+  { clip: 140, turns: 1, decisions: 8, questions: 12, findings: 12, items: 16, ids: true },
+  { clip: 80, turns: 0, decisions: 4, questions: 8, findings: 8, items: 10, ids: true },
+  { clip: 50, turns: 0, decisions: 0, questions: 4, findings: 4, items: 6, ids: true },
+  // The floor: headers and counts only — the brief and every section's
+  // header always fit READ_CAP at this level (asserted at every cap).
+  { clip: 50, turns: 0, decisions: 0, questions: 0, findings: 0, items: 0, ids: false },
+];
+/** The brief's lists as `read` names them to the AGENT (the page says
+ *  "Waiting on you" to the user — the same list). */
+const BRIEF_READ_LABELS = { established: "Established", dead: "Dead", lead: "Live lead", waiting: "Waiting on the user" };
+
+function clipLine(v, n) {
+  const t = String(v).replace(/\s+/g, " ").trim();
+  return t.length > n ? `${t.slice(0, Math.max(1, n - 1)).trimEnd()}…` : t;
+}
+
+/** Newest first by an ISO stamp; an unparseable one sorts last. */
+function newestFirstBy(list, stampOf) {
+  const ms = (x) => {
+    const t = Date.parse(stampOf(x));
+    return Number.isFinite(t) ? t : -Infinity;
+  };
+  return [...list].sort((a, b) => ms(b) - ms(a));
+}
+
+function renderPageRead(page, answers, dismissedIds, lim) {
+  const out = [];
+  const more = (total, shown) => {
+    if (total > shown) out.push(`  (+ ${total - shown} more — the page lists them)`);
+  };
+  out.push(`THEME: ${page.theme ? clipLine(page.theme, lim.clip) : "(none — set it once with op theme)"}`);
+
+  out.push("");
+  const b = page.brief;
+  const briefLists = b ? BRIEF_LISTS.map((f) => [f, Array.isArray(b[f]) ? b[f].filter((l) => typeof l === "string" && l.trim().length > 0) : []]) : [];
+  const goal = b && typeof b.goal === "string" && b.goal.trim().length > 0 ? b.goal : null;
+  if (b && (goal !== null || briefLists.some(([, lines]) => lines.length > 0))) {
+    out.push(`WHERE THINGS STAND (the brief${typeof b.updatedAt === "string" && b.updatedAt ? `, rewritten ${b.updatedAt}` : ""}):`);
+    // Never clipped (see the header) — the stored text, verbatim (a line
+    // break inside one, which the write path never stores, is flattened so
+    // the listing stays one line per entry).
+    const verbatim = (v) => String(v).replace(/[\r\n]+/g, " ").trim();
+    if (goal !== null) out.push(`  Goal: ${verbatim(goal)}`);
+    for (const [f, lines] of briefLists) {
+      if (lines.length === 0) continue;
+      out.push(`  ${BRIEF_READ_LABELS[f]}:`);
+      for (const l of lines.slice(0, BRIEF_LINES_CAP)) out.push(`    - ${verbatim(l)}`);
+    }
+  } else {
+    out.push("WHERE THINGS STAND: no brief yet — write one with op brief.");
+  }
+
+  const questions = page.questions.filter((q) => q && typeof q.id === "string" && typeof q.text === "string");
+  const resolved = (q) => typeof q.answeredAt === "string" && q.answeredAt.length > 0 && typeof q.answer === "string";
+  const answerOf = (q) => {
+    const a = answers[q.id];
+    return a && typeof a === "object" && typeof a.text === "string" && a.text.length > 0 ? a : null;
+  };
+  // An answer is the agent's to read once it was SENT (sentAt, not older
+  // than the answer — pageStore.isAnswerUnsent's rule); until then the user
+  // may still change it, so only the fact that it is coming is stated.
+  const sent = (a) => typeof a.sentAt === "string" && a.sentAt.length > 0 && !(a.sentAt < String(a.at || ""));
+  // SWIT-105: a question the user dismissed as not needed is off the page —
+  // not open, not a decision; named by id so the agent knows not to wait.
+  const dismissed = questions.filter((q) => !answerOf(q) && !resolved(q) && dismissedIds.has(q.id));
+  const open = questions.filter((q) => !answerOf(q) && !resolved(q) && !dismissedIds.has(q.id));
+  const pending = questions.filter((q) => answerOf(q) && !sent(answerOf(q)));
+  out.push("");
+  out.push(`OPEN QUESTIONS (${open.length}):`);
+  for (const q of open.slice(0, lim.questions)) {
+    const options = Array.isArray(q.options) ? q.options.filter((o) => typeof o === "string" && o.length > 0) : [];
+    const kind = typeof q.kind === "string" ? q.kind : "decision";
+    const tail =
+      (options.length > 0 ? ` | options: ${clipLine(options.join(" / "), lim.clip)}` : "") +
+      (typeof q.default === "string" && q.default.length > 0 ? ` | default: ${clipLine(q.default, 60)}` : "");
+    out.push(`  ${q.id} [${kind}] ${clipLine(q.text, lim.clip)}${tail}`);
+  }
+  more(open.length, lim.questions);
+  if (open.length === 0) out.push("  (none)");
+  const idList = (qs) => (lim.ids ? ` (${qs.map((q) => q.id).join(", ")})` : "");
+  if (pending.length > 0) {
+    out.push(
+      `  ${pending.length} more ${pending.length === 1 ? "is" : "are"} answered on the page and not sent yet${idList(pending)} — the answer arrives in the Decisions message; do not re-ask.`
+    );
+  }
+  if (dismissed.length > 0) {
+    out.push(
+      `  ${dismissed.length} ${dismissed.length === 1 ? "was" : "were"} dismissed by the user as not needed${idList(dismissed)} — do not wait on ${dismissed.length === 1 ? "it" : "them"}; re-ask (same id) only if the answer has come to matter.`
+    );
+  }
+
+  const items = page.items.filter((i) => i && typeof i.id === "string" && typeof i.title === "string");
+  const openItems = items.filter((i) => i.state !== "done" && i.state !== "dropped").reverse();
+  out.push("");
+  out.push(`TO DO (${openItems.length} open):`);
+  for (const i of openItems.slice(0, lim.items)) {
+    const owner = i.owner === "user" ? "the user" : i.owner === "team" ? "team" : "you";
+    out.push(`  ${i.id} [${typeof i.state === "string" ? i.state : "todo"}, ${owner}] ${clipLine(i.title, lim.clip)}`);
+  }
+  more(openItems.length, lim.items);
+  if (openItems.length === 0) out.push("  (none)");
+
+  // The user's answer wins the same id (the merge's precedence).
+  const decisions = newestFirstBy(
+    questions
+      .map((q) => {
+        const a = answerOf(q);
+        if (a && sent(a)) return { q, answer: a.text, at: String(a.at || ""), by: "the user" };
+        if (!a && resolved(q)) return { q, answer: q.answer, at: q.answeredAt, by: "settled by you" };
+        return null;
+      })
+      .filter((d) => d !== null),
+    (d) => d.at
+  );
+  out.push("");
+  out.push(`STANDING DECISIONS (${decisions.length}):`);
+  for (const d of decisions.slice(0, lim.decisions)) {
+    out.push(`  decision:${d.q.id} ${clipLine(d.q.text, lim.clip)} → ${clipLine(d.answer, lim.clip)} (${d.by})`);
+  }
+  more(decisions.length, lim.decisions);
+  if (decisions.length === 0) out.push("  (none)");
+
+  // SWIT-106: the findings ledger, newest first by its last update.
+  const findings = newestFirstBy(
+    (Array.isArray(page.findings) ? page.findings : []).filter(
+      (f) => f && typeof f.id === "string" && typeof f.claim === "string" && FINDING_VERDICTS.includes(f.verdict)
+    ),
+    (f) => f.updatedAt
+  );
+  out.push("");
+  out.push(`FINDINGS (${findings.length}):`);
+  for (const f of findings.slice(0, lim.findings)) {
+    const tail =
+      (typeof f.n === "string" && f.n.length > 0 ? ` | n: ${clipLine(f.n, FINDING_N_CAP)}` : "") +
+      (typeof f.report === "string" && f.report.length > 0 ? ` | report: ${clipLine(f.report, lim.clip)}` : "");
+    out.push(`  ${f.id} [${f.verdict}] ${clipLine(f.claim, lim.clip)}${tail}`);
+  }
+  more(findings.length, lim.findings);
+  if (findings.length === 0) out.push("  (none)");
+
+  const turns = page.turns.filter((t) => t && Array.isArray(t.lines)).slice(0, Math.min(READ_TURNS, lim.turns));
+  out.push("");
+  out.push(`LAST TURNS (newest first, ${turns.length} of ${page.turns.length}):`);
+  for (const t of turns) {
+    const lines = t.lines.filter((l) => typeof l === "string" && l.trim().length > 0).slice(0, TURN_LINE_CAP);
+    out.push(`  ${typeof t.at === "string" ? t.at : ""}: ${lines.map((l) => clipLine(l, lim.clip)).join(" | ")}`);
+  }
+  if (turns.length === 0) out.push(page.turns.length > 0 ? "  (cut — the page lists them)" : "  (none)");
+  return out.join("\n");
+}
+
+/** THE READ FORMATTER. `page` = parsePage's shape (arrays unvalidated — every
+ *  entry is guarded here); `answers` = answers.json and (SWIT-105)
+ *  `retracted` = retracted.json, both as parsed JSON (the app's files,
+ *  READ-only). Pure. Always ≤ READ_CAP characters. */
+function formatPageRead(page, answers, retracted) {
+  const known = typeof answers === "object" && answers !== null && !Array.isArray(answers) ? answers : {};
+  const dismissedIds = dismissedQuestionIds(page, retracted);
+  let text = "";
+  for (const lim of READ_LEVELS) {
+    text = renderPageRead(page, known, dismissedIds, lim);
+    if (text.length <= READ_CAP) return text;
+  }
+  const cut = "\n… (cut — the page holds more)";
+  return text.slice(0, READ_CAP - cut.length) + cut;
+}
+
+/** One of the app's files beside page.json, as parsed JSON — READ-only (the
+ *  app is their one writer). Missing or junk → `fallback`. */
+function readAppJson(threadDir, name, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(threadDir, name), "utf-8"));
+  } catch {
+    return fallback;
+  }
+}
+
+/** `page` op `read` — reads page.json + answers.json + retracted.json,
+ *  writes nothing. */
+function performReadOp(threadDir) {
+  let raw = "";
+  try {
+    raw = fs.readFileSync(pagePathFor(threadDir), "utf-8");
+  } catch {
+    // no page yet — the read says so
+  }
+  return formatPageRead(
+    parsePage(raw),
+    readAppJson(threadDir, "answers.json", {}),
+    readAppJson(threadDir, "retracted.json", null)
+  );
+}
+
+// ── Shows (SWIT-102) — put an EXISTING doc or file in front of the user ──────
+// `page` op `show {address}` appends to `shows.json` in the thread dir
+// (`{version:1, shows:[{id:"o<n>", address, at}]}`, newest first, capped; this
+// server is its one writer) and the app's view-intent poll reads it beside
+// views/ and sets.json with the same baseline rule, opening an unseen show in
+// the ONE preview slot, focused. The address is the Evidence vocabulary's
+// openable half: a knowledge-base doc path, a file path in this thread's
+// project, `surface:<project>/<page>[?k=v]`, `view:<id>[#h:<slug>]`. Caps
+// mirror src/lib/showIntent.ts.
+
+const SHOW_CAP = 20; // shows kept in shows.json
+const SHOW_ADDRESS_CAP = 300; // an address, not prose (reviewFirst's cap)
+const SHOW_PATH_SEGMENT_RE = /^[A-Za-z0-9._-]+$/; // evidenceModel's PATH_SEGMENT
+const SHOW_SURFACE_RE = /^surface:[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+(\?.*)?$/; // surfaceParams' SURFACE_ADDRESS
+const SHOW_FORMS =
+  "a knowledge-base doc path (relative to the knowledge-base root), a file path relative to this thread's working directory, surface:<project>/<page>[?k=v], view:<id>[#h:<heading-slug>] or a project's view:<project>/<id>[#h:<heading-slug>]";
+
+// src/lib/surfaceParams.ts's STRICT query rule, mirrored (review of 49ebb20,
+// #3): an address whose params the app's `parseSurfaceQuery` rejects opens
+// NOTHING there, so it is refused here instead of reported as opening.
+const SURFACE_PARAM_MAX_KEYS = 8;
+const SURFACE_PARAM_VALUE_MAX = 120;
+const SURFACE_PARAM_KEY_RE = /^[a-z][a-zA-Z0-9_]*$/;
+function surfaceQueryOk(query) {
+  if (query.length === 0) return true;
+  let pairs;
+  try {
+    pairs = new URLSearchParams(query);
+  } catch {
+    return false;
+  }
+  const seen = new Set();
+  for (const [key, value] of pairs) {
+    if (!SURFACE_PARAM_KEY_RE.test(key) || seen.has(key)) return false;
+    if (value.length === 0 || value.length > SURFACE_PARAM_VALUE_MAX) return false;
+    seen.add(key);
+    if (seen.size > SURFACE_PARAM_MAX_KEYS) return false;
+  }
+  return true;
+}
+
+// What the app's repo-file viewer can render — mirrors explorer.rs's
+// `read_at` (review of 49ebb20, #3): a FILE, at most MAX_READ_BYTES, UTF-8
+// text (`fs::read_to_string` refuses anything else). A path that fails it
+// would open an error card, so `show` refuses it by name instead.
+const SHOW_READ_CAP = 512 * 1024; // explorer.rs MAX_READ_BYTES — change one, change the other
+
+/** The real filesystem probe: {kind: "missing" | "dir" | "file", size, text}.
+ *  Tests inject their own. */
+function inspectPath(p) {
+  let st;
+  try {
+    st = fs.statSync(p);
+  } catch {
+    return { kind: "missing", size: 0, text: false };
+  }
+  if (st.isDirectory()) return { kind: "dir", size: 0, text: false };
+  if (!st.isFile()) return { kind: "missing", size: 0, text: false };
+  if (st.size > SHOW_READ_CAP) return { kind: "file", size: st.size, text: false };
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(fs.readFileSync(p));
+    return { kind: "file", size: st.size, text: true };
+  } catch {
+    return { kind: "file", size: st.size, text: false };
+  }
+}
+
+/** Refuse a path the viewer could not render, by name. */
+function assertOpenable(address, info) {
+  if (info.kind === "dir") {
+    throw new OpError(`${address} is a folder — show opens a file; name a file inside it`);
+  }
+  if (info.kind === "file" && info.size > SHOW_READ_CAP) {
+    throw new OpError(
+      `${address} is ${Math.ceil(info.size / 1024)} KB — the panel's viewer reads files up to ${SHOW_READ_CAP / 1024} KB, so nothing would open`
+    );
+  }
+  if (info.kind === "file" && !info.text) {
+    throw new OpError(`${address} is not a text file (the panel's viewer renders text — markdown, html, source) — nothing would open`);
+  }
+}
+
+/** Classify + normalize a `show` address. Pure: `cwd` and the thread's view
+ *  ids are passed in. Returns `{address, form}` — form is `view` | `surface` |
+ *  `path` (relative, forward slashes) | `absolute` (outside cwd; the app opens
+ *  it only when it sits inside the knowledge base). Throws OpError — visible —
+ *  on anything that cannot open (a ticket key, a URL, prose, `..`). */
+function normalizeShowAddress(raw, cwd, viewIds, projectViewIds) {
+  const a = text(raw, "address");
+  if (a.length > SHOW_ADDRESS_CAP) {
+    throw new OpError(`address is too long (${a.length} chars; the cap is ${SHOW_ADDRESS_CAP}) — it is ${SHOW_FORMS}, not prose`);
+  }
+  if (a.startsWith("view:")) {
+    const rest = a.slice("view:".length);
+    const hash = rest.indexOf("#");
+    const head = hash === -1 ? rest : rest.slice(0, hash);
+    // SWIT-107: `view:<project>/<id>` — a view the PROJECT owns (the form is
+    // evidenceModel.projectViewOfAddress's). Checked against the project's
+    // index when the registry is readable (`projectViewIds(project)` → ids,
+    // or null when it cannot be known).
+    const slash = head.indexOf("/");
+    if (slash !== -1) {
+      const project = head.slice(0, slash);
+      const pid = head.slice(slash + 1);
+      if (!VIEW_ID_RE.test(project) || !VIEW_ID_RE.test(pid)) {
+        throw new OpError(`${JSON.stringify(a)} is not a project view address — view:<project>/<id>, as the view tool's result named it`);
+      }
+      const known = typeof projectViewIds === "function" ? projectViewIds(project) : null;
+      if (Array.isArray(known) && !known.includes(pid)) {
+        throw new OpError(`no project view ${pid} in ${project} — a report shown with the view tool (scope project) names its address in the result`);
+      }
+      // eslint-disable-next-line no-control-regex
+      if (hash !== -1 && (!/^[a-z][a-z0-9-]*:.+$/s.test(rest.slice(hash + 1)) || /[\x00-\x1f\x7f]/.test(rest.slice(hash + 1)))) {
+        throw new OpError(`${JSON.stringify(a)} has a malformed anchor — a report heading is view:<project>/<id>#h:<heading-slug>`);
+      }
+      return { address: a, form: Array.isArray(known) ? "project-view" : "project-view-unchecked" };
+    }
+    const id = head;
+    if (!VIEW_ID_RE.test(id)) throw new OpError(`${JSON.stringify(a)} is not a view address — view:<id> with the id the view tool gave you`);
+    if (!viewIds.includes(id)) {
+      throw new OpError(`no view with id ${id} in this thread — create it with the view tool (op show) first`);
+    }
+    // The anchor grammar is viewAnchorOfAddress's (evidenceModel): <kind>:<id>.
+    // eslint-disable-next-line no-control-regex
+    if (hash !== -1 && (!/^[a-z][a-z0-9-]*:.+$/s.test(rest.slice(hash + 1)) || /[\x00-\x1f\x7f]/.test(rest.slice(hash + 1)))) {
+      throw new OpError(`${JSON.stringify(a)} has a malformed anchor — a report heading is view:<id>#h:<heading-slug>`);
+    }
+    return { address: a, form: "view" };
+  }
+  if (a.startsWith("surface:")) {
+    if (!SHOW_SURFACE_RE.test(a)) {
+      throw new OpError(`${JSON.stringify(a)} is not a page address — surface:<project>/<page>?key=value`);
+    }
+    const q = a.indexOf("?");
+    if (q !== -1 && !surfaceQueryOk(a.slice(q + 1))) {
+      throw new OpError(
+        `${JSON.stringify(a)} has params the page would refuse — up to ${SURFACE_PARAM_MAX_KEYS} key=value pairs, ` +
+          `each key [a-z][a-zA-Z0-9_]* used once, each value 1–${SURFACE_PARAM_VALUE_MAX} chars`
+      );
+    }
+    return { address: a, form: "surface" };
+  }
+  // A path. Backslashes are separators here (Windows); `./` is noise.
+  let p = a.replace(/\\/g, "/");
+  while (p.startsWith("./")) p = p.slice(2);
+  const drive = /^[A-Za-z]:\//.test(p);
+  let absolute = drive || p.startsWith("/");
+  if (absolute && typeof cwd === "string" && cwd.length > 0) {
+    // An absolute path INSIDE the working directory is that relative path.
+    const root = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
+    const fold = (s) => (drive ? s.toLowerCase() : s); // drive paths are case-insensitive
+    if (root.length > 0 && fold(p).startsWith(`${fold(root)}/`)) {
+      p = p.slice(root.length + 1);
+      absolute = false;
+    }
+  }
+  const body = absolute ? p.replace(/^[A-Za-z]:\//, "").replace(/^\/+/, "") : p;
+  const segments = body.split("/");
+  const clean = segments.every((s) => s.length > 0 && s !== ".." && s !== "." && SHOW_PATH_SEGMENT_RE.test(s));
+  if (!clean || (!body.includes("/") && !/\.[A-Za-z0-9]{1,8}$/.test(body))) {
+    throw new OpError(
+      `${JSON.stringify(a)} is not something the panel can open — address must be ${SHOW_FORMS}. ` +
+        "A path uses letters, digits, . _ - and / only (no spaces, no ..); a ticket key or a URL opens nothing here — those are evidence rows."
+    );
+  }
+  return { address: p, form: absolute ? "absolute" : "path" };
+}
+
+function readShowsFile(file) {
+  try {
+    const data = JSON.parse(fs.readFileSync(file, "utf8"));
+    return Array.isArray(data && data.shows) ? data.shows.filter((s) => s && typeof s.id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** `page` op `show`. `env` = {cwd, exists?, inspect?} — injected by the
+ *  tests; the real server uses its own working directory (claude's — the
+ *  thread's) and the filesystem. A bare `exists` probe (older tests) reads as
+ *  "a readable text file" when it answers true.
+ *
+ *  THE RESULT IS HONEST (review of 49ebb20, #3): a folder, an oversize or a
+ *  binary file is REFUSED by name (nothing is recorded — the viewer could
+ *  not render it); a page is "opening" only if its project/page is registered
+ *  in Switchboard, which this server cannot see, so it says so; and a file
+ *  under the working directory opens only when that folder belongs to a
+ *  registry project — which this server cannot see either, so it says so.
+ *  A path FOUND under the working directory is recorded `where: "cwd"`: the
+ *  app then opens that file and never a knowledge-base doc of the same path
+ *  (review of 49ebb20, #1 — `README.md` in a repo thread opened
+ *  personal-kb/README.md). */
+function performShowOp(threadDir, args, now, env) {
+  const cwd = (env && env.cwd) || process.cwd();
+  const inspect =
+    (env && env.inspect) ||
+    (env && env.exists
+      ? (p) => (env.exists(p) ? { kind: "file", size: 0, text: true } : { kind: "missing", size: 0, text: false })
+      : inspectPath);
+  // SWIT-107: the registry (when this server was handed one) — to check a
+  // project view address, and to say plainly whether a cwd file can open.
+  const registryPath = env && "registryPath" in env ? env.registryPath : process.env.SWITCHBOARD_REGISTRY;
+  const projects = readRegistryProjects(registryPath);
+  const projectViewIds = (key) => {
+    if (projects === null) return null;
+    const project = projects.find((p) => p.key === key);
+    if (!project) return [];
+    return [...projectViewOwners({ repos: project.repos }).keys()];
+  };
+  const { address, form } = normalizeShowAddress(args.address, cwd, listViewIds(path.join(threadDir, "views")), projectViewIds);
+  let underCwd = false;
+  if (form === "absolute") {
+    const info = inspect(address);
+    if (info.kind === "missing") throw new OpError(`no file at ${address} — nothing to open`);
+    assertOpenable(address, info);
+  } else if (form === "path") {
+    const info = inspect(path.join(cwd, address));
+    if (info.kind !== "missing") {
+      assertOpenable(address, info);
+      underCwd = true;
+    }
+  }
+  const file = path.join(threadDir, "shows.json");
+  const shows = readShowsFile(file);
+  const show = { id: nextId(shows, "o"), address, at: new Date(now).toISOString() };
+  if (underCwd) show.where = "cwd";
+  const next = { version: 1, shows: [show, ...shows].slice(0, SHOW_CAP) };
+  fs.mkdirSync(threadDir, { recursive: true });
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(next, null, 2));
+  fs.renameSync(tmp, file);
+  const opening = `${address} is opening in the panel beside the terminal.`;
+  let message;
+  if (form === "view" || form === "project-view") {
+    message = opening;
+  } else if (form === "project-view-unchecked") {
+    message = `${address} opens in the panel beside the terminal if that project owns a view with that id (this server could not read the registry to check).`;
+  } else if (form === "surface") {
+    message =
+      `${address} opens in the panel beside the terminal if it names a page Switchboard has registered ` +
+      "(this server cannot see that list — an unregistered project or page opens nothing).";
+  } else if (form === "absolute") {
+    message = `Recorded — but ${address} is outside this thread's working directory, so it opens ONLY if it sits inside the knowledge base; otherwise nothing opens.`;
+  } else if (underCwd && projects !== null && projectPlaceFor(projects, cwd) !== null) {
+    // SWIT-107: the registry says which project holds this folder — exact.
+    message = opening;
+  } else if (underCwd && projects !== null) {
+    message =
+      `Recorded — but this thread's working directory is in no registry project, so ${address} opens ONLY if the folder is inside the knowledge base; otherwise nothing opens.`;
+  } else if (underCwd) {
+    message =
+      `${address} opens in the panel beside the terminal when this thread's folder belongs to a registry project ` +
+      "(every registered repo does; a folder outside them opens nothing unless it is inside the knowledge base).";
+  } else {
+    message = `Recorded — but ${address} is not a file under this thread's working directory, so it opens ONLY if Switchboard can resolve it as a knowledge-base doc (a path relative to the knowledge-base root) or a file in this thread's project; otherwise nothing opens.`;
+  }
+  return { show, message };
 }
 
 // ── Views (SWIT-50) — a rendered dataset the shell draws ─────────────────────
@@ -887,7 +1651,10 @@ function readSetsFile(file) {
   }
 }
 
-function performViewOp(threadDir, args, now) {
+/** `view` op show/update. `env` = {cwd, threadId, registryPath} — injected by
+ *  the tests; the real server uses its cwd (claude's — the thread's),
+ *  SWITCHBOARD_THREAD_ID and SWITCHBOARD_REGISTRY. */
+function performViewOp(threadDir, args, now, env) {
   const viewsDir = path.join(threadDir, "views");
   const existing = listViewIds(viewsDir);
   if (args.set !== undefined && args.set !== null) {
@@ -904,6 +1671,9 @@ function performViewOp(threadDir, args, now) {
       message: `Set ${set.id} (${set.label}) of ${set.ids.length} views is opening as ONE tab beside the terminal — the user steps through it.`,
     };
   }
+  if (args.scope !== undefined && args.scope !== null && !VIEW_SCOPES.includes(args.scope)) {
+    throw new OpError('scope must be "thread" or "project"');
+  }
   if (args.op === "update") {
     const id = typeof args.id === "string" ? args.id.trim() : "";
     if (!existing.includes(id)) {
@@ -912,24 +1682,202 @@ function performViewOp(threadDir, args, now) {
   } else if (args.op !== "show") {
     throw new OpError('op must be "show" or "update"');
   }
-  const spec = buildViewSpec(args, existing, now);
+  // SWIT-107: WHO OWNS IT. A report defaults to the project; everything else
+  // to the thread; an explicit scope wins — except that `update` of a view
+  // this thread already put in the project keeps writing both copies.
+  const threadId = env && typeof env.threadId === "string" ? env.threadId : process.env.SWITCHBOARD_THREAD_ID || "";
+  const cwd = (env && env.cwd) || process.cwd();
+  const registryPath = env && "registryPath" in env ? env.registryPath : process.env.SWITCHBOARD_REGISTRY;
+  const explicit = args.scope === "project" || args.scope === "thread" ? args.scope : null;
+  let scope = explicit || (args.kind === "report" ? "project" : "thread");
+  const place = projectPlaceFor(readRegistryProjects(registryPath), cwd);
+  const owners = place ? projectViewOwners(place) : new Map();
+  if (args.op === "update" && place) {
+    const owner = owners.get(typeof args.id === "string" ? args.id.trim() : "");
+    if (owner && owner.threadId === threadId) scope = "project";
+  }
+  let note = "";
+  if (scope === "project" && place === null) {
+    if (explicit === "project") {
+      throw new OpError(
+        "this thread's working directory is in no registry project (or the registry is unreadable) — a project view needs a project to own it; show it with scope 'thread'"
+      );
+    }
+    scope = "thread";
+    note = " It is kept in this thread — its working directory is in no registry project, so no project can own it.";
+  }
+  const spec = buildViewSpec(args, scope === "project" ? [...existing, ...owners.keys()] : existing, now);
+  if (scope === "project") {
+    const owner = owners.get(spec.id);
+    if (owner && owner.threadId !== threadId) {
+      throw new OpError(
+        `view id ${spec.id} is already a project view of another thread (${owner.threadId || "unknown"}) in ${place.key} — pick another id, or omit id to mint one`
+      );
+    }
+    spec.scope = "project";
+    spec.project = place.key;
+    spec.base = place.base;
+    spec.threadId = threadId;
+  }
   fs.mkdirSync(viewsDir, { recursive: true });
   const file = path.join(viewsDir, `${spec.id}.json`);
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(spec, null, 2));
   fs.renameSync(tmp, file);
+  if (scope === "project") writeProjectView(place, spec);
+  const owned =
+    scope === "project"
+      ? ` The PROJECT ${place.key} owns it (${projectViewAddress(place.key, spec.id)} — the address for page evidence, a finding's report or page show), so it outlives this thread and is listed under ${place.key} › reports in the knowledge base.`
+      : "";
   return {
     spec,
     message:
-      args.op === "update"
+      (args.op === "update"
         ? `View ${spec.id} updated — the open tab re-renders within a couple of seconds.`
-        : `View ${spec.id} is opening in the panel beside the terminal. Update it later with op "update" and the same id.`,
+        : `View ${spec.id} is opening in the panel beside the terminal. Update it later with op "update" and the same id.`) +
+      owned +
+      note,
   };
+}
+
+// ── Project views (SWIT-107) — a view the PROJECT owns ───────────────────────
+// A report used to live inside the thread that made it: spec in the thread
+// dir, data relative to the thread's cwd — archive or lose the thread and the
+// report was unreachable. `scope: "project"` (a report's DEFAULT) ALSO writes
+// the spec into the project's repo at `.sb-views/_project/<id>.json` and keeps
+// `.sb-views/_project/index.json` (`{version:1, views:[{id, title, kind,
+// builtAt, threadId}]}`, newest first, PROJECT_VIEW_INDEX_CAP) — this server is
+// the one writer of both. The project is the registry project whose repo
+// holds this thread's working directory (longest match — the app's
+// explorer.projectPlaceForDir rule), read from SWITCHBOARD_REGISTRY; the
+// copy records `base` (the cwd relative to that repo root), so the app reads
+// the view's data — and a report's embedded blocks' data — relative to the
+// same directory the agent wrote it from. Ids are PROJECT-unique: an id
+// another thread already holds in the project is refused by name, and a
+// minted id counts the project's ids too. The THREAD copy is still written
+// (views/<id>.json), so the thread's Evidence rows and the view-intent poll
+// work unchanged; the PROJECT copy is the authoritative one (it is what
+// outlives the thread), and `update` writes both.
+
+const PROJECT_VIEW_INDEX_CAP = 200;
+const VIEW_SCOPES = ["thread", "project"];
+const PROJECT_VIEWS_REL = [".sb-views", "_project"];
+
+/** The registry's projects as {key, repos:[absolute, forward slashes]} —
+ *  explorer.rs's lenient parse (conventions.reposRoot + projects[].repos +
+ *  archived[].path). Null when the file is unreadable or has no reposRoot. */
+function readRegistryProjects(registryPath) {
+  if (typeof registryPath !== "string" || registryPath.length === 0) return null;
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(registryPath, "utf8"));
+  } catch {
+    return null;
+  }
+  const rootRaw = data && data.conventions && data.conventions.reposRoot;
+  if (typeof rootRaw !== "string" || rootRaw.trim().length === 0) return null;
+  const root = rootRaw.trim().replace(/\\/g, "/").replace(/\/+$/, "");
+  const out = [];
+  const projects = data.projects && typeof data.projects === "object" ? data.projects : {};
+  for (const [key, entry] of Object.entries(projects)) {
+    if (!entry || typeof entry !== "object" || !Array.isArray(entry.repos)) continue;
+    const repos = entry.repos.filter((r) => typeof r === "string" && r.trim().length > 0).map((r) => `${root}/${r.trim()}`);
+    if (repos.length > 0) out.push({ key, repos });
+  }
+  const archived = data.archived && typeof data.archived === "object" ? data.archived : {};
+  for (const [key, entry] of Object.entries(archived)) {
+    if (entry && typeof entry.path === "string" && entry.path.trim().length > 0) out.push({ key, repos: [`${root}/${entry.path.trim()}`] });
+  }
+  return out;
+}
+
+function foldPath(p) {
+  return String(p).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+/** Is `dir` the same directory as `root` or inside it? Segment-safe,
+ *  case-insensitive (Windows) — explorer.ts `isPathInside`. */
+function isDirInside(dir, root) {
+  const d = foldPath(dir);
+  const r = foldPath(root);
+  return r.length > 0 && (d === r || d.startsWith(`${r}/`));
+}
+
+/** WHERE this thread's working directory sits in the registry: the project
+ *  key, the repo root holding it, every repo of the project, and `base` — the
+ *  cwd relative to that repo root ("" at the root). Null = no registry, or no
+ *  project holds the folder. Pure over the parsed projects. */
+function projectPlaceFor(projects, cwd) {
+  if (!Array.isArray(projects) || typeof cwd !== "string" || cwd.length === 0) return null;
+  let best = null;
+  for (const project of projects) {
+    for (const repo of project.repos) {
+      if (!isDirInside(cwd, repo)) continue;
+      if (best === null || repo.length > best.repoRoot.length) best = { key: project.key, repoRoot: repo, repos: project.repos };
+    }
+  }
+  if (best === null) return null;
+  const rel = cwd.replace(/\\/g, "/").replace(/\/+$/, "").slice(best.repoRoot.replace(/\/+$/, "").length).replace(/^\/+/, "");
+  return { ...best, base: rel };
+}
+
+function projectViewsDir(repoRoot) {
+  return path.join(repoRoot, ...PROJECT_VIEWS_REL);
+}
+
+function readProjectIndex(repoRoot) {
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(projectViewsDir(repoRoot), "index.json"), "utf8"));
+    return Array.isArray(data && data.views) ? data.views.filter((v) => v && typeof v.id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Every project view id across the project's repos → {threadId, repoRoot}. */
+function projectViewOwners(place) {
+  const owners = new Map();
+  for (const repo of place.repos) {
+    for (const v of readProjectIndex(repo)) {
+      if (!owners.has(v.id)) owners.set(v.id, { threadId: typeof v.threadId === "string" ? v.threadId : "", repoRoot: repo });
+    }
+  }
+  return owners;
+}
+
+function writeJsonAtomic(file, value) {
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
+  fs.renameSync(tmp, file);
+}
+
+/** Write the PROJECT copy + its index entry (newest first, one per id). */
+function writeProjectView(place, spec) {
+  const dir = projectViewsDir(place.repoRoot);
+  fs.mkdirSync(dir, { recursive: true });
+  writeJsonAtomic(path.join(dir, `${spec.id}.json`), spec);
+  const entry = { id: spec.id, title: spec.title, kind: spec.kind, builtAt: spec.builtAt, threadId: spec.threadId };
+  const views = [entry, ...readProjectIndex(place.repoRoot).filter((v) => v.id !== spec.id)].slice(0, PROJECT_VIEW_INDEX_CAP);
+  writeJsonAtomic(path.join(dir, "index.json"), { version: 1, views });
+}
+
+/** A project view's address — `view:<project>/<id>` (evidenceModel.ts
+ *  projectViewAddress; the app's one definition of the form). */
+function projectViewAddress(project, id) {
+  return `view:${project}/${id}`;
 }
 
 const VIEW_TOOL = {
   name: "view",
   description:
+    // SWIT-102: the description OPENS by claiming the words a user says — an
+    // agent that hears "artifact" or "report" reached for a claude.ai
+    // publishing tool three times on 2026-09-22 and every link died.
+    "A REPORT, an \"artifact\", a summary page, a brief — anything the user asks to see IN THE " +
+    "PANEL — is made with THIS tool and stays in Switchboard: write a .md file in this " +
+    "thread's working directory and show it with kind 'report' (see report: below). Never " +
+    "publish it to claude.ai (the Artifact tool, Claude Docs) unless the user asks for a link " +
+    "to share. A doc or file that ALREADY exists opens with the page tool's op show. " +
     "SHOW the user rendered data in the panel — a table, a candle chart with markers, a " +
     "distribution, a line chart, bars by category, or a match timeline — drawn by Switchboard's own chart " +
     "components from data YOU supply. Use it " +
@@ -994,7 +1942,14 @@ const VIEW_TOOL = {
     "code. op 'update' re-renders the open report (every block reloads " +
     "its data); the markdown itself is re-read while the tab is active. A report's headings " +
     "are addressable from page evidence as view:<id>#h:<heading-slug>. Prefer one report over " +
-    "several views when narrative belongs between the charts. THE REVIEW LOOP (a deck): a " +
+    "several views when narrative belongs between the charts. A REPORT BELONGS TO THE " +
+    "PROJECT by default (scope 'project'): it is also written into the project's repo " +
+    "(.sb-views/_project/<id>.json + index.json), outlives this thread, is listed under the " +
+    "project's reports in the knowledge base and is addressed view:<project>/<id> (the " +
+    "result names it) — use that address in evidence, a finding's report or page show. Its " +
+    "data paths stay relative to this working directory. Ids are unique across the project " +
+    "(omit id to mint one); update writes both copies. Pass scope 'project' to give any other " +
+    "view the same life, or scope 'thread' to keep a report in this thread only. THE REVIEW LOOP (a deck): a " +
     "table with a drill is a deck the user steps through with next/prev in the panel; give the " +
     "drill `levels` [{price, label?, style?:'solid'|'dashed'|'zone', price2?}] (<=12; a zone is " +
     "the band between price and price2) for horizontal levels, and `markerColumns` " +
@@ -1022,6 +1977,12 @@ const VIEW_TOOL = {
     type: "object",
     properties: {
       op: { type: "string", enum: ["show", "update"], description: "show = create/open; update = refresh an existing id." },
+      scope: {
+        type: "string",
+        enum: VIEW_SCOPES,
+        description:
+          "Who owns the view: 'project' (the default for kind report — written into the project's repo too, so it outlives this thread and is listed under the project's reports) or 'thread' (the default for every other kind).",
+      },
       set: {
         type: "object",
         description:
@@ -1549,7 +2510,10 @@ const PAGE_TOOL = {
     "Something only the user can " +
     "answer: op ask (prefer 2–4 short options, each ≤ 60 chars, YOUR recommendation first or " +
     "named as default, plus why: one line on that recommendation) — it renders under Open " +
-    "questions on the page, answerable in place. Answers arrive as ONE message when the user " +
+    "questions on the page, answerable in place. An option over 60 chars is CUT at a word " +
+    "boundary with … (the result says which), so write short ones. The user can DISMISS a " +
+    "question as not needed: it leaves the page and op read names it — do not wait on it, " +
+    "and re-ask it (same id) only if the answer has come to matter. Answers arrive as ONE message when the user " +
     "sends — \"Decisions:\" numbering every open question with its answer or \"still open\" — " +
     "so never ask the same question twice (re-asking an open id replaces that question), and " +
     "do not re-ask a \"still open\" one; the user chose to leave it. Asking is HELP ME " +
@@ -1564,14 +2528,96 @@ const PAGE_TOOL = {
     "EVERY TURN, resolve every question that is settled — answered in chat, decided " +
     "elsewhere, or moot — or it stays open forever; the page lists the open ones. Set op " +
     "theme once to one line saying what this thread is working on. Never open anything for " +
-    "an answer — the page IS where your findings go.",
+    "an answer — the page IS where your findings go. op show {address} PUTS AN EXISTING DOC " +
+    "OR FILE IN FRONT OF THE USER: it opens in the panel beside the terminal, in front. Use " +
+    "it when the user asks to open, show or see a doc or file \"in the panel\" — this is how a " +
+    "file gets there; nothing is published anywhere. address is ONE of: a knowledge-base doc " +
+    "path relative to the knowledge-base root (switchboard/features/x/requirements.md); a " +
+    "file path relative to this thread's working directory (specs/design.md renders as a " +
+    "document, mock.html as a page); surface:<project>/<page>?key=value; view:<id> (add " +
+    "#h:<heading-slug> for a report heading); view:<project>/<id> for a report the project " +
+    "owns (the view tool's result names it). A file that exists under your working " +
+    "directory is always THAT file — a knowledge-base doc of the same path never shadows it. " +
+    "A folder, a binary file or one over 512 KB is refused (the viewer renders text). " +
+    "A ticket key or a URL opens nothing. The " +
+    "result says when the address may not resolve — then nothing opens. The last 20 shows " +
+    "are kept; a new report is made with the view tool (kind report), not this op. " +
+    "KEEP THE BRIEF CURRENT — rewrite it at every seam (a finding lands, a decision is made, " +
+    "the direction changes); it is what the user reads after days away. op brief {goal, " +
+    "established, dead, lead, waiting} writes WHERE THINGS STAND, the first block on the " +
+    "page: goal is ONE sentence (≤ 300 chars) on what this work is for; established (what " +
+    "is now known), dead (what was tried and ruled out), lead (the live lead being chased) " +
+    "and waiting (what is waiting on the user) are each ≤ 6 short plain lines (≤ 200 chars). " +
+    "The brief is REPLACED WHOLE by every call — pass everything that still stands, not a " +
+    "delta; goal: \"\" alone clears it. It is a summary, never a log: the story is a turn, " +
+    "the detail a report. op read RETURNS THE PAGE as compact plain text (≤ 8000 chars) — " +
+    "theme, the brief (always whole, never clipped), the open questions with their ids, the " +
+    "ids of questions the user dismissed as not needed, the open items, the standing " +
+    "decisions, the findings, the last three turns — and writes nothing; on a full page the " +
+    "turns are cut first, then the lists. It is how you see your own page: call it FIRST when " +
+    "you are resumed, and before you rewrite the brief. RECORD WHAT THE WORK ESTABLISHED as " +
+    "op finding {claim, verdict, n?, report?} — the page's Findings ledger, the record that " +
+    "outlives the thread: claim is ONE sentence (≤ 240 chars); verdict is lead (worth " +
+    "chasing) | open (not settled) | fact (established) | dead (ruled out); n is the sample " +
+    "it rests on in a few words (\"264 nights\", \"10 tests\"; ≤ 40); report is the address " +
+    "of the report or view behind it (view:<id>, a doc or file path, surface:<project>/<page>) " +
+    "and opens like an evidence row. Pass the finding's id (the result gives it) to UPDATE it " +
+    "in place as the verdict moves — never file the same claim twice; fields you omit are " +
+    "kept, n or report \"\" clears one; findingOp drop {id} removes one that was never right. " +
+    "At most 60 per page. A finding is never an evidence row (finding:<id> is refused).",
   inputSchema: {
     type: "object",
     properties: {
       op: {
         type: "string",
-        enum: ["theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item"],
+        enum: ["theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "brief", "finding", "show", "read"],
         description: "Which page operation to perform.",
+      },
+      claim: {
+        type: "string",
+        description: "finding: ONE sentence (≤ 240 chars) saying what was found.",
+      },
+      verdict: {
+        type: "string",
+        enum: ["lead", "open", "fact", "dead"],
+        description: "finding: lead = worth chasing; open = not settled; fact = established; dead = ruled out.",
+      },
+      n: {
+        type: "string",
+        description: "finding: the sample the claim rests on, a few words (\"264 nights\", \"10 tests\"; ≤ 40). \"\" clears it.",
+      },
+      report: {
+        type: "string",
+        description: "finding: the address of the report behind it — view:<id>, a doc or file path, surface:<project>/<page> (≤ 300). \"\" clears it.",
+      },
+      findingOp: {
+        type: "string",
+        enum: ["drop"],
+        description: "finding: drop removes the finding named by id. Omit to add (no id, or a new id) or update (an existing id).",
+      },
+      goal: {
+        type: "string",
+        description: "brief: ONE sentence (≤ 300 chars) on what this work is for.",
+      },
+      established: {
+        type: "array",
+        items: { type: "string" },
+        description: "brief: what is now known — ≤ 6 short plain lines (≤ 200 chars each).",
+      },
+      dead: {
+        type: "array",
+        items: { type: "string" },
+        description: "brief: what was tried and ruled out — ≤ 6 short plain lines.",
+      },
+      lead: {
+        type: "array",
+        items: { type: "string" },
+        description: "brief: the live lead being chased — ≤ 6 short plain lines (usually one).",
+      },
+      waiting: {
+        type: "array",
+        items: { type: "string" },
+        description: "brief: what is waiting on the user — ≤ 6 short plain lines.",
       },
       addresses: {
         type: "array",
@@ -1599,7 +2645,7 @@ const PAGE_TOOL = {
       },
       address: {
         type: "string",
-        description: "evidence: the row's address — a ticket key, `repo #pr`, a doc or file path, or a page state `surface:<project>/<page>?key=value`. The same address updates its row.",
+        description: "evidence: the row's address — a ticket key, `repo #pr`, a doc or file path, or a page state `surface:<project>/<page>?key=value`. The same address updates its row. show: what to open in the panel — a knowledge-base doc path, a file path in this thread's working directory, `surface:<project>/<page>?key=value` or `view:<id>[#h:<slug>]` (≤ 300 chars).",
       },
       label: { type: "string", description: "evidence: a plain few-word label." },
       status: {
@@ -1609,7 +2655,7 @@ const PAGE_TOOL = {
       options: {
         type: "array",
         items: { type: "string" },
-        description: "ask: 2–4 short answer options, each ≤ 60 chars (free text is always possible).",
+        description: "ask: 2–4 short answer options, each ≤ 60 chars — a longer one is cut at a word boundary with … (free text is always possible).",
       },
       kind: {
         type: "string",
@@ -1619,14 +2665,14 @@ const PAGE_TOOL = {
       },
       default: {
         type: "string",
-        description: "ask: your proposal — must be one of options. Listed first and marked as the default; the user confirms it in one click.",
+        description: "ask: your proposal — must be one of options (matched after an over-long option is trimmed). Listed first and marked as the default; the user confirms it in one click.",
       },
       itemOp: {
         type: "string",
         enum: ["add", "update", "close", "drop"],
         description: "item: which item operation. close = done (the work happened); drop = never the right row (leaves the plan, not an accomplishment).",
       },
-      id: { type: "string", description: "item update/close/drop: the item id. resolve: the question id. ask: optional stable question id." },
+      id: { type: "string", description: "item update/close/drop: the item id. resolve: the question id. ask: optional stable question id. finding: the finding to update or drop (omit to add one)." },
       title: { type: "string", description: "item: a few plain words." },
       owner: { type: "string", enum: ["agent", "user", "team"], description: "item: who owns it." },
       state: { type: "string", enum: ["todo", "in_progress", "waiting", "done"], description: "item: its state." },
@@ -1645,6 +2691,10 @@ function pagePathFor(threadDir) {
  *  writer, so the read is always our own last write; the atomicity protects
  *  the APP's concurrent 2.5s reads from a torn file. */
 function performOp(threadDir, args, now) {
+  // SWIT-102: `show` is the one page op that does not touch page.json.
+  if (args && args.op === "show") return performShowOp(threadDir, args, now).message;
+  // SWIT-104: `read` writes nothing at all — it returns the page as text.
+  if (args && args.op === "read") return performReadOp(threadDir);
   const file = pagePathFor(threadDir);
   let raw = "";
   try {
@@ -1655,15 +2705,16 @@ function performOp(threadDir, args, now) {
   // Answered question ids (READ-only — the app writes answers.json): what
   // makes the ask cap an OPEN-question cap.
   const answeredIds = new Set();
-  try {
-    const answers = JSON.parse(fs.readFileSync(path.join(threadDir, "answers.json"), "utf-8"));
-    if (answers && typeof answers === "object" && !Array.isArray(answers)) {
-      for (const k of Object.keys(answers)) answeredIds.add(k);
-    }
-  } catch {
-    // no answers yet, or junk — every question counts as open
+  const answers = readAppJson(threadDir, "answers.json", null);
+  // no answers yet, or junk — every question counts as open
+  if (answers && typeof answers === "object" && !Array.isArray(answers)) {
+    for (const k of Object.keys(answers)) answeredIds.add(k);
   }
-  const { page, message } = applyOp(parsePage(raw), args, now, answeredIds);
+  // SWIT-105: the questions the user dismissed (READ-only — the app writes
+  // retracted.json): off the page, so not counted against the ask cap.
+  const current = parsePage(raw);
+  const dismissedIds = dismissedQuestionIds(current, readAppJson(threadDir, "retracted.json", null));
+  const { page, message } = applyOp(current, args, now, answeredIds, dismissedIds);
   fs.mkdirSync(threadDir, { recursive: true });
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(page, null, 2));
@@ -1740,7 +2791,11 @@ function serve(threadDir) {
           const args = (params && params.arguments) || {};
           const message =
             name === "view"
-              ? performViewOp(threadDir, args, Date.now()).message
+              ? performViewOp(threadDir, args, Date.now(), {
+                  cwd: process.cwd(),
+                  threadId: process.env.SWITCHBOARD_THREAD_ID || "",
+                  registryPath: process.env.SWITCHBOARD_REGISTRY,
+                }).message
               : name === "backlog"
                 ? performBacklogOp(
                     {
@@ -1828,9 +2883,35 @@ module.exports = {
   parsePage,
   applyOp,
   performOp,
+  formatPageRead,
+  performReadOp,
+  trimOption,
+  dismissedQuestionIds,
+  OPTION_CAP,
+  FINDING_VERDICTS,
+  FINDING_CAP,
+  FINDING_CLAIM_CAP,
+  FINDING_N_CAP,
+  FINDING_REPORT_CAP,
+  BRIEF_GOAL_CAP,
+  BRIEF_LINE_CAP,
+  BRIEF_LINES_CAP,
+  READ_CAP,
+  normalizeShowAddress,
+  performShowOp,
+  SHOW_CAP,
+  SHOW_ADDRESS_CAP,
+  SHOW_READ_CAP,
+  surfaceQueryOk,
+  inspectPath,
   buildViewSpec,
   buildViewSet,
   performViewOp,
+  readRegistryProjects,
+  projectPlaceFor,
+  projectViewAddress,
+  PROJECT_VIEW_INDEX_CAP,
+  VIEW_SCOPES,
   SET_CAP,
   SET_ITEM_CAP,
   resolvePostTarget,
@@ -1857,4 +2938,5 @@ module.exports = {
   TURN_LINE_CAP,
   EVIDENCE_CAP,
   QUESTION_CAP,
+  QUESTION_KEEP_CAP,
 };

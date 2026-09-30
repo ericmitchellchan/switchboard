@@ -48,7 +48,7 @@ export const DEFAULT_ROUTE: Route = { screen: "home" };
  *  (`?screen=project&project=lodestar&page=trading&p.instrument=NQ`). A prefix,
  *  not a list — the keys are the page's own — so ownership is a predicate
  *  (`isRouteParamKey`), and every `p.*` key is cleared like the fixed ones. */
-export const ROUTE_PARAM_KEYS = ["screen", "doc", "project", "path", "page"] as const;
+export const ROUTE_PARAM_KEYS = ["screen", "doc", "project", "path", "page", "view"] as const;
 
 /** The prefix under which a project route's surface params travel. */
 export const ROUTE_SURFACE_PARAM_PREFIX = "p.";
@@ -108,6 +108,13 @@ export function parseRoute(params: URLSearchParams): Route {
       // location, so it falls back to the default like an unknown screen.
       const project = params.get("project");
       const page = params.get("page");
+      // SWIT-107: the project screen's other identity — a project VIEW (a
+      // report the project owns). A page wins when both are present; a view
+      // id outside the view alphabet is not a location.
+      const view = params.get("view");
+      if (project && !page && view && /^[A-Za-z0-9_-]{1,64}$/.test(view)) {
+        return { screen: "project", project, view };
+      }
       if (!project || !page) return DEFAULT_ROUTE;
       const surfaceParams = parseSurfaceRouteParams(params);
       return surfaceParams
@@ -145,6 +152,10 @@ export function routeToParams(route: Route): URLSearchParams {
       break;
     case "project": {
       params.set("project", route.project);
+      if (route.view !== undefined) {
+        params.set("view", route.view);
+        break;
+      }
       params.set("page", route.page);
       // Sorted, and only the valid keys: the URL is a canonical spelling of
       // the state (routeKey compares these strings), not an echo of the map.
@@ -332,7 +343,7 @@ export function backTargetLabel(): string | null {
           ? target.project
           : "the explorer";
     case "project":
-      return `${target.project} / ${target.page}`;
+      return `${target.project} / ${target.view !== undefined ? `reports / ${target.view}` : target.page}`;
   }
 }
 

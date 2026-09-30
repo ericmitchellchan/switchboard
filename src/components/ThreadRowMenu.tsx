@@ -31,7 +31,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { createPortal } from "react-dom";
 import type { CSSProperties, FocusEvent } from "react";
 import type { Thread } from "../types";
-import { getThreadActions, isThreadArchived, renameEditorHoldsFocus } from "../lib/threadStore";
+import { getThreadActions, isThreadArchived, noteTitleEditor, renameEditorHoldsFocus } from "../lib/threadStore";
 import { Icon, type IconName } from "./icons";
 
 export type ThreadMenuItem = {
@@ -362,8 +362,9 @@ export function ThreadRowMenu({
  *  restart like every other field.
  *
  *  ONE blur is not a commit: the box a `+` opened (SWIT-56) is on screen while
- *  the new pane's terminal focuses ITSELF — from the pane's visibility effect,
- *  or from the show-fit's `shouldFocus` several frames later. That blur has
+ *  the new pane's terminal focuses ITSELF — from the pane's visibility effect
+ *  (`landTerminalView`'s focus when the tab is shown) or xterm's own focus on
+ *  mount, frames after the box opened. That blur has
  *  xterm's helper textarea as its `relatedTarget` and no pointer gesture
  *  behind it; `threadStore.renameEditorHoldsFocus` calls it a steal and the
  *  box takes focus back. A click on the terminal commits as before. */
@@ -380,6 +381,13 @@ export function ThreadTitleEditor({
   const committed = useRef(false);
   const openedAt = useRef(Date.now());
   const pointerSinceOpen = useRef(false);
+
+  // Review of c178f2f, #7b: registered while open, so the auto-name from a
+  // page theme waits instead of landing under this box.
+  useEffect(() => {
+    noteTitleEditor(thread.id, true);
+    return () => noteTitleEditor(thread.id, false);
+  }, [thread.id]);
 
   useEffect(() => {
     // Capture phase, document-wide: a pointer anywhere (the terminal above

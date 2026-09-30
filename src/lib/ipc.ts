@@ -8,16 +8,27 @@ import {
 } from "@tauri-apps/plugin-notification";
 import type { SessionInfo, Config } from "../types";
 import { log } from "./logger";
+import { TERMINAL_COLS, TERMINAL_ROWS } from "./terminalGrid";
 
+/** Spawn a PTY session — ALWAYS at the pinned grid (SWIT-103). There is no
+ *  size parameter on purpose: the xterm that will show this session is created
+ *  at the same constants, and nothing resizes either afterwards, so the two
+ *  must agree from the first byte (Rust's own default is 120×30). */
 export async function createSession(
   name: string,
   repo: string,
-  working_dir: string,
-  cols?: number,
-  rows?: number
+  working_dir: string
 ): Promise<SessionInfo> {
-  log.debug(`IPC createSession name=${name} repo=${repo} working_dir=${working_dir}`);
-  return invoke("create_session", { name, repo, workingDir: working_dir, cols, rows });
+  log.debug(
+    `IPC createSession name=${name} repo=${repo} working_dir=${working_dir} grid=${TERMINAL_COLS}x${TERMINAL_ROWS}`
+  );
+  return invoke("create_session", {
+    name,
+    repo,
+    workingDir: working_dir,
+    cols: TERMINAL_COLS,
+    rows: TERMINAL_ROWS,
+  });
 }
 
 export async function restartSession(
@@ -33,8 +44,13 @@ export async function restartSession(
   // thread's dying events droppable and the new spawn's first output safe.
   gen: number
 ): Promise<SessionInfo> {
-  log.debug(`IPC restartSession id=${sessionId} name=${name} cols=${cols} rows=${rows} gen=${gen}`);
-  return invoke("restart_session", { sessionId, name, repo, workingDir: working_dir, cols, rows, gen });
+  // The live terminal's grid when the caller has it — which is the pinned
+  // grid; the constants when it does not. Never Rust's 120×30 default: with
+  // no fit to correct it later, the restarted shell would stay that size.
+  const c = cols ?? TERMINAL_COLS;
+  const r = rows ?? TERMINAL_ROWS;
+  log.debug(`IPC restartSession id=${sessionId} name=${name} cols=${c} rows=${r} gen=${gen}`);
+  return invoke("restart_session", { sessionId, name, repo, workingDir: working_dir, cols: c, rows: r, gen });
 }
 
 export async function closeSession(sessionId: string): Promise<void> {
@@ -55,8 +71,11 @@ export async function resizeSession(
   cols: number,
   rows: number
 ): Promise<void> {
-  // This is the single path that SIGWINCHes the shell. Logged so a recurrence
-  // of the text-render corruption can be traced to the resize(s) that caused it.
+  // This is the single path that SIGWINCHes the shell. Since the grid was
+  // pinned (SWIT-103) its only callers are the rows-only bounce
+  // (resumeHealRunner.bouncePtyRows — the resume heal and the narrow-frame
+  // nudge) and the registry's xterm → PTY mirror, which no layout path fires.
+  // Logged so a rendering report can be traced to the resize(s) behind it.
   log.debug(`IPC resizeSession id=${sessionId} cols=${cols} rows=${rows}`);
   return invoke("resize_session", { sessionId, cols, rows });
 }
@@ -93,7 +112,7 @@ export async function threadsRoot(): Promise<string> {
 }
 
 /** Read one of a thread's page files (page.json / answers.json / inbox.json /
- *  retracted.json / sets.json). A missing file resolves to "" — "no page yet"
+ *  retracted.json / sets.json / shows.json). A missing file resolves to "" — "no page yet"
  *  is the ordinary state. */
 export async function readThreadFile(threadId: string, name: string): Promise<string> {
   return invoke("read_thread_file", { threadId, name });
@@ -129,6 +148,29 @@ export async function readThreadView(threadId: string, viewId: string): Promise<
  *  no path root ever crosses this seam). Size-capped in Rust. */
 export async function readViewData(threadId: string, relPath: string): Promise<string> {
   return invoke("read_view_data", { threadId, relPath });
+}
+
+/** SWIT-107 — PROJECT VIEWS. One repo's `.sb-views/_project/index.json` as
+ *  written by the MCP server; `repo` is the repo's name for a multi-repo
+ *  project (`""` for a single-repo one). Missing indexes are simply absent. */
+export type ProjectViewIndexFile = { repo: string; content: string };
+
+/** Every repo of a registry project that holds a project-view index. The
+ *  roots come from the registry by KEY (explorer.rs), never from the caller. */
+export async function listProjectViews(projectKey: string): Promise<ProjectViewIndexFile[]> {
+  return invoke("list_project_views", { projectKey });
+}
+
+/** A project view's SPEC json ("" when missing — the cannot-render card). */
+export async function readProjectView(projectKey: string, viewId: string): Promise<string> {
+  return invoke("read_project_view", { projectKey, viewId });
+}
+
+/** A project view's DATA (or a report's markdown): `relPath` is relative to
+ *  the directory the view was written from (the spec's `base` inside its
+ *  repo), resolved by Rust with the explorer's two-layer guard. */
+export async function readProjectViewData(projectKey: string, viewId: string, relPath: string): Promise<string> {
+  return invoke("read_project_view_data", { projectKey, viewId, relPath });
 }
 
 /** Write a deck's `notes.json` (SWIT-75) into `<relDir>` under the thread's

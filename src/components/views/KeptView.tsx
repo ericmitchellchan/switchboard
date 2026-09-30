@@ -96,7 +96,7 @@ export default function KeptView({
       meta={meta}
       loading={false}
       rerun={noop}
-      threadId=""
+      owner=""
       viewId={spec.id}
       artifact={chromeArtifact}
       active={active}

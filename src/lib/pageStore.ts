@@ -2,7 +2,10 @@
 // as a MERGE of three per-thread files with ONE WRITER EACH:
 //
 //   page.json    ← the agent, through the MCP server (SWIT-49). Theme, turns,
-//                  evidence rows, questions, to-do items.
+//                  evidence rows, questions, to-do items, and (SWIT-104) the
+//                  standing BRIEF — where things stand, rewritten whole —
+//                  and (SWIT-106) the FINDINGS ledger: claim · verdict · n ·
+//                  report, one row per claim, updated in place by id.
 //   answers.json ← the app (SWIT-51): Eric's answers, joined to questions by
 //                  id at render time — page.json is never touched. Each answer
 //                  ALSO renders as a `decision:<id>` evidence row (SWIT-58),
@@ -56,6 +59,15 @@ export const TURN_CAP = 30;
 export const TURN_LINE_CAP = 6;
 export const EVIDENCE_CAP = 60;
 export const QUESTION_CAP = 20;
+/** Review of c178f2f, #3: every question the page HOLDS is kept up to this
+ *  many — open, answered, settled, dismissed alike, file order (newest
+ *  first). It mirrors the server's QUESTION_KEEP_CAP, the most a page can
+ *  hold (a new ask past it is refused, nothing is evicted), so no question
+ *  the server wrote is dropped here. QUESTION_CAP (20) is the server's OPEN
+ *  cap and no longer cuts the parse: it used to keep the newest 20 of ANY
+ *  state, and an older open question vanished from the page, the rail and
+ *  Home while `page read` listed it. */
+export const QUESTION_KEEP_CAP = 200;
 /** Done items beyond this fold behind a count. */
 export const DONE_FOLD = 10;
 /** A turn's reviewFirst is an ADDRESS, not prose — the server refuses more
@@ -65,6 +77,12 @@ export const REVIEW_FIRST_CAP = 300;
 /** SWIT-77: an ask's `why` is ONE line on the recommendation — the server
  *  refuses more; a hand-written longer one is cut here. Mirrors WHY_CAP. */
 export const WHY_CAP = 240;
+/** SWIT-104: the standing brief — `goal` is one sentence, each list at most
+ *  BRIEF_LINES_CAP short lines. The server refuses more; a hand-written
+ *  longer one is cut here. Mirror the server's BRIEF_* caps. */
+export const BRIEF_GOAL_CAP = 300;
+export const BRIEF_LINE_CAP = 200;
+export const BRIEF_LINES_CAP = 6;
 
 // ── File shapes ──────────────────────────────────────────────────────────────
 
@@ -125,6 +143,57 @@ export function isOpenItem(item: Pick<PageItem, "state">): boolean {
   return item.state !== "done" && item.state !== "dropped";
 }
 
+/** SWIT-104: THE STANDING BRIEF — where things stand, for a reader who has
+ *  been away for days (Eric asked "refresh my memory… where everything is"
+ *  five times in three weeks). The agent REWRITES it whole at every seam
+ *  (page op `brief`); it is never appended to. `goal` is one sentence; the
+ *  four lists are short lines. */
+export type PageBrief = {
+  goal: string | null;
+  /** What is now known. */
+  established: string[];
+  /** What was tried and ruled out. */
+  dead: string[];
+  /** The live lead being chased. */
+  lead: string[];
+  /** What is waiting on the user. */
+  waiting: string[];
+  /** When the agent last rewrote it. */
+  updatedAt: string;
+};
+
+/** The brief's four lists, in page order, with the words the page prints. */
+export const BRIEF_LISTS = [
+  { key: "established", label: "Established" },
+  { key: "dead", label: "Dead" },
+  { key: "lead", label: "Live lead" },
+  { key: "waiting", label: "Waiting on you" },
+] as const;
+export type BriefListKey = (typeof BRIEF_LISTS)[number]["key"];
+
+/** SWIT-106: THE FINDINGS LEDGER — what the work has established, one row
+ *  per claim (the tennis thread improvised `finding:` evidence rows for it;
+ *  Eric: "Document this in the ledger: the summary of each one, linked to
+ *  whatever artifact or report"). The verdict words are the one-platform
+ *  mock's. Mirrors the server's FINDING_* caps. */
+export const FINDING_VERDICTS = ["lead", "open", "fact", "dead"] as const;
+export type FindingVerdict = (typeof FINDING_VERDICTS)[number];
+export const FINDING_CAP = 60;
+export const FINDING_CLAIM_CAP = 240;
+export const FINDING_N_CAP = 40;
+export const FINDING_REPORT_CAP = 300;
+export type PageFinding = {
+  id: string;
+  /** One sentence. */
+  claim: string;
+  verdict: FindingVerdict;
+  /** The sample it rests on, in words (`264 nights`); null = not stated. */
+  n: string | null;
+  /** The report behind it — an Evidence-style address; null = none. */
+  report: string | null;
+  updatedAt: string;
+};
+
 /** page.json — the agent's half, newest-first arrays. */
 export type PageFile = {
   theme: string | null;
@@ -132,6 +201,10 @@ export type PageFile = {
   evidence: PageEvidence[];
   questions: PageQuestion[];
   items: PageItem[];
+  /** SWIT-104: null while the agent has written none (or cleared it). */
+  brief: PageBrief | null;
+  /** SWIT-106: the findings ledger, in file order (newest filed first). */
+  findings: PageFinding[];
 };
 
 export const EMPTY_PAGE: PageFile = Object.freeze({
@@ -140,6 +213,8 @@ export const EMPTY_PAGE: PageFile = Object.freeze({
   evidence: [],
   questions: [],
   items: [],
+  brief: null,
+  findings: [],
 });
 
 /** answers.json — question id → Eric's answer. SWIT-77: `sentAt` = when the
@@ -257,7 +332,7 @@ export function parsePageFile(raw: string): PageFile {
             ? { answer: resolvedAnswer, at: resolvedAt, by: q.resolvedBy === "user" ? "user" : "agent" }
             : null,
       });
-      if (questions.length >= QUESTION_CAP) break;
+      if (questions.length >= QUESTION_KEEP_CAP) break;
     }
   }
 
@@ -279,7 +354,81 @@ export function parsePageFile(raw: string): PageFile {
     }
   }
 
-  return { theme: str(data.theme), turns, evidence, questions, items };
+  return {
+    theme: str(data.theme),
+    turns,
+    evidence,
+    questions,
+    items,
+    brief: parseBrief(data.brief),
+    findings: parseFindings(data.findings),
+  };
+}
+
+function isFindingVerdict(v: unknown): v is FindingVerdict {
+  return typeof v === "string" && (FINDING_VERDICTS as readonly string[]).includes(v);
+}
+
+/** Tolerant parse of `page.findings` (SWIT-106): a malformed entry — no id,
+ *  no claim, an unknown verdict — drops ALONE; a repeated id keeps its first;
+ *  an over-long field is cut; capped at FINDING_CAP. Not an array → none. */
+export function parseFindings(raw: unknown): PageFinding[] {
+  if (!Array.isArray(raw)) return [];
+  const out: PageFinding[] = [];
+  const seen = new Set<string>();
+  for (const f of raw) {
+    if (!isRecord(f)) continue;
+    const id = str(f.id);
+    const claim = str(typeof f.claim === "string" ? f.claim.trim() : null);
+    if (!id || !claim || seen.has(id) || !isFindingVerdict(f.verdict)) continue;
+    seen.add(id);
+    const n = typeof f.n === "number" && Number.isFinite(f.n) ? String(f.n) : str(typeof f.n === "string" ? f.n.trim() : null);
+    out.push({
+      id,
+      claim: claim.slice(0, FINDING_CLAIM_CAP),
+      verdict: f.verdict,
+      n: n?.slice(0, FINDING_N_CAP) ?? null,
+      report: str(typeof f.report === "string" ? f.report.trim() : null)?.slice(0, FINDING_REPORT_CAP) ?? null,
+      updatedAt: str(f.updatedAt) ?? "",
+    });
+    if (out.length >= FINDING_CAP) break;
+  }
+  return out;
+}
+
+/** Tolerant parse of `page.brief` (SWIT-104). A malformed brief is ABSENT,
+ *  never a broken page: a non-object is null, a non-string line drops alone,
+ *  an over-long goal/line is cut, a list keeps its first BRIEF_LINES_CAP
+ *  lines — and a brief with nothing left in it is null (no empty block). */
+export function parseBrief(raw: unknown): PageBrief | null {
+  if (!isRecord(raw)) return null;
+  const lines = (v: unknown): string[] =>
+    Array.isArray(v)
+      ? v
+          .filter((l): l is string => typeof l === "string" && l.trim().length > 0)
+          .map((l) => l.trim().slice(0, BRIEF_LINE_CAP))
+          .slice(0, BRIEF_LINES_CAP)
+      : [];
+  const goal = str(typeof raw.goal === "string" ? raw.goal.trim() : null)?.slice(0, BRIEF_GOAL_CAP) ?? null;
+  const brief: PageBrief = {
+    goal,
+    established: lines(raw.established),
+    dead: lines(raw.dead),
+    lead: lines(raw.lead),
+    waiting: lines(raw.waiting),
+    updatedAt: str(raw.updatedAt) ?? "",
+  };
+  return goal === null && BRIEF_LISTS.every(({ key }) => brief[key].length === 0) ? null : brief;
+}
+
+/** The brief's NON-EMPTY lists in page order — what the block draws under
+ *  the goal (an empty list has no label). Pure. */
+export function briefSections(brief: PageBrief): { key: BriefListKey; label: string; lines: string[] }[] {
+  return BRIEF_LISTS.filter(({ key }) => brief[key].length > 0).map(({ key, label }) => ({
+    key,
+    label,
+    lines: brief[key],
+  }));
 }
 
 export function parseAnswersFile(raw: string): AnswersFile {
@@ -368,6 +517,40 @@ export function isRetracted(
 /** The synthesized decision row's address prefix (`decisionAddress`). */
 export const DECISION_ADDRESS_PREFIX = "decision:";
 
+// ── Dismissed questions (SWIT-105) ───────────────────────────────────────────
+// A question the user does not need answered is DISMISSED — `not needed` on
+// its card. page.json is the agent's file, so (exactly like an evidence row)
+// the app records it in retracted.json, under the address `question:<id>`,
+// and every reader of "is this question open" folds it out. Reversible by
+// the agent, on purpose: RE-ASKING the id stamps a newer `askedAt`, and a
+// question asked AFTER its dismissal is open again.
+
+/** The retracted.json address a dismissed question is recorded under. */
+export const QUESTION_ADDRESS_PREFIX = "question:";
+export function questionAddress(questionId: string): string {
+  return `${QUESTION_ADDRESS_PREFIX}${questionId}`;
+}
+
+/** When the user dismissed this question, or null when it is not dismissed.
+ *  Dismissed = a `question:<id>` retraction that is NOT OLDER than the ask —
+ *  a later SECOND of `askedAt` (a re-ask) brings it back, the same clock rule
+ *  `isRetracted` applies to a re-posted evidence row; an unparseable stamp on
+ *  either side keeps it dismissed (a dismissal stands until the agent
+ *  demonstrably re-asks). Pure. */
+export function questionDismissedAt(
+  q: { id: string; askedAt?: string },
+  retracted: readonly RetractedEvidence[]
+): string | null {
+  if (retracted.length === 0) return null;
+  const address = questionAddress(q.id);
+  const hit = retracted.find((r) => r.address === address);
+  if (!hit) return null;
+  const askedAt = Date.parse(q.askedAt ?? "");
+  const dismissedAt = Date.parse(hit.at);
+  if (!Number.isFinite(askedAt) || !Number.isFinite(dismissedAt)) return hit.at;
+  return Math.floor(askedAt / 1000) <= Math.floor(dismissedAt / 1000) ? hit.at : null;
+}
+
 /** Fold the retractions out of a row list (agent-clock rows: `updatedAt` is
  *  consulted). Returns the SAME array when nothing is hidden. Pure. */
 export function applyRetractions<T extends Pick<PageEvidence, "address" | "updatedAt">>(
@@ -396,16 +579,19 @@ export function isAnswerUnsent(answer: PageAnswer | undefined): boolean {
 /** The open / unsent split of a page's questions — what App's 5s pass counts
  *  per thread and the rail marker + Home's Needs you read (SWIT-77 review
  *  fix: an unsent batch used to be invisible outside the page). `open` =
- *  `isQuestionOpen`; `unsent` = answered in answers.json and not yet sent
+ *  `isQuestionOpen` (a question dismissed in retracted.json — SWIT-105 —
+ *  is not open: three files feed this, page.json, answers.json and
+ *  retracted.json); `unsent` = answered in answers.json and not yet sent
  *  (`isAnswerUnsent`). Pure. */
 export function countQuestionStates(
-  questions: readonly Pick<PageQuestion, "id" | "resolved">[],
-  answers: AnswersFile
+  questions: readonly OpenQuestionFields[],
+  answers: AnswersFile,
+  retracted: readonly RetractedEvidence[] = NO_RETRACTIONS
 ): { open: number; unsent: number } {
   let open = 0;
   let unsent = 0;
   for (const q of questions) {
-    if (isQuestionOpen(q, answers)) open += 1;
+    if (isQuestionOpen(q, answers, retracted)) open += 1;
     else if (isAnswerUnsent(answers[q.id])) unsent += 1;
   }
   return { open, unsent };
@@ -558,6 +744,8 @@ export type AnsweredQuestion = { question: PageQuestion; answer: PageAnswer };
  *  answer, or the agent's resolution. `by` picks the page's word: `you:` /
  *  `settled:`. */
 export type SettledQuestion = { question: PageQuestion; answer: string; at: string; by: "user" | "agent" };
+/** SWIT-105: a question the user dismissed as not needed, and when. */
+export type DismissedQuestion = { question: PageQuestion; at: string };
 
 /** Is the item waiting on the USER — owned by the user, or parked in
  *  `waiting` (whoever owns it)? Home's Needs You and the To do owner column
@@ -566,15 +754,32 @@ export function isWaitingOnUser(item: Pick<PageItem, "owner" | "state">): boolea
   return item.owner === "user" || item.state === "waiting";
 }
 
+/** What "is it open" reads off a question (`askedAt` only matters once there
+ *  are dismissals to compare it with). */
+export type OpenQuestionFields = Pick<PageQuestion, "id" | "resolved"> & { askedAt?: string };
+
 /** Nobody has settled it: no user answer in answers.json, no agent
- *  resolution on the question. Pure — App's 5s pass counts with it too. */
-export function isQuestionOpen(q: Pick<PageQuestion, "id" | "resolved">, answers: AnswersFile): boolean {
-  return !(q.id in answers) && q.resolved === null;
+ *  resolution on the question — and (SWIT-105) the user has not dismissed it
+ *  as not needed (`questionDismissedAt`; the retractions default to none, so
+ *  a caller that never read retracted.json sees the pre-SWIT-105 answer).
+ *  Pure — App's 5s pass counts with it too. */
+export function isQuestionOpen(
+  q: OpenQuestionFields,
+  answers: AnswersFile,
+  retracted: readonly RetractedEvidence[] = NO_RETRACTIONS
+): boolean {
+  return !(q.id in answers) && q.resolved === null && questionDismissedAt(q, retracted) === null;
 }
 
 /** What PageView renders — the three files folded into R2's section order. */
 export type RenderedPage = {
   theme: string | null;
+  /** SWIT-104: where things stand — the first block under the summary; null
+   *  = no block. */
+  brief: PageBrief | null;
+  /** SWIT-106: the findings ledger, NEWEST FIRST by `updatedAt` (a finding
+   *  whose verdict just moved comes to the top). */
+  findings: PageFinding[];
   /** OPEN questions — nobody has settled them (Home's Needs You lists these;
    *  a decided-but-unsent one is NOT here, it is in `unsentDecisions`). */
   openQuestions: PageQuestion[];
@@ -611,6 +816,11 @@ export type RenderedPage = {
   /** DECIDED — the settled questions (user answers that went, agent
    *  resolutions), newest first; the page folds them. */
   settledQuestions: SettledQuestion[];
+  /** SWIT-105: questions the user dismissed as not needed (retracted.json's
+   *  `question:<id>` entries that are not older than the ask), newest first —
+   *  listed under the folded Decided block as `dismissed`. Out of Open
+   *  questions, the batch, Home and every count; never a decision row. */
+  dismissedQuestions: DismissedQuestion[];
   /** DONE — folded past DONE_FOLD. */
   doneItems: PageItem[];
   doneFolded: number;
@@ -657,7 +867,17 @@ export function mergePage(
   inbox: InboxPost[],
   retracted: readonly RetractedEvidence[] = NO_RETRACTIONS
 ): RenderedPage {
-  const openQuestions = page.questions.filter((q) => isQuestionOpen(q, answers));
+  const openQuestions = page.questions.filter((q) => isQuestionOpen(q, answers, retracted));
+  // SWIT-105: dismissed = would be open but for the user's `not needed`. An
+  // answer or a resolution outranks a dismissal (something was SAID), so
+  // those stay decisions; a dismissed question is never a decision row.
+  const dismissedQuestions: DismissedQuestion[] = page.questions
+    .filter((q) => !(q.id in answers) && q.resolved === null)
+    .flatMap((q) => {
+      const at = questionDismissedAt(q, retracted);
+      return at === null ? [] : [{ question: q, at }];
+    })
+    .sort((a, b) => newestFirst(a.at, b.at));
   // PRECEDENCE (SWIT-77): the user's answer in answers.json is ground truth
   // over the agent's resolution of the same question — the agent settles
   // what the user left, never what the user said.
@@ -717,6 +937,8 @@ export function mergePage(
   ].sort(byNewest);
   const merged: RenderedPage = {
     theme: page.theme,
+    brief: page.brief,
+    findings: [...page.findings].sort((a, b) => newestFirst(a.updatedAt, b.updatedAt)),
     openQuestions,
     unsentDecisions,
     decisionQuestions,
@@ -729,12 +951,15 @@ export function mergePage(
     evidence,
     decisions,
     settledQuestions,
+    dismissedQuestions,
     doneItems,
     doneFolded: Math.max(0, doneAll.length - DONE_FOLD),
     droppedItems,
     retractedEvidence: retracted as RetractedEvidence[],
     isEmpty:
       page.theme === null &&
+      page.brief === null &&
+      page.findings.length === 0 &&
       page.turns.length === 0 &&
       page.evidence.length === 0 &&
       page.questions.length === 0 &&
@@ -788,6 +1013,21 @@ export function sendErrorNote(err: unknown): AnswerNote {
   return {
     kind: "error",
     text: `not sent — ${err instanceof Error ? err.message : String(err)}`,
+  };
+}
+
+/** Review of c178f2f, nit: Home's `not needed` SAVED — the card says so in
+ *  place of its form until the poll takes it off Home. */
+export function dismissSuccessNote(): AnswerNote {
+  return { kind: "success", text: "not needed · off the page" };
+}
+
+/** SWIT-105: a `not needed` did not save — the question stays on the page
+ *  (it leaves only when the merged files say so), the reason beside Send. */
+export function dismissErrorNote(err: unknown): AnswerNote {
+  return {
+    kind: "error",
+    text: `not dismissed — ${err instanceof Error ? err.message : String(err)}`,
   };
 }
 
@@ -916,10 +1156,11 @@ export type ThreadPassEntry = {
   /** The stamp the entry was read under; -1 = a failed stat or read, which
    *  never matches, so the next tick re-reads. */
   stamp: number;
-  /** Open questions at the read — page.json + answers.json, both stamped. */
+  /** Open questions at the read — page.json + answers.json + (SWIT-105, the
+   *  dismissals) retracted.json, all three stamped. */
   questions: number;
   /** Decided-but-unsent answers at the read (answers.json, stamped) — the
-   *  same pass, the same two files (`countQuestionStates`). */
+   *  same pass, the same three files — page, answers, retracted (`countQuestionStates`). */
   unsent: number;
   /** The inbox's post times at the read (postTimes) — inbox.json is stamped,
    *  the seen stamp is not, so unread is re-derived from these every tick. */
@@ -1090,4 +1331,30 @@ export function __resetPageFocusForTests(): void {
   pendingFocus = new Map();
   focusNonce = 0;
   focusListeners.clear();
+}
+
+/** Where focus goes after a KEYBOARD `not needed` (review of c178f2f, #5):
+ *  the card after the dismissed one, else the one before it — whichever is
+ *  still on the page NOW — else null (the caller focuses Send): never
+ *  <body>. By question id, not by position, so it holds whether or not the
+ *  dismissed card has already left the list when the hand-off runs.
+ *  `idsAtClick` = the cards' ids when `not needed` was pressed, `idsNow` =
+ *  the ids rendered when focus moves. Pure. */
+export function neighbourAfterDismiss(
+  idsAtClick: readonly string[],
+  dismissedId: string,
+  idsNow: readonly string[]
+): string | null {
+  const at = idsAtClick.indexOf(dismissedId);
+  if (at === -1) return null;
+  const alive = (id: string | undefined) => (id !== undefined && id !== dismissedId && idsNow.includes(id) ? id : null);
+  for (let i = at + 1; i < idsAtClick.length; i++) {
+    const id = alive(idsAtClick[i]);
+    if (id !== null) return id;
+  }
+  for (let i = at - 1; i >= 0; i--) {
+    const id = alive(idsAtClick[i]);
+    if (id !== null) return id;
+  }
+  return null;
 }

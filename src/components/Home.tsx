@@ -9,10 +9,14 @@
 //                      the batch is sent from the page, so the row says so
 //                      and opens the thread). Answering HERE calls the same
 //                      bridge the page uses (acceptance 7).
+//   Findings         → (SWIT-106) the newest 8 findings across the active
+//                      threads' ledgers, each with its thread; opens it.
 //   Live now         → launched threads + the latest turn's first line.
 //   Between threads  → the last hour of cross-thread posts.
 //   Listening        → announced dev servers, probed (never "healthy").
-//   Kept views       → the scratchpad listing (_scratch/*.view.json).
+//   Kept views       → the scratchpad listing (_scratch/*.view.json), and
+//                      (SWIT-107) the newest PROJECT reports — views a
+//                      registry project owns, from repoListing's cache.
 //
 // SKIN (SWIT-54 hierarchy pass; re-cut SWIT-91 — the ✦ page's Ky pass,
 // SWIT-90, reads like Ky's PlanPanel and Home did not): ONE left-aligned
@@ -34,7 +38,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { PulsingDot } from "./PulsingDot";
-import { MONO, READING, SECTION_TITLE, DENSE_ROW, FIELD } from "./kit";
+import { MONO, READING, SECTION_TITLE, DENSE_ROW, FIELD, TEXT_LINK } from "./kit";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
 import {
   useThreadsView,
@@ -48,16 +52,28 @@ import {
   parsePageFile,
   parseAnswersFile,
   parseInboxFile,
+  parseRetractedFile,
   mergePage,
   orderedOptions,
   answerSuccessNote,
   answerErrorNote,
   noteReplacesForm,
   unsentDecisionsLine,
+  questionAddress,
+  dismissErrorNote,
+  dismissSuccessNote,
 } from "../lib/pageStore";
 import type { AnswerNote, InboxPost, PageItem, PageQuestion, RenderedPage } from "../lib/pageStore";
-import { answerQuestion } from "../lib/panelStore";
-import { readThreadFile, listScratchViews } from "../lib/ipc";
+import { answerQuestion, openArtifact } from "../lib/panelStore";
+import {
+  getProjectViews,
+  getRegistryProjects,
+  newestProjectViews,
+  refreshRepoKb,
+  useRepoListings,
+  type ProjectViewEntry,
+} from "../lib/repoListing";
+import { readThreadFile, listScratchViews, retractThreadEvidence } from "../lib/ipc";
 import { navigate } from "../lib/route";
 import { useAllKnownServers, serverKey } from "../lib/devServer";
 import type { DevServerHit } from "../lib/devServer";
@@ -65,6 +81,9 @@ import { useBacklog, openItems, HOME_BACKLOG_LIMIT } from "../lib/backlogStore";
 import type { BacklogItem } from "../lib/backlogStore";
 import { BacklogListing } from "./BacklogPanel";
 import { OptionRow } from "./kb/OptionRow";
+import { Fold, StatusPill } from "./kb/PageBlock";
+import { needsYouMeta, olderThreadIds, olderQuestionsLabel, recentFindings } from "../lib/homeModel";
+import { verdictTone } from "../lib/statusPill";
 
 /** The page's H2 + trailing meta (10px mono faint, pushed right). */
 const SECTION_META: CSSProperties = {
@@ -141,7 +160,9 @@ function Row({
   title,
   children,
 }: {
-  onClick: () => void;
+  /** The click event rides along so a row can read Ctrl/⌘ (SWIT-107's
+   *  report rows: full width instead of beside the thread). */
+  onClick: (e: React.MouseEvent) => void;
   title?: string;
   children: ReactNode;
 }) {
@@ -193,6 +214,12 @@ export function Home({
   const servers = useAllKnownServers();
   const [digests, setDigests] = useState<ThreadDigest[]>([]);
   const [kept, setKept] = useState<string[]>([]);
+  // SWIT-107: the newest project reports — repoListing's cache (the KB band's),
+  // refreshed with the registry on Home's own tick (throttled there to
+  // REFRESH_MIN_MS, so no new timer and no per-tick IPC).
+  useRepoListings();
+  const registry = getRegistryProjects();
+  const reports = newestProjectViews((registry.projects ?? []).map((p) => p.key), getProjectViews);
 
   // ONE poll for every block: page + answers + inbox per active thread, and
   // the scratchpad listing — while Home is on screen only (the standing
@@ -209,15 +236,18 @@ export function Home({
         const next: ThreadDigest[] = [];
         for (const thread of threads) {
           try {
-            const [pageRaw, answersRaw, inboxRaw] = await Promise.all([
+            const [pageRaw, answersRaw, inboxRaw, retractedRaw] = await Promise.all([
               readThreadFile(thread.id, "page.json"),
               readThreadFile(thread.id, "answers.json"),
               readThreadFile(thread.id, "inbox.json"),
+              // SWIT-105: a question dismissed on the page (`not needed`) is
+              // not open here either — the dismissals live in this file.
+              readThreadFile(thread.id, "retracted.json"),
             ]);
             const posts = parseInboxFile(inboxRaw);
             next.push({
               thread,
-              page: mergePage(parsePageFile(pageRaw), parseAnswersFile(answersRaw), posts),
+              page: mergePage(parsePageFile(pageRaw), parseAnswersFile(answersRaw), posts, parseRetractedFile(retractedRaw)),
               posts,
             });
           } catch {
@@ -225,6 +255,7 @@ export function Home({
           }
           if (cancelled) return;
         }
+        refreshRepoKb();
         const keptViews = await listScratchViews().catch(() => [] as string[]);
         if (cancelled) return;
         setDigests(next);
@@ -260,13 +291,15 @@ export function Home({
     view.launched
   );
   const recentPosts = collectRecentPosts(digests);
+  const findings = recentFindings(digests);
   const quiet: string[] = [];
   if (needsCount === 0) quiet.push("needs you");
+  if (findings.length === 0) quiet.push("findings");
   if (openBacklog.length === 0) quiet.push("backlog");
   if (liveRows.length === 0) quiet.push("live now");
   if (recentPosts.length === 0) quiet.push("between threads");
   if (servers.length === 0) quiet.push("listening");
-  if (kept.length === 0) quiet.push("kept views");
+  if (kept.length === 0 && reports.length === 0) quiet.push("kept views");
 
   return (
     <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
@@ -295,14 +328,15 @@ export function Home({
             gap: 18,
           }}
         >
-          {needsCount > 0 && <NeedsYou digests={digests} />}
+          {needsCount > 0 && <NeedsYou digests={digests} launched={view.launched} />}
+          {findings.length > 0 && <Findings rows={findings} />}
           {openBacklog.length > 0 && (
             <BacklogBlock items={openBacklog} projectOptions={backlogProjects} />
           )}
           {liveRows.length > 0 && <LiveNow rows={liveRows} digests={digests} />}
           {recentPosts.length > 0 && <BetweenThreads recent={recentPosts} />}
           {servers.length > 0 && <Listening active={active} servers={servers} />}
-          {kept.length > 0 && <KeptViews kept={kept} />}
+          {(kept.length > 0 || reports.length > 0) && <KeptViews kept={kept} reports={reports} />}
           {quiet.length > 0 && (
             <div style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)", lineHeight: 1.5 }}>
               {quiet.join(" · ")} — all quiet
@@ -343,11 +377,19 @@ function BacklogBlock({
 
 // ── Needs you ────────────────────────────────────────────────────────────────
 
-function NeedsYou({ digests }: { digests: ThreadDigest[] }) {
+function NeedsYou({ digests, launched }: { digests: ThreadDigest[]; launched: ReadonlySet<string> }) {
   const entries: ReactNode[] = [];
+  // SWIT-105: questions from threads with no sign of life in the last 14
+  // days (homeModel.olderThreadIds) fold behind ONE line under the list —
+  // a month-old question no longer sits above today's. Everything else a
+  // thread needs (an unsent batch, a request, an item) still lists.
+  const older = olderThreadIds(digests, launched, Date.now());
+  const olderCards: ReactNode[] = [];
   for (const d of digests) {
     for (const q of d.page.openQuestions) {
-      entries.push(<QuestionCard key={`q-${d.thread.id}-${q.id}`} digest={d} question={q} />);
+      (older.has(d.thread.id) ? olderCards : entries).push(
+        <QuestionCard key={`q-${d.thread.id}-${q.id}`} digest={d} question={q} />
+      );
     }
     if (d.page.unsentDecisions.length > 0) {
       entries.push(<UnsentRow key={`u-${d.thread.id}`} digest={d} count={d.page.unsentDecisions.length} />);
@@ -361,8 +403,13 @@ function NeedsYou({ digests }: { digests: ThreadDigest[] }) {
   }
   return (
     <div>
-      <SectionHeader label="Needs you" meta={String(entries.length)} />
+      <SectionHeader label="Needs you" meta={needsYouMeta(entries.length, olderCards.length)} />
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>{entries}</div>
+      {olderCards.length > 0 && (
+        <Fold label={olderQuestionsLabel(olderCards.length)} count={olderCards.length}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>{olderCards}</div>
+        </Fold>
+      )}
     </div>
   );
 }
@@ -379,6 +426,24 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
   const [chosen, setChosen] = useState<string | null>(null);
   const [note, setNote] = useState<AnswerNote | null>(null);
   const [fieldFocus, setFieldFocus] = useState(false);
+  // Review of c178f2f, nit: `not needed` on Home too — the SAME write the
+  // page makes (retracted.json, `question:<id>`, through the app's retract
+  // command) and the same rule: the card leaves when the poll shows the
+  // dismissal, a failed write is one line and the card stays.
+  const [dismissing, setDismissing] = useState(false);
+  const dismiss = useCallback(async () => {
+    if (busy || dismissing) return;
+    setDismissing(true);
+    setNote(null);
+    try {
+      await retractThreadEvidence(digest.thread.id, questionAddress(question.id));
+      setNote(dismissSuccessNote());
+    } catch (err) {
+      setNote(dismissErrorNote(err));
+    } finally {
+      setDismissing(false);
+    }
+  }, [busy, dismissing, digest.thread.id, question.id]);
   const submit = useCallback(
     async (text: string) => {
       const clean = text.trim();
@@ -409,6 +474,17 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
         <span style={{ ...ROW_META, marginLeft: 0 }}>
           {digest.thread.title} · {threadRepoName(digest.thread.workingDir)}
         </span>
+        {!noteReplacesForm(note) && (
+          <button
+            type="button"
+            onClick={() => void dismiss()}
+            disabled={busy || dismissing}
+            title="Take this question off the page — you do not need it answered. The agent can ask again if it comes to matter."
+            style={{ ...TEXT_LINK, flex: "none", marginTop: 0, opacity: dismissing ? 0.4 : 1, cursor: busy || dismissing ? "default" : "pointer" }}
+          >
+            not needed
+          </button>
+        )}
       </div>
       {noteReplacesForm(note) ? (
         <div style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.5 }}>{note?.text}</div>
@@ -520,6 +596,31 @@ function UserItemCard({ digest, item }: { digest: ThreadDigest; item: PageItem }
   );
 }
 
+// ── Findings (SWIT-106) ──────────────────────────────────────────────────────
+
+/** The newest findings across the active threads (homeModel.recentFindings),
+ *  one flat row each: the claim, its thread (later: its lane) dim beside it,
+ *  the verdict pill at the right — the page's own pill and tone rule. The row
+ *  opens the thread; the ledger itself lives on its page. */
+function Findings({ rows }: { rows: ReturnType<typeof recentFindings<Thread>> }) {
+  return (
+    <div>
+      <SectionHeader label="Findings" meta={String(rows.length)} />
+      {rows.map(({ thread, finding }) => (
+        <Row key={`${thread.id}-${finding.id}`} title={finding.claim} onClick={() => getThreadActions()?.openThread(thread.id)}>
+          <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <span style={TITLE}>{finding.claim}</span>
+            <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)" }}> {thread.title}</span>
+          </span>
+          <span style={{ flex: "none", width: 58, display: "flex", alignSelf: "center" }}>
+            <StatusPill word={finding.verdict} tone={verdictTone(finding.verdict)} />
+          </span>
+        </Row>
+      ))}
+    </div>
+  );
+}
+
 // ── Live now ─────────────────────────────────────────────────────────────────
 
 function LiveNow({ rows, digests }: { rows: Thread[]; digests: ThreadDigest[] }) {
@@ -600,10 +701,24 @@ function BetweenThreads({ recent }: { recent: RecentPost[] }) {
 
 // ── Kept views ───────────────────────────────────────────────────────────────
 
-function KeptViews({ kept }: { kept: string[] }) {
+function KeptViews({ kept, reports }: { kept: string[]; reports: readonly ProjectViewEntry[] }) {
   return (
     <div>
-      <SectionHeader label="Kept views" meta={String(kept.length)} />
+      <SectionHeader label="Kept views" meta={String(kept.length + reports.length)} />
+      {/* SWIT-107: the newest reports a PROJECT owns — live, not frozen; a
+          row opens beside the active thread (Ctrl: full width). */}
+      {reports.map((r) => (
+        <Row
+          key={`report:${r.project}/${r.id}`}
+          title={`view:${r.project}/${r.id} — a ${r.kind} the project owns; it outlives the thread that made it`}
+          onClick={(e) => openArtifact({ kind: "view", project: r.project, viewId: r.id }, { modifier: e.ctrlKey || e.metaKey })}
+        >
+          <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", ...TITLE }}>
+            {r.title}
+          </span>
+          <span style={ROW_META}>{r.project}</span>
+        </Row>
+      ))}
       {kept.map((relPath) => {
         const parts = relPath.split("/");
         const project = parts[1] ?? "";

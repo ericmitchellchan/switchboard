@@ -14,7 +14,8 @@
 //
 // What heals it: a rows-only PTY bounce (rows-1 → rows). claude repaints the
 // WHOLE frame at the true grid on the way back. xterm is never touched, so
-// nothing reflows.
+// nothing reflows. (Since SWIT-103 pinned the grid, this bounce and the
+// narrow-frame nudge that shares it are the only PTY resizes there are.)
 //
 // When: at output settles inside a window after the resumed session's FIRST
 // output (the replay lands ~2–25 s after spawn depending on MCP load; claude's
@@ -39,8 +40,9 @@ export const RESUME_HEAL_MAX_BOUNCES = 5;
  *  echo is refused the same way and stays garbled until claude prints anything
  *  else (which re-arms a settle inside the window). */
 export const RESUME_HEAL_MIN_GAP_MS = 4_000;
-/** Quiet after the last PTY byte that counts as a settle (fitQueue's
- *  STREAM_QUIET_MS, and Ky's turn-end settle). */
+/** Quiet after the last PTY byte that counts as a settle (Ky's turn-end
+ *  settle; repaintRunner's REPAINT_SETTLE_MS is the same length on purpose —
+ *  the two clocks fire at the same settle, this one first). */
 export const RESUME_HEAL_SETTLE_MS = 1_500;
 /** The pause between the two legs of the bounce. */
 export const RESUME_HEAL_BOUNCE_GAP_MS = 120;

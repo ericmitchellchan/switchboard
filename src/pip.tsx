@@ -9,6 +9,7 @@ import { notifyPipClosing, notifyPipReady, notifyPipSwitchSession, onPipHost, on
 import { STATUS_CONFIGS } from "./lib/statusConfig";
 import type { AgentStatus, Artifact } from "./types";
 import { log, initLogger } from "./lib/logger";
+import { TERMINAL_COLS, TERMINAL_ROWS } from "./lib/terminalGrid";
 import { describeArtifact, sanitizeArtifact } from "./lib/panelStore";
 import { configurePinsIO } from "./lib/pinsStore";
 import { ArtifactSurface } from "./components/kb/ArtifactSurface";
@@ -92,6 +93,10 @@ function PipApp({ sessionId }: { sessionId: string }) {
       allowProposedApi: true,
       convertEol: true,
       screenReaderMode: false,
+      // The pinned grid (SWIT-103) — the same constants main's terminal is
+      // created at, so the mirror matches before the snapshot even arrives.
+      cols: TERMINAL_COLS,
+      rows: TERMINAL_ROWS,
     });
 
     const searchAddon = new SearchAddon();
@@ -104,13 +109,15 @@ function PipApp({ sessionId }: { sessionId: string }) {
 
     terminal.open(container);
 
-    // We deliberately do NOT call fitAddon.fit() — PiP must keep the SAME
-    // dimensions as main so that absolute cursor-positioning sequences in PTY
-    // output (PSReadLine line redraws, TUI redraws) land at matching
-    // coordinates in both windows. Main sends its cols/rows in the scrollback
-    // handoff and we resize to match there. PiP's container may be smaller
-    // than main's geometry — content past the visible area is clipped. This
-    // is the price of keeping the two views byte-identical.
+    // No fit, here or anywhere: PiP must keep the SAME grid as main so that
+    // absolute cursor-positioning sequences in PTY output (PSReadLine line
+    // redraws, TUI redraws) land at matching coordinates in both windows.
+    // Both are created at the pinned grid (terminalGrid.ts); main still sends
+    // its cols/rows in the scrollback handoff and the snapshot handler below
+    // matches them — a check that is a no-op unless the two ever disagreed.
+    // PiP's window may be smaller than the grid — content past the visible
+    // area is clipped (width) or scrolled (height). This is the price of
+    // keeping the two views byte-identical.
     requestAnimationFrame(() => {
       terminal.focus();
     });
@@ -148,11 +155,14 @@ function PipApp({ sessionId }: { sessionId: string }) {
         if (payload.type === "snapshot") {
           // Match main's geometry before writing so wrapping is identical and
           // subsequent live PTY positioning sequences land at the same row/col
-          // here as in main.
+          // here as in main. Both sides are the pinned grid, so this never
+          // runs in practice; it is the mirror following main, not a fit — no
+          // PTY hears it (this window has no resize forwarding at all).
           if (payload.cols && payload.rows && (terminal.cols !== payload.cols || terminal.rows !== payload.rows)) {
+            log.warn(`[PiP] main's grid ${payload.cols}x${payload.rows} differs from the mirror's ${terminal.cols}x${terminal.rows}; matching it`);
             terminal.resize(payload.cols, payload.rows);
           }
-          log.info(`[PiP] snapshot received, length=${payload.text.length}, resized to cols=${terminal.cols} rows=${terminal.rows}`);
+          log.info(`[PiP] snapshot received, length=${payload.text.length}, grid cols=${terminal.cols} rows=${terminal.rows}`);
           if (payload.text) {
             terminal.write(payload.text, () => {
               terminal.scrollToBottom();
@@ -189,11 +199,10 @@ function PipApp({ sessionId }: { sessionId: string }) {
       notifyPipReady(sessionId).catch((e) => log.warn(`[PiP] notifyPipReady failed: ${e}`));
     })();
 
-    // No window-resize → fit handler. PiP intentionally stays at main's
-    // geometry (matched in the scrollback handoff) regardless of container
-    // size — resizing the xterm would cause cursor positions in incoming
-    // PTY output to drift from main's rendering. Container resizes just clip
-    // or reveal more of the buffer.
+    // No window-resize handler. PiP stays at main's (pinned) grid regardless
+    // of the window's size — resizing the xterm would cause cursor positions
+    // in incoming PTY output to drift from main's rendering. Window resizes
+    // just clip or reveal more of the grid.
 
     return () => {
       cancelled = true;

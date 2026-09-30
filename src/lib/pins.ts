@@ -239,6 +239,12 @@ export function surfacePinTargetFor(artifact: Extract<Artifact, { kind: "surface
  *  moves. The DOC SCOPE was chosen over the anchor id because `pinsForDoc`
  *  already partitions the sidecar by doc — an anchor-id suffix would have
  *  needed every provider to understand it. */
+/** SWIT-107: the owner word a PROJECT view files its pins under, in place of
+ *  a thread id — `view:project:<viewId>` in `<project>/surface-pins.json`.
+ *  Thread ids are uuids, so the word can never collide with one; a project
+ *  view's pins therefore outlive every thread that opened it. */
+export const PROJECT_VIEW_PIN_OWNER = "project";
+
 export function viewPinTargetFor(project: string, threadId: string, viewId: string, scope = ""): PinTarget {
   const segments = mirrorSegments(project);
   const dir = segments.join("/");

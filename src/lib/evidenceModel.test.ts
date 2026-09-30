@@ -3,6 +3,8 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  couldBeKbDoc,
+  KB_DOC_EXTENSIONS,
   evidenceKindOf,
   groupEvidence,
   isPathShaped,
@@ -197,6 +199,35 @@ describe("resolveDocTarget", () => {
     expect(resolveDocTarget("Cargo.toml", [], "switchboard")).toBeNull(); // no slash, not in KB
     expect(resolveDocTarget("SWIT-64", ["SWIT-64"], "switchboard")).toBeNull(); // not a doc/file kind
   });
+
+  it("reports a KB-list MISS before the repo fallback (SWIT-101) — and only a real one", () => {
+    const misses: string[] = [];
+    const onMiss = (a: string) => misses.push(a);
+    // The bug: a KB doc created after the list loaded fell through to a
+    // (missing) repo file. It still falls back — but the caller is told.
+    expect(resolveDocTarget(" switchboard/features/new/spec.md ", ["switchboard/notes.md"], "lodestar", onMiss)).toEqual({
+      kind: "repo-file",
+      project: "lodestar",
+      path: "switchboard/features/new/spec.md",
+    });
+    expect(misses).toEqual(["switchboard/features/new/spec.md"]); // trimmed — the list's own key form
+    // No project: plain text, but the miss is still reported (the refresh is
+    // what can turn the row into a link).
+    expect(resolveDocTarget("switchboard/other.md", [], null, onMiss)).toBeNull();
+    expect(misses).toHaveLength(2);
+    // Not misses: a hit, an address that is not a doc/file, an unknown list.
+    resolveDocTarget("switchboard/notes.md", ["switchboard/notes.md"], "lodestar", onMiss);
+    resolveDocTarget("SWIT-64", [], "lodestar", onMiss);
+    resolveDocTarget("surface:lodestar/trading", [], "lodestar", onMiss);
+    resolveDocTarget("switchboard/x.md", null, "lodestar", onMiss);
+    expect(misses).toHaveLength(2);
+    // The same address against the refreshed list is the KB doc.
+    expect(resolveDocTarget("switchboard/features/new/spec.md", ["switchboard/features/new/spec.md"], "lodestar", onMiss)).toEqual({
+      kind: "kb-doc",
+      path: "switchboard/features/new/spec.md",
+    });
+    expect(misses).toHaveLength(2);
+  });
 });
 
 describe("latchViewKey (SWIT-70 review fix F2 — a failed spec read retries)", () => {
@@ -213,5 +244,31 @@ describe("latchViewKey (SWIT-70 review fix F2 — a failed spec read retries)", 
 
   it("every read failing latches nothing that matches a non-empty list", () => {
     expect(latchViewKey(["a"], [])).not.toBe(["a"].join("\n"));
+  });
+});
+
+describe("the KB miss is reported only for an address that could BE a KB doc (review of 49ebb20, #5)", () => {
+  it("couldBeKbDoc: a KB-listed extension (kb.rs DOC_EXTENSIONS), any case", () => {
+    expect(KB_DOC_EXTENSIONS).toEqual(["md", "html", "htm", "jsx", "tsx", "mmd", "json"]);
+    for (const a of ["README.md", "a/b.HTML", "x/mock.jsx", "d.mmd", "registry.json", "x.view.json"]) expect(couldBeKbDoc(a)).toBe(true);
+    for (const a of ["Cargo.toml", "v0.16.0", "e.g", "src/App.rs", "notes", "a/b"]) expect(couldBeKbDoc(a)).toBe(false);
+  });
+
+  it("resolveDocTarget calls onKbMiss for a plausible doc and stays quiet for a dotted word", () => {
+    const misses: string[] = [];
+    const miss = (a: string) => misses.push(a);
+    for (const a of ["Cargo.toml", "v0.16.0", "e.g", "src/App.rs"]) resolveDocTarget(a, ["x.md"], "p", miss);
+    expect(misses).toEqual([]);
+    resolveDocTarget("switchboard/new.md", ["x.md"], "p", miss);
+    expect(misses).toEqual(["switchboard/new.md"]);
+  });
+
+  it("pathPrefix re-bases a repo file (the cwd→project place), never a KB doc", () => {
+    expect(resolveDocTarget("src/x.md", ["x.md"], "lodestar", undefined, "apps/desktop/")).toEqual({
+      kind: "repo-file",
+      project: "lodestar",
+      path: "apps/desktop/src/x.md",
+    });
+    expect(resolveDocTarget("x.md", ["x.md"], "lodestar", undefined, "apps/desktop/")).toEqual({ kind: "kb-doc", path: "x.md" });
   });
 });

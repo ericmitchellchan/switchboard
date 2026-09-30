@@ -13,7 +13,7 @@
 // activity, never months old, so Xm/Xh/Xd is the whole range that matters.
 
 import { isWaitingOnUser } from "./pageStore";
-import type { PageItem } from "./pageStore";
+import type { FindingVerdict, PageItem } from "./pageStore";
 
 export type PillTone = "amber" | "green" | "blue" | "neutral" | "dim";
 
@@ -57,6 +57,24 @@ export type ItemPill = { word: string; tone: PillTone };
 export function itemPill(item: Pick<PageItem, "state" | "owner">): ItemPill {
   const word = item.state === "in_progress" ? "in progress" : item.state;
   return { word, tone: isWaitingOnUser(item) ? "amber" : statusTone(word) };
+}
+
+/** A FINDING's verdict pill (SWIT-106). Not `statusTone`: the verdict words
+ *  mean something of their own — `open` here is an unsettled claim that
+ *  still wants the reader (amber), not live work (statusTone's blue). lead =
+ *  the accent (worth chasing), fact = the neutral solid (established, and
+ *  nothing to do), open = amber, dead = the dim outline (over). Pure. */
+export function verdictTone(verdict: FindingVerdict): PillTone {
+  switch (verdict) {
+    case "lead":
+      return "green";
+    case "fact":
+      return "neutral";
+    case "open":
+      return "amber";
+    case "dead":
+      return "dim";
+  }
 }
 
 /** A relative age word for a stamp: `now` under a minute, else `Xm` / `Xh` /

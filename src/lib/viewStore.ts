@@ -124,9 +124,58 @@
 // validated by reportStore alone (the server never sees inside the file).
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { readThreadView, readViewData } from "./ipc";
+import { readProjectView, readProjectViewData, readThreadView, readViewData } from "./ipc";
 import { splitReport } from "./reportStore";
 import { isBarTone, parseTableTones, type BarTone, type TableTone } from "./viewTone";
+
+// ── Owners (SWIT-107) ────────────────────────────────────────────────────────
+// A view is owned by a THREAD (its spec in the thread dir, its data relative
+// to the thread's cwd) or by a registry PROJECT (its spec in the project's
+// repo at `.sb-views/_project/<id>.json`, its data relative to the directory
+// it was written from — the spec's `base` — both read by Rust by project KEY).
+// The hooks key on ONE string, the OWNER KEY, so every effect dependency stays
+// a primitive and every hook signature stays what it was:
+//   thread  → the thread id (a uuid — never contains `:`)
+//   project → `project:<key>/<viewId>` — the viewId of the view whose spec
+//             holds the `base`; a drilled child and every embedded report
+//             block of that view load their data through the same key.
+// "" = no owner (a KEPT view — frozen, nothing loads).
+
+export type ViewOwner = { kind: "thread"; threadId: string } | { kind: "project"; project: string; viewId: string };
+
+const OWNER_WORD = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** The owner key of a view artifact (or any record with the same fields). */
+export function viewOwnerKey(a: { threadId?: string; project?: string; viewId: string }): string {
+  return a.project !== undefined ? `project:${a.project}/${a.viewId}` : a.threadId ?? "";
+}
+
+/** The owner behind a key, or null ("" / malformed). Pure. */
+export function parseViewOwnerKey(key: string): ViewOwner | null {
+  if (key.startsWith("project:")) {
+    const rest = key.slice("project:".length);
+    const slash = rest.indexOf("/");
+    if (slash === -1) return null;
+    const project = rest.slice(0, slash);
+    const viewId = rest.slice(slash + 1);
+    return OWNER_WORD.test(project) && OWNER_WORD.test(viewId) ? { kind: "project", project, viewId } : null;
+  }
+  return key.length > 0 && !key.includes(":") ? { kind: "thread", threadId: key } : null;
+}
+
+/** A view's SPEC through its owner — the ONE read every spec poll uses. */
+export async function readViewSpec(owner: string, viewId: string): Promise<string> {
+  const o = parseViewOwnerKey(owner);
+  if (!o) throw new Error("this view has no owner to read from");
+  return o.kind === "thread" ? readThreadView(o.threadId, viewId) : readProjectView(o.project, viewId);
+}
+
+/** A view's DATA file (or a report's markdown) through its owner. */
+export async function readViewFile(owner: string, relPath: string): Promise<string> {
+  const o = parseViewOwnerKey(owner);
+  if (!o) throw new Error("this view has no owner to read from");
+  return o.kind === "thread" ? readViewData(o.threadId, relPath) : readProjectViewData(o.project, o.viewId, relPath);
+}
 
 export const VIEW_KINDS = ["table", "candles", "dist", "line", "bar", "timeline", "report"] as const;
 export type ViewKind = (typeof VIEW_KINDS)[number];
@@ -1444,8 +1493,8 @@ export const VIEW_SPEC_POLL_MS = 2_500;
 /** One raw read of a view source — the ONE fetch path every data load goes
  *  through (main, panels, embedded): a file through the guarded IPC, a query
  *  against a loopback URL the parse already vetted. */
-async function fetchViewRaw(threadId: string, source: ViewSource): Promise<string> {
-  if (source.type === "file") return readViewData(threadId, source.path);
+async function fetchViewRaw(owner: string, source: ViewSource): Promise<string> {
+  if (source.type === "file") return readViewFile(owner, source.path);
   const init: RequestInit = source.body
     ? { method: "POST", headers: { "content-type": "application/json" }, body: source.body }
     : { method: "GET" };
@@ -1472,7 +1521,9 @@ export type ViewRead = {
 };
 
 export function useView(
-  threadId: string,
+  /** SWIT-107: the view's OWNER KEY (`viewOwnerKey`) — a thread id, or
+   *  `project:<key>/<viewId>` for a project view. */
+  owner: string,
   viewId: string,
   active: boolean,
   /** T6: a drilled CHILD — the parent's drill resolved for this key. */
@@ -1507,14 +1558,14 @@ export function useView(
     setMeta(null);
     setText(null);
     setDataError(null);
-  }, [threadId, viewId, drillKey, block]);
+  }, [owner, viewId, drillKey, block]);
 
   useEffect(() => {
-    if (!active || threadId.length === 0 || viewId.length === 0) return;
+    if (!active || owner.length === 0 || viewId.length === 0) return;
     let cancelled = false;
     const tick = async () => {
       try {
-        const raw = await readThreadView(threadId, viewId);
+        const raw = await readViewSpec(owner, viewId);
         // SWIT-73: a `block` artifact's effective spec lives in the report's
         // MARKDOWN, so the change key covers both files — an edited block
         // re-derives even while the spec file itself is unchanged.
@@ -1524,7 +1575,7 @@ export function useView(
           const parsed0 = parseViewSpec(raw);
           if (parsed0.spec?.kind === "report" && parsed0.spec.source.type === "file") {
             try {
-              markdown = await readViewData(threadId, parsed0.spec.source.path);
+              markdown = await readViewFile(owner, parsed0.spec.source.path);
             } catch {
               markdown = null;
             }
@@ -1574,7 +1625,7 @@ export function useView(
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [threadId, viewId, active, drillKey, block]);
+  }, [owner, viewId, active, drillKey, block]);
 
   // SWIT-73: a REPORT's markdown polls at the same cadence gates as the spec
   // (active-gated, no-op on unchanged content — the mergeDocRead lesson: an
@@ -1586,7 +1637,7 @@ export function useView(
     let cancelled = false;
     const tick = async () => {
       try {
-        const raw = await readViewData(threadId, path);
+        const raw = await readViewFile(owner, path);
         if (cancelled || raw === lastTextRef.current) return;
         lastTextRef.current = raw;
         setText(raw);
@@ -1603,7 +1654,7 @@ export function useView(
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [threadId, spec, active]);
+  }, [owner, spec, active]);
 
   const load = useCallback(
     async (target: ViewSpec) => {
@@ -1611,7 +1662,7 @@ export function useView(
       setLoading(true);
       setDataError(null);
       try {
-        const raw = await fetchViewRaw(threadId, target.source);
+        const raw = await fetchViewRaw(owner, target.source);
         if (seq !== loadSeqRef.current) return;
         const parsed = parseViewPayload(raw);
         if (parsed === null) {
@@ -1630,7 +1681,7 @@ export function useView(
         if (seq === loadSeqRef.current) setLoading(false);
       }
     },
-    [threadId]
+    [owner]
   );
 
   // Load data once per BUILD (id + builtAt + source): an agent `update`
@@ -1678,7 +1729,7 @@ export type InlineViewData = {
  *  every block at once), `rerun` is Eric's gesture, a failed re-read keeps
  *  the last good rows. The spec arrives already derived
  *  (`parseInlineViewSpec`); null = nothing to load. */
-export function useInlineViewData(threadId: string, spec: ViewSpec | null): InlineViewData {
+export function useInlineViewData(owner: string, spec: ViewSpec | null): InlineViewData {
   const [rows, setRows] = useState<ViewRow[] | null>(null);
   const [meta, setMeta] = useState<ViewMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1692,7 +1743,7 @@ export function useInlineViewData(threadId: string, spec: ViewSpec | null): Inli
       setLoading(true);
       setError(null);
       try {
-        const raw = await fetchViewRaw(threadId, target.source);
+        const raw = await fetchViewRaw(owner, target.source);
         if (seq !== loadSeqRef.current) return;
         const parsed = parseViewPayload(raw);
         if (parsed === null) {
@@ -1711,7 +1762,7 @@ export function useInlineViewData(threadId: string, spec: ViewSpec | null): Inli
         if (seq === loadSeqRef.current) setLoading(false);
       }
     },
-    [threadId]
+    [owner]
   );
 
   useEffect(() => {
@@ -1747,7 +1798,7 @@ const NO_PANELS: PanelData[] = [];
  *  source only — a panel is a companion chart, not a live feed). Same
  *  loading rules as the main source: file through the guarded IPC, query
  *  against a loopback URL the parse already vetted. */
-export function useViewPanels(threadId: string, spec: ViewSpec | null, active: boolean): PanelData[] {
+export function useViewPanels(owner: string, spec: ViewSpec | null, active: boolean): PanelData[] {
   const [data, setData] = useState<PanelData[]>(NO_PANELS);
   const loadedForRef = useRef<string | null>(null);
   const seqRef = useRef(0);
@@ -1762,7 +1813,7 @@ export function useViewPanels(threadId: string, spec: ViewSpec | null, active: b
     // No thread = nothing to load from (a KEPT view, SWIT-53: frozen, so its
     // panels stay whatever the snapshot held — and a query-sourced panel must
     // not fetch live data under a "frozen" label). Same guard as useView.
-    if (threadId.length === 0) return;
+    if (owner.length === 0) return;
     const buildKey = `${spec.id}:${spec.builtAt}:${panels
       .map((p) => (p.source.type === "file" ? p.source.path : p.source.url))
       .join("|")}`;
@@ -1774,7 +1825,7 @@ export function useViewPanels(threadId: string, spec: ViewSpec | null, active: b
       void (async () => {
         let next: PanelData;
         try {
-          const raw = await fetchViewRaw(threadId, p.source);
+          const raw = await fetchViewRaw(owner, p.source);
           const parsed = parseViewPayload(raw);
           next =
             parsed === null
@@ -1787,6 +1838,6 @@ export function useViewPanels(threadId: string, spec: ViewSpec | null, active: b
         setData((prev) => prev.map((d, j) => (j === i ? next : d)));
       })();
     });
-  }, [threadId, spec, active]);
+  }, [owner, spec, active]);
   return data;
 }

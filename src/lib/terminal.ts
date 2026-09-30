@@ -1,24 +1,35 @@
 // Terminal utilities + compatibility facade over the keep-alive registry.
 //
-// Instance OWNERSHIP (creation, keep-alive DOM, once-only PTY wiring, WebGL
-// attach/detach policy, disposal) lives in terminalRegistry.ts — panes acquire
-// and release instances through it, keyed by owner tokens whose rules are in
-// terminalLifecycle.ts. This module keeps the measurement/serialize/scroll
-// helpers and re-exports the registry-backed pieces so existing consumers
-// (workspace.ts, fitQueue.ts, App.tsx, useKeyboardShortcuts.ts, export.ts)
-// keep their import surface unchanged.
+// Instance OWNERSHIP (creation at the pinned grid, keep-alive DOM, once-only
+// PTY wiring, WebGL attach/detach policy, the scroll-range re-sync, disposal)
+// lives in terminalRegistry.ts — panes acquire and release instances through
+// it, keyed by owner tokens whose rules are in terminalLifecycle.ts. This
+// module keeps the CSS-hide bookkeeping, the serialize helpers and the two
+// "the pane is on screen again" moves, and re-exports the registry-backed
+// pieces so existing consumers (workspace.ts, App.tsx, useKeyboardShortcuts.ts,
+// export.ts) keep their import surface unchanged.
+//
+// There is no fit here any more (SWIT-103): the grid is a constant
+// (terminalGrid.ts) and a layout change never measures, proposes or resizes
+// anything. Showing a terminal is refresh + re-sync + land, never a resize.
 
 import { log } from "./logger";
-import { hiddenCols, resizeDecision } from "./resizePolicy";
+import {
+  isRepaintRewriting,
+  repaintBracketedPaste,
+  repaintSnapshot,
+  whenRepaintIdle,
+} from "./repaintRunner";
 import {
   getTerminal,
   getAllTerminalIds,
   enableWebGL,
   disableWebGL,
-  setResizePropagationSuppressed,
   registerDisposeCleanup,
   isTerminalDetached,
   setScreenWebGLGate,
+  resyncTerminalViewport,
+  parkTerminalHost,
 } from "./terminalRegistry";
 
 export type { TerminalInstance } from "./terminalRegistry";
@@ -34,9 +45,6 @@ export {
   disposeTerminal,
 } from "./terminalRegistry";
 
-// Saved scroll positions for restoring after visibility change / sleep-wake
-const savedScrollPositions = new Map<string, { viewportY: number; baseY: number }>();
-
 // Hidden session tracking: sessions whose parent container has display:none
 // (single-pane mode keeps every tab MOUNTED and toggles CSS visibility — this
 // is distinct from the registry's keep-alive root, which holds UNMOUNTED
@@ -46,7 +54,6 @@ const hiddenSessionIds = new Set<string>();
 // The registry owns all disposal paths (session close / kill, app teardown);
 // clear this module's per-session state on every one of them.
 registerDisposeCleanup((sessionId) => {
-  savedScrollPositions.delete(sessionId);
   hiddenSessionIds.delete(sessionId);
 });
 
@@ -69,8 +76,9 @@ export function hideTerminal(sessionId: string): void {
 
 /**
  * Mark a terminal as visible again.  Re-enables WebGL and returns true if the
- * terminal was previously hidden (caller should enqueueFit to adjust to the
- * now-visible container dimensions).
+ * terminal was previously hidden (the caller then lands the view —
+ * `landTerminalView` — because everything written while it was hidden was
+ * measured against a zero-height viewport).
  */
 export function showTerminal(sessionId: string): boolean {
   if (!hiddenSessionIds.has(sessionId)) return false;
@@ -92,8 +100,9 @@ export function isTerminalHidden(sessionId: string): boolean {
  * the screen) never observes, so panes kept their GPU contexts behind it.
  * App calls this on route changes. Hide = drop WebGL on every attached,
  * non-CSS-hidden pane (same policy hideTerminal applies per tab); show =
- * re-enable + repaint exactly like the adopt/show paths (hidden writes
- * advanced the buffer while the renderer skipped them). CSS-hidden tabs and
+ * re-enable + repaint + re-sync the scroll range, exactly like the adopt/show
+ * paths (hidden writes advanced the buffer while the renderer skipped them,
+ * and were measured against a zero-height viewport). CSS-hidden tabs and
  * keep-alive-parked terminals stay WebGL-less on both transitions; the
  * registry-side gate also keeps acquire/adopt/show/recover from creating
  * contexts while the screen is hidden.
@@ -105,50 +114,102 @@ export function setTerminalScreenVisible(visible: boolean): void {
     if (hiddenSessionIds.has(sessionId)) continue;
     if (visible) {
       enableWebGL(sessionId);
-      const instance = getTerminal(sessionId);
-      instance?.terminal.refresh(0, instance.terminal.rows - 1);
+      refreshTerminalView(sessionId, "screen-show");
     } else {
       disableWebGL(sessionId);
     }
   }
 }
 
-/** Retrieve saved scroll position without deleting (non-destructive read) */
-export function getSavedScrollPosition(sessionId: string): { viewportY: number; baseY: number } | undefined {
-  return savedScrollPositions.get(sessionId);
-}
-
-/** Explicitly clear saved scroll position after successful restoration */
-export function clearSavedScrollPosition(sessionId: string): void {
-  savedScrollPositions.delete(sessionId);
-}
-
-/** Save scroll position without detaching (for visibility change / alt-tab) */
-export function saveScrollPosition(sessionId: string): void {
+/**
+ * Repaint a terminal that may have gone stale and re-measure its scroll range
+ * — the whole of what a wake from sleep, an alt-tab back or a screen switch
+ * needs. Nothing is measured against the pane and nothing is resized: the
+ * buffer (viewportY included) is the truth, and the re-sync writes the DOM
+ * scroller from it. That is also why no scroll position is saved across a
+ * hide any more — the old fit pipeline moved it, this does not.
+ */
+export function refreshTerminalView(sessionId: string, cause: string): void {
   const instance = getTerminal(sessionId);
   if (!instance) return;
-  const buf = instance.terminal.buffer.active;
-  savedScrollPositions.set(sessionId, { viewportY: buf.viewportY, baseY: buf.baseY });
+  instance.terminal.refresh(0, instance.terminal.rows - 1);
+  resyncTerminalViewport(sessionId, cause);
 }
 
-/** Restore scroll position from saved state (non-destructive — does not clear) */
-export function restoreScrollPosition(sessionId: string): void {
-  const instance = getTerminal(sessionId);
-  if (!instance) return;
-  const saved = savedScrollPositions.get(sessionId);
-  if (!saved) return;
-  const wasAtBottom = saved.viewportY >= saved.baseY;
-  if (wasAtBottom) {
-    instance.terminal.scrollToBottom();
-  } else {
-    const newBaseY = instance.terminal.buffer.active.baseY;
-    instance.terminal.scrollToLine(Math.min(saved.viewportY, newBaseY));
+/** `refreshTerminalView` for every terminal a pane is actually showing (not
+ *  parked in the keep-alive root, not a CSS-hidden tab — those are landed
+ *  when they are shown). */
+export function refreshAllTerminalViews(cause: string): void {
+  for (const sessionId of getAllTerminalIds()) {
+    if (isTerminalDetached(sessionId)) continue;
+    if (hiddenSessionIds.has(sessionId)) continue;
+    refreshTerminalView(sessionId, cause);
   }
+}
+
+/**
+ * A pane just put this terminal on screen (a mount, an adopt, a tab switch):
+ * repaint it, re-sync its scroll range, and put the pane on the content's
+ * bottom. `toBottom` also takes xterm's own history to the prompt — a tab
+ * switch does (you switch to a tab to see the latest); an adopt does not (the
+ * instance survived the remount, and so does the reader's place in it).
+ * Never a resize.
+ */
+export function landTerminalView(
+  sessionId: string,
+  cause: string,
+  opts?: { toBottom?: boolean; focus?: boolean }
+): void {
+  const instance = getTerminal(sessionId);
+  if (!instance) return;
+  if (opts?.toBottom) instance.terminal.scrollToBottom();
+  refreshTerminalView(sessionId, cause);
+  // After a frame, so the host has laid the subtree out and its scroll range
+  // is real (a pane shorter than the grid opens at scrollTop 0 otherwise).
+  requestAnimationFrame(() => parkTerminalHost(sessionId));
+  if (opts?.focus) instance.terminal.focus();
+}
+
+/** Is bracketed-paste mode on in this session's terminal? Mid-rewrite
+ *  (SWIT-103) the reset turns every mode off until the snapshot's parse re-arms
+ *  it, so the value the program had set is read from the rewrite instead —
+ *  a multi-line composer send must not go unbracketed (each newline an Enter)
+ *  because it landed in those few ms. Undefined when there is no terminal. */
+export function bracketedPasteModeOf(sessionId: string): boolean | undefined {
+  const during = repaintBracketedPaste(sessionId);
+  if (during !== null) return during;
+  return getTerminal(sessionId)?.terminal.modes.bracketedPasteMode;
+}
+
+/** Paste into the session's terminal the way Ctrl+V does (xterm's own paste:
+ *  bracketed when the program asked for it). Mid-rewrite it waits for the
+ *  parse to finish — xterm reads bracketed-paste mode at paste time, and it
+ *  reads OFF between the reset and the parse. */
+export function pasteIntoTerminal(sessionId: string, text: string): void {
+  whenRepaintIdle(sessionId, () => getTerminal(sessionId)?.terminal.paste(text));
+}
+
+/** The user sent something from OUTSIDE the terminal (the composer): take
+ *  them to the prompt — xterm's history AND the pane — the way typing into the
+ *  terminal does by itself, so the echoed message is in view. */
+export function landTerminalAtPrompt(sessionId: string): void {
+  const instance = getTerminal(sessionId);
+  if (!instance) return;
+  instance.terminal.scrollToBottom();
+  parkTerminalHost(sessionId);
 }
 
 export function serializeTerminal(sessionId: string): string | null {
   const instance = getTerminal(sessionId);
   if (!instance) return null;
+  // The turn-end clean rewrite (SWIT-103) resets the buffer and writes it
+  // back over a few tens of ms. A save landing inside that window would put a
+  // half-written transcript on disk; null makes the caller skip this round
+  // (the session stays dirty, so the next periodic save takes it).
+  if (isRepaintRewriting(sessionId)) {
+    log.debug(`Skipping serialize for session id=${sessionId}: a rewrite is in flight`);
+    return null;
+  }
   try {
     // SWIT-93: the modes (bracketed paste, application cursor keys, mouse
     // tracking) belong to the program that was running; the file is read
@@ -186,6 +247,13 @@ export function serializeTerminal(sessionId: string): string | null {
 export function plainTextTerminal(sessionId: string): string | null {
   const instance = getTerminal(sessionId);
   if (!instance) return null;
+  // Mid-rewrite (SWIT-103) the buffer is reset and half re-laid: an empty or
+  // truncated transcript. Null = "no read this time" — the evidence scan
+  // waits for the next output, the transcript flush keeps the older file.
+  if (isRepaintRewriting(sessionId)) {
+    log.debug(`Skipping plain-text read for session id=${sessionId}: a rewrite is in flight`);
+    return null;
+  }
   try {
     const buf = instance.terminal.buffer.active;
     const lines: string[] = [];
@@ -214,8 +282,10 @@ export function plainTextTerminal(sessionId: string): string | null {
  * range-trimmed snapshot puts content at `baseY=0` in PiP while main's cursor
  * is at `baseY+cursorY` — and the same `\x1b[N H` sequence resolves to a
  * different row in each window. Full serialize (with the trailing
- * cursor-position sequence preserved) plus a matching `terminal.resize` keeps
- * the two buffers byte-identical.
+ * cursor-position sequence preserved) into a PiP terminal of the SAME grid
+ * keeps the two buffers byte-identical. Since SWIT-103 that grid is the
+ * pinned one in both windows; the dimensions still ride along so the mirror
+ * checks rather than assumes.
  */
 export function serializeForPip(
   sessionId: string
@@ -223,7 +293,11 @@ export function serializeForPip(
   const instance = getTerminal(sessionId);
   if (!instance) return null;
   try {
-    const text = instance.serializeAddon.serialize();
+    // Mid-rewrite (SWIT-103) the terminal is reset and half re-laid; the
+    // rewrite's own snapshot IS the buffer as it was and is about to be
+    // again (modes included, like this serialize), and every PTY chunk the
+    // mirror receives after it lands behind it in both windows.
+    const text = repaintSnapshot(sessionId) ?? instance.serializeAddon.serialize();
     return {
       text,
       cols: instance.terminal.cols,
@@ -235,173 +309,12 @@ export function serializeForPip(
   }
 }
 
-export type FitOutcome =
-  /** Nothing to do: grid already right, or the container isn't measurable. */
-  | { outcome: "none" }
-  /** A grid change is needed but the session is streaming — the caller
-   *  (fitQueue) flags a pending refit and re-runs after output settles. */
-  | { outcome: "deferred" }
-  /** The grid changed. `reflowed` = the widen path ran (snapshot → reset →
-   *  resize → async write): scroll restoration happens in the write callback,
-   *  so the caller must NOT restore scroll itself for this fit. */
-  | { outcome: "applied"; cols: number; rows: number; reflowed: boolean };
-
-/**
- * Fit the terminal to its container under the settled resize policy
- * (resizePolicy.ts): grow-only width capped at MAX_TERMINAL_COLS, rows follow
- * the pane, widen = snapshot-reflow, mid-stream changes deferred.
- *
- * Never calls fitAddon.fit() — fit() applies proposeDimensions() verbatim,
- * which would shrink cols on a narrowed pane (re-wrapping content the policy
- * says must horizontal-scroll instead). We propose, decide, then resize()
- * ourselves; xterm's onResize wiring forwards the one genuine PTY resize.
- */
-export function fitTerminal(
-  sessionId: string,
-  opts?: { streaming?: boolean; busy?: boolean; initial?: boolean }
-): FitOutcome {
-  const instance = getTerminal(sessionId);
-  if (!instance) return { outcome: "none" };
-
-  // Guard: skip fit if container has zero or very small dimensions (detached,
-  // not yet laid out, or mid-layout-transition).  Tiny containers propose
-  // cols=2/rows=1; grow-only width blocks the col shrink, but the initial fit
-  // doesn't, and rows=1 is wrong for everyone.  A terminal parked in the
-  // keep-alive root (display:none) measures 0x0 and is skipped here.
-  const container = instance.terminal.element?.parentElement;
-  if (container && (container.clientWidth < 10 || container.clientHeight < 10)) {
-    log.debug(`Skipping fit for session id=${sessionId}: container too small (${container.clientWidth}x${container.clientHeight})`);
-    return { outcome: "none" };
-  }
-
-  try {
-    const term = instance.terminal;
-    const proposed = instance.fitAddon.proposeDimensions();
-    const decision = resizeDecision(
-      { cols: term.cols, rows: term.rows },
-      proposed ?? null,
-      { streaming: !!opts?.streaming, busy: !!opts?.busy, initial: !!opts?.initial }
-    );
-
-    // The grow-only surplus, named at the seam where it is decided: when the
-    // grid is wider than the pane the columns past the right edge are in the
-    // buffer and reachable only by the host's horizontal scroll. A report of
-    // "the table is cut off" correlates with this line, not with a refit
-    // (SWIT-68's deferred bullet — the receipt was a 160-col grid in a pane
-    // that fit 98).
-    const hidden = hiddenCols({ cols: term.cols, rows: term.rows }, proposed ?? null);
-    if (hidden > 0) {
-      log.debug(
-        `fit id=${sessionId} grid=${term.cols} cols, pane fits ${proposed?.cols}: ${hidden} beyond the right edge (horizontal scroll)`
-      );
-    }
-
-    switch (decision.kind) {
-      case "none":
-        return { outcome: "none" };
-      case "defer":
-        log.debug(
-          `fit deferred id=${sessionId} streaming=${!!opts?.streaming} busy=${!!opts?.busy}`
-        );
-        return { outcome: "deferred" };
-      case "resize":
-        // Height-only / initial / capped-legacy shrink: no reflow, no
-        // conflict window. onResize forwards the one genuine PTY resize.
-        term.resize(decision.cols, decision.rows);
-        return { outcome: "applied", cols: decision.cols, rows: decision.rows, reflowed: false };
-      case "reflow": {
-        // Widen: reflow to the wider grid via snapshot + rewrite so the PTY's
-        // async SIGWINCH repaint lands on content matching its cursor model
-        // (a WIDER grid can't wrap-break existing lines). Keep the reader's
-        // place as distance-from-bottom (0 = pinned at the prompt) and
-        // restore it in the write CALLBACK — xterm's parse is async, and
-        // restoring before the callback races the parse.
-        //
-        // Honest limits: the snapshot serializes only the last 3000 scrollback
-        // lines (of the 10k cap), so a widen reflow TRUNCATES older history;
-        // and fromBottom is measured in PRE-reflow row units, so the restored
-        // viewport is approximate when re-wrapping changes line counts.
-        const buf = term.buffer.active;
-        const fromBottom = Math.max(0, buf.baseY - buf.viewportY);
-        const snap = instance.serializeAddon.serialize({ scrollback: 3000 });
-        term.reset();
-        term.resize(decision.cols, decision.rows);
-        term.write(snap, () => {
-          // The parse window is async — the session can be disposed (or the
-          // instance replaced) before this fires.
-          const live = getTerminal(sessionId);
-          if (!live || live.terminal !== term) return;
-          term.scrollToBottom();
-          if (fromBottom > 0) term.scrollLines(-fromBottom);
-          term.refresh(0, term.rows - 1);
-        });
-        log.debug(
-          `fit reflow id=${sessionId} -> ${decision.cols}x${decision.rows} fromBottom=${fromBottom}`
-        );
-        return { outcome: "applied", cols: decision.cols, rows: decision.rows, reflowed: true };
-      }
-    }
-  } catch (e) {
-    log.warn(`Failed to fit terminal for session id=${sessionId}: ${e}`);
-    return { outcome: "none" };
-  }
-}
-
-/**
- * Force xterm through a full resize cycle even if cols/rows didn't change.
- * Needed because fitAddon.fit() may skip the internal resize when dimensions
- * are unchanged after a display:none -> flex transition.
- *
- * The cols-1 bounce is fenced so its (transient) onResize events are not
- * forwarded to the PTY — the registry's onResize forwarding checks the
- * suppression flag. xterm fires onResize synchronously within resize(), so
- * the flag reliably covers both resize() calls.
- */
-export function forceViewportRefresh(sessionId: string): void {
-  const instance = getTerminal(sessionId);
-  if (!instance) return;
-  const cols = instance.terminal.cols;
-  const rows = instance.terminal.rows;
-  if (cols <= 2) return; // can't shrink further
-  setResizePropagationSuppressed(sessionId, true);
-  try {
-    instance.terminal.resize(cols - 1, rows);
-    instance.terminal.resize(cols, rows);
-  } finally {
-    setResizePropagationSuppressed(sessionId, false);
-  }
-}
-
-/**
- * Directly sync the .xterm-viewport DOM element's scrollTop to match the
- * terminal buffer state. Fixes viewport desync after display:none transitions
- * where xterm's internal scroll area height and scrollTop are stale.
- */
-export function forceViewportScrollSync(sessionId: string): void {
-  const instance = getTerminal(sessionId);
-  if (!instance) return;
-  const el = instance.terminal.element;
-  if (!el) return;
-  const viewport = el.querySelector('.xterm-viewport') as HTMLElement | null;
-  if (!viewport) return;
-  const buf = instance.terminal.buffer.active;
-  // Access cell height via core renderer dimensions (allowProposedApi is true)
-  const core = (instance.terminal as any)._core;
-  const cellHeight = core?._renderService?.dimensions?.css?.cell?.height;
-  if (!cellHeight || cellHeight <= 0) return;
-  const scrollArea = el.querySelector('.xterm-scroll-area') as HTMLElement | null;
-  if (scrollArea) {
-    scrollArea.style.height = `${(buf.baseY + instance.terminal.rows) * cellHeight}px`;
-  }
-  viewport.scrollTop = buf.viewportY * cellHeight;
-}
-
 /**
  * The terminal's CSS cell WIDTH (px per column), or null while unmeasured
  * (no instance, or the renderer has not laid out yet). SWIT-79: what the
  * panel's default width is computed against — the widest panel that leaves
- * the grid TERMINAL_COLS wide (panelStore.defaultPanelWidth). Same core
- * access as forceViewportScrollSync's cell height.
+ * the pane as wide as the pinned grid (panelStore.defaultPanelWidth). Read
+ * off the live renderer's dimensions (private API, hence the optional chain).
  */
 export function terminalCellWidth(sessionId: string): number | null {
   const instance = getTerminal(sessionId);

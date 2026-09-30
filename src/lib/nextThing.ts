@@ -25,14 +25,16 @@
 // which is right; a deleted thread's entry is pruned.
 //
 // Addresses are the Evidence vocabulary (evidenceModel): `view:<id>[#anchor]`,
-// `surface:<project>/<page>[?k=v]`, a KB doc path that EXISTS, a repo-relative
-// file path resolved against the thread's own project. A `decision:` row and
+// `surface:<project>/<page>[?k=v]`, a KB doc path that EXISTS, a file path
+// relative to the thread's working directory, re-based onto the thread's own
+// project (`pathPrefix` — the SAME re-base the agent's `show` uses, so an
+// address opens the same file from every surface). A `decision:` row and
 // a ticket key open nothing here — they navigate away or have no surface.
 
 import type { Artifact } from "../types";
 import type { PageItem, RenderedPage } from "./pageStore";
-import { artifactIdentity } from "./panelStore";
-import { resolveDocTarget, viewAnchorOfAddress } from "./evidenceModel";
+import { artifactIdentity, type OpenableArtifact } from "./panelStore";
+import { projectViewOfAddress, resolveDocTarget, viewAnchorOfAddress } from "./evidenceModel";
 import { parseSurfaceAddress } from "./surfaceParams";
 
 export type NextThingContext = {
@@ -41,13 +43,61 @@ export type NextThingContext = {
   kbDocs: readonly string[] | null;
   /** The thread's own project key (a repo path resolves against it). */
   projectKey: string | null;
+  /** SWIT-101: told when a doc/file address is NOT in a known KB list, before
+   *  the repo fallback (evidenceModel.resolveDocTarget) — the caller's way to
+   *  refresh a stale list. Optional; absent = the pre-SWIT-101 behaviour. */
+  onKbMiss?: (address: string) => void;
+  /** What turns a path relative to the THREAD'S WORKING DIRECTORY into the
+   *  project-relative path a repo-file artifact carries
+   *  (`explorer.projectPlaceForDir`'s prefix): `""` at a single-repo
+   *  project's root, `apps/desktop/` in a subdirectory, `<repo>/` in a
+   *  multi-repo project. Absent = `""`. Never applied to a KB doc. */
+  pathPrefix?: string;
 };
+
+/** The half of the resolver that yields an artifact the page's link rows can
+ *  open directly — a page state, a KB doc, a repo file (re-based by
+ *  `pathPrefix`). `resolveAddress` adds `view:` on top. The page's Evidence
+ *  rows and `start here` link come here, so they resolve an address exactly
+ *  as the turn-end hook and the agent's `show` do (review of 49ebb20, #7). */
+export function resolveOpenable(address: string, ctx: NextThingContext): OpenableArtifact | null {
+  // SWIT-107: a PROJECT's view (`view:<project>/<id>`) needs no thread.
+  const pview = projectViewOfAddress(address);
+  if (pview) return { kind: "view", project: pview.project, viewId: pview.viewId };
+  return (
+    parseSurfaceAddress(address) ??
+    resolveDocTarget(address, ctx.kbDocs, ctx.projectKey, ctx.onKbMiss, ctx.pathPrefix ?? "")
+  );
+}
+
+/** THE address resolver (SWIT-102 lifted it out of `openableAddressIn`): ONE
+ *  whole address → the artifact it opens, or null. `view:<id>[#anchor]`,
+ *  `surface:<project>/<page>[?k=v]`, a KB doc in the real list, a repo path
+ *  against the thread's project (re-based from the thread's working
+ *  directory) — the Evidence vocabulary. Text tokens (`openableAddressIn`),
+ *  the page's link rows (`resolveOpenable`) and the agent's `show`
+ *  (showIntent) all come here. */
+export function resolveAddress(
+  address: string,
+  ctx: NextThingContext
+): { artifact: Artifact; anchor: string | null } | null {
+  const view = viewAnchorOfAddress(address);
+  if (view) return { artifact: { kind: "view", threadId: ctx.threadId, viewId: view.viewId }, anchor: view.anchor };
+  // SWIT-107: `view:<project>/<id>[#anchor]` — the project's view, its anchor kept.
+  const pview = projectViewOfAddress(address);
+  if (pview) return { artifact: { kind: "view", project: pview.project, viewId: pview.viewId }, anchor: pview.anchor };
+  const hit = resolveOpenable(address, ctx);
+  return hit ? { artifact: hit, anchor: null } : null;
+}
 
 export type NextThing =
   | {
       why: "review";
       /** The turn's reviewFirst, verbatim — the page prints it as `start here →`. */
       address: string;
+      /** The token INSIDE reviewFirst that resolved (wrapping punctuation
+       *  stripped) — what a click re-resolves; null when nothing resolved. */
+      token: string | null;
       /** Null when the address names nothing openable (a ticket, a decision). */
       artifact: Artifact | null;
       anchor: string | null;
@@ -74,18 +124,8 @@ export function openableAddressIn(
   for (const raw of text.split(/\s+/)) {
     const token = raw.replace(/^[(\[<"'`]+/, "").replace(/[)\]>"'`,.;:!?]+$/, "");
     if (token.length === 0) continue;
-    const view = viewAnchorOfAddress(token);
-    if (view) {
-      return {
-        artifact: { kind: "view", threadId: ctx.threadId, viewId: view.viewId },
-        anchor: view.anchor,
-        address: token,
-      };
-    }
-    const surface = parseSurfaceAddress(token);
-    if (surface) return { artifact: surface, anchor: null, address: token };
-    const doc = resolveDocTarget(token, ctx.kbDocs, ctx.projectKey);
-    if (doc) return { artifact: doc, anchor: null, address: token };
+    const hit = resolveAddress(token, ctx);
+    if (hit) return { ...hit, address: token };
   }
   return null;
 }
@@ -108,6 +148,7 @@ export function nextThingFor(page: RenderedPage | null | undefined, ctx: NextThi
     return {
       why: "review",
       address: reviewFirst,
+      token: hit?.address ?? null,
       artifact: hit?.artifact ?? null,
       anchor: hit?.anchor ?? null,
       label: reviewFirst,
@@ -157,6 +198,13 @@ export function offerNextThing(threadId: string, offerKey: string): boolean {
   return true;
 }
 
+/** Has this key already been offered for the thread? A PEEK — records
+ *  nothing. The turn-end hook asks it before paying for a fresh KB list, so a
+ *  settle that would stand down anyway costs no IPC (review of 49ebb20, #5). */
+export function isNextThingOffered(threadId: string, offerKey: string): boolean {
+  return offered.get(threadId) === offerKey;
+}
+
 /** Nothing to offer any more — forget the thread's last key, so the same
  *  thing coming BACK later (a question re-asked) is offered again. */
 export function clearNextThingOffer(threadId: string): void {
@@ -166,4 +214,63 @@ export function clearNextThingOffer(threadId: string): void {
 /** Tests: forget every offer. */
 export function __resetNextThingOffers(): void {
   offered.clear();
+}
+
+// ── The turn-end decision (review of 49ebb20, #5) ────────────────────────────
+// App's settleTurn used to resolve against a FRESH KB list first — one
+// `kb_list` on nearly every settle, since any dotted token in a turn line was
+// a KB miss — and only then run the checks that make most settles a no-op.
+// The order is now: resolve against the CACHED list (no IPC) → nothing / the
+// questions branch / a stand-down (nothing openable, the preview is being
+// read, the agent's own show wins the slot, already offered) → and only for
+// an open that survived all of that AND fell back to a repo file after a
+// real miss, ONE refresh and a re-derive. Pure over injected effects; App
+// applies the decision (offer-once recording, focus, the open).
+
+export type TurnSettleDeps = {
+  /** The resolver context minus the list (threadId, projectKey, pathPrefix). */
+  ctx: Omit<NextThingContext, "kbDocs" | "onKbMiss">;
+  /** The CACHED KB list (the caller loads a cold cache once). */
+  kbDocs: readonly string[] | null;
+  /** One `kb_list`; resolves the SAME reference when nothing changed. */
+  refreshKbDocs: () => Promise<readonly string[] | null>;
+  /** Is the strip's active tab its preview (a replace would land in front)? */
+  previewActive: () => boolean;
+  /** Did the agent's own view/set/show open something moments ago? */
+  intentRecent: () => boolean;
+};
+
+export type TurnSettleDecision =
+  | { act: "none" }
+  | { act: "questions"; next: Extract<NextThing, { why: "questions" }> }
+  | { act: "stand-down"; reason: "not-openable" | "preview" | "intent" | "offered"; next: NextThing }
+  | { act: "open"; next: Exclude<NextThing, { why: "questions" }> & { artifact: Artifact } };
+
+export async function decideTurnSettle(
+  page: RenderedPage | null | undefined,
+  deps: TurnSettleDeps
+): Promise<TurnSettleDecision> {
+  let missed = false;
+  const first = nextThingFor(page, { ...deps.ctx, kbDocs: deps.kbDocs, onKbMiss: () => (missed = true) });
+  if (!first) return { act: "none" };
+  if (first.why === "questions") return { act: "questions", next: first };
+  if (first.artifact === null) return { act: "stand-down", reason: "not-openable", next: first };
+  if (deps.previewActive()) return { act: "stand-down", reason: "preview", next: first };
+  if (deps.intentRecent()) return { act: "stand-down", reason: "intent", next: first };
+  if (isNextThingOffered(deps.ctx.threadId, first.offerKey)) return { act: "stand-down", reason: "offered", next: first };
+  let next: NextThing = first;
+  if (missed && first.artifact.kind === "repo-file") {
+    const fresh = await deps.refreshKbDocs().catch(() => null);
+    if (fresh !== null && fresh !== deps.kbDocs) {
+      const again = nextThingFor(page, { ...deps.ctx, kbDocs: fresh });
+      if (!again) return { act: "none" };
+      next = again;
+    }
+  }
+  if (next.why === "questions") return { act: "questions", next };
+  if (next.artifact === null) return { act: "stand-down", reason: "not-openable", next };
+  if (next !== first && isNextThingOffered(deps.ctx.threadId, next.offerKey)) {
+    return { act: "stand-down", reason: "offered", next };
+  }
+  return { act: "open", next: next as Exclude<NextThing, { why: "questions" }> & { artifact: Artifact } };
 }

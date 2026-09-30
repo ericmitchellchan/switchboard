@@ -234,9 +234,9 @@ export function ExplorerTreeSection({ route }: { route: Route }) {
         ? panelArtifact?.kind === "surface"
           ? { project: panelArtifact.project, page: panelArtifact.page }
           : undefined
-        : route.screen === "project"
+        : route.screen === "project" && route.page !== undefined
           ? { project: route.project, page: route.page }
-          : lastProject?.screen === "project"
+          : lastProject?.screen === "project" && lastProject.page !== undefined
             ? { project: lastProject.project, page: lastProject.page }
             : undefined;
     return (

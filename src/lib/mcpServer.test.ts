@@ -8,11 +8,27 @@ import { describe, it, expect } from "vitest";
 // @ts-expect-error — no @types/node in the frontend tsconfig; vitest's node
 // runtime provides the real module, and the require result is cast below.
 import { createRequire } from "node:module";
-import { parsePageFile, mergePage } from "./pageStore";
+import {
+  parsePageFile,
+  mergePage,
+  BRIEF_GOAL_CAP,
+  BRIEF_LINE_CAP,
+  BRIEF_LINES_CAP,
+  FINDING_VERDICTS,
+  FINDING_CAP,
+  FINDING_CLAIM_CAP,
+  FINDING_N_CAP,
+  FINDING_REPORT_CAP,
+} from "./pageStore";
 import { parseViewSpec } from "./viewStore";
 import { parseInboxFile } from "./pageStore";
 import { parseBacklogInbox } from "./backlogStore";
 import { parseSetsFile } from "./artifactSets";
+import { parseShowsFile, showTargetFor, SHOW_CAP, SHOW_ADDRESS_CAP } from "./showIntent";
+import { parseSurfaceQuery } from "./surfaceParams";
+import { projectViewAddress } from "./evidenceModel";
+import { PROJECT_VIEW_INDEX_CAP } from "./repoListing";
+import { QUESTION_KEEP_CAP } from "./pageStore";
 // Source text of the two loopback predicates, for the byte-identical check.
 import viewStoreSource from "./viewStore.ts?raw";
 import mcpServerSource from "../../src-tauri/resources/mcp/switchboard-mcp.cjs?raw";
@@ -133,13 +149,38 @@ describe("applyOp semantics", () => {
     ).toThrow(/decision:q1/);
   });
 
-  it("an ask option beyond 60 chars is a VISIBLE error (SWIT-69)", () => {
+  it("an ask option beyond 60 chars is TRIMMED at a word boundary with …, and the result says which (SWIT-105; was a refusal, SWIT-69)", () => {
+    const trim = (server as unknown as { trimOption: (o: string) => string; OPTION_CAP: number });
+    expect(trim.OPTION_CAP).toBe(60);
+    const long = "Release model on Model 4 debt, run against the whole forward stream";
+    const { page, message } = server.applyOp(
+      empty(),
+      { op: "ask", text: "Which?", options: ["ok", long], default: long },
+      NOW
+    );
+    const q = (page.questions as Array<Record<string, unknown>>)[0];
+    const cut = (q.options as string[])[1];
+    expect(cut).toBe("Release model on Model 4 debt, run against the whole…");
+    expect(cut.length).toBeLessThanOrEqual(60);
+    expect(long.startsWith(cut.slice(0, -1))).toBe(true);
+    // The default names the option by its FULL text — matched after trimming.
+    expect(q.default).toBe(cut);
+    expect(message).toContain(`Trimmed 1 option to 60 chars: "${cut}"`);
+    // An option at the cap is untouched, and the result carries no note.
+    const exact = server.applyOp(empty(), { op: "ask", text: "Which?", options: ["x".repeat(60)] }, NOW);
+    expect((exact.page.questions as Array<{ options: string[] }>)[0].options).toEqual(["x".repeat(60)]);
+    expect(exact.message).not.toContain("Trimmed");
+    // One unbroken word is cut hard, still ≤ 60 with the ellipsis.
+    expect(trim.trimOption("y".repeat(90))).toBe(`${"y".repeat(59)}…`);
+    // Two options that read the same once trimmed are a VISIBLE error.
+    const twin = "a ".repeat(40);
     expect(() =>
-      server.applyOp(empty(), { op: "ask", text: "Which?", options: ["ok", "x".repeat(61)] }, NOW)
-    ).toThrow(/cap is 60/);
+      server.applyOp(empty(), { op: "ask", text: "Which?", options: [`${twin}one`, `${twin}two`] }, NOW)
+    ).toThrow(/read the same once trimmed/);
+    // A default that is none of the options, trimmed or not, still refuses.
     expect(() =>
-      server.applyOp(empty(), { op: "ask", text: "Which?", options: ["x".repeat(60)] }, NOW)
-    ).not.toThrow();
+      server.applyOp(empty(), { op: "ask", text: "Which?", options: ["ok", long], default: "z".repeat(80) }, NOW)
+    ).toThrow(/default must be one of the options/);
   });
 
   it("a turn's reviewFirst is validated like an address, stored on the turn, and round-trips (SWIT-67)", () => {
@@ -385,7 +426,7 @@ describe("ROUND-TRIP: the server's writes parse through pageStore (the seam)", (
     }
     const props = (server.PAGE_TOOL.inputSchema as { properties: Record<string, { enum?: string[] }> }).properties;
     expect(props.kind.enum).toEqual(["decision", "convention", "info"]);
-    expect(props.op.enum).toEqual(["theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item"]);
+    expect(props.op.enum).toEqual(["theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "brief", "finding", "show", "read"]);
     expect(props.default).toBeDefined();
     expect(props.reviewFirst).toBeDefined();
     expect(props.why).toBeDefined();
@@ -1259,5 +1300,1169 @@ describe("the view tool — the dashboard grammar (SWIT-96: facts / width / stat
     ]) {
       expect(server.VIEW_TOOL.description).toContain(rule);
     }
+  });
+});
+
+describe("the page tool — op show (SWIT-102): put an existing doc or file in front of the user", () => {
+  const shows = server as unknown as {
+    normalizeShowAddress: (raw: unknown, cwd: string, viewIds: string[]) => { address: string; form: string };
+    performShowOp: (
+      threadDir: string,
+      args: Record<string, unknown>,
+      now: number,
+      env?: {
+        cwd?: string;
+        exists?: (p: string) => boolean;
+        inspect?: (p: string) => { kind: "missing" | "dir" | "file"; size: number; text: boolean };
+      }
+    ) => { show: { id: string; address: string; at: string; where?: string }; message: string };
+    SHOW_READ_CAP: number;
+    surfaceQueryOk: (q: string) => boolean;
+    inspectPath: (p: string) => { kind: string; size: number; text: boolean };
+    performOp: (threadDir: string, args: Record<string, unknown>, now: number) => string;
+    SHOW_CAP: number;
+    SHOW_ADDRESS_CAP: number;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeFs = require("fs") as {
+    mkdtempSync: (p: string) => string;
+    mkdirSync: (p: string, o?: { recursive: boolean }) => void;
+    writeFileSync: (p: string, d: string) => void;
+    readFileSync: (p: string, e: string) => string;
+    existsSync: (p: string) => boolean;
+    rmSync: (p: string, o: { recursive: boolean; force: boolean }) => void;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeOs = require("os") as { tmpdir: () => string };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodePath = require("path") as { join: (...p: string[]) => string };
+  const CWD = "C:/Users/eric/projects/lodestar";
+  const norm = (raw: unknown, viewIds: string[] = []) => shows.normalizeShowAddress(raw, CWD, viewIds);
+
+  it("accepts the four address forms and normalizes a path (backslashes, ./, an absolute path inside cwd)", () => {
+    expect(norm("specs/sextant/gamma-metric-design.md")).toEqual({ address: "specs/sextant/gamma-metric-design.md", form: "path" });
+    expect(norm("  switchboard/features/x/requirements.md ")).toEqual({ address: "switchboard/features/x/requirements.md", form: "path" });
+    expect(norm("mockups\\cases-compact-v1.html")).toEqual({ address: "mockups/cases-compact-v1.html", form: "path" });
+    expect(norm("./README.md")).toEqual({ address: "README.md", form: "path" });
+    // Inside the working directory — drive paths compare case-insensitively.
+    expect(norm("c:\\users\\eric\\projects\\lodestar\\specs\\a.md")).toEqual({ address: "specs/a.md", form: "path" });
+    // Outside it — kept absolute; the app opens it only inside the knowledge base.
+    expect(norm("C:\\Users\\eric\\projects\\personal-kb\\switchboard\\notes.md")).toEqual({
+      address: "C:/Users/eric/projects/personal-kb/switchboard/notes.md",
+      form: "absolute",
+    });
+    // A sibling directory that merely shares the prefix is NOT inside cwd.
+    expect(norm("C:/Users/eric/projects/lodestar-old/a.md").form).toBe("absolute");
+    expect(norm("surface:lodestar/trading?instrument=NQ&date=2026-06-05")).toEqual({
+      address: "surface:lodestar/trading?instrument=NQ&date=2026-06-05",
+      form: "surface",
+    });
+    expect(norm("view:v2", ["v1", "v2"])).toEqual({ address: "view:v2", form: "view" });
+    expect(norm("view:v2#h:net-gamma", ["v2"])).toEqual({ address: "view:v2#h:net-gamma", form: "view" });
+  });
+
+  it("refuses — visibly — what cannot open: a ticket key, a URL, prose, `..`, a bare word, an unknown view, a bad anchor, a long address", () => {
+    expect(() => norm("SWIT-102")).toThrow(/not something the panel can open/);
+    expect(() => norm("https://claude.ai/artifact/abc")).toThrow(/not something the panel can open/);
+    expect(() => norm("the gamma design doc")).toThrow(/no spaces/);
+    expect(() => norm("../secrets/a.md")).toThrow(/no \.\./);
+    expect(() => norm("specs/../../a.md")).toThrow(/not something the panel can open/);
+    expect(() => norm("refactor")).toThrow(/not something the panel can open/);
+    expect(() => norm("")).toThrow(/address must be a non-empty string/);
+    expect(() => norm(undefined)).toThrow(/address must be a non-empty string/);
+    expect(() => norm("view:v9", ["v1"])).toThrow(/no view with id v9 in this thread — create it with the view tool/);
+    expect(() => norm("view:bad id", ["v1"])).toThrow(/not a view address/);
+    expect(() => norm("view:v1#nope", ["v1"])).toThrow(/malformed anchor/);
+    expect(() => norm("surface:lodestar")).toThrow(/not a page address/);
+    expect(() => norm(`docs/${"a".repeat(shows.SHOW_ADDRESS_CAP)}.md`)).toThrow(/too long \(\d+ chars; the cap is 300\)/);
+  });
+
+  it("writes shows.json newest-first with o<n> ids, capped at 20 — and never touches page.json", () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-shows-"));
+    try {
+      const env = { cwd: CWD, exists: () => true };
+      const first = shows.performShowOp(dir, { op: "show", address: "specs/a.md" }, NOW, env);
+      expect(first.show).toEqual({ id: "o1", address: "specs/a.md", at: "2026-08-31T10:00:00.000Z", where: "cwd" });
+      expect(first.message).toMatch(/^specs\/a\.md opens in the panel beside the terminal when this thread's folder belongs to a registry project/);
+      const second = shows.performShowOp(dir, { op: "show", address: "mock.html" }, NOW + 1000, env);
+      expect(second.show.id).toBe("o2");
+      const file = JSON.parse(nodeFs.readFileSync(nodePath.join(dir, "shows.json"), "utf8"));
+      expect(file.version).toBe(1);
+      expect(file.shows.map((s: { id: string }) => s.id)).toEqual(["o2", "o1"]);
+      // The app's parser reads exactly this shape.
+      expect(parseShowsFile(JSON.stringify(file))).toEqual([
+        { id: "o2", address: "mock.html", at: "2026-08-31T10:00:01.000Z", where: "cwd" },
+        { id: "o1", address: "specs/a.md", at: "2026-08-31T10:00:00.000Z", where: "cwd" },
+      ]);
+      // The cap: 25 more shows keep the newest 20, and ids keep counting up
+      // (a trimmed id is never re-minted — the app's seen-set stays honest).
+      for (let i = 0; i < 25; i++) shows.performShowOp(dir, { op: "show", address: `docs/n${i}.md` }, NOW + 2000 + i, env);
+      const capped = JSON.parse(nodeFs.readFileSync(nodePath.join(dir, "shows.json"), "utf8"));
+      expect(capped.shows).toHaveLength(shows.SHOW_CAP);
+      expect(capped.shows[0].id).toBe("o27");
+      expect(capped.shows[capped.shows.length - 1].id).toBe("o8");
+      expect(parseShowsFile(JSON.stringify(capped))).toHaveLength(SHOW_CAP);
+      // Through the page tool's own entry point; page.json is never written.
+      expect(shows.performOp(dir, { op: "show", address: "surface:lodestar/trading" }, NOW)).toMatch(
+        /^surface:lodestar\/trading opens in the panel beside the terminal if it names a page Switchboard has registered/
+      );
+      expect(nodeFs.existsSync(nodePath.join(dir, "page.json"))).toBe(false);
+      // The pure page half refuses it rather than pretending to write a page.
+      expect(() => server.applyOp(empty(), { op: "show", address: "a/b.md" }, NOW)).toThrow(/shows\.json/);
+      // A refused address writes nothing.
+      const before = nodeFs.readFileSync(nodePath.join(dir, "shows.json"), "utf8");
+      expect(() => shows.performShowOp(dir, { op: "show", address: "SWIT-1" }, NOW, env)).toThrow();
+      expect(nodeFs.readFileSync(nodePath.join(dir, "shows.json"), "utf8")).toBe(before);
+    } finally {
+      nodeFs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("the RESULT says plainly when nothing may open: a path not under cwd, an absolute path outside it; a missing absolute path is refused", () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-shows-"));
+    try {
+      nodeFs.mkdirSync(nodePath.join(dir, "views"), { recursive: true });
+      nodeFs.writeFileSync(nodePath.join(dir, "views", "v1.json"), "{}");
+      const asked: string[] = [];
+      const missing = { cwd: CWD, exists: (p: string) => (asked.push(p), false) };
+      const kbDoc = shows.performShowOp(dir, { op: "show", address: "switchboard/features/x/requirements.md" }, NOW, missing);
+      // Not under cwd: no `where` — the app may resolve it as a KB doc.
+      expect(kbDoc.show.where).toBeUndefined();
+      expect(kbDoc.message).toMatch(/^Recorded — but switchboard\/features\/x\/requirements\.md is not a file under this thread's working directory/);
+      expect(kbDoc.message).toMatch(/opens ONLY if Switchboard can resolve it as a knowledge-base doc .* or a file in this thread's project; otherwise nothing opens\.$/);
+      // The existence check is cwd + the relative address (the server's cwd is the thread's).
+      expect(asked[asked.length - 1].replace(/\\/g, "/")).toBe(`${CWD}/switchboard/features/x/requirements.md`);
+      const outside = shows.performShowOp(
+        dir,
+        { op: "show", address: "C:\\Users\\eric\\projects\\personal-kb\\switchboard\\notes.md" },
+        NOW,
+        { cwd: CWD, exists: () => true }
+      );
+      expect(outside.show.address).toBe("C:/Users/eric/projects/personal-kb/switchboard/notes.md");
+      expect(outside.message).toMatch(/outside this thread's working directory, so it opens ONLY if it sits inside the knowledge base; otherwise nothing opens\.$/);
+      expect(() =>
+        shows.performShowOp(dir, { op: "show", address: "C:/nowhere/at/all.md" }, NOW, missing)
+      ).toThrow(/no file at C:\/nowhere\/at\/all\.md — nothing to open/);
+      // A view the thread has opens; one it does not have is refused by name.
+      expect(shows.performShowOp(dir, { op: "show", address: "view:v1#h:summary" }, NOW, missing).message).toBe(
+        "view:v1#h:summary is opening in the panel beside the terminal."
+      );
+      expect(() => shows.performShowOp(dir, { op: "show", address: "view:v2" }, NOW, missing)).toThrow(/no view with id v2/);
+    } finally {
+      nodeFs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("REFUSES what the viewer cannot render — a folder, an oversize file, a binary file — and records nothing (review of 49ebb20, #3)", () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-shows-"));
+    try {
+      const probe = (info: { kind: "missing" | "dir" | "file"; size: number; text: boolean }) => ({ cwd: CWD, inspect: () => info });
+      expect(() => shows.performShowOp(dir, { op: "show", address: "specs/sextant" }, NOW, probe({ kind: "dir", size: 0, text: false }))).toThrow(
+        /specs\/sextant is a folder — show opens a file/
+      );
+      expect(() =>
+        shows.performShowOp(dir, { op: "show", address: "data/big.json" }, NOW, probe({ kind: "file", size: shows.SHOW_READ_CAP + 1, text: false }))
+      ).toThrow(/data\/big\.json is 513 KB — the panel's viewer reads files up to 512 KB/);
+      expect(() => shows.performShowOp(dir, { op: "show", address: "shot.png" }, NOW, probe({ kind: "file", size: 900, text: false }))).toThrow(
+        /shot\.png is not a text file/
+      );
+      // The absolute form gets the same checks (it opens only as a KB doc, which is text too).
+      expect(() =>
+        shows.performShowOp(dir, { op: "show", address: "C:/Users/eric/projects/personal-kb/switchboard" }, NOW, probe({ kind: "dir", size: 0, text: false }))
+      ).toThrow(/is a folder/);
+      expect(nodeFs.existsSync(nodePath.join(dir, "shows.json"))).toBe(false);
+      // The cap is explorer.rs MAX_READ_BYTES.
+      expect(shows.SHOW_READ_CAP).toBe(512 * 1024);
+    } finally {
+      nodeFs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("inspectPath is the real probe: a folder, a text file, a binary file, a missing path", () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-inspect-"));
+    try {
+      nodeFs.writeFileSync(nodePath.join(dir, "a.md"), "# héllo");
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      (require("fs") as { writeFileSync: (p: string, d: Uint8Array) => void }).writeFileSync(
+        nodePath.join(dir, "b.bin"),
+        new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x00, 0xc3])
+      );
+      expect(shows.inspectPath(dir)).toEqual({ kind: "dir", size: 0, text: false });
+      expect(shows.inspectPath(nodePath.join(dir, "a.md"))).toMatchObject({ kind: "file", text: true });
+      expect(shows.inspectPath(nodePath.join(dir, "b.bin"))).toMatchObject({ kind: "file", text: false });
+      expect(shows.inspectPath(nodePath.join(dir, "nope.md")).kind).toBe("missing");
+    } finally {
+      nodeFs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a page address whose params the app's strict parser rejects is refused, not reported as opening (review of 49ebb20, #3)", () => {
+    expect(() => norm("surface:lodestar/trading?Bad=1")).toThrow(/has params the page would refuse/);
+    expect(() => norm("surface:lodestar/trading?date=")).toThrow(/has params the page would refuse/);
+    expect(() => norm("surface:lodestar/trading?a=1&a=2")).toThrow(/has params the page would refuse/);
+    expect(() => norm(`surface:lodestar/trading?a=${"x".repeat(121)}`)).toThrow(/has params the page would refuse/);
+    const nine = Array.from({ length: 9 }, (_, i) => `k${i}=v`).join("&");
+    expect(() => norm(`surface:lodestar/trading?${nine}`)).toThrow(/has params the page would refuse/);
+    expect(norm("surface:lodestar/trading?instrument=NQ&date=2026-06-05").form).toBe("surface");
+    // The mirror agrees with the app's parser on every case above.
+    for (const q of ["Bad=1", "date=", "a=1&a=2", nine, "instrument=NQ&date=2026-06-05", ""]) {
+      expect(shows.surfaceQueryOk(q)).toBe(parseSurfaceQuery(q) !== null);
+    }
+  });
+
+  it("a path FOUND under cwd is recorded `where: cwd` and opens as that file — never a KB doc of the same path (review of 49ebb20, #1)", () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-shows-"));
+    try {
+      const found = shows.performShowOp(dir, { op: "show", address: "README.md" }, NOW, { cwd: CWD, exists: () => true });
+      expect(found.show.where).toBe("cwd");
+      const [stored] = parseShowsFile(nodeFs.readFileSync(nodePath.join(dir, "shows.json"), "utf8"));
+      // personal-kb/README.md exists in the KB list — and still does not win.
+      const ctx = { threadId: "t1", kbDocs: ["README.md", "registry.json"], projectKey: "lodestar", kbRoot: "C:/Users/eric/projects/personal-kb" };
+      expect(showTargetFor(stored.address, ctx, stored.where)?.artifact).toEqual({ kind: "repo-file", project: "lodestar", path: "README.md" });
+      // Without the field (an entry written before it existed) the old order holds.
+      expect(showTargetFor(stored.address, ctx)?.artifact).toEqual({ kind: "kb-doc", path: "README.md" });
+    } finally {
+      nodeFs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ROUND-TRIP: every address the server stores resolves through the app's resolver (or to nothing, as the result said)", () => {
+    const ctx = { threadId: "t1", kbDocs: ["switchboard/notes.md"], projectKey: "lodestar", kbRoot: "C:/Users/eric/projects/personal-kb" };
+    const stored = (raw: string, viewIds: string[] = ["v1"]) => shows.normalizeShowAddress(raw, CWD, viewIds).address;
+    expect(showTargetFor(stored("specs\\a.md"), ctx)?.artifact).toEqual({ kind: "repo-file", project: "lodestar", path: "specs/a.md" });
+    expect(showTargetFor(stored("switchboard/notes.md"), ctx)?.artifact).toEqual({ kind: "kb-doc", path: "switchboard/notes.md" });
+    expect(showTargetFor(stored("C:\\Users\\eric\\projects\\personal-kb\\switchboard\\notes.md"), ctx)?.artifact).toEqual({
+      kind: "kb-doc",
+      path: "switchboard/notes.md",
+    });
+    expect(showTargetFor(stored("view:v1#h:summary"), ctx)).toEqual({ artifact: { kind: "view", threadId: "t1", viewId: "v1" }, anchor: "h:summary" });
+    expect(showTargetFor(stored("surface:lodestar/trading?instrument=NQ"), ctx)?.artifact).toEqual({
+      kind: "surface",
+      project: "lodestar",
+      page: "trading",
+      params: { instrument: "NQ" },
+    });
+    expect(showTargetFor(stored("C:/elsewhere/a.md"), ctx)).toBeNull();
+  });
+
+  it("caps are mirrored in showIntent.ts and the tool table states the op", () => {
+    expect(shows.SHOW_CAP).toBe(SHOW_CAP);
+    expect(shows.SHOW_ADDRESS_CAP).toBe(SHOW_ADDRESS_CAP);
+    for (const rule of [
+      "op show {address} PUTS AN EXISTING DOC OR FILE IN FRONT OF THE USER",
+      "it opens in the panel beside the terminal, in front",
+      "nothing is published anywhere",
+      "a knowledge-base doc path relative to the knowledge-base root",
+      "a file path relative to this thread's working directory",
+      "surface:<project>/<page>?key=value; view:<id>",
+      "A ticket key or a URL opens nothing",
+      "The result says when the address may not resolve — then nothing opens",
+      "The last 20 shows are kept",
+      "a new report is made with the view tool (kind report), not this op",
+    ]) {
+      expect(server.PAGE_TOOL.description).toContain(rule);
+    }
+    const props = (server.PAGE_TOOL.inputSchema as { properties: Record<string, { enum?: string[]; description?: string }> }).properties;
+    expect(props.op.enum).toContain("show");
+    expect(props.address.description).toContain("show: what to open in the panel");
+  });
+});
+
+describe("the view tool claims the words a user says (SWIT-102): report, artifact, summary page, in the panel", () => {
+  it("the description OPENS with them, keeps the report in Switchboard, and points at page show for what already exists", () => {
+    const d = server.VIEW_TOOL.description;
+    const opening = d.slice(0, 480);
+    expect(opening.startsWith('A REPORT, an "artifact", a summary page, a brief')).toBe(true);
+    for (const word of ["REPORT", '"artifact"', "summary page", "IN THE PANEL"]) expect(opening).toContain(word);
+    expect(opening).toContain("is made with THIS tool and stays in Switchboard");
+    expect(opening).toContain("show it with kind 'report'");
+    expect(opening).toContain("Never publish it to claude.ai (the Artifact tool, Claude Docs) unless the user asks for a link to share");
+    expect(opening).toContain("A doc or file that ALREADY exists opens with the page tool's op show");
+    // The rest of the description is still there, after the claim.
+    expect(d).toContain("SHOW the user rendered data in the panel");
+    expect(d).toContain("report: ONE document with live views embedded");
+  });
+});
+
+describe("a dismissed question (SWIT-105) — the app's retracted.json, read-only here", () => {
+  const d = server as unknown as {
+    dismissedQuestionIds: (page: Record<string, unknown>, retracted: unknown) => Set<string>;
+    formatPageRead: (page: Record<string, unknown>, answers: unknown, retracted?: unknown) => string;
+    performOp: (threadDir: string, args: Record<string, unknown>, now: number) => string;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeFs = require("fs") as {
+    mkdtempSync: (p: string) => string;
+    writeFileSync: (p: string, d: string) => void;
+    readFileSync: (p: string, e: string) => string;
+    rmSync: (p: string, o: { recursive: boolean; force: boolean }) => void;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeOs = require("os") as { tmpdir: () => string };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodePath = require("path") as { join: (...p: string[]) => string };
+  const asked = () => run([{ op: "ask", id: "q1", text: "A?" }, { op: "ask", id: "q2", text: "B?" }]); // askedAt = NOW
+  const LATER = new Date(NOW + 60_000).toISOString();
+  const EARLIER = new Date(NOW - 60_000).toISOString();
+
+  it("dismissedQuestionIds: a question:<id> entry not older than the ask; a re-ask after it brings the question back", () => {
+    const page = asked();
+    expect(d.dismissedQuestionIds(page, { version: 1, evidence: [{ address: "question:q1", at: LATER }] })).toEqual(new Set(["q1"]));
+    // Same second as the ask — still dismissed (whole seconds, pageStore's rule).
+    expect(d.dismissedQuestionIds(page, [{ address: "question:q1", at: new Date(NOW + 400).toISOString() }])).toEqual(new Set(["q1"]));
+    // Dismissed BEFORE the (re-)ask: the question is back.
+    expect(d.dismissedQuestionIds(page, [{ address: "question:q1", at: EARLIER }]).size).toBe(0);
+    // Unparseable stamp stays dismissed; evidence rows, unknown ids and junk are ignored.
+    expect(d.dismissedQuestionIds(page, [{ address: "question:q2", at: "garbage" }, { address: "SWIT-1", at: LATER }, { address: "question:q9", at: LATER }, null])).toEqual(new Set(["q2"]));
+    expect(d.dismissedQuestionIds(page, null).size).toBe(0);
+    expect(d.dismissedQuestionIds(page, "junk").size).toBe(0);
+  });
+
+  it("a dismissed question does not count against the ask cap; re-asking it brings it back and SAYS so", () => {
+    let page = empty();
+    for (let i = 0; i < server.QUESTION_CAP; i++) page = server.applyOp(page, { op: "ask", text: `q ${i}` }, NOW).page;
+    expect(() => server.applyOp(page, { op: "ask", text: "one more" }, NOW)).toThrow(/already OPEN/);
+    const applyDismissed = server.applyOp as unknown as (
+      p: Record<string, unknown>, a: Record<string, unknown>, n: number, answered: Set<string>, dismissed: Set<string>
+    ) => { page: Record<string, unknown>; message: string };
+    expect(() => applyDismissed(page, { op: "ask", text: "one more" }, NOW, new Set(), new Set(["q1"]))).not.toThrow();
+    const back = applyDismissed(asked(), { op: "ask", id: "q1", text: "A, again?" }, NOW + 120_000, new Set(), new Set(["q1"]));
+    expect(back.message).toMatch(/^Question q1 is back on the page — the user had dismissed it as not needed/);
+    expect((back.page.questions as Array<Record<string, unknown>>).find((q) => q.id === "q1")!.askedAt).toBe(new Date(NOW + 120_000).toISOString());
+    // A dismissed question can still be resolved (the agent closing it out).
+    expect(() => applyDismissed(asked(), { op: "resolve", id: "q1", answer: "moot" }, NOW, new Set(), new Set(["q1"]))).not.toThrow();
+  });
+
+  it("op read names a dismissed question by id, outside OPEN QUESTIONS; performOp reads retracted.json", () => {
+    const text = d.formatPageRead(asked(), {}, { evidence: [{ address: "question:q1", at: LATER }] });
+    expect(text).toContain("OPEN QUESTIONS (1):\n  q2 [decision] B?");
+    expect(text).toContain("1 was dismissed by the user as not needed (q1) — do not wait on it; re-ask (same id) only if the answer has come to matter.");
+    expect(text).not.toContain("q1 [decision]");
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-dismiss-"));
+    try {
+      d.performOp(dir, { op: "ask", id: "q1", text: "A?" }, NOW);
+      nodeFs.writeFileSync(nodePath.join(dir, "retracted.json"), JSON.stringify({ version: 1, evidence: [{ address: "question:q1", at: LATER }] }));
+      expect(d.performOp(dir, { op: "read" }, NOW)).toContain("dismissed by the user as not needed (q1)");
+      // Re-asking through the real entry point: the message says it is back.
+      expect(d.performOp(dir, { op: "ask", id: "q1", text: "A?" }, NOW + 120_000)).toMatch(/^Question q1 is back on the page/);
+      expect(d.performOp(dir, { op: "read" }, NOW + 120_000)).toContain("OPEN QUESTIONS (1):\n  q1 [decision] A?");
+    } finally {
+      nodeFs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("the tool table states dismissal and trimming", () => {
+    for (const rule of [
+      "An option over 60 chars is CUT at a word boundary with … (the result says which)",
+      "The user can DISMISS a question as not needed: it leaves the page and op read names it",
+      "re-ask it (same id) only if the answer has come to matter",
+    ]) {
+      expect(server.PAGE_TOOL.description).toContain(rule);
+    }
+  });
+});
+
+describe("the page tool — the standing brief + op read (SWIT-104)", () => {
+  const brief = server as unknown as {
+    formatPageRead: (page: Record<string, unknown>, answers: unknown, retracted?: unknown) => string;
+    performReadOp: (threadDir: string) => string;
+    performOp: (threadDir: string, args: Record<string, unknown>, now: number) => string;
+    BRIEF_GOAL_CAP: number;
+    BRIEF_LINE_CAP: number;
+    BRIEF_LINES_CAP: number;
+    READ_CAP: number;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeFs = require("fs") as {
+    mkdtempSync: (p: string) => string;
+    writeFileSync: (p: string, d: string) => void;
+    readFileSync: (p: string, e: string) => string;
+    existsSync: (p: string) => boolean;
+    readdirSync: (p: string) => string[];
+    rmSync: (p: string, o: { recursive: boolean; force: boolean }) => void;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeOs = require("os") as { tmpdir: () => string };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodePath = require("path") as { join: (...p: string[]) => string };
+  const AT = new Date(NOW).toISOString();
+  const GAMMA = {
+    op: "brief",
+    goal: " A gamma measure of our own that a discretionary trader can lean on live. ",
+    established: ["our all-expiry sum is about 0.58 of the vendor total", " same sign 82% of nights "],
+    dead: ["level effects beyond price motion (ten registered tests)"],
+    lead: ["overnight hedging debt vs the Europe open"],
+    waiting: ["the book (front expiries vs all)", "the state variable"],
+  };
+
+  it("writes the brief whole, stamped, trimmed — and it ROUND-TRIPS through pageStore", () => {
+    const { page, message } = server.applyOp(empty(), GAMMA, NOW);
+    expect(page.brief).toEqual({
+      goal: "A gamma measure of our own that a discretionary trader can lean on live.",
+      established: ["our all-expiry sum is about 0.58 of the vendor total", "same sign 82% of nights"],
+      dead: ["level effects beyond price motion (ten registered tests)"],
+      lead: ["overnight hedging debt vs the Europe open"],
+      waiting: ["the book (front expiries vs all)", "the state variable"],
+      updatedAt: AT,
+    });
+    expect(message).toMatch(/^Brief written — it is the first block on the page\./);
+    const parsed = parsePageFile(JSON.stringify(page));
+    expect(parsed.brief).toEqual(page.brief);
+    const merged = mergePage(parsed, {}, []);
+    expect(merged.brief?.lead).toEqual(["overnight hedging debt vs the Europe open"]);
+    expect(merged.isEmpty).toBe(false); // a page holding only a brief is a page
+  });
+
+  it("is REPLACED, never appended: a field left out no longer stands; a bare string is one line", () => {
+    const first = server.applyOp(empty(), GAMMA, NOW).page;
+    const { page, message } = server.applyOp(first, { op: "brief", goal: "A new goal.", lead: "one live lead" }, NOW + 60_000);
+    expect(page.brief).toEqual({
+      goal: "A new goal.",
+      established: [],
+      dead: [],
+      lead: ["one live lead"],
+      waiting: [],
+      updatedAt: new Date(NOW + 60_000).toISOString(),
+    });
+    expect(message).toMatch(/^Brief rewritten/);
+    // Lists alone are a brief too (no goal).
+    const listsOnly = server.applyOp(empty(), { op: "brief", dead: ["x"] }, NOW).page;
+    expect((listsOnly.brief as { goal: unknown }).goal).toBeNull();
+    expect(parsePageFile(JSON.stringify(listsOnly)).brief?.dead).toEqual(["x"]);
+  });
+
+  it("is CLEARED by passing only empty fields — the key leaves the file", () => {
+    const first = server.applyOp(empty(), GAMMA, NOW).page;
+    const cleared = server.applyOp(first, { op: "brief", goal: "" }, NOW);
+    expect("brief" in cleared.page).toBe(false);
+    expect(cleared.message).toBe("Brief cleared.");
+    expect(parsePageFile(JSON.stringify(cleared.page)).brief).toBeNull();
+    expect(server.applyOp(empty(), { op: "brief", established: [], waiting: ["  "] }, NOW).message).toBe("Brief cleared — there was none.");
+  });
+
+  it("caps are VISIBLE errors: no field, a long goal, a long line, too many lines, a non-string line", () => {
+    expect(brief.BRIEF_GOAL_CAP).toBe(300);
+    expect(brief.BRIEF_LINE_CAP).toBe(200);
+    expect(brief.BRIEF_LINES_CAP).toBe(6);
+    expect(() => server.applyOp(empty(), { op: "brief" }, NOW)).toThrow(/at least one of goal, established, dead, lead, waiting/);
+    expect(() => server.applyOp(empty(), { op: "brief", goal: null, dead: null }, NOW)).toThrow(/REPLACED whole/);
+    expect(() => server.applyOp(empty(), { op: "brief", goal: "g".repeat(301) }, NOW)).toThrow(/goal is too long \(301 chars; the cap is 300\)/);
+    expect(() => server.applyOp(empty(), { op: "brief", goal: "g".repeat(300) }, NOW)).not.toThrow();
+    expect(() => server.applyOp(empty(), { op: "brief", goal: 7 }, NOW)).toThrow(/goal must be one sentence/);
+    expect(() => server.applyOp(empty(), { op: "brief", dead: ["l".repeat(201)] }, NOW)).toThrow(/a line in dead is too long \(201 chars; the cap is 200\)/);
+    expect(() => server.applyOp(empty(), { op: "brief", established: Array.from({ length: 7 }, (_, i) => `fact ${i}`) }, NOW)).toThrow(
+      /established has 7 lines; the cap is 6/
+    );
+    expect(() => server.applyOp(empty(), { op: "brief", established: Array.from({ length: 6 }, (_, i) => `fact ${i}`) }, NOW)).not.toThrow();
+    expect(() => server.applyOp(empty(), { op: "brief", waiting: ["ok", 4] }, NOW)).toThrow(/waiting must be an array of short plain lines/);
+    expect(() => server.applyOp(empty(), { op: "brief", lead: { a: 1 } }, NOW)).toThrow(/lead must be an array/);
+  });
+
+  it("the brief SURVIVES every other op (parsePage carries it), and a page without one serializes as before", () => {
+    let page = server.applyOp(empty(), GAMMA, NOW).page;
+    page = server.parsePage(JSON.stringify(page)); // what the next op reads back from disk
+    page = server.applyOp(page, { op: "turn", lines: ["Did a thing."] }, NOW).page;
+    page = server.applyOp(server.parsePage(JSON.stringify(page)), { op: "item", itemOp: "add", title: "t" }, NOW).page;
+    expect((page.brief as { goal: string }).goal).toBe("A gamma measure of our own that a discretionary trader can lean on live.");
+    expect("brief" in empty()).toBe(false);
+    expect("brief" in server.applyOp(empty(), { op: "theme", text: "t" }, NOW).page).toBe(false);
+    // A junk brief in the file is dropped at the read, not carried.
+    expect("brief" in server.parsePage(JSON.stringify({ brief: ["not", "an", "object"] }))).toBe(false);
+  });
+
+  const worked = () =>
+    run([
+      { op: "theme", text: "Build a gamma measure of our own" },
+      GAMMA,
+      { op: "turn", lines: ["First turn."] },
+      { op: "turn", lines: ["Second turn.", "Two lines."] },
+      { op: "turn", lines: ["Third turn."] },
+      { op: "turn", lines: ["Fourth turn — the newest."] },
+      { op: "ask", id: "q1", text: "Which options are the book?", options: ["front expiries", "all expiries"], default: "all expiries" },
+      { op: "ask", id: "q2", text: "State variable?", kind: "info" },
+      { op: "ask", id: "q3", text: "Keep the old keys?" },
+      { op: "ask", id: "q4", text: "Which vendor?" },
+      { op: "resolve", id: "q3", answer: "moot — the keys are gone" },
+      { op: "item", itemOp: "add", title: "Run the release model", state: "in_progress" },
+      { op: "item", itemOp: "add", title: "Pick the book", owner: "user", state: "waiting" },
+      { op: "item", itemOp: "add", title: "Old thing" },
+      { op: "item", itemOp: "close", id: "i3" },
+    ]);
+
+  it("read prints EVERY section: theme, the brief, open questions with ids, open items, standing decisions, the last three turns", () => {
+    const answers = {
+      q2: { text: "net over gross", at: "2026-08-31T11:00:00Z", sentAt: "2026-08-31T11:05:00Z", resolvedBy: "user" },
+      q4: { text: "the second one", at: "2026-08-31T12:00:00Z" }, // saved on the page, NOT sent
+    };
+    const text = brief.formatPageRead(worked(), answers);
+    expect(text).toBe(
+      [
+        "THEME: Build a gamma measure of our own",
+        "",
+        `WHERE THINGS STAND (the brief, rewritten ${AT}):`,
+        "  Goal: A gamma measure of our own that a discretionary trader can lean on live.",
+        "  Established:",
+        "    - our all-expiry sum is about 0.58 of the vendor total",
+        "    - same sign 82% of nights",
+        "  Dead:",
+        "    - level effects beyond price motion (ten registered tests)",
+        "  Live lead:",
+        "    - overnight hedging debt vs the Europe open",
+        "  Waiting on the user:",
+        "    - the book (front expiries vs all)",
+        "    - the state variable",
+        "",
+        "OPEN QUESTIONS (1):",
+        "  q1 [decision] Which options are the book? | options: front expiries / all expiries | default: all expiries",
+        "  1 more is answered on the page and not sent yet (q4) — the answer arrives in the Decisions message; do not re-ask.",
+        "",
+        "TO DO (2 open):",
+        "  i2 [waiting, the user] Pick the book",
+        "  i1 [in_progress, you] Run the release model",
+        "",
+        "STANDING DECISIONS (2):",
+        "  decision:q2 State variable? → net over gross (the user)",
+        "  decision:q3 Keep the old keys? → moot — the keys are gone (settled by you)",
+        "",
+        "FINDINGS (0):",
+        "  (none)",
+        "",
+        "LAST TURNS (newest first, 3 of 4):",
+        `  ${AT}: Fourth turn — the newest.`,
+        `  ${AT}: Third turn.`,
+        `  ${AT}: Second turn. | Two lines.`,
+      ].join("\n")
+    );
+    // An unsent answer's TEXT is never in the read — the user may still change it.
+    expect(text).not.toContain("the second one");
+  });
+
+  it("read on an empty page still names every section, and says how to start a brief", () => {
+    const text = brief.formatPageRead(empty(), {});
+    for (const heading of [
+      "THEME: (none",
+      "WHERE THINGS STAND: no brief yet — write one with op brief.",
+      "OPEN QUESTIONS (0):",
+      "TO DO (0 open):",
+      "STANDING DECISIONS (0):",
+      "FINDINGS (0):",
+      "LAST TURNS (newest first, 0 of 0):",
+    ]) {
+      expect(text).toContain(heading);
+    }
+    // Junk answers and a hand-corrupted page (nulls in the arrays) do not throw.
+    const corrupted = server.parsePage(
+      JSON.stringify({ questions: [null, { id: "q2", text: "t" }], items: [null], turns: [null, { lines: [7, "kept"] }], brief: { goal: 4, dead: ["x", 9] } })
+    );
+    const out = brief.formatPageRead(corrupted, "junk");
+    expect(out).toContain("  q2 [decision] t");
+    expect(out).toContain("    - x");
+    expect(out).toContain("kept");
+  });
+
+  it("read stays under READ_CAP on a page at every cap — sections all present, lists cut with a count", () => {
+    expect(brief.READ_CAP).toBe(8000);
+    const long = (tag: string, n: number) => `${tag} ${"word ".repeat(200)}`.slice(0, n).trim();
+    let page = empty();
+    page = server.applyOp(page, { op: "theme", text: long("theme", 500) }, NOW).page;
+    page = server.applyOp(
+      page,
+      {
+        op: "brief",
+        goal: long("goal", 300),
+        established: Array.from({ length: 6 }, (_, i) => long(`e${i}`, 200)),
+        dead: Array.from({ length: 6 }, (_, i) => long(`d${i}`, 200)),
+        lead: Array.from({ length: 6 }, (_, i) => long(`l${i}`, 200)),
+        waiting: Array.from({ length: 6 }, (_, i) => long(`w${i}`, 200)),
+      },
+      NOW
+    ).page;
+    for (let i = 0; i < server.QUESTION_CAP; i++) {
+      page = server.applyOp(page, { op: "ask", text: long(`question ${i}`, 500), options: ["a".repeat(60), "b".repeat(60), "c".repeat(60)] }, NOW).page;
+    }
+    for (let i = 0; i < 60; i++) page = server.applyOp(page, { op: "item", itemOp: "add", title: long(`item ${i}`, 500) }, NOW).page;
+    for (let i = 0; i < server.TURN_CAP; i++) {
+      page = server.applyOp(page, { op: "turn", lines: Array.from({ length: 6 }, (_, j) => long(`turn ${i} line ${j}`, 500)) }, NOW).page;
+    }
+    // SWIT-106: a full ledger too.
+    for (let i = 0; i < 60; i++) {
+      page = server.applyOp(page, { op: "finding", claim: long(`finding ${i}`, 240), verdict: "open", n: "n".repeat(40), report: `docs/${"r".repeat(280)}.md` }, NOW + i).page;
+    }
+    const text = brief.formatPageRead(page, {});
+    expect(text.length).toBeLessThanOrEqual(brief.READ_CAP);
+    for (const heading of [
+      "THEME: ",
+      "WHERE THINGS STAND (the brief",
+      "OPEN QUESTIONS (20):",
+      "TO DO (60 open):",
+      "STANDING DECISIONS (0):",
+      "FINDINGS (60):",
+      "LAST TURNS (newest first, ",
+    ]) {
+      expect(text).toContain(heading);
+    }
+    expect(text).toMatch(/\(\+ \d+ more — the page lists them\)/);
+    // Newest first inside a cut list: the newest item and question are the ones kept.
+    expect(text).toContain("  i60 [todo, you] item 59");
+    expect(text).toContain("  q20 [decision] question 19");
+    expect(text).not.toMatch(/\n {2}i1 \[/);
+    // A modest page is printed at the roomiest level — nothing clipped.
+    expect(brief.formatPageRead(worked(), {})).not.toContain("…");
+  });
+
+  it("the BRIEF is never clipped: at every cap, beside every other section at its cap, it reads back byte-for-byte (review of daaad36, #1)", () => {
+    const long = (tag: string, n: number) => `${tag} ${"wörd ".repeat(200)}`.slice(0, n).trim();
+    const goal = long("goal", 300);
+    const lists = {
+      established: Array.from({ length: 6 }, (_, i) => long(`established ${i}`, 200)),
+      dead: Array.from({ length: 6 }, (_, i) => long(`dead ${i}`, 200)),
+      lead: Array.from({ length: 6 }, (_, i) => long(`lead ${i}`, 200)),
+      waiting: Array.from({ length: 6 }, (_, i) => long(`waiting ${i}`, 200)),
+    };
+    let page = empty();
+    page = server.applyOp(page, { op: "theme", text: long("theme", 500) }, NOW).page;
+    page = server.applyOp(page, { op: "brief", goal, ...lists }, NOW).page;
+    // Every other section at its cap: 20 open questions + 40 answered and
+    // sent + 20 dismissed (every id list long), 60 items, 30 full turns, 60
+    // findings with long reports.
+    const answers: Record<string, { text: string; at: string; sentAt: string }> = {};
+    const dismissed: { address: string; at: string }[] = [];
+    for (let i = 0; i < 80; i++) {
+      const id = `question-with-a-long-id-${i}`;
+      const answered = new Set<string>(Object.keys(answers));
+      const gone = new Set<string>(dismissed.map((d) => d.address.slice("question:".length)));
+      page = (server.applyOp as unknown as (
+        p: Record<string, unknown>,
+        a: Record<string, unknown>,
+        n: number,
+        answered: Set<string>,
+        dismissed: Set<string>
+      ) => { page: Record<string, unknown> })(page, { op: "ask", id, text: long(`question ${i}`, 500), options: ["a".repeat(60), "b".repeat(60)] }, NOW + i, answered, gone).page;
+      if (i < 40) answers[id] = { text: long(`answer ${i}`, 500), at: "2026-08-31T11:00:00Z", sentAt: "2026-08-31T11:00:05Z" };
+      else if (i < 60) dismissed.push({ address: `question:${id}`, at: "2026-09-30T00:00:00Z" });
+    }
+    for (let i = 0; i < 60; i++) page = server.applyOp(page, { op: "item", itemOp: "add", title: long(`item ${i}`, 500) }, NOW).page;
+    for (let i = 0; i < server.TURN_CAP; i++) {
+      page = server.applyOp(page, { op: "turn", lines: Array.from({ length: 6 }, (_, j) => long(`turn ${i} line ${j}`, 500)) }, NOW).page;
+    }
+    for (let i = 0; i < 60; i++) {
+      page = server.applyOp(page, { op: "finding", claim: long(`finding ${i}`, 240), verdict: "open", n: "n".repeat(40), report: `docs/${"r".repeat(280)}.md` }, NOW + i).page;
+    }
+    const text = brief.formatPageRead(page, answers, { version: 1, evidence: dismissed });
+    expect(text.length).toBeLessThanOrEqual(brief.READ_CAP);
+    expect(text).toContain(`  Goal: ${goal}\n`);
+    for (const [label, lines] of [
+      ["Established", lists.established],
+      ["Dead", lists.dead],
+      ["Live lead", lists.lead],
+      ["Waiting on the user", lists.waiting],
+    ] as const) {
+      expect(text).toContain(`  ${label}:\n${lines.map((l) => `    - ${l}`).join("\n")}\n`);
+    }
+    // …and the sections the brief shares the cap with are all still there.
+    for (const heading of ["OPEN QUESTIONS (20):", "TO DO (60 open):", "STANDING DECISIONS (40):", "FINDINGS (60):", "LAST TURNS (newest first, "]) {
+      expect(text).toContain(heading);
+    }
+    expect(text).not.toContain("… (cut — the page holds more)");
+  });
+
+  it("performOp read returns the text and WRITES NOTHING — no page.json, no tmp file", () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-read-"));
+    try {
+      const fresh = brief.performOp(dir, { op: "read" }, NOW);
+      expect(fresh).toContain("WHERE THINGS STAND: no brief yet");
+      expect(nodeFs.readdirSync(dir)).toEqual([]);
+      brief.performOp(dir, GAMMA, NOW);
+      brief.performOp(dir, { op: "ask", id: "q1", text: "A?" }, NOW);
+      nodeFs.writeFileSync(
+        nodePath.join(dir, "answers.json"),
+        JSON.stringify({ q1: { text: "yes", at: "2026-08-31T11:00:00Z", sentAt: "2026-08-31T11:00:05Z" } })
+      );
+      const before = nodeFs.readFileSync(nodePath.join(dir, "page.json"), "utf8");
+      const text = brief.performOp(dir, { op: "read" }, NOW + 5000);
+      expect(text).toContain("  Live lead:\n    - overnight hedging debt vs the Europe open");
+      expect(text).toContain("  decision:q1 A? → yes (the user)");
+      expect(text).toBe(brief.performReadOp(dir));
+      expect(nodeFs.readFileSync(nodePath.join(dir, "page.json"), "utf8")).toBe(before);
+      expect(nodeFs.readdirSync(dir).sort()).toEqual(["answers.json", "page.json"]);
+      // The pure page half refuses it rather than pretending to write a page.
+      expect(() => server.applyOp(empty(), { op: "read" }, NOW)).toThrow(/returns it/);
+    } finally {
+      nodeFs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("the tool table states the brief contract and the read op", () => {
+    for (const rule of [
+      "KEEP THE BRIEF CURRENT — rewrite it at every seam (a finding lands, a decision is made, the direction changes); it is what the user reads after days away.",
+      "op brief {goal, established, dead, lead, waiting} writes WHERE THINGS STAND, the first block on the page",
+      "goal is ONE sentence (≤ 300 chars)",
+      "are each ≤ 6 short plain lines (≤ 200 chars)",
+      "The brief is REPLACED WHOLE by every call",
+      'goal: "" alone clears it',
+      "op read RETURNS THE PAGE as compact plain text",
+      "the open questions with their ids, the ids of questions the user dismissed as not needed, the open items, the standing decisions, the findings, the last three turns",
+      "(≤ 8000 chars)",
+      "the brief (always whole, never clipped)",
+      "on a full page the turns are cut first, then the lists",
+      "writes nothing",
+      "call it FIRST when you are resumed",
+    ]) {
+      expect(server.PAGE_TOOL.description).toContain(rule);
+    }
+    const props = (server.PAGE_TOOL.inputSchema as { properties: Record<string, { enum?: string[]; type?: string }> }).properties;
+    expect(props.op.enum).toContain("brief");
+    expect(props.op.enum).toContain("read");
+    expect(props.goal.type).toBe("string");
+    for (const list of ["established", "dead", "lead", "waiting"]) expect(props[list].type).toBe("array");
+    // The caps stated to the agent are the caps the app's parser applies.
+    expect([brief.BRIEF_GOAL_CAP, brief.BRIEF_LINE_CAP, brief.BRIEF_LINES_CAP]).toEqual([BRIEF_GOAL_CAP, BRIEF_LINE_CAP, BRIEF_LINES_CAP]);
+  });
+});
+
+describe("the page tool — op finding, the Findings ledger (SWIT-106)", () => {
+  const f = server as unknown as {
+    formatPageRead: (page: Record<string, unknown>, answers: unknown, retracted?: unknown) => string;
+    FINDING_VERDICTS: string[];
+    FINDING_CAP: number;
+    FINDING_CLAIM_CAP: number;
+    FINDING_N_CAP: number;
+    FINDING_REPORT_CAP: number;
+  };
+  type Row = { id: string; claim: string; verdict: string; n: string | null; report: string | null; updatedAt: string };
+  const findingsOf = (page: Record<string, unknown>) => (page.findings ?? []) as Row[];
+
+  it("adds a finding with a minted id, newest first; the row round-trips through pageStore", () => {
+    let page = server.applyOp(empty(), { op: "finding", claim: " Debt by 02:00 predicts the Europe-open block ", verdict: "lead", n: 264, report: "view:model4-debt" }, NOW).page;
+    const second = server.applyOp(page, { op: "finding", claim: "All-expiry ÷ vendor total = 0.58", verdict: "fact", n: "531 nights" }, NOW + 1000);
+    page = second.page;
+    expect(second.message).toMatch(/^Finding f2 recorded \(fact\) in the page's Findings ledger/);
+    expect(findingsOf(page)).toEqual([
+      { id: "f2", claim: "All-expiry ÷ vendor total = 0.58", verdict: "fact", n: "531 nights", report: null, updatedAt: new Date(NOW + 1000).toISOString() },
+      { id: "f1", claim: "Debt by 02:00 predicts the Europe-open block", verdict: "lead", n: "264", report: "view:model4-debt", updatedAt: new Date(NOW).toISOString() },
+    ]);
+    const parsed = parsePageFile(JSON.stringify(page));
+    expect(parsed.findings).toEqual(findingsOf(page));
+    const merged = mergePage(parsed, {}, []);
+    expect(merged.findings.map((x) => x.id)).toEqual(["f2", "f1"]);
+    expect(merged.isEmpty).toBe(false);
+  });
+
+  it("the same id UPDATES in place — omitted fields kept, \"\" clears n / report; the moved row sorts first in the merge", () => {
+    let page = run([
+      { op: "finding", claim: "Charm dominates quiet nights", verdict: "open", n: "4", report: "reports/charm.md" },
+      { op: "finding", claim: "Second", verdict: "open" },
+    ]);
+    const upd = server.applyOp(page, { op: "finding", id: "f1", verdict: "dead", n: "" }, NOW + 60_000);
+    page = upd.page;
+    expect(upd.message).toBe("Finding f1 updated (dead).");
+    const rows = findingsOf(page);
+    expect(rows.map((r) => r.id)).toEqual(["f2", "f1"]); // in place in the file
+    expect(rows[1]).toEqual({ id: "f1", claim: "Charm dominates quiet nights", verdict: "dead", n: null, report: "reports/charm.md", updatedAt: new Date(NOW + 60_000).toISOString() });
+    page = server.applyOp(page, { op: "finding", id: "f1", report: "" }, NOW + 61_000).page;
+    expect(findingsOf(page)[1].report).toBeNull();
+    // A caller-chosen stable id is a NEW finding the first time, then updates.
+    page = server.applyOp(page, { op: "finding", id: "gap-audit", claim: "Gap audit", verdict: "fact" }, NOW).page;
+    page = server.applyOp(page, { op: "finding", id: "gap-audit", verdict: "lead" }, NOW + 1).page;
+    expect(findingsOf(page).filter((r) => r.id === "gap-audit")).toHaveLength(1);
+    expect(findingsOf(page)[0]).toMatchObject({ id: "gap-audit", verdict: "lead", claim: "Gap audit" });
+    // The merge puts the most recently moved finding first.
+    expect(mergePage(parsePageFile(JSON.stringify(page)), {}, []).findings[0].id).toBe("f1");
+  });
+
+  it("findingOp drop removes one; the last one out takes the key with it", () => {
+    const page = run([{ op: "finding", claim: "Only one", verdict: "open" }]);
+    const dropped = server.applyOp(page, { op: "finding", findingOp: "drop", id: "f1" }, NOW);
+    expect(dropped.message).toBe("Finding f1 dropped.");
+    expect("findings" in dropped.page).toBe(false);
+    expect(() => server.applyOp(page, { op: "finding", findingOp: "drop", id: "f9" }, NOW)).toThrow(/no finding with id f9/);
+    expect(() => server.applyOp(page, { op: "finding", findingOp: "vanish", id: "f1" }, NOW)).toThrow(/findingOp must be "drop"/);
+    // A page without findings serializes as before; the ledger survives other ops.
+    expect("findings" in empty()).toBe(false);
+    const kept = server.applyOp(server.parsePage(JSON.stringify(page)), { op: "turn", lines: ["t"] }, NOW).page;
+    expect(findingsOf(kept)).toHaveLength(1);
+  });
+
+  it("caps and shapes are VISIBLE errors", () => {
+    expect(f.FINDING_VERDICTS).toEqual(["lead", "open", "fact", "dead"]);
+    expect([f.FINDING_CAP, f.FINDING_CLAIM_CAP, f.FINDING_N_CAP, f.FINDING_REPORT_CAP]).toEqual([60, 240, 40, 300]);
+    expect(() => server.applyOp(empty(), { op: "finding", verdict: "lead" }, NOW)).toThrow(/claim is required/);
+    expect(() => server.applyOp(empty(), { op: "finding", claim: "c" }, NOW)).toThrow(/verdict is required/);
+    expect(() => server.applyOp(empty(), { op: "finding", claim: "c", verdict: "maybe" }, NOW)).toThrow(/verdict must be one of lead, open, fact, dead/);
+    expect(() => server.applyOp(empty(), { op: "finding", claim: "c".repeat(241), verdict: "open" }, NOW)).toThrow(/claim is too long \(241 chars; the cap is 240\)/);
+    expect(() => server.applyOp(empty(), { op: "finding", claim: "c".repeat(240), verdict: "open" }, NOW)).not.toThrow();
+    expect(() => server.applyOp(empty(), { op: "finding", claim: "c", verdict: "open", n: "n".repeat(41) }, NOW)).toThrow(/n is too long/);
+    expect(() => server.applyOp(empty(), { op: "finding", claim: "c", verdict: "open", n: { a: 1 } }, NOW)).toThrow(/n must be a short string/);
+    expect(() => server.applyOp(empty(), { op: "finding", claim: "c", verdict: "open", report: "r".repeat(301) }, NOW)).toThrow(/report is too long .* it is an address/);
+    expect(() => server.applyOp(empty(), { op: "finding", id: "bad id!", claim: "c", verdict: "open" }, NOW)).toThrow(/id must be a short stable key/);
+    let page = empty();
+    for (let i = 0; i < f.FINDING_CAP; i++) page = server.applyOp(page, { op: "finding", claim: `c${i}`, verdict: "open" }, NOW).page;
+    expect(() => server.applyOp(page, { op: "finding", claim: "one more", verdict: "open" }, NOW)).toThrow(/60 findings are already on the page — drop/);
+    // An UPDATE at the cap is fine.
+    expect(() => server.applyOp(page, { op: "finding", id: "f3", verdict: "fact" }, NOW)).not.toThrow();
+    // A hand-corrupted ledger (nulls) does not break the op.
+    const corrupted = server.parsePage(JSON.stringify({ findings: [null, { id: "f2", claim: "x", verdict: "open" }] }));
+    expect(findingsOf(server.applyOp(corrupted, { op: "finding", claim: "y", verdict: "lead" }, NOW).page)[0].id).toBe("f3");
+  });
+
+  it("nothing new writes the old `finding:` evidence form — and a row written in it still parses and renders", () => {
+    expect(() => server.applyOp(empty(), { op: "evidence", address: "finding:gamma-1", label: "x" }, NOW)).toThrow(/a finding is not an evidence row — record it with op finding/);
+    const legacy = parsePageFile(JSON.stringify({ evidence: [{ address: "finding:gamma-1", label: "old", status: "open", updatedAt: "t" }] }));
+    expect(mergePage(legacy, {}, []).evidence.map((e) => e.address)).toEqual(["finding:gamma-1"]);
+  });
+
+  it("op read lists the ledger newest first with n and report; the tool table states the op", () => {
+    const page = run([
+      { op: "finding", claim: "Older claim", verdict: "dead", n: "10 tests" },
+      { op: "finding", claim: "Newer claim", verdict: "lead", report: "view:v1" },
+    ]);
+    const bumped = server.applyOp(page, { op: "finding", id: "f1", verdict: "dead" }, NOW + 5000).page; // f1 moved last
+    const text = f.formatPageRead(bumped, {});
+    expect(text).toContain("FINDINGS (2):\n  f1 [dead] Older claim | n: 10 tests\n  f2 [lead] Newer claim | report: view:v1");
+    for (const rule of [
+      "RECORD WHAT THE WORK ESTABLISHED as op finding {claim, verdict, n?, report?}",
+      "verdict is lead (worth chasing) | open (not settled) | fact (established) | dead (ruled out)",
+      "Pass the finding's id (the result gives it) to UPDATE it in place as the verdict moves — never file the same claim twice",
+      "findingOp drop {id} removes one that was never right",
+      "At most 60 per page",
+      "A finding is never an evidence row",
+    ]) {
+      expect(server.PAGE_TOOL.description).toContain(rule);
+    }
+    const props = (server.PAGE_TOOL.inputSchema as { properties: Record<string, { enum?: string[] }> }).properties;
+    expect(props.op.enum).toContain("finding");
+    expect(props.verdict.enum).toEqual(["lead", "open", "fact", "dead"]);
+    expect(props.findingOp.enum).toEqual(["drop"]);
+    expect(props.claim).toBeDefined();
+    expect(props.n).toBeDefined();
+    expect(props.report).toBeDefined();
+    // Caps mirrored in pageStore.
+    expect([...FINDING_VERDICTS]).toEqual(f.FINDING_VERDICTS);
+    expect([FINDING_CAP, FINDING_CLAIM_CAP, FINDING_N_CAP, FINDING_REPORT_CAP]).toEqual([f.FINDING_CAP, f.FINDING_CLAIM_CAP, f.FINDING_N_CAP, f.FINDING_REPORT_CAP]);
+  });
+});
+
+describe("the view tool — project-level reports (SWIT-107)", () => {
+  const pv = server as unknown as {
+    performViewOp: (
+      threadDir: string,
+      args: Record<string, unknown>,
+      now: number,
+      env?: { cwd?: string; threadId?: string; registryPath?: string | null }
+    ) => { spec: Record<string, unknown>; message: string };
+    performShowOp: (
+      threadDir: string,
+      args: Record<string, unknown>,
+      now: number,
+      env?: { cwd?: string; exists?: (p: string) => boolean; registryPath?: string | null }
+    ) => { show: { id: string; address: string }; message: string };
+    readRegistryProjects: (p: string | null | undefined) => { key: string; repos: string[] }[] | null;
+    projectPlaceFor: (projects: { key: string; repos: string[] }[] | null, cwd: string) => { key: string; repoRoot: string; base: string } | null;
+    projectViewAddress: (project: string, id: string) => string;
+    PROJECT_VIEW_INDEX_CAP: number;
+    VIEW_SCOPES: string[];
+    VIEW_TOOL: { description: string; inputSchema: { properties: Record<string, { enum?: string[] }> } };
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeFs = require("fs") as {
+    mkdtempSync: (p: string) => string;
+    mkdirSync: (p: string, o?: { recursive: boolean }) => void;
+    writeFileSync: (p: string, d: string) => void;
+    readFileSync: (p: string, e: string) => string;
+    existsSync: (p: string) => boolean;
+    rmSync: (p: string, o: { recursive: boolean; force: boolean }) => void;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeOs = require("os") as { tmpdir: () => string };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodePath = require("path") as { join: (...p: string[]) => string };
+
+  /** A registry whose reposRoot holds `lodestar` (single repo) and `kyde`
+   *  (two repos), and two thread dirs. */
+  function fixture() {
+    const root = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-pviews-")).split("\\").join("/");
+    for (const d of ["repos/lodestar/apps/desktop", "repos/admin-panel", "repos/api", "t1", "t2", "kb"]) {
+      nodeFs.mkdirSync(`${root}/${d}`, { recursive: true });
+    }
+    const registryPath = `${root}/kb/registry.json`;
+    nodeFs.writeFileSync(
+      registryPath,
+      JSON.stringify({
+        conventions: { reposRoot: `${root}/repos/` },
+        projects: { lodestar: { repos: ["lodestar"] }, kyde: { repos: ["admin-panel", "api"] }, broken: "x" },
+      })
+    );
+    return { root, registryPath, cleanup: () => nodeFs.rmSync(root, { recursive: true, force: true }) };
+  }
+  const report = (over: Record<string, unknown> = {}) => ({
+    op: "show",
+    kind: "report",
+    title: "gamma review",
+    source: { type: "file", path: "analysis.md" },
+    ...over,
+  });
+  const readJson = (p: string) => JSON.parse(nodeFs.readFileSync(p, "utf8"));
+
+  it("the registry parse and the place: longest repo holding the cwd, `base` = the cwd under that repo", () => {
+    const f = fixture();
+    try {
+      const projects = pv.readRegistryProjects(f.registryPath)!;
+      expect(projects.map((p) => p.key)).toEqual(["lodestar", "kyde"]);
+      const place = pv.projectPlaceFor(projects, `${f.root}/repos/lodestar/apps/desktop`);
+      expect(place).toMatchObject({ key: "lodestar", repoRoot: `${f.root}/repos/lodestar`, base: "apps/desktop" });
+      expect(pv.projectPlaceFor(projects, `${f.root}/repos/LODESTAR/`)).toMatchObject({ key: "lodestar", base: "" });
+      expect(pv.projectPlaceFor(projects, `${f.root}/repos/api`)).toMatchObject({ key: "kyde", repoRoot: `${f.root}/repos/api` });
+      expect(pv.projectPlaceFor(projects, `${f.root}/repos/lodestar-old`)).toBeNull();
+      expect(pv.projectPlaceFor(null, `${f.root}/repos/lodestar`)).toBeNull();
+      expect(pv.readRegistryProjects(`${f.root}/nope.json`)).toBeNull();
+      expect(pv.readRegistryProjects(null)).toBeNull();
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("a REPORT defaults to project scope: the thread copy AND the project copy + index, with base and threadId", () => {
+    const f = fixture();
+    try {
+      const env = { cwd: `${f.root}/repos/lodestar/apps/desktop`, threadId: "t-one", registryPath: f.registryPath };
+      const out = pv.performViewOp(`${f.root}/t1`, report(), NOW, env);
+      expect(out.spec).toMatchObject({ id: "v1", scope: "project", project: "lodestar", base: "apps/desktop", threadId: "t-one" });
+      expect(out.message).toContain("The PROJECT lodestar owns it (view:lodestar/v1");
+      const threadCopy = readJson(`${f.root}/t1/views/v1.json`);
+      const projectCopy = readJson(`${f.root}/repos/lodestar/.sb-views/_project/v1.json`);
+      expect(projectCopy).toEqual(threadCopy);
+      // The app's tolerant parser reads the copy as the same report.
+      expect(parseViewSpec(JSON.stringify(projectCopy)).spec?.kind).toBe("report");
+      expect(readJson(`${f.root}/repos/lodestar/.sb-views/_project/index.json`)).toEqual({
+        version: 1,
+        views: [{ id: "v1", title: "gamma review", kind: "report", builtAt: "2026-08-31T10:00:00.000Z", threadId: "t-one" }],
+      });
+      // Any other kind stays in the thread unless asked.
+      const table = pv.performViewOp(`${f.root}/t1`, { op: "show", kind: "table", title: "rows", source: { type: "file", path: "r.json" } }, NOW, env);
+      expect(table.spec.scope).toBeUndefined();
+      expect(nodeFs.existsSync(`${f.root}/repos/lodestar/.sb-views/_project/${table.spec.id}.json`)).toBe(false);
+      // …and scope project gives it the same life; scope thread keeps a report in the thread.
+      const pinned = pv.performViewOp(`${f.root}/t1`, { op: "show", kind: "table", title: "rows", source: { type: "file", path: "r.json" }, scope: "project" }, NOW, env);
+      expect(pinned.spec.scope).toBe("project");
+      const local = pv.performViewOp(`${f.root}/t1`, report({ scope: "thread" }), NOW, env);
+      expect(local.spec.scope).toBeUndefined();
+      expect(nodeFs.existsSync(`${f.root}/repos/lodestar/.sb-views/_project/${local.spec.id}.json`)).toBe(false);
+      expect(() => pv.performViewOp(`${f.root}/t1`, report({ scope: "global" }), NOW, env)).toThrow(/scope must be "thread" or "project"/);
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("ids are PROJECT-unique: another thread's id is refused by name; a minted id counts the project's ids", () => {
+    const f = fixture();
+    try {
+      const envA = { cwd: `${f.root}/repos/lodestar`, threadId: "t-a", registryPath: f.registryPath };
+      const envB = { cwd: `${f.root}/repos/lodestar`, threadId: "t-b", registryPath: f.registryPath };
+      pv.performViewOp(`${f.root}/t1`, report({ id: "gamma" }), NOW, envA);
+      expect(() => pv.performViewOp(`${f.root}/t2`, report({ id: "gamma" }), NOW, envB)).toThrow(
+        /view id gamma is already a project view of another thread \(t-a\) in lodestar — pick another id, or omit id to mint one/
+      );
+      pv.performViewOp(`${f.root}/t1`, report(), NOW, envA); // v1 in the project, from t1
+      const minted = pv.performViewOp(`${f.root}/t2`, report(), NOW + 1, envB);
+      expect(minted.spec.id).toBe("v2"); // t2 has no views, but the project already holds v1
+      const index = readJson(`${f.root}/repos/lodestar/.sb-views/_project/index.json`);
+      expect(index.views.map((v: { id: string }) => v.id)).toEqual(["v2", "v1", "gamma"]);
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("update writes BOTH copies — the project one stays authoritative — and moves the index row to the front", () => {
+    const f = fixture();
+    try {
+      const env = { cwd: `${f.root}/repos/lodestar`, threadId: "t-a", registryPath: f.registryPath };
+      pv.performViewOp(`${f.root}/t1`, report({ id: "r1" }), NOW, env);
+      pv.performViewOp(`${f.root}/t1`, report({ id: "r2" }), NOW + 1, env);
+      // An update that names scope thread still writes both: a project view is not demoted by update.
+      pv.performViewOp(`${f.root}/t1`, report({ op: "update", id: "r1", title: "gamma v2", scope: "thread" }), NOW + 2, env);
+      expect(readJson(`${f.root}/repos/lodestar/.sb-views/_project/r1.json`).title).toBe("gamma v2");
+      expect(readJson(`${f.root}/t1/views/r1.json`).title).toBe("gamma v2");
+      const index = readJson(`${f.root}/repos/lodestar/.sb-views/_project/index.json`);
+      expect(index.views.map((v: { id: string; title: string }) => `${v.id}:${v.title}`)).toEqual(["r1:gamma v2", "r2:gamma review"]);
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("no project for the folder: an explicit project scope is refused; a report falls back to the thread and says so", () => {
+    const f = fixture();
+    try {
+      const env = { cwd: `${f.root}/elsewhere`, threadId: "t-a", registryPath: f.registryPath };
+      expect(() => pv.performViewOp(`${f.root}/t1`, report({ scope: "project" }), NOW, env)).toThrow(/in no registry project/);
+      const kept = pv.performViewOp(`${f.root}/t1`, report(), NOW, env);
+      expect(kept.spec.scope).toBeUndefined();
+      expect(kept.message).toContain("kept in this thread — its working directory is in no registry project");
+      // No registry at all — the same fallback.
+      const none = pv.performViewOp(`${f.root}/t1`, report(), NOW, { cwd: `${f.root}/repos/lodestar`, threadId: "t-a", registryPath: null });
+      expect(none.spec.scope).toBeUndefined();
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("the index is capped at PROJECT_VIEW_INDEX_CAP, newest first (mirrored in repoListing)", () => {
+    const f = fixture();
+    try {
+      const dir = `${f.root}/repos/lodestar/.sb-views/_project`;
+      nodeFs.mkdirSync(dir, { recursive: true });
+      const views = Array.from({ length: pv.PROJECT_VIEW_INDEX_CAP }, (_, i) => ({ id: `old${i}`, title: "t", kind: "report", builtAt: "", threadId: "t-a" }));
+      nodeFs.writeFileSync(`${dir}/index.json`, JSON.stringify({ version: 1, views }));
+      pv.performViewOp(`${f.root}/t1`, report({ id: "fresh" }), NOW, { cwd: `${f.root}/repos/lodestar`, threadId: "t-a", registryPath: f.registryPath });
+      const index = readJson(`${dir}/index.json`);
+      expect(index.views).toHaveLength(pv.PROJECT_VIEW_INDEX_CAP);
+      expect(index.views[0].id).toBe("fresh");
+      expect(pv.PROJECT_VIEW_INDEX_CAP).toBe(PROJECT_VIEW_INDEX_CAP);
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("`page show` takes view:<project>/<id> — checked against the project's index when the registry is readable", () => {
+    const f = fixture();
+    try {
+      const env = { cwd: `${f.root}/repos/lodestar`, threadId: "t-a", registryPath: f.registryPath };
+      pv.performViewOp(`${f.root}/t1`, report({ id: "gamma" }), NOW, env);
+      const ok = pv.performShowOp(`${f.root}/t2`, { op: "show", address: "view:lodestar/gamma#h:results" }, NOW, env);
+      expect(ok.show.address).toBe("view:lodestar/gamma#h:results");
+      expect(ok.message).toBe("view:lodestar/gamma#h:results is opening in the panel beside the terminal.");
+      expect(() => pv.performShowOp(`${f.root}/t2`, { op: "show", address: "view:lodestar/nope" }, NOW, env)).toThrow(/no project view nope in lodestar/);
+      expect(() => pv.performShowOp(`${f.root}/t2`, { op: "show", address: "view:lodestar/a b" }, NOW, env)).toThrow(/not a project view address/);
+      const unchecked = pv.performShowOp(`${f.root}/t2`, { op: "show", address: "view:lodestar/gamma" }, NOW, { ...env, registryPath: null });
+      expect(unchecked.message).toMatch(/opens in the panel beside the terminal if that project owns a view with that id/);
+      // The address the result names is the one the app's resolver reads.
+      expect(pv.projectViewAddress("lodestar", "gamma")).toBe(projectViewAddress("lodestar", "gamma"));
+      expect(showTargetFor("view:lodestar/gamma#h:results", { threadId: "t2", kbDocs: [], projectKey: null, kbRoot: null })).toEqual({
+        artifact: { kind: "view", project: "lodestar", viewId: "gamma" },
+        anchor: "h:results",
+      });
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("with the registry, a cwd file's `show` result is exact: opening, or plainly nothing outside a project", () => {
+    const f = fixture();
+    try {
+      nodeFs.writeFileSync(`${f.root}/repos/lodestar/README.md`, "# lodestar");
+      const inProject = pv.performShowOp(`${f.root}/t1`, { op: "show", address: "README.md" }, NOW, {
+        cwd: `${f.root}/repos/lodestar`,
+        registryPath: f.registryPath,
+      });
+      expect(inProject.message).toBe("README.md is opening in the panel beside the terminal.");
+      nodeFs.mkdirSync(`${f.root}/loose`, { recursive: true });
+      nodeFs.writeFileSync(`${f.root}/loose/notes.md`, "x");
+      const loose = pv.performShowOp(`${f.root}/t1`, { op: "show", address: "notes.md" }, NOW, {
+        cwd: `${f.root}/loose`,
+        registryPath: f.registryPath,
+      });
+      expect(loose.message).toMatch(/^Recorded — but this thread's working directory is in no registry project/);
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("the tool states the rule: report defaults to project, the address form, update writes both", () => {
+    expect(pv.VIEW_SCOPES).toEqual(["thread", "project"]);
+    expect(pv.VIEW_TOOL.inputSchema.properties.scope.enum).toEqual(["thread", "project"]);
+    for (const rule of [
+      "A REPORT BELONGS TO THE PROJECT by default (scope 'project')",
+      "(.sb-views/_project/<id>.json + index.json)",
+      "addressed view:<project>/<id>",
+      "update writes both copies",
+      "scope 'thread' to keep a report in this thread only",
+    ]) {
+      expect(pv.VIEW_TOOL.description).toContain(rule);
+    }
+    expect(server.PAGE_TOOL.description).toContain("view:<project>/<id> for a report the project owns");
+  });
+});
+
+describe("review of daaad36 / c178f2f / 4f016e1 — the server half", () => {
+  const srv = server as unknown as {
+    applyOp: (
+      page: Record<string, unknown>,
+      args: Record<string, unknown>,
+      now: number,
+      answeredIds?: Set<string>,
+      dismissedIds?: Set<string>
+    ) => { page: Record<string, unknown>; message: string };
+    QUESTION_KEEP_CAP: number;
+    OPTION_CAP: number;
+  };
+  const optionsOf = (page: Record<string, unknown>) => (page.questions as { options: string[]; default: string | null }[])[0];
+
+  it("#3 — a page HOLDS at most QUESTION_KEEP_CAP questions (the parser keeps exactly as many); a new ask past it is refused, nothing evicted", () => {
+    expect(srv.QUESTION_KEEP_CAP).toBe(QUESTION_KEEP_CAP);
+    let page = empty();
+    const answered = new Set<string>();
+    for (let i = 0; i < srv.QUESTION_KEEP_CAP; i++) {
+      page = srv.applyOp(page, { op: "ask", id: `q${i}`, text: `q ${i}` }, NOW, answered).page;
+      answered.add(`q${i}`); // answered at once, so the OPEN cap never bites
+    }
+    expect(() => srv.applyOp(page, { op: "ask", id: "one-more", text: "?" }, NOW, answered)).toThrow(
+      /already holds 200 questions, the most it keeps — its decisions stand/
+    );
+    // Every one the server wrote survives the app's parse — open or not.
+    expect(parsePageFile(JSON.stringify(page)).questions).toHaveLength(srv.QUESTION_KEEP_CAP);
+    // Re-asking an existing (open) id still works at the cap — it replaces, it does not add.
+    const reopened = srv.applyOp(page, { op: "ask", id: "q0", text: "again" }, NOW, new Set());
+    expect((reopened.page.questions as unknown[]).length).toBe(srv.QUESTION_KEEP_CAP);
+  });
+
+  it("#4 — refusing a finding: evidence row names op finding AND the drop_evidence that clears the old row", () => {
+    expect(() => srv.applyOp(empty(), { op: "evidence", address: "finding:f3", label: "x" }, NOW)).toThrow(
+      /record it with op finding \{claim, verdict, n\?, report\?\}.*then remove the old row with op drop_evidence \{addresses: \["finding:f3"\]\}/
+    );
+  });
+
+  it("#6 — an option is cut on GRAPHEME boundaries: a flag, a ZWJ family and a combining mark stay whole", () => {
+    const pad = "x".repeat(srv.OPTION_CAP - 3);
+    for (const tail of ["🇯🇵🇯🇵", "👨‍👩‍👧‍👦 family", "é́ accents"]) {
+      const opt = `${pad}${tail} and more words to force the cut`;
+      const cut = optionsOf(srv.applyOp(empty(), { op: "ask", text: "q", options: [opt, "b"] }, NOW).page).options[0];
+      expect(cut.endsWith("…")).toBe(true);
+      expect(cut.length).toBeLessThanOrEqual(srv.OPTION_CAP);
+      const body = cut.slice(0, -1);
+      // Whatever survives is a PREFIX of whole graphemes of the original.
+      const Segmenter = (Intl as unknown as { Segmenter: new (l: undefined, o: { granularity: "grapheme" }) => { segment: (t: string) => Iterable<{ segment: string }> } }).Segmenter;
+      const graphemes = Array.from(new Segmenter(undefined, { granularity: "grapheme" }).segment(opt), (g) => g.segment);
+      let joined = "";
+      let whole = false;
+      for (const g of graphemes) {
+        if (joined === body) {
+          whole = true;
+          break;
+        }
+        joined += g;
+      }
+      expect(whole || joined === body).toBe(true);
+      // No orphans: no lone surrogate, no dangling ZWJ, no regional indicator half (a combining mark rides with its base — the prefix check above).
+      expect(body).not.toMatch(/[\uD800-\uDBFF]$/);
+      expect(body.endsWith("\u200D")).toBe(false);
+      expect((body.match(/[\u{1F1E6}-\u{1F1FF}]/gu) ?? []).length % 2).toBe(0);
+    }
+  });
+
+  it("#6 — `default` is matched against the UNTRIMMED options first, so two long options sharing a head are not confused", () => {
+    const head = "Ship the gamma exporter with the prior-close levels ";
+    const a = `${head}as drill levels and drop the constant columns`;
+    const b = "Keep the constant columns and the series as they are now";
+    // A default that is NOT an option but trims to the same text as `a` —
+    // accepted before (the default was trimmed, then matched), refused now.
+    const c = `${head}as drill levels and keep the constant columns`;
+    expect(() => srv.applyOp(empty(), { op: "ask", text: "which?", options: [a, b], default: c }, NOW)).toThrow(
+      /default must be one of the options/
+    );
+    // The untrimmed option maps to its trimmed form…
+    const q = optionsOf(srv.applyOp(empty(), { op: "ask", text: "which?", options: [a, b], default: a }, NOW).page);
+    expect(q.options[0].endsWith("…")).toBe(true);
+    expect(q.default).toBe(q.options[0]);
+    // …and the trimmed form itself still names its option.
+    expect(optionsOf(srv.applyOp(empty(), { op: "ask", text: "which?", options: [a, b], default: q.options[0] }, NOW).page).default).toBe(q.options[0]);
   });
 });

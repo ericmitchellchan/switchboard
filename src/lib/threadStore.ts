@@ -141,6 +141,52 @@ export function explicitThreadTitle(typed: string | undefined | null): string {
   return t.length > 0 ? t : NEW_THREAD_TITLE;
 }
 
+/** SWIT-105: how long a title taken from a page theme may be. */
+export const THEME_TITLE_MAX = 40;
+
+/** A thread title cut from its page THEME (SWIT-105): whitespace folded, the
+ *  first THEME_TITLE_MAX characters, cut back to a word boundary when one
+ *  sits in the last 40% of the cut, trailing punctuation dropped, `…` when
+ *  anything was cut (backlogThreadTitle's shape). Counted in code points, so
+ *  an emoji is never halved. Empty when the theme is. Pure. */
+export function themeThreadTitle(theme: string): string {
+  const clean = theme.replace(/\s+/g, " ").trim();
+  const points = Array.from(clean);
+  if (points.length <= THEME_TITLE_MAX) return clean;
+  let cut = points.slice(0, THEME_TITLE_MAX).join("");
+  // A cut that already ends on a whole word (the next character is a space)
+  // keeps that word; otherwise back up to the last space, if it is near.
+  if (points[THEME_TITLE_MAX] !== " ") {
+    const space = cut.lastIndexOf(" ");
+    if (space >= THEME_TITLE_MAX * 0.6) cut = cut.slice(0, space);
+  }
+  return `${cut.replace(/[\s,;:.\-–—]+$/, "")}…`;
+}
+
+/** A THREAD NAMES ITSELF (SWIT-105): the title a thread should take from its
+ *  page theme, or NULL to leave it alone. Only a thread whose title is still
+ *  EXACTLY the explicit-creation default (`New thread`) is ever named — a
+ *  user's rename always wins and is never overwritten, a box the user
+ *  emptied fell back to `repo · date` (derivedThreadTitle) and is not the
+ *  default either, and a promoted thread was never `New thread`. Null too
+ *  when there is no theme, or the theme yields nothing new. Pure; the caller
+ *  applies it once, through the rename primitives. */
+export function autoThreadTitle(
+  currentTitle: string,
+  theme: string | null | undefined,
+  opts: { editorOpen?: boolean } = {}
+): string | null {
+  if (currentTitle !== NEW_THREAD_TITLE) return null;
+  // Review of c178f2f, #7b: a title box OPEN on this thread (the rail's
+  // inline editor, the breadcrumb's) holds `New thread` as typed-in state;
+  // naming the thread under it would be undone by that box's Enter or blur,
+  // which commits `New thread` back. The user is naming it right now — wait.
+  if (opts.editorOpen === true) return null;
+  if (typeof theme !== "string") return null;
+  const title = themeThreadTitle(theme);
+  return title.length > 0 && title !== NEW_THREAD_TITLE ? title : null;
+}
+
 /** Do two paths name the same directory? Windows-shaped comparison: separator
  *  style, a trailing separator, the verbatim `\\?\` prefix and CASE are all
  *  insignificant here (NTFS is case-insensitive, and the two strings reach us
@@ -984,8 +1030,9 @@ export function clearThreadRenameRequest(threadId: string): void {
 
 /** The title box a `+` opened must not be closed by the new pane's terminal
  *  taking focus (SWIT-56 review). The box commits on blur, and a terminal
- *  focuses itself from several places (the pane's visibility effect, the
- *  show-fit's `shouldFocus` a few frames after mount) — none of them a user
+ *  focuses itself from several places (the pane's visibility effect —
+ *  `landTerminalView`'s focus when the tab is shown — and xterm's own focus
+ *  on mount) — none of them a user
  *  gesture, all of them after the box has opened. So a blur that lands in
  *  xterm's helper textarea, with NO pointer gesture since the box opened and
  *  inside the settle window, is a programmatic steal: the box holds focus
@@ -1122,13 +1169,16 @@ export function unbindThread(threadId: string): void {
  *  this. An empty/whitespace title falls back to the record's DERIVED default
  *  rather than persisting a blank row. Rides the existing persistence (the
  *  workspace blob + the disk mirror), so it survives a restart. */
-export function renameThread(threadId: string, title: string): void {
+export function renameThread(threadId: string, title: string, opts: { keepRenameRequest?: boolean } = {}): void {
   const t = getThreadById(threadId);
   if (!t) return;
   const next = title.trim() || derivedThreadTitle(t);
   // A rename answers the request whether or not the title moved — the box
   // that asked for it has done its job (an untouched `New thread` included).
-  const hadRequest = renameRequest === threadId;
+  // Review of c178f2f, #7a: the AUTO-NAME from a page theme is not that box —
+  // it keeps a pending rename-on-create request, so the box still opens
+  // (now holding the theme's title, which the user can keep or change).
+  const hadRequest = renameRequest === threadId && opts.keepRenameRequest !== true;
   if (hadRequest) renameRequest = null;
   if (next === t.title) {
     if (hadRequest) bump();
@@ -1408,7 +1458,29 @@ export function getThreadActions(): ThreadActions | null {
 }
 
 /** Test-only: reset the store to a blank state. */
+// ── Open title editors (review of c178f2f, #7b) ──────────────────────────────
+// Every inline title box registers while it is mounted — keyed by THREAD id
+// (the rail's / history's ThreadTitleEditor) or by SESSION id (the
+// breadcrumb's tab-name box) — so the auto-name from a page theme can stand
+// down while one is open. Runtime-only; a count per key (two boxes on one
+// thread, e.g. the rail and the history screen, each unregister alone).
+const openTitleEditors = new Map<string, number>();
+
+/** A title box on `key` (thread or session id) mounted (`open`) or went away. */
+export function noteTitleEditor(key: string, open: boolean): void {
+  if (key.length === 0) return;
+  const n = (openTitleEditors.get(key) ?? 0) + (open ? 1 : -1);
+  if (n > 0) openTitleEditors.set(key, n);
+  else openTitleEditors.delete(key);
+}
+
+/** Is a title box open on any of these keys (a thread id, its session id)? */
+export function isTitleEditorOpen(...keys: (string | null | undefined)[]): boolean {
+  return keys.some((k) => typeof k === "string" && k.length > 0 && openTitleEditors.has(k));
+}
+
 export function __resetThreadStoreForTests(): void {
+  openTitleEditors.clear();
   threads = [];
   launched.clear();
   booting.clear();

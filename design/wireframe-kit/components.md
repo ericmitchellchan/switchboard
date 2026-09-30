@@ -383,6 +383,19 @@ shape for restored workspaces only.
   `--text-muted` over `you: <answer>` / `settled: <answer>` (the agent's `resolve`) in
   `--text-secondary` with the label dim; the legacy tab centres the same voice, or the one
   line `This question is no longer on the page.`
+- **`not needed` (SWIT-105):** on an OPEN card only (a decided one is corrected with
+  `change`), after the state word on the first line: the kit TEXT_LINK voice (10px mono
+  `--text-faint`, `--text-primary` on hover and on keyboard focus — `.page-textlink`),
+  always visible, `title` = `Take this question off the page — you do not need it
+  answered. The agent can ask again if it comes to matter.` It takes `keepFocus` like the
+  option rows, so a click never blurs (and so saves) a box being typed in; it dims to .4
+  while its write is in flight and every one is disabled while any retraction writes. A
+  dismissed question lists under DECIDED, after the answered ones, as the question in
+  `--text-secondary` over `dismissed` (10px mono `--text-faint`). A failed dismissal is the
+  footer's outcome line, `not dismissed — …`, and the card stays.
+- **Home's Needs you, older questions (SWIT-105):** questions from threads with no sign of
+  life in 14 days sit under the listed cards behind ONE PageBlock `Fold` line — `N older
+  questions · show` / `hide` — the cards inside unchanged.
 
 ## The page sections
 
@@ -530,6 +543,39 @@ right-aligned, `title` = the full local timestamp. `lib/statusPill.ts`'s `ago` (
 simpler than Ky's own — every stamp on the ✦ page is recent thread activity, so the range
 never needs to step past days): under a minute → `now`, else `Xm` / `Xh` / `Xd`. An
 unparseable or absent stamp draws an empty column, never `NaN` or a dash.
+
+## Findings block (SWIT-106)
+
+THE FINDINGS LEDGER — `PageView`'s `Findings` **Page block**, after To do (the mock's lane
+scene: Claim · Verdict · n · Report). Column heads `Verdict · Claim · n · Report · Updated`
+over the grid `58px minmax(0,1fr) 72px 150px 52px` (`PageBlock.FINDING_GRID`), gap 11,
+rows `padding: 7px 0` with a hairline under each, lit `--bg-hover` like every block row.
+The verdict is a **Status pill** whose tone comes from `statusPill.verdictTone`, not the
+word table: **lead** the accent fill (worth chasing) · **open** amber (unsettled — it still
+wants the reader) · **fact** the neutral solid (established, nothing to do) · **dead** the
+dim outline (ruled out). The claim is 12.5px reading-face `--text-primary`, wrapping; `n`
+10.5px mono `--text-secondary` (`—` when not stated); the report is the Evidence address
+exactly (kind colour, `.page-address` hairline, opens beside the thread); **Age** at the
+right with the NEW dot. Newest first by the row's last update. No ledger, no block.
+
+**Home's Findings** (under Needs you): the newest 8 across the active threads, each a flat
+Home row — the claim (reading face) with its thread's title dim mono beside it, the verdict
+pill (58px slot) at the right; the row opens the thread.
+
+## Brief block (SWIT-104)
+
+WHERE THINGS STAND — the agent's standing brief, the first **Page block** under the page
+head (`PageView.BriefBlock`; the one-platform mock's lane scene, `platform-v1.html`, is the
+source: a dated line, the goal as a sentence, then Established / Dead / Live lead /
+Waiting on you). Title `Where things stand`; the block's note is `rewritten` + its **Age**
+(no note when the stamp does not parse). Body: the GOAL as one line — 12.5px / 1.5
+`--font-reading` `--text-primary`, `padding: 8px 0 7px`, a 1px `--border` hairline under it
+while lists follow — then one row per NON-EMPTY list: a grid `104px minmax(0,1fr)`, gap 11,
+`padding: 7px 0`, a hairline between rows (none after the last). The label is the **Facts
+row** label voice (9.5px mono uppercase `.08em` `--text-faint`); `Waiting on you` alone is
+`--tone-amber` — the page's one colour, on the row that waits on the user. The lines are
+12.5px / 1.5 reading-face `--text-primary`, stacked 2px apart, no bullets. Not a list of
+click targets: rows do not light on hover. No brief, no block.
 
 ## Set frame (SWIT-79)
 

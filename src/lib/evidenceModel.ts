@@ -232,6 +232,35 @@ export function viewAnchorOfAddress(address: string): { viewId: string; anchor: 
   return { viewId: id, anchor };
 }
 
+/** SWIT-107 — A PROJECT'S VIEW: `view:<project>/<viewId>[#anchor]`. The ONE
+ *  definition of the form (the MCP server's `show` mirrors it). A bare
+ *  `view:<id>` keeps meaning the THREAD's view — the slash is what names a
+ *  project owner, and neither word may hold one. Same anchor grammar as
+ *  `viewAnchorOfAddress`; a malformed part makes the whole address plain. */
+export function projectViewAddress(project: string, viewId: string): string {
+  return `view:${project}/${viewId}`;
+}
+
+export function projectViewOfAddress(
+  address: string
+): { project: string; viewId: string; anchor: string | null } | null {
+  const a = address.trim();
+  if (!a.startsWith("view:")) return null;
+  const rest = a.slice("view:".length);
+  const hash = rest.indexOf("#");
+  const head = hash === -1 ? rest : rest.slice(0, hash);
+  const slash = head.indexOf("/");
+  if (slash === -1) return null;
+  const project = head.slice(0, slash);
+  const viewId = head.slice(slash + 1);
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(project) || !/^[A-Za-z0-9_-]{1,64}$/.test(viewId)) return null;
+  if (hash === -1) return { project, viewId, anchor: null };
+  const anchor = rest.slice(hash + 1);
+  // eslint-disable-next-line no-control-regex
+  if (!/^[a-z][a-z0-9-]*:.+$/s.test(anchor) || /[\x00-\x1f\x7f]/.test(anchor)) return null;
+  return { project, viewId, anchor };
+}
+
 /** What the view poll LATCHES after a pass (SWIT-70 review fix, F2): only
  *  the ids whose spec actually read. A failed or torn read leaves the latched
  *  key UNEQUAL to the id list's key, so the next tick retries that spec
@@ -264,16 +293,56 @@ export function mergeViewEvidence(
  *  when it stays plain text. A KB doc must be IN the real doc list (exact
  *  path); a repo file needs the thread's project key and a syntactically
  *  clean relative path — v1's honest reach: the file's existence is the
- *  viewer's problem (explorerRead errors visibly), never a silent link. */
+ *  viewer's problem (explorerRead errors visibly), never a silent link.
+ *
+ *  SWIT-101 — THE MISS: the doc list is a cache, and a KB doc created after
+ *  it loaded is not in it, so the address fell through to the repo fallback
+ *  and opened as a missing repo file. This function stays pure; it REPORTS
+ *  the miss (a doc/file address, a KNOWN list, not in it) through `onKbMiss`
+ *  before falling back, and the caller decides what a miss costs: a render
+ *  hands in `kb.noteKbMiss` (one coalesced list refresh per NEW address,
+ *  remembered), a one-shot open runs inside `kb.resolveWithFreshKbDocs`
+ *  (refresh once, resolve again). Every resolver path — Evidence rows,
+ *  reviewFirst, To do links, the turn-end hook, the agent's `show` — comes
+ *  through here, so they all get it.
+ *
+ *  A miss is reported ONLY for an address that could BE a KB doc
+ *  (`couldBeKbDoc`: the KB lists nothing but DOC_EXTENSIONS files) — any
+ *  dotted token in a turn line (`Cargo.toml`, `v0.16.0`, `e.g`) is file-
+ *  shaped, and each used to cost a `kb_list` on the turn-end path (review of
+ *  49ebb20, #5).
+ *
+ *  `pathPrefix` (review of 49ebb20, #7 — ONE resolver) re-bases a repo path
+ *  from the THREAD'S WORKING DIRECTORY onto the project root
+ *  (`explorer.projectPlaceForDir`): `apps/desktop/` for a thread in a
+ *  subdirectory, `<repo>/` in a multi-repo project, `""` at a single-repo
+ *  root. Every resolver path passes it, so an address resolves the same way
+ *  in an Evidence row, `start here`, the To do link, the turn-end open and
+ *  the agent's `show`. Never applied to a KB doc. */
 export function resolveDocTarget(
   address: string,
   kbDocs: readonly string[] | null,
-  projectKey: string | null
+  projectKey: string | null,
+  onKbMiss?: (address: string) => void,
+  pathPrefix: string = ""
 ): OpenableArtifact | null {
   const kind = evidenceKindOf(address);
   if (kind !== "doc" && kind !== "file") return null;
   const a = address.trim();
   if (kbDocs !== null && kbDocs.includes(a)) return { kind: "kb-doc", path: a };
-  if (projectKey !== null && a.includes("/")) return { kind: "repo-file", project: projectKey, path: a };
+  if (kbDocs !== null && couldBeKbDoc(a)) onKbMiss?.(a);
+  if (projectKey !== null && a.includes("/")) return { kind: "repo-file", project: projectKey, path: `${pathPrefix}${a}` };
   return null;
+}
+
+/** The extensions the knowledge base LISTS — mirrors kb.rs `DOC_EXTENSIONS`
+ *  (change one, change the other). A path with any other extension cannot be
+ *  in the KB doc list, so missing it there is not news. */
+export const KB_DOC_EXTENSIONS: readonly string[] = ["md", "html", "htm", "jsx", "tsx", "mmd", "json"];
+
+/** Could this address be a KB doc the cached list has not caught up with?
+ *  Only when its extension is one the KB lists. Pure. */
+export function couldBeKbDoc(address: string): boolean {
+  const m = /\.([A-Za-z0-9]{1,8})$/.exec(address.trim());
+  return m !== null && KB_DOC_EXTENSIONS.includes(m[1].toLowerCase());
 }

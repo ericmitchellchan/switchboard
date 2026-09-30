@@ -99,6 +99,38 @@ export function projectKeyForDir(
   return bestKey;
 }
 
+/** WHERE `dir` sits inside its registry project (SWIT-102): the project key
+ *  plus the PREFIX that turns a path relative to `dir` into the project-
+ *  relative path `explorer_read` takes. A repo-file artifact is addressed
+ *  from the project root — the repo root for a single-repo project, and
+ *  `<repo name>/…` for a multi-repo one (explorer.rs `resolve_repo_rel`) — so
+ *  a thread working in `lodestar/apps/desktop` that names `src/x.md` means
+ *  `apps/desktop/src/x.md`, and one in a multi-repo project means
+ *  `<repo>/src/x.md`. Same longest-match rule as `projectKeyForDir`; the
+ *  prefix is `""` for the common case (a single-repo project, `dir` = its
+ *  root) and otherwise ends in `/`. Null when no project contains `dir`. */
+export function projectPlaceForDir(
+  projects: readonly ExplorerProject[],
+  dir: string
+): { key: string; prefix: string } | null {
+  if (!dir) return null;
+  let best: { project: ExplorerProject; repo: string } | null = null;
+  for (const project of projects) {
+    for (const repo of project.repos) {
+      if (!isPathInside(dir, repo)) continue;
+      if (best === null || repo.length > best.repo.length) best = { project, repo };
+    }
+  }
+  if (best === null) return null;
+  const slashed = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  const repo = slashed(best.repo);
+  // `dir`'s own casing is kept — the containment test already folded case.
+  const sub = slashed(dir).slice(repo.length).replace(/^\/+/, "");
+  const repoName = best.project.repos.length > 1 ? repo.split("/").pop() ?? "" : "";
+  const prefix = [repoName, sub].filter((s) => s.length > 0).join("/");
+  return { key: best.project.key, prefix: prefix.length > 0 ? `${prefix}/` : "" };
+}
+
 /** THE project label for a live preview started in `dir`: the registry key
  *  when there is one, the directory's own name when there is not, and a last
  *  resort of `local` for a session with no usable cwd. Total — a preview

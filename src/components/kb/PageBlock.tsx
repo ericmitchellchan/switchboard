@@ -179,6 +179,8 @@ export const TODO_GRID: CSSProperties = { gridTemplateColumns: "14px minmax(0,1f
 export const ARTIFACT_GRID: CSSProperties = { gridTemplateColumns: "176px minmax(0,1fr) 124px 52px 14px" };
 /** time · line. */
 export const TURN_GRID: CSSProperties = { gridTemplateColumns: "64px minmax(0,1fr)" };
+/** verdict · claim · n · report · updated (SWIT-106, the Findings ledger). */
+export const FINDING_GRID: CSSProperties = { gridTemplateColumns: "58px minmax(0,1fr) 72px 150px 52px" };
 
 const DOT: CSSProperties = { display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "var(--accent)", flex: "none" };
 
