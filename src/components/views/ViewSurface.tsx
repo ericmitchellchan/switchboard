@@ -98,7 +98,8 @@
 //     to `<deck dir>/notes.json` in the thread cwd (lib/viewNotes — the
 //     deck dir is the parent SOURCE's directory). Enter in the box = next.
 //   · `send N notes → thread` composes ONE message (viewNotes.formatBatch)
-//     and SUBMITS it through `composeWrite` — one bracketed paste, one CR —
+//     and SUBMITS it through the composer's wire format (App's side of the
+//     seam) — one bracketed paste, then one CR as its own write —
 //     because Eric asked to send the batch, unlike the typed `→ thread`
 //     reference that leaves Enter to him. Notes are marked sent only when
 //     the PTY write resolved.
@@ -154,7 +155,6 @@ import {
   formatBatch,
   batchSendTarget,
 } from "../../lib/viewNotes";
-import { composeWrite } from "../../lib/composer";
 import { barTone, columnMinMax, tableCellTone } from "../../lib/viewTone";
 // candles.ts is pure helpers (its lightweight-charts import is type-only,
 // erased at build) — importing seriesColor here pulls no chart library into
@@ -703,10 +703,10 @@ export function ViewChrome({
       await flushViewNotes(threadId, notesDir);
       const entries = unsentNotes(getViewNotes(threadId, notesDir).file, deck);
       if (entries.length === 0) return;
-      // composeWrite: multi-line → ONE bracketed paste + ONE CR (the
-      // composer's wire format), so the batch arrives as one message.
-      const bytes = composeWrite(formatBatch(deckSpec.title, entries));
-      await submitToThread(threadId, bytes);
+      // The host composes it: multi-line → ONE bracketed paste, then ONE
+      // Enter as its own write (the composer's wire format), so the batch
+      // arrives as one message.
+      await submitToThread(threadId, formatBatch(deckSpec.title, entries));
       await markViewNotesSent(threadId, notesDir, entries.map((e) => e.key));
       flashNote(`sent ${entries.length} ${entries.length === 1 ? "note" : "notes"}`);
     } catch (err) {

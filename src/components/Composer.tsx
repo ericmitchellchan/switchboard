@@ -4,7 +4,7 @@
 // Scope, from Decision 3: this box handles PROSE. Ctrl+C, Esc, arrow-key TUI
 // navigation and every other control character stay the terminal's job — click
 // into it for those. Nothing here proxies a control character, and the wire
-// format (lib/composer.composeWrite) strips them out of composed text rather
+// format (lib/composer.composeSend) strips them out of composed text rather
 // than forwarding them.
 //
 // PASTE (the rule, revised for SWIT-59). Dictation is the motivating case:
@@ -50,7 +50,9 @@ import {
   DRAFT_INDEX,
   attachmentAgentBlock,
   composeMessage,
-  composeWrite,
+  composeSend,
+  deliverComposed,
+  TypedNotSentError,
   formatAttachmentSize,
   parseThreadPost,
   getComposerDraft,
@@ -77,6 +79,7 @@ const MIN_HEIGHT = LINE_HEIGHT + PAD_Y * 2;
 const MAX_HEIGHT = LINE_HEIGHT * MAX_ROWS + PAD_Y * 2;
 
 const HINT = "^C · Esc → terminal";
+const STILL_SENDING = "Still sending the last one — Enter again in a moment.";
 const HINT_TITLE =
   "The composer sends prose. Control keys — Ctrl+C, Esc, arrow-key navigation — belong to the terminal: click it to use them.";
 
@@ -131,7 +134,13 @@ export function Composer({ sessionId }: { sessionId: string }) {
   }, [sessionId]);
 
   const send = useCallback(async () => {
-    if (inFlightRef.current) return;
+    if (inFlightRef.current) {
+      // The previous message's Enter is still waiting out its settle (up to
+      // 3 s after a big paste). Say so — a silently ignored Enter reads as
+      // the very bug this wait fixes. The text stays in the box.
+      if (valueRef.current.trim().length > 0) setError(STILL_SENDING);
+      return;
+    }
     const text = valueRef.current;
     const paths = attachments.map((a) => a.path);
 
@@ -171,36 +180,58 @@ export function Composer({ sessionId }: { sessionId: string }) {
       return;
     }
 
-    const payload = composeWrite(composeMessage(text, paths));
+    const composed = composeSend(composeMessage(text, paths), {
+      bracketed: getTerminal(sessionId)?.terminal.modes.bracketedPasteMode,
+    });
     // Empty / whitespace-only and nothing attached: a no-op. Never a bare Enter.
-    if (payload.length === 0) return;
+    if (!composed) return;
 
     inFlightRef.current = true;
     try {
-      await writeToSession(sessionId, payload);
+      // SWIT-99: the text, a settle wait, then the Enter as ITS OWN write —
+      // an Enter in the same write as the text is eaten by claude's paste
+      // detection (see composer.composeSend). Keyed by session, so nothing
+      // else typed into this terminal lands between the two.
+      await deliverComposed((data) => writeToSession(sessionId, data), composed, {
+        key: sessionId,
+        onTyped: () => {
+          setError(null);
+          recordSend(sessionId, text);
+          historyIndexRef.current = DRAFT_INDEX;
+          draftRef.current = "";
+          // Clear only what we actually sent, and as soon as it is TYPED (the
+          // settle wait can run seconds for a big paste, and a box still
+          // holding sent text invites a second send). Anything typed (or
+          // dictated) during the round trip is a NEW draft and must survive.
+          // Chips are cleared by PATH for the same reason — one staged
+          // mid-flight is the next message's.
+          if (valueRef.current === text) {
+            setValue("");
+            setComposerDraft(sessionId, "");
+          }
+          for (const p of paths) removeComposerAttachment(sessionId, p);
+          // Focus comes back HERE, not after the settle: seconds later the
+          // user may be in another field, and pulling focus out of it would
+          // commit whatever that field saves on blur.
+          textareaRef.current?.focus();
+        },
+      });
     } catch (err) {
-      // NEVER silently swallow a message: the text stays exactly where it is
-      // and the failure is surfaced in the box's own hint slot.
-      log.error(`Composer send failed session=${sessionId}: ${err}`);
-      setError("Send failed — your text is still here. Retry, or type into the terminal.");
+      // NEVER silently swallow a message. Nothing written: the text stays
+      // exactly where it is. Text written but not the Enter: it is sitting in
+      // the terminal's input, and the box says where to finish the send.
+      const typed = err instanceof TypedNotSentError;
+      log.error(`Composer send failed session=${sessionId} typed=${typed}: ${err}`);
+      setError(
+        typed
+          ? "Typed, but not sent — press Enter in the terminal."
+          : "Send failed — your text is still here. Retry, or type into the terminal."
+      );
       inFlightRef.current = false;
       return;
     }
     inFlightRef.current = false;
-    setError(null);
-    recordSend(sessionId, text);
-    historyIndexRef.current = DRAFT_INDEX;
-    draftRef.current = "";
-    // Clear only what we actually sent. The write is a round trip; anything
-    // typed (or dictated) during it is a NEW draft and must survive. Chips are
-    // cleared by PATH for the same reason — one staged mid-flight is the next
-    // message's.
-    if (valueRef.current === text) {
-      setValue("");
-      setComposerDraft(sessionId, "");
-    }
-    for (const p of paths) removeComposerAttachment(sessionId, p);
-    textareaRef.current?.focus();
+    setError((e) => (e === STILL_SENDING ? null : e));
 
     // Decision 4 — chatStarted is marked EXPLICITLY here. `writeToSession`
     // bypasses the input detector on purpose (feeding IPC writes back in

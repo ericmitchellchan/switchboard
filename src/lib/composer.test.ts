@@ -6,6 +6,14 @@ import {
   SEND_HISTORY_LIMIT,
   sanitizeComposerText,
   composeWrite,
+  composeSend,
+  deliverComposed,
+  afterPendingSends,
+  TypedNotSentError,
+  pasteSettleMs,
+  RAW_LINE_MAX,
+  RAW_SETTLE_MS,
+  SUBMIT,
   pushSendHistory,
   stepHistory,
   shouldNavigateHistory,
@@ -142,6 +150,148 @@ describe("composeWrite", () => {
 
   it("preserves unicode (dictation output is prose, not ascii)", () => {
     expect(composeWrite("café — naïve ✅")).toBe(`café — naïve ✅${CR}`);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The Enter is its own write (SWIT-99)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("composeSend", () => {
+  it("never puts the submit in the body", () => {
+    expect(composeSend("refactor the fit queue")).toEqual({
+      body: "refactor the fit queue",
+      settleMs: RAW_SETTLE_MS,
+    });
+    const paste = composeSend("one\ntwo");
+    expect(paste?.body).toBe(`${PASTE_START}one${CR}two${PASTE_END}`);
+    expect(paste?.body.endsWith(PASTE_END)).toBe(true);
+  });
+
+  it("is null when there is nothing to send", () => {
+    expect(composeSend("")).toBeNull();
+    expect(composeSend(" \n\t ")).toBeNull();
+  });
+
+  it("a single line goes raw up to RAW_LINE_MAX and as a paste past it", () => {
+    // A dictated paragraph is ONE long line; sent raw, claude half-detects a
+    // paste and only the tail of the message survives.
+    const atLimit = "x".repeat(RAW_LINE_MAX);
+    expect(composeSend(atLimit)?.body).toBe(atLimit);
+    const over = "x".repeat(RAW_LINE_MAX + 1);
+    expect(composeSend(over)?.body).toBe(`${PASTE_START}${over}${PASTE_END}`);
+  });
+
+  it("keeps a long line raw for a terminal without bracketed-paste mode", () => {
+    const over = "x".repeat(RAW_LINE_MAX + 1);
+    expect(composeSend(over, { bracketed: false })?.body).toBe(over);
+    // Multi-line is wrapped regardless: unwrapped, every newline is an Enter.
+    expect(composeSend("a\nb", { bracketed: false })?.body).toBe(
+      `${PASTE_START}a${CR}b${PASTE_END}`
+    );
+  });
+
+  it("the settle wait grows with a paste and is capped", () => {
+    expect(composeSend("a\nb")?.settleMs).toBe(pasteSettleMs(3));
+    expect(pasteSettleMs(0)).toBe(600);
+    expect(pasteSettleMs(400)).toBe(700);
+    expect(pasteSettleMs(1_000_000)).toBe(3000);
+  });
+
+  it("composeWrite is the body followed by the one submit", () => {
+    const send = composeSend("one\ntwo");
+    expect(composeWrite("one\ntwo")).toBe(`${send?.body}${SUBMIT}`);
+    expect(SUBMIT).toBe(CR);
+  });
+});
+
+describe("deliverComposed", () => {
+  it("writes the text, waits, then writes the Enter alone", async () => {
+    const events: string[] = [];
+    await deliverComposed(
+      async (data) => {
+        events.push(`write:${data}`);
+      },
+      { body: "hello", settleMs: 180 },
+      {
+        onTyped: () => events.push("typed"),
+        sleep: async (ms) => {
+          events.push(`sleep:${ms}`);
+        },
+      }
+    );
+    expect(events).toEqual(["write:hello", "typed", "sleep:180", `write:${CR}`]);
+  });
+
+  it("a failed text write types nothing and sends no Enter", async () => {
+    const writes: string[] = [];
+    let typed = false;
+    await expect(
+      deliverComposed(
+        async (data) => {
+          writes.push(data);
+          throw new Error("pty gone");
+        },
+        { body: "hello", settleMs: 0 },
+        { onTyped: () => (typed = true), sleep: async () => {} }
+      )
+    ).rejects.toThrow("pty gone");
+    expect(writes).toEqual(["hello"]);
+    expect(typed).toBe(false);
+  });
+
+  it("a failed Enter rejects AFTER the text was typed, and says typed-not-sent", async () => {
+    let typed = false;
+    const attempt = deliverComposed(
+      async (data) => {
+        if (data === SUBMIT) throw new Error("pty gone");
+      },
+      { body: "hello", settleMs: 0 },
+      { onTyped: () => (typed = true), sleep: async () => {} }
+    );
+    await expect(attempt).rejects.toBeInstanceOf(TypedNotSentError);
+    await expect(attempt).rejects.toThrow("pty gone");
+    expect(typed).toBe(true);
+  });
+
+  it("with a key, nothing else queued for that session lands before the Enter", async () => {
+    // The gap between the text and its Enter is up to 3s; a reference typed
+    // into the same terminal in that gap would be submitted with the message.
+    const writes: string[] = [];
+    const write = async (data: string) => {
+      writes.push(data);
+    };
+    let release: () => void = () => {};
+    const settle = new Promise<void>((r) => (release = r));
+    const first = deliverComposed(write, { body: "message", settleMs: 0 }, { key: "s1", sleep: () => settle });
+    const typed = afterPendingSends("s1", () => write("[from thread] look at this"));
+    const other = afterPendingSends("s2", () => write("other session"));
+    await other;
+    expect(writes).toEqual(["message", "other session"]);
+    release();
+    await Promise.all([first, typed]);
+    expect(writes).toEqual(["message", "other session", CR, "[from thread] look at this"]);
+  });
+
+  it("a failed send does not block the next one in the queue", async () => {
+    const failing = deliverComposed(
+      async () => {
+        throw new Error("pty gone");
+      },
+      { body: "a", settleMs: 0 },
+      { key: "s1", sleep: async () => {} }
+    );
+    const writes: string[] = [];
+    const next = deliverComposed(
+      async (data) => {
+        writes.push(data);
+      },
+      { body: "b", settleMs: 0 },
+      { key: "s1", sleep: async () => {} }
+    );
+    await expect(failing).rejects.toThrow("pty gone");
+    await next;
+    expect(writes).toEqual(["b", CR]);
   });
 });
 

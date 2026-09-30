@@ -9,7 +9,7 @@
 // The composer is that, plus Enter, plus a text box.
 //
 // Layout:
-//   1. Wire format — `composeWrite`, the ONE decision that must not silently
+//   1. Wire format — `composeSend` + `deliverComposed`, the ONE decision that must not silently
 //      regress (single line vs bracketed paste), pure and unit-tested.
 //   2. Send history — pure list ops + the caret rules that decide when ↑/↓
 //      belong to history and when they belong to the caret.
@@ -48,7 +48,7 @@ const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
  *  punctuation) — so they used to survive sanitization intact.
  *
  *  That mattered for the WIRE FORMAT, not for safety: a paragraph whose only
- *  breaks were U+2028 contained no \n, took composeWrite's SINGLE-LINE branch,
+ *  breaks were U+2028 contained no \n, took composeSend's SINGLE-LINE branch,
  *  and went to the PTY UNBRACKETED — the exact "4 lines become 4 submissions"
  *  shape the bracketing exists to prevent. (A wrong shape, never a breakout:
  *  none of these can terminate a bracketed paste, only ESC can, and ESC is
@@ -62,31 +62,147 @@ export function sanitizeComposerText(text: string): string {
   return text.replace(LINE_TERMINATORS, "\n").replace(CONTROL_CHARS, "");
 }
 
+/** The submit: ONE carriage return, ALWAYS its own PTY write (see
+ *  `deliverComposed`). */
+export const SUBMIT = "\r";
+
+/** A single line longer than this goes as a bracketed paste (Ky's
+ *  CHAT_SEND_PASTE_THRESHOLD). A Wispr Flow paragraph is ONE long line, and a
+ *  long raw burst is indistinguishable from a paste to claude's TUI: letting
+ *  it half-detect one is the truncated send (only the tail of the message
+ *  survives). The explicit markers make the TUI take the block atomically. */
+export const RAW_LINE_MAX = 200;
+
+/** How long the text gets to land before the Enter follows it. Ky's curve,
+ *  verbatim (ipc.ts `kyChatSend`): a raw line needs a beat; a paste collapses
+ *  to `[Pasted text]` and needs longer the bigger it is — an Enter that
+ *  arrives while the TUI is still chewing is eaten. Do not shave these. */
+export const RAW_SETTLE_MS = 180;
+export const PASTE_SETTLE_BASE_MS = 600;
+export const PASTE_SETTLE_MAX_MS = 3000;
+
+export function pasteSettleMs(length: number): number {
+  return Math.min(PASTE_SETTLE_MAX_MS, PASTE_SETTLE_BASE_MS + Math.floor(Math.max(0, length) / 4));
+}
+
+/** What a send puts on the PTY BEFORE the Enter, and how long to wait between
+ *  the two. */
+export type ComposedSend = { body: string; settleMs: number };
+
+export type ComposeOptions = {
+  /** Does the target terminal have bracketed-paste mode on (xterm's
+   *  `modes.bracketedPasteMode`)? Only an explicit `false` matters, and only
+   *  for a long SINGLE line: a plain shell that never asked for the markers
+   *  would print them, so that line stays raw. claude always has it on.
+   *  Multi-line is wrapped regardless — without the markers each newline is
+   *  its own Enter. */
+  bracketed?: boolean;
+};
+
 /** THE wire-format decision: what bytes a composer send puts on the PTY.
  *
- *  Returns "" when there is nothing to send (empty or whitespace-only) — an
+ *  Returns null when there is nothing to send (empty or whitespace-only) — an
  *  empty send is a no-op, never a bare Enter, which in the TUI would submit
  *  nothing while still costing a turn's worth of repaint.
  *
- *  Single line  →  `<text>\r`                      (plain typing + submit)
- *  Multi-line   →  `ESC[200~<text with \n → \r>ESC[201~\r`
+ *  Short single line        →  `<text>`
+ *  Multi-line, or > 200 ch  →  `ESC[200~<text with \n → \r>ESC[201~`
+ *  …then, as a SEPARATE write after `settleMs`, the one `\r` (SUBMIT).
+ *
+ *  THE ENTER IS NEVER IN THE SAME WRITE AS THE TEXT (SWIT-99, Ky's
+ *  second-message bug): a multi-character chunk arriving with its CR trips
+ *  claude's paste heuristics, the CR is taken as part of the paste, and the
+ *  text sits in the input unsent until Enter is pressed in the terminal.
  *
  *  The bracketed-paste wrapping is what makes multi-line arrive as ONE message.
  *  Without it each embedded newline is its own Enter and a 4-line message
  *  becomes 4 submissions. Inside the brackets the line breaks are CARRIAGE
  *  RETURNS, not \n — that is exactly what xterm's own paste path does
  *  (`prepareTextForTerminal`: /\r?\n/g → \r), so a composer paste and a
- *  Ctrl+V paste are byte-identical to the TUI. The single trailing \r sits
- *  OUTSIDE the end marker: it is the submit, and it is the only Enter.
+ *  Ctrl+V paste are byte-identical to the TUI.
  *
  *  Trailing blank space is dropped (a Shift+Enter you changed your mind about
  *  must not become a trailing empty line); LEADING whitespace is preserved,
  *  because indentation in a pasted snippet is content. */
-export function composeWrite(text: string): string {
+export function composeSend(text: string, opts: ComposeOptions = {}): ComposedSend | null {
   const clean = sanitizeComposerText(text).replace(/[ \t\n]+$/, "");
-  if (clean.trim().length === 0) return "";
-  if (!clean.includes("\n")) return `${clean}\r`;
-  return `${PASTE_START}${clean.replace(/\n/g, "\r")}${PASTE_END}\r`;
+  if (clean.trim().length === 0) return null;
+  const multiline = clean.includes("\n");
+  const longLine = clean.length > RAW_LINE_MAX && opts.bracketed !== false;
+  if (!multiline && !longLine) return { body: clean, settleMs: RAW_SETTLE_MS };
+  return {
+    body: `${PASTE_START}${clean.replace(/\n/g, "\r")}${PASTE_END}`,
+    settleMs: pasteSettleMs(clean.length),
+  };
+}
+
+/** Every byte a send puts on the PTY, in order, as one string — the wire
+ *  format's reference form ("" = nothing to send). NEVER write this in one
+ *  call: a live send goes through `deliverComposed`, which keeps the Enter in
+ *  its own write. */
+export function composeWrite(text: string, opts: ComposeOptions = {}): string {
+  const send = composeSend(text, opts);
+  return send ? `${send.body}${SUBMIT}` : "";
+}
+
+const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+// ONE WRITER AT A TIME PER SESSION. A send is two writes with up to 3 s
+// between them, and anything else typed into the same terminal in that gap —
+// a second composed send, an inbox delivery, a `→ thread` reference — would
+// be submitted by the first message's Enter as part of it. Every write that
+// TYPES into a session's input goes through this queue, keyed by session id.
+const writeQueues = new Map<string, Promise<void>>();
+
+/** Run `fn` once every write already queued for `key` has finished (a
+ *  composed send's Enter included). A failed predecessor does not block it. */
+export function afterPendingSends<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = writeQueues.get(key) ?? Promise.resolve();
+  const run = prev.then(fn, fn);
+  const tail = run.then(
+    () => {},
+    () => {}
+  );
+  writeQueues.set(key, tail);
+  void tail.then(() => {
+    if (writeQueues.get(key) === tail) writeQueues.delete(key);
+  });
+  return run;
+}
+
+/** The Enter of a composed send failed AFTER its text was typed: the message
+ *  is sitting in the terminal's input, unsent. Callers say so rather than
+ *  "not sent" — a blind retry would type it twice. */
+export class TypedNotSentError extends Error {
+  constructor(cause: unknown) {
+    super(`typed, but the Enter failed — press Enter in the terminal (${cause instanceof Error ? cause.message : String(cause)})`);
+    this.name = "TypedNotSentError";
+  }
+}
+
+/** Deliver a composed send: the text, the settle wait, then the Enter — two
+ *  PTY writes, never one, and with `key` (the session id) nothing else queued
+ *  through `afterPendingSends` lands between them. `onTyped` fires once the
+ *  text is in the terminal's input (the caller clears its box there: the
+ *  message is no longer a draft even if the Enter then fails). A plain
+ *  rejection means nothing was written; a `TypedNotSentError` means the text
+ *  is typed and only the submit is missing. */
+export function deliverComposed(
+  write: (data: string) => Promise<void>,
+  send: ComposedSend,
+  opts: { key?: string; onTyped?: () => void; sleep?: (ms: number) => Promise<void> } = {}
+): Promise<void> {
+  const run = async () => {
+    await write(send.body);
+    opts.onTyped?.();
+    await (opts.sleep ?? defaultSleep)(send.settleMs);
+    try {
+      await write(SUBMIT);
+    } catch (err) {
+      throw new TypedNotSentError(err);
+    }
+  };
+  return opts.key ? afterPendingSends(opts.key, run) : run();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -96,7 +212,7 @@ export function composeWrite(text: string): string {
 // A path is all an agent needs — Read renders images and PDFs directly — so
 // pasted images are saved to the thread's attachments dir and dropped/picked
 // files are staged BY PATH (never copied). The block rides on the composed
-// text and goes through `composeWrite` like any other multi-line message.
+// text and goes through `composeSend` like any other multi-line message.
 
 export type ComposerAttachment = {
   /** Absolute path the agent will `Read`. Identity of the chip. */
@@ -128,7 +244,7 @@ export function attachmentStandInBody(count: number): string {
  *  → the text untouched. Attachments and no words → the stand-in body carries
  *  the block, so the message never opens with two blank lines. The result is
  *  multi-line whenever there is a block, which is exactly what puts it on
- *  `composeWrite`'s bracketed-paste path: the block is ONE message. */
+ *  `composeSend`'s bracketed-paste path: the block is ONE message. */
 export function composeMessage(text: string, paths: readonly string[]): string {
   if (paths.length === 0) return text;
   const words = text.trim().length > 0 ? text.replace(/[ \t\n]+$/, "") : attachmentStandInBody(paths.length);

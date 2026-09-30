@@ -172,7 +172,8 @@ import {
 } from "./lib/workspace";
 import { remapSessionIds, getMaxPaneIdNumber, setPaneIdCounter, closePane, getVisibleSessionIds } from "./lib/paneLayout";
 import type { PaneNode } from "./lib/paneLayout";
-import { toggleComposer, isComposerVisible } from "./lib/composer";
+import { toggleComposer, isComposerVisible, composeSend, deliverComposed, afterPendingSends } from "./lib/composer";
+import { markSessionResumed, forgetResumeHeal } from "./lib/resumeHealRunner";
 import { initTaskDetector, destroyTaskDetector } from "./lib/taskDetector";
 import { startUpdater, registerPreRelaunchFlush } from "./lib/updater";
 import { log, initLogger } from "./lib/logger";
@@ -905,9 +906,15 @@ export default function App() {
         mcpConfig,
       });
       log.info(`Thread launch id=${threadId} session=${sessionId} exists=${resume}: ${line}`);
+      // SWIT-100: a resumed claude repaints its replayed frame a few rows off;
+      // arm the heal (a rows-only PTY bounce at the settles that follow). A
+      // fresh conversation never bounces.
+      if (resume) markSessionResumed(sessionId);
+      else forgetResumeHeal(sessionId);
       try {
         await writeToSession(sessionId, line + "\r");
       } catch (err) {
+        forgetResumeHeal(sessionId);
         // No claude behind the row after all — roll back liveness so the row
         // returns to its revive chip instead of lying live.
         log.error(`Failed to type thread launch line id=${threadId}: ${err}`);
@@ -1529,7 +1536,10 @@ export default function App() {
             const line = sanitizeForTypedLine(`[from thread "${post.from}"] ${post.text}`, 600);
             if (line.length === 0) continue;
             log.info(`Inbox delivery: post=${post.id} -> thread=${t.id}`);
-            writeToSession(sessionId, line).catch((err) =>
+            // Queued behind any composed send in flight (SWIT-99): typed in
+            // the gap before that message's Enter, this line would be
+            // submitted as part of it.
+            afterPendingSends(sessionId, () => writeToSession(sessionId, line)).catch((err) =>
               log.warn(`Inbox typed delivery failed thread=${t.id}: ${err}`)
             );
           }
@@ -2178,16 +2188,19 @@ export default function App() {
     if (!sessionId || text.length === 0) return;
     if (getNavState().route.screen !== "terminal") navigate({ screen: "terminal" });
     log.info(`Send to thread session=${sessionId}: ${text}`);
-    writeToSession(sessionId, text)
+    // Queued behind any composed send in flight (SWIT-99) — typed before that
+    // message's Enter, the reference would be submitted with it, and this
+    // seam's rule is that the Enter is the user's.
+    afterPendingSends(sessionId, () => writeToSession(sessionId, text))
       .then(() => getTerminal(sessionId)?.terminal.focus())
       .catch((err) => log.error(`Failed to type reference into session=${sessionId}: ${err}`));
   }, []);
 
   // SUBMIT a composed message (SWIT-75 — the deck's `send N notes → thread`):
-  // the bytes come from composeWrite (the CR is inside the wire format — one
-  // bracketed paste, one submit, the composer's rule) and the outcome is
-  // RETURNED, so the caller marks its notes sent only when the PTY write
-  // succeeded. THE TARGET IS THE THREAD'S OWN SESSION, not the active tab
+  // the message goes through the composer's wire format here (composeSend →
+  // deliverComposed: one bracketed paste, then the one Enter as its own
+  // write — SWIT-99) and the outcome is RETURNED, so the caller marks its
+  // notes sent only when both PTY writes succeeded. THE TARGET IS THE THREAD'S OWN SESSION, not the active tab
   // (review #1): the first cut targeted whatever shell owned the active tab,
   // and with claude exited there the batch ran as PowerShell commands while
   // the write "succeeded" and the notes were stamped sent. So the session is
@@ -2208,8 +2221,9 @@ export default function App() {
   // save (pick A → change → pick B used to write two lines). SECONDARY to
   // the message, which the agent already has: a failed append is logged and
   // toasted, never thrown.
+  const submittingThreadsRef = useRef(new Set<string>());
   const handleSubmitToThread = useCallback(
-    async (threadId: string, bytes: string, opts?: { conventions?: readonly ConventionEntry[] }) => {
+    async (threadId: string, message: string, opts?: { conventions?: readonly ConventionEntry[] }) => {
       const thread = getThreadById(threadId);
       const live =
         !!thread?.sessionId &&
@@ -2217,10 +2231,26 @@ export default function App() {
       const target = batchSendTarget(thread, isThreadLaunched(threadId), live);
       if (target.sessionId === null) throw new Error(target.reason);
       const sessionId = target.sessionId;
-      if (bytes.length === 0) return;
+      // The composer's wire format (SWIT-99): the text, a settle wait, then
+      // the Enter as its own write — resolved only once the Enter went.
+      const composed = composeSend(message);
+      if (!composed) return;
+      // One batch per thread at a time. The caller's own `sending` flag is
+      // component state and a remount (a deck step) resets it while this
+      // send is still waiting out its settle — a second click would type
+      // the same batch twice.
+      if (submittingThreadsRef.current.has(threadId)) throw new Error("already sending");
+      submittingThreadsRef.current.add(threadId);
       if (getNavState().route.screen !== "terminal") navigate({ screen: "terminal" });
-      log.info(`Submit to thread=${threadId} session=${sessionId}: ${bytes.length} bytes`);
-      await writeToSession(sessionId, bytes);
+      log.info(`Submit to thread=${threadId} session=${sessionId}: ${composed.body.length} bytes`);
+      try {
+        // A TypedNotSentError (text in, Enter failed) reaches the caller with
+        // its own wording — "typed, but the Enter failed" — so a retry is not
+        // mistaken for the first attempt.
+        await deliverComposed((data) => writeToSession(sessionId, data), composed, { key: sessionId });
+      } finally {
+        submittingThreadsRef.current.delete(threadId);
+      }
       if (thread && !thread.chatStarted) {
         log.info(`Batch submit — chatStarted id=${threadId}`);
         markChatStarted(threadId);
@@ -2575,8 +2605,8 @@ export default function App() {
   useEffect(() => {
     registerPanelActions({
       sendToThread: (text) => panelActionsRef.current?.sendToThread(text),
-      submitToThread: (threadId, bytes, opts) =>
-        panelActionsRef.current?.submitToThread?.(threadId, bytes, opts) ??
+      submitToThread: (threadId, message, opts) =>
+        panelActionsRef.current?.submitToThread?.(threadId, message, opts) ??
         Promise.reject(new Error("the app is not ready to send")),
       answerQuestion: (threadId, questionId, answerText) =>
         panelActionsRef.current?.answerQuestion(threadId, questionId, answerText) ??
