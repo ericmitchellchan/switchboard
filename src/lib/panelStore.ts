@@ -59,6 +59,7 @@ import { log } from "./logger";
 import type { ConventionEntry } from "./pageStore";
 import { surfaceLabel } from "../surfaces/registry";
 import { encodeSurfaceParams, sanitizeSurfaceParams, surfaceParamsSuffix } from "./surfaceParams";
+import { TERMINAL_COLS } from "./terminalGrid";
 // SETS (SWIT-79) — the pure fold/split/position rules; this store applies
 // them and keeps the per-set position map. artifactSets imports nothing back.
 import {
@@ -410,14 +411,23 @@ export function panelWidthFromDrag(
 // at the terminal's measured cell width, clamped like any width. A width the
 // user dragged is the user's and is never recomputed. With no measurement
 // (no terminal yet, a hidden screen) the old constant stands, and when the
-// window cannot afford 100 columns the clamp floor wins — the grow-only grid
-// then starts narrower and the visible horizontal scrollbar is the fallback.
+// window cannot afford 100 columns the clamp floor wins — the grid is still
+// 100 columns (it is pinned, SWIT-103), the pane is narrower than it, and the
+// host's visible horizontal scrollbar reaches the rest.
+//
+// Since SWIT-103 this rule is what makes the pinned grid FIT by default: the
+// terminal is exactly TERMINAL_COLS wide whatever the pane measures, so a
+// default panel that leaves the pane that width shows the whole grid with no
+// horizontal bar.
 
-/** The column count the default width protects. */
-export const TERMINAL_COLS = 100;
+/** The column count the default width protects — THE terminal grid's
+ *  (terminalGrid.ts is the one place it is defined; re-exported here for the
+ *  width rule's callers and tests). */
+export { TERMINAL_COLS };
 
-/** Pixels the terminal host adds beside the grid: the 5px viewport scrollbar
- *  plus fit slack (a fit rounds down to whole cells). */
+/** Pixels the terminal host needs beside the grid so no horizontal bar shows:
+ *  the host's own 5px vertical scrollbar (present when the pane is shorter
+ *  than the grid) plus sub-pixel slack. */
 export const TERMINAL_GUTTER = 8;
 
 /** Is the stored width still the untouched default? (The width the default

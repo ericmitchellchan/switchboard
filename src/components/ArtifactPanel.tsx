@@ -17,11 +17,11 @@
 // renders. Nothing about content rendering is reimplemented here.
 //
 // Terminal interplay: opening/closing/dragging changes the pane tree's width
-// and NOTHING else. v1's grow-only resize policy treats narrowing as
-// no-re-wrap + horizontal scroll, so a running claude TUI is disturbed exactly
-// as much as a divider drag disturbs it (i.e. not at all). No resize code
-// lives here — the existing ResizeObserver → fitQueue path sees the new width
-// on its own.
+// and NOTHING else. The terminal grid is pinned at 100×40 (SWIT-103,
+// lib/terminalGrid.ts): a narrower pane scrolls over it and a wider one leaves
+// slack, so a running claude TUI is not disturbed at all — no re-wrap, no
+// SIGWINCH. No resize code lives here or anywhere; the pane's own
+// ResizeObserver only re-syncs its scroll range.
 //
 // Layout rules live in panelStore.ts (panelLayoutFor / panelWidthFromDrag) so
 // they are pure and tested; this file only measures the container and paints.
@@ -1070,9 +1070,9 @@ export function ArtifactPanel({
           // one. `minWidth: 0` is the LocalhostView lesson applied: this is a
           // flex item wrapping a terminal whose min-content width is its
           // columns, and without it the panel would overflow at the 260px
-          // floor instead of letting the terminal scroll horizontally (which
-          // the existing grow-only policy already handles — no resize code
-          // lives here either).
+          // floor instead of letting the pane scroll over the pinned 100×40
+          // grid (SWIT-103 — the terminal never resizes; no resize code lives
+          // here either).
           <div
             style={{
               flex: 1,

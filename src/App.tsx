@@ -21,9 +21,10 @@ import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
 import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, listThreadViews, readThreadFile, threadFilesStamp, writeThreadAnswer, appendConvention, writeThreadPost, saveTranscript, readBacklog, writeBacklog, takeBacklogInbox } from "./lib/ipc";
-import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, saveScrollPosition, getSavedScrollPosition, clearSessionDirty, isSessionDirty, serializeForPip, plainTextTerminal, getSessionWriteCount, setTerminalScreenVisible } from "./lib/terminal";
+import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, refreshAllTerminalViews, clearSessionDirty, isSessionDirty, serializeForPip, plainTextTerminal, getSessionWriteCount, setTerminalScreenVisible, pasteIntoTerminal } from "./lib/terminal";
 import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing, sendPipHost } from "./lib/pipBridge";
 import { bumpSessionGeneration, addSessionInputListener, getSessionGeneration } from "./lib/terminalRegistry";
+import { TERMINAL_COLS, TERMINAL_ROWS } from "./lib/terminalGrid";
 import {
   initThreadStore,
   remapThreadSessionsInStore,
@@ -165,7 +166,6 @@ import { BackButton } from "./components/BackButton";
 import { ThreadsScreen } from "./components/ThreadsScreen";
 import { ProjectView } from "./components/ProjectView";
 import { findSurface } from "./surfaces/registry";
-import { enqueueFit } from "./lib/fitQueue";
 import { useRoute, navigate, readRouteFromUrl, getNavState } from "./lib/route";
 import {
   loadWorkspaceFromStorage,
@@ -450,8 +450,9 @@ export default function App() {
     setTerminalScreenVisible(route.screen === "terminal");
   }, [route.screen]);
 
-  // No wrapper needed — the fitQueue's per-session debounce (150ms) naturally
-  // coalesces the ResizeObserver events that fire during sidebar width transition.
+  // No wrapper needed — a pane resize never refits the (pinned) terminal, and
+  // TerminalPane debounces the one re-sync it asks for (150ms), which coalesces
+  // the ResizeObserver events that fire during the sidebar width transition.
   const cycleSidebar = rawCycleSidebar;
 
   const [searchOpen, setSearchOpen] = useState(false);
@@ -779,9 +780,9 @@ export default function App() {
       const gen = bumpSessionGeneration(sessionId);
 
       try {
-        // Spawn the new PTY at the live terminal's grid — xterm keeps its
-        // real cols/rows across restart, and omitting them spawned the shell
-        // at the 120x30 default until the next fit SIGWINCHed it.
+        // Spawn the new PTY at the live terminal's grid — the pinned one
+        // (terminalGrid.ts; ipc fills it in if the instance is gone). The
+        // PTY must start there: nothing resizes it afterwards.
         await restartSession(
           sessionId,
           session.name,
@@ -1002,8 +1003,8 @@ export default function App() {
         void launchClaudeInSession(info.id, thread.id);
         if (opts?.renameOnCreate) {
           // NOW, not on a timer (review fix): the new pane's terminal focuses
-          // itself from more than one place (its visibility effect, the
-          // show-fit's `shouldFocus` a few frames later) and no delay is
+          // itself from more than one place (its visibility effect's
+          // `landTerminalView` focus, xterm's own focus on mount) and no delay is
           // guaranteed to land after the last of them. The title box commits
           // on blur, so it is the box that holds its ground — ThreadTitleEditor
           // ignores a blur into xterm's helper textarea that no pointer
@@ -2171,8 +2172,10 @@ export default function App() {
       if (payload.sessionId !== sessionId || snapshotSent) return;
       const snapshot = serializeForPip(sessionId);
       const text = snapshot?.text ?? "";
-      const cols = snapshot?.cols ?? 80;
-      const rows = snapshot?.rows ?? 24;
+      // The pinned grid when there is no terminal to ask (SWIT-103) — the
+      // mirror is created at the same constants, so it must not be told 80×24.
+      const cols = snapshot?.cols ?? TERMINAL_COLS;
+      const rows = snapshot?.rows ?? TERMINAL_ROWS;
       log.info(`PiP ready id=${sessionId}, sending snapshot length=${text.length} cols=${cols} rows=${rows}`);
       void sendPipOutput(sessionId, { type: "snapshot", text, cols, rows }).catch((e) =>
         log.warn(`PiP snapshot send failed: ${e}`)
@@ -2709,9 +2712,9 @@ export default function App() {
 
             Rendered as a SIBLING above TerminalPane (whose root is `flex: 1`
             inside the panel's column), so it costs no layout while there is no
-            offer and, when one appears, the resulting height change goes
-            through the pane's existing ResizeObserver → fitQueue → grow-only
-            policy like any other. Same component, same rules, same wording —
+            offer and, when one appears, the resulting height change is a pane
+            move over the pinned terminal grid like any other (SWIT-103 —
+            nothing resizes). Same component, same rules, same wording —
             not a second implementation that could drift. */}
         <DevServerOffer session={session} compact={false} framed />
         <TerminalPane
@@ -2941,14 +2944,10 @@ export default function App() {
         return;
       }
 
-      // Paste into the focused terminal session (respects bracketed paste mode)
+      // Paste into the focused terminal session (respects bracketed paste
+      // mode; held while a turn-end rewrite is parsing — SWIT-103)
       const sessionId = effectiveActiveIdRef.current;
-      if (sessionId) {
-        const instance = getTerminal(sessionId);
-        if (instance) {
-          instance.terminal.paste(text);
-        }
-      }
+      if (sessionId) pasteIntoTerminal(sessionId, text);
     });
 
     return () => {
@@ -3079,12 +3078,7 @@ export default function App() {
           .join(" ");
 
         const sessionId = effectiveActiveIdRef.current;
-        if (sessionId) {
-          const instance = getTerminal(sessionId);
-          if (instance) {
-            instance.terminal.paste(formatted);
-          }
-        }
+        if (sessionId) pasteIntoTerminal(sessionId, formatted);
       }, DROP_CLAIM_DEFER_MS);
     });
 
@@ -3164,8 +3158,6 @@ export default function App() {
               repoColor: saved.repoColor,
               group: saved.group,
               restoredFromId: saved.id,
-              cols: saved.cols,
-              rows: saved.rows,
             });
             initTaskDetector(info.id);
           } catch (err) {
@@ -3370,37 +3362,28 @@ export default function App() {
       // Clear corrupt texture atlases (cheap, safe)
       clearAllTextureAtlases();
 
-      // Re-enable lost WebGL contexts after GPU settles, then re-fit
+      // Re-enable lost WebGL contexts after GPU settles, then repaint every
+      // showing terminal and re-measure its scroll range. No fit: the grid is
+      // pinned (SWIT-103), so a wake resizes nothing — but the display scaling
+      // can have changed while asleep (dock → undock), and the re-sync is what
+      // re-points xterm's scroller at the fresh renderer's row height.
       setTimeout(() => {
         recoverAllWebGL();
-        for (const id of getAllTerminalIds()) {
-          const inst = getTerminal(id);
-          if (!inst?.terminal.element?.parentElement) continue;
-          enqueueFit(id, "wake", {}, 0);
-        }
+        refreshAllTerminalViews("wake");
       }, GPU_SETTLE_MS);
     };
 
     // --- Visibility change (alt-tab back) ---
     // WebView2 may discard GPU-rendered content when backgrounded.
     // Unlike sleep/wake, the WebGL context isn't lost — just the render surface is stale.
+    // Nothing is saved on the way out any more: the reader's place is buffer
+    // state (viewportY), nothing resizes or reflows while the window is away,
+    // and the re-sync on the way back writes the DOM scroller FROM the buffer.
     const handleVisibilityChange = () => {
-      const ids = getAllTerminalIds();
-      if (document.visibilityState === "hidden") {
-        log.info(`Window hidden — saving scroll positions for ${ids.length} terminals`);
-        for (const id of ids) {
-          saveScrollPosition(id);
-        }
-        return;
-      }
-      log.info(`Window became visible, refreshing ${ids.length} terminals`);
+      if (document.visibilityState === "hidden") return;
+      log.info(`Window became visible, refreshing ${getAllTerminalIds().length} terminals`);
       clearAllTextureAtlases();
-      for (const id of ids) {
-        const inst = getTerminal(id);
-        if (!inst?.terminal.element?.parentElement) continue;
-        const saved = getSavedScrollPosition(id);
-        enqueueFit(id, "visibility", { savedScroll: saved }, 0);
-      }
+      refreshAllTerminalViews("visibility");
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
 

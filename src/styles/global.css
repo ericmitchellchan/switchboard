@@ -197,18 +197,19 @@ html, body, #root {
   padding: 0;
 }
 
-/* THE TERMINAL HOST'S HORIZONTAL SCROLLBAR (SWIT-68 deferred bullet,
-   2026-09-07). The grow-only resize policy keeps cols when a pane narrows and
-   the host scrolls horizontally instead (TerminalPane `overflow-x: auto`), so
-   a table claude drew to 160 cols in a pane that fits 98 is complete in the
-   buffer and off-screen to the right. The global rule above sets only `width`
-   (the vertical bar); for the horizontal axis Chromium falls back to its
-   default thickness — measured in headless Chrome against this exact chain:
-   15px of `--border` on `--bg-primary`, which read as nothing. So: thin, one
-   step brighter than the global bar (the same lesson as the chart zero rule —
-   one step up or it vanishes among the lines around it), and drawn only while
-   there is overflow. Never `scrollbar-gutter`: the spec reserves the inline
-   gutter only, and a permanent band would cost every fitting grid 6px. */
+/* THE TERMINAL HOST'S SCROLLBARS (SWIT-68's bar, 2026-09-07; both axes since
+   SWIT-103, 2026-09-30). The terminal grid is pinned at 100×40 and the pane
+   scrolls over it (TerminalPane `overflow: auto`): a pane narrower than 100
+   columns leaves the right-hand cells off-screen, a pane shorter than 40 rows
+   leaves the bottom rows below the fold, and these bars are what reaches
+   them. The global rule above sets only `width` (the vertical bar); for the
+   horizontal axis Chromium falls back to its default thickness — measured in
+   headless Chrome against this exact chain: 15px of `--border` on
+   `--bg-primary`, which read as nothing. So: thin, one step brighter than the
+   global bar on BOTH axes (the same lesson as the chart zero rule — one step
+   up or it vanishes among the lines around it), and drawn only on an axis
+   with overflow. Never `scrollbar-gutter`: a permanent band would cost every
+   pane that fits the grid its width. */
 .terminal-host::-webkit-scrollbar {
   height: 6px;
 }
