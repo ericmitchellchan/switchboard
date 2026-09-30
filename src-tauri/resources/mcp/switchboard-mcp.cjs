@@ -1682,18 +1682,30 @@ function performViewOp(threadDir, args, now, env) {
   } else if (args.op !== "show") {
     throw new OpError('op must be "show" or "update"');
   }
-  // SWIT-107: WHO OWNS IT. A report defaults to the project; everything else
-  // to the thread; an explicit scope wins — except that `update` of a view
-  // this thread already put in the project keeps writing both copies.
+  // SWIT-107: WHO OWNS IT. On `show`, a report defaults to the project and
+  // everything else to the thread; an explicit scope wins. On `update`, the
+  // view KEEPS the scope it already has — a report shown before 0.17.0 (or
+  // with scope thread) stays in the thread; an explicit scope project
+  // promotes it; a view this thread already put in the project keeps writing
+  // both copies. (Release review: defaulting an UPDATE to project silently
+  // promoted every older thread's report on its next update, and the second
+  // thread to update its own minted `v1` was refused because the first had
+  // just claimed that id in the project.)
   const threadId = env && typeof env.threadId === "string" ? env.threadId : process.env.SWITCHBOARD_THREAD_ID || "";
   const cwd = (env && env.cwd) || process.cwd();
   const registryPath = env && "registryPath" in env ? env.registryPath : process.env.SWITCHBOARD_REGISTRY;
   const explicit = args.scope === "project" || args.scope === "thread" ? args.scope : null;
-  let scope = explicit || (args.kind === "report" ? "project" : "thread");
+  const updateId = args.op === "update" && typeof args.id === "string" ? args.id.trim() : "";
+  let scope =
+    args.op === "update"
+      ? explicit === "project" || existingViewScope(viewsDir, updateId) === "project"
+        ? "project"
+        : "thread"
+      : explicit || (args.kind === "report" ? "project" : "thread");
   const place = projectPlaceFor(readRegistryProjects(registryPath), cwd);
   const owners = place ? projectViewOwners(place) : new Map();
   if (args.op === "update" && place) {
-    const owner = owners.get(typeof args.id === "string" ? args.id.trim() : "");
+    const owner = owners.get(updateId);
     if (owner && owner.threadId === threadId) scope = "project";
   }
   let note = "";
@@ -1706,12 +1718,22 @@ function performViewOp(threadDir, args, now, env) {
     scope = "thread";
     note = " It is kept in this thread — its working directory is in no registry project, so no project can own it.";
   }
+  if (scope === "project" && place !== null && readProjectIndexStrict(place.repoRoot) === null) {
+    // A torn or hand-edited index must never be rewritten as a one-row file:
+    // that would drop every other report from the listing AND from the id
+    // check, letting another thread overwrite a spec it does not own.
+    throw new OpError(
+      `the project's report index (${place.key}: .sb-views/_project/index.json) cannot be read — fix or delete it, or show this view with scope 'thread'`
+    );
+  }
   const spec = buildViewSpec(args, scope === "project" ? [...existing, ...owners.keys()] : existing, now);
   if (scope === "project") {
     const owner = owners.get(spec.id);
     if (owner && owner.threadId !== threadId) {
       throw new OpError(
-        `view id ${spec.id} is already a project view of another thread (${owner.threadId || "unknown"}) in ${place.key} — pick another id, or omit id to mint one`
+        args.op === "update"
+          ? `view id ${spec.id} is already a project view of another thread (${owner.threadId || "unknown"}) in ${place.key} — keep this one in this thread (update without scope, or scope 'thread')`
+          : `view id ${spec.id} is already a project view of another thread (${owner.threadId || "unknown"}) in ${place.key} — pick another id, or omit id to mint one`
       );
     }
     spec.scope = "project";
@@ -1826,11 +1848,36 @@ function projectViewsDir(repoRoot) {
 }
 
 function readProjectIndex(repoRoot) {
+  return readProjectIndexStrict(repoRoot) || [];
+}
+
+/** The index's rows; [] when there is no index yet; NULL when a file is there
+ *  but cannot be parsed (torn or hand-edited) — the one case a writer must
+ *  not proceed on. */
+function readProjectIndexStrict(repoRoot) {
+  let raw;
   try {
-    const data = JSON.parse(fs.readFileSync(path.join(projectViewsDir(repoRoot), "index.json"), "utf8"));
-    return Array.isArray(data && data.views) ? data.views.filter((v) => v && typeof v.id === "string") : [];
+    raw = fs.readFileSync(path.join(projectViewsDir(repoRoot), "index.json"), "utf8");
+  } catch (err) {
+    return err && err.code === "ENOENT" ? [] : null;
+  }
+  try {
+    const data = JSON.parse(raw);
+    return Array.isArray(data && data.views) ? data.views.filter((v) => v && typeof v.id === "string") : null;
   } catch {
-    return [];
+    return null;
+  }
+}
+
+/** The scope a thread's existing view was written with ("project" | "thread");
+ *  "thread" when the file is missing, unreadable or predates SWIT-107. */
+function existingViewScope(viewsDir, id) {
+  if (!VIEW_ID_RE.test(id)) return "thread";
+  try {
+    const spec = JSON.parse(fs.readFileSync(path.join(viewsDir, `${id}.json`), "utf8"));
+    return spec && spec.scope === "project" ? "project" : "thread";
+  } catch {
+    return "thread";
   }
 }
 
@@ -1846,7 +1893,12 @@ function projectViewOwners(place) {
 }
 
 function writeJsonAtomic(file, value) {
-  const tmp = `${file}.tmp`;
+  // A tmp name per WRITER: every live thread runs its own server, and two of
+  // them writing the same project's index at once must not share one tmp file
+  // (a torn write, or EPERM on the Windows rename). The read-modify-write of
+  // the index can still lose a row to a writer in the same instant — rare,
+  // and the next update of that view writes its row back.
+  const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
   fs.renameSync(tmp, file);
 }

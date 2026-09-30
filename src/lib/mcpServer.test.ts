@@ -2289,6 +2289,52 @@ describe("the view tool — project-level reports (SWIT-107)", () => {
     }
   });
 
+  it("update KEEPS a view's scope: an older thread-only report stays in its thread, even when another thread holds its id in the project (release review)", () => {
+    const f = fixture();
+    try {
+      const envA = { cwd: `${f.root}/repos/lodestar`, threadId: "t-a", registryPath: f.registryPath };
+      const envB = { cwd: `${f.root}/repos/lodestar`, threadId: "t-b", registryPath: f.registryPath };
+      // Two threads, each with a thread-only report v1 — what every thread shown before 0.17.0 has.
+      pv.performViewOp(`${f.root}/t1`, report({ scope: "thread" }), NOW, envA);
+      pv.performViewOp(`${f.root}/t2`, report({ scope: "thread" }), NOW, envB);
+      // A updates its v1 with no scope: it stays in the thread — nothing is claimed in the project.
+      const a = pv.performViewOp(`${f.root}/t1`, report({ op: "update", id: "v1", title: "A's report" }), NOW + 1, envA);
+      expect(a.spec.scope).toBeUndefined();
+      expect(nodeFs.existsSync(`${f.root}/repos/lodestar/.sb-views/_project/v1.json`)).toBe(false);
+      // A promotes it on purpose; B's update of ITS v1 is still fine (thread scope)…
+      pv.performViewOp(`${f.root}/t1`, report({ op: "update", id: "v1", title: "A's report", scope: "project" }), NOW + 2, envA);
+      const b = pv.performViewOp(`${f.root}/t2`, report({ op: "update", id: "v1", title: "B's report" }), NOW + 3, envB);
+      expect(b.spec.scope).toBeUndefined();
+      expect(readJson(`${f.root}/t2/views/v1.json`).title).toBe("B's report");
+      expect(readJson(`${f.root}/repos/lodestar/.sb-views/_project/v1.json`).title).toBe("A's report");
+      // …and asking to promote it names the way out that applies to an update.
+      expect(() => pv.performViewOp(`${f.root}/t2`, report({ op: "update", id: "v1", scope: "project" }), NOW + 4, envB)).toThrow(
+        /already a project view of another thread \(t-a\) in lodestar — keep this one in this thread/
+      );
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("a torn or hand-edited project index is never rewritten as a one-row file — the write is refused by name", () => {
+    const f = fixture();
+    try {
+      const env = { cwd: `${f.root}/repos/lodestar`, threadId: "t-a", registryPath: f.registryPath };
+      pv.performViewOp(`${f.root}/t1`, report({ id: "r1" }), NOW, env);
+      const index = `${f.root}/repos/lodestar/.sb-views/_project/index.json`;
+      nodeFs.writeFileSync(index, '{"version":1,"views":[{"id":"r1"');
+      expect(() => pv.performViewOp(`${f.root}/t1`, report({ id: "r2" }), NOW + 1, env)).toThrow(/report index .* cannot be read/);
+      expect(nodeFs.readFileSync(index, "utf8")).toBe('{"version":1,"views":[{"id":"r1"'); // untouched
+      // Thread scope still works while the index is broken.
+      expect(pv.performViewOp(`${f.root}/t1`, report({ id: "r3", scope: "thread" }), NOW + 2, env).spec.scope).toBeUndefined();
+      // No leftover tmp files from the writes that did happen.
+      const listDir = (nodeFs as unknown as { readdirSync: (p: string) => string[] }).readdirSync;
+      expect(listDir(`${f.root}/repos/lodestar/.sb-views/_project`).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+    } finally {
+      f.cleanup();
+    }
+  });
+
   it("no project for the folder: an explicit project scope is refused; a report falls back to the thread and says so", () => {
     const f = fixture();
     try {
