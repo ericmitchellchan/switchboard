@@ -20,7 +20,9 @@ import {
   placeholdersIn,
   sanitizeControlValues,
   substituteControls,
-  undeclaredPlaceholders,
+  jsonStringEscape,
+  noteSettingKey,
+  CONTROL_VALUE_CAP,
   clampControlNumber,
 } from "./viewControls";
 import type { ViewControl } from "./viewControls";
@@ -158,17 +160,20 @@ describe("substitution — the drill-key rule, per source type", () => {
     }
   });
 
-  it("a QUERY value is URL-encoded in the url and the body, and the loopback rule is re-checked after", () => {
+  it("a QUERY value is URL-encoded in the url, JSON-escaped in the body, and the loopback rule is re-checked after", () => {
     const r = substituteControls(
       { type: "query", url: "http://127.0.0.1:8799/book?expiry={expiry}", body: '{"e":"{expiry}"}' },
-      { expiry: "a&b=c" },
+      { expiry: 'front month & "x"\\' },
       DEPS
     );
     expect(r.source).toEqual({
       type: "query",
-      url: "http://127.0.0.1:8799/book?expiry=a%26b%3Dc",
-      body: '{"e":"a%26b%3Dc"}',
+      url: "http://127.0.0.1:8799/book?expiry=front%20month%20%26%20%22x%22%5C",
+      // Review of 9605373, #2: the body is JSON — `front month`, not `front%20month`.
+      body: '{"e":"front month & \\"x\\"\\\\"}',
     });
+    expect(JSON.parse(r.source?.type === "query" ? r.source.body ?? "" : "")).toEqual({ e: 'front month & "x"\\' });
+    expect(jsonStringEscape('a"b\\c\nd')).toBe('a\\"b\\\\c\\nd');
     // A value in the authority slot: encoded, so it cannot become userinfo —
     // and the re-check refuses what is not a literal loopback.
     const hop = substituteControls({ type: "query", url: "http://{host}/rows" }, { host: "evil.com" }, DEPS);
@@ -188,9 +193,34 @@ describe("substitution — the drill-key rule, per source type", () => {
     expect(substituteControls({ type: "file", path: "rows.json" }, {}, DEPS).source).toEqual({ type: "file", path: "rows.json" });
   });
 
-  it("placeholdersIn / undeclaredPlaceholders read the name grammar only", () => {
+  it("placeholdersIn reads the name grammar only", () => {
     expect(placeholdersIn('a/{expiry}/{expiry}-{w}.json {"x":1} {2026} {Upper}')).toEqual(["expiry", "w"]);
-    expect(undeclaredPlaceholders("a/{expiry}/{key}/{z}.json", [EXPIRY], ["key"])).toEqual(["z"]);
+  });
+});
+
+describe("review of 9605373 — the value cap and the note setting", () => {
+  it("#7: a number whose PLAIN form exceeds the value cap is not a value", () => {
+    const big: ViewControl = { name: "n", kind: "number", default: 1 };
+    expect(normalizeControlValue(big, "1e70")).toBeNull(); // 71 digits
+    expect(normalizeControlValue(big, "1e20")).toBe("100000000000000000000");
+    expect(normalizeControlValue(big, "1e-70")).toBeNull();
+    // A control whose default (or bound) cannot print within the cap drops.
+    expect(parseViewControls([{ name: "n", kind: "number", default: 1e70 }])).toEqual([]);
+    expect(parseViewControls([{ name: "n", kind: "number", default: 1, max: 1e70 }])).toEqual([]);
+    expect(parseViewControls([{ name: "n", kind: "number", default: 1, max: 1e60 }])).toHaveLength(1);
+    // A clamp keeps a huge typed value inside the fitting bound.
+    const bounded: ViewControl = { name: "n", kind: "number", default: 1, max: 100 };
+    expect(normalizeControlValue(bounded, "1e60")).toBe("100");
+    expect(formatControlNumber(1e60).length).toBeLessThanOrEqual(CONTROL_VALUE_CAP);
+  });
+
+  it("#3: a note's setting is empty at the defaults (old notes.json reads as before), else the values", () => {
+    expect(noteSettingKey({ expiry: "front" }, [EXPIRY])).toBe("");
+    expect(noteSettingKey(null, [EXPIRY])).toBe("");
+    expect(noteSettingKey({ expiry: "all" }, [EXPIRY])).toBe("expiry=all");
+    expect(noteSettingKey({ expiry: "all", width: "5" }, [EXPIRY, WIDTH])).toBe("expiry=all&width=5");
+    // A name no control declares is ignored.
+    expect(noteSettingKey({ expiry: "front", junk: "x" }, [EXPIRY])).toBe("");
   });
 });
 

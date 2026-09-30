@@ -49,6 +49,11 @@ import {
   resolveViewSource,
   resolvePanelSources,
   parseInlineViewSpec,
+  nextLoadState,
+  EMPTY_VIEW_LOAD,
+  NOT_ROWS_ERROR,
+  panelLoadKeys,
+  panelsToReload,
 } from "./viewStore";
 import { controlPinScope } from "./viewControls";
 import type { ViewSpec } from "./viewStore";
@@ -454,7 +459,7 @@ describe("T6 — drill resolution", () => {
     expect(resolveDrill({ ...T6_SPEC, drill: undefined }, "k").error).toMatch(/declares no drill/);
   });
 
-  it("resolves a query template: {key} URL-encoded in url and body; loopback re-checked", () => {
+  it("resolves a query template: {key} URL-encoded in the url, JSON-escaped in the body; loopback re-checked", () => {
     const q: ViewSpec = {
       ...T6_SPEC,
       drill: {
@@ -463,11 +468,16 @@ describe("T6 — drill resolution", () => {
         source: { type: "query", url: "http://127.0.0.1:8799/setups?k={key}", body: '{"setup":"{key}"}' },
       },
     };
-    const r = resolveDrill(q, "MNQ short/flat&x");
+    const r = resolveDrill(q, 'MNQ short/flat&x "q"');
     expect(r.spec?.source).toEqual({
       type: "query",
-      url: "http://127.0.0.1:8799/setups?k=MNQ%20short%2Fflat%26x",
-      body: '{"setup":"MNQ%20short%2Fflat%26x"}',
+      url: "http://127.0.0.1:8799/setups?k=MNQ%20short%2Fflat%26x%20%22q%22",
+      // SWIT-111 review #2: the body is JSON — the key arrives as itself,
+      // its quotes escaped (it used to arrive URL-encoded).
+      body: '{"setup":"MNQ short/flat&x \\"q\\""}',
+    });
+    expect(JSON.parse(r.spec?.source.type === "query" ? r.spec.source.body ?? "" : "")).toEqual({
+      setup: 'MNQ short/flat&x "q"',
     });
   });
 
@@ -1870,8 +1880,16 @@ describe("controls — views you can tweak (SWIT-111)", () => {
     const child = resolveDrill(spec, "SPX 2026-06-05", { expiry: "all" });
     expect(child.error).toBeNull();
     expect(child.spec?.source).toEqual({ type: "file", path: ".sb-views/gamma/all/SPX_2026-06-05.json" });
-    // The child records the setting it was opened at (its pin scope, `spec`).
-    expect(child.spec?.inheritedControls).toEqual({ expiry: "all", width: "5" });
+    // The child records the setting it was opened at (its pin scope, `spec`)
+    // — ONLY the controls its template names (review #6): `width` is the
+    // parent's knob and the child's source ignores it.
+    expect(child.spec?.inheritedControls).toEqual({ expiry: "all" });
+    expect(resolveDrill(spec, "SPX", { expiry: "all", width: "8" }).spec?.inheritedControls).toEqual({ expiry: "all" });
+    // A template naming no control inherits nothing (identity unchanged).
+    const noKnob = parseViewSpec(
+      JSON.stringify({ ...gamma, drill: { kind: "table", title: "{key}", source: { type: "file", path: "d/{key}.json" } } })
+    ).spec as ViewSpec;
+    expect(resolveDrill(noKnob, "SPX", { expiry: "all" }).spec?.inheritedControls).toBeUndefined();
     expect(child.spec?.controls).toBeUndefined();
     // No values handed down → the parent's defaults, never a literal {expiry}.
     expect(resolveDrill(spec, "SPX", null).spec?.source).toEqual({ type: "file", path: ".sb-views/gamma/front/SPX.json" });
@@ -1894,7 +1912,81 @@ describe("controls — views you can tweak (SWIT-111)", () => {
   it("specLines lists the controls with the value in force, and a child's inherited setting", () => {
     expect(specLines(parsed(), { expiry: "all" })).toContain("controls  expiry = all [front · all] · width = 5 [1–10]");
     const child = resolveDrill(parsed(), "SPX", { expiry: "all" }).spec as ViewSpec;
-    expect(specLines(child)).toContain("controls  expiry = all · width = 5 (from the parent)");
+    expect(specLines(child)).toContain("controls  expiry = all (from the parent)");
+  });
+
+  it("the drill substitutes the key and the values in ONE pass — neither is substituted twice", () => {
+    const q = parseViewSpec(
+      JSON.stringify({
+        ...gamma,
+        kind: "table",
+        panels: undefined,
+        controls: [{ name: "expiry", kind: "select", options: ["{key}", "all"], default: "{key}" }],
+        drill: {
+          kind: "table",
+          title: "{key}",
+          source: { type: "query", url: "http://127.0.0.1:8799/d?k={key}&e={expiry}", body: '{"k":"{key}","e":"{expiry}"}' },
+        },
+      })
+    ).spec as ViewSpec;
+    const r = resolveDrill(q, "{expiry}", { expiry: "{key}" });
+    expect(r.spec?.source).toEqual({
+      type: "query",
+      url: "http://127.0.0.1:8799/d?k=%7Bexpiry%7D&e=%7Bkey%7D",
+      body: '{"k":"{expiry}","e":"{key}"}',
+    });
+  });
+
+  it("review #1/#4: the rows' values move WITH the rows — a failed load, a refusal, a non-rows answer keep them", () => {
+    const rows1 = JSON.stringify([{ t: 1 }]);
+    const s0 = EMPTY_VIEW_LOAD;
+    const s1 = nextLoadState(nextLoadState(s0, { kind: "start" }), { kind: "read", raw: rows1, values: { expiry: "front" } });
+    expect(s1.rows).toEqual([{ t: 1 }]);
+    expect(s1.loaded).toEqual({ expiry: "front" });
+    // The knob moves to `all`; the load starts, then FAILS: the old rows and
+    // the values they were loaded at stay.
+    const s2 = nextLoadState(nextLoadState(s1, { kind: "start" }), { kind: "failed", error: "no such file" });
+    expect(s2.rows).toBe(s1.rows);
+    expect(s2.loaded).toEqual({ expiry: "front" });
+    expect(s2.error).toBe("no such file");
+    // A refused substitution is a failure too.
+    const s3 = nextLoadState(s1, { kind: "failed", error: 'the value ".." for expiry cannot name a file' });
+    expect(s3.loaded).toEqual({ expiry: "front" });
+    // An answer that is not rows: an error over the LAST GOOD rows (#4 — it
+    // used to blank the chart).
+    const s4 = nextLoadState(s1, { kind: "read", raw: '{"nope":1}', values: { expiry: "all" } });
+    expect(s4.rows).toBe(s1.rows);
+    expect(s4.loaded).toEqual({ expiry: "front" });
+    expect(s4.error).toBe(NOT_ROWS_ERROR);
+    // Success at the new setting: rows and values move together; start clears the error.
+    const s5 = nextLoadState(nextLoadState(s4, { kind: "start" }), { kind: "read", raw: rows1, values: { expiry: "all" } });
+    expect(s5.loaded).toEqual({ expiry: "all" });
+    expect(s5.error).toBeNull();
+    // Retag: same source, new values (a panel-only knob) — only with rows.
+    expect(nextLoadState(s5, { kind: "retag", values: { expiry: "all", width: "3" } }).loaded).toEqual({
+      expiry: "all",
+      width: "3",
+    });
+    expect(nextLoadState(s0, { kind: "retag", values: { expiry: "all" } })).toBe(s0);
+    expect(nextLoadState(s5, { kind: "retag", values: { expiry: "all" } })).toBe(s5);
+  });
+
+  it("review #5: panels reload ONE BY ONE — only the slot whose resolved source moved", () => {
+    const spec = parseViewSpec(
+      JSON.stringify({
+        ...gamma,
+        panels: [
+          { title: "flow", source: { type: "file", path: "flow-{expiry}.json" } },
+          { title: "vol", source: { type: "file", path: "vol.json" } },
+        ],
+      })
+    ).spec as ViewSpec;
+    const front = panelLoadKeys(spec, resolvePanelSources(spec, { expiry: "front" }));
+    const all = panelLoadKeys(spec, resolvePanelSources(spec, { expiry: "all" }));
+    expect(panelsToReload([], front)).toEqual([0, 1]);
+    expect(panelsToReload(front, all)).toEqual([0]);
+    expect(panelsToReload(all, all)).toEqual([]);
+    expect(panelsToReload(all, all.slice(0, 1))).toEqual([]);
   });
 
   it("the control values are filed in the pin doc key after the filter suffix", () => {

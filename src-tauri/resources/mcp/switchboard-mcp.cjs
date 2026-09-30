@@ -1668,6 +1668,32 @@ function isControlDate(v) {
   return t.getUTCFullYear() === y && t.getUTCMonth() === mo - 1 && t.getUTCDate() === d;
 }
 
+/** A control value's cap — a number's PLAIN form must fit it too (review of
+ *  9605373, #7). Mirrors viewControls.CONTROL_VALUE_CAP. */
+const CONTROL_VALUE_CAP = 64;
+
+/** A number printed PLAINLY — no exponent, no float noise, no trailing
+ *  zeros, `-0` → `0`. Mirrors viewControls.formatControlNumber (the test
+ *  compares the two on awkward numbers). Pure. */
+function formatControlNumber(n) {
+  if (!Number.isFinite(n)) return "0";
+  const r = Number(n.toPrecision(15));
+  if (r === 0) return "0";
+  let s = String(r);
+  const exp = /^(-?)(\d)(?:\.(\d+))?e([+-]\d+)$/i.exec(s);
+  if (exp) {
+    const sign = exp[1];
+    const digits = `${exp[2]}${exp[3] || ""}`;
+    const point = 1 + Number(exp[4]);
+    s =
+      point <= 0
+        ? `${sign}0.${"0".repeat(-point)}${digits}`
+        : `${sign}${digits.padEnd(point, "0").slice(0, point)}${digits.length > point ? `.${digits.slice(point)}` : ""}`;
+  }
+  if (s.includes(".")) s = s.replace(/0+$/, "").replace(/\.$/, "");
+  return s;
+}
+
 /** A finite number from a number (or a numeric string); null otherwise. */
 function finiteNumber(v) {
   if (typeof v === "number") return Number.isFinite(v) ? v : null;
@@ -1764,6 +1790,15 @@ function buildControls(raw, kind) {
       if (step !== undefined && step <= 0) throw new OpError(`${at}.step must be above 0`);
       if ((min !== undefined && dflt < min) || (max !== undefined && dflt > max)) {
         throw new OpError(`${at}.default ${dflt} is outside min–max`);
+      }
+      for (const [which, v] of [["default", dflt], ["min", min], ["max", max]]) {
+        if (v === undefined) continue;
+        const printed = formatControlNumber(v);
+        if (printed.length > CONTROL_VALUE_CAP) {
+          throw new OpError(
+            `${at}.${which} prints as ${printed.length} characters; a control value is at most ${CONTROL_VALUE_CAP}`
+          );
+        }
       }
       control.default = dflt;
       if (min !== undefined) control.min = min;
@@ -2091,6 +2126,14 @@ function buildViewSpec(args, existingIds, now) {
     }
     if (args.drill !== undefined && args.drill !== null) {
       throw new OpError("a report takes no drill — declare drills on the embedded ```view blocks instead");
+    }
+    // Review of 9605373, #8: say it once, for the report — not "add
+    // controls" (which a report then refuses).
+    const named = placeholdersIn(cleanSource.path);
+    if (named.length > 0) {
+      throw new OpError(
+        `a report's path takes no placeholders ({${named[0]}}) — a report has no controls; declare them on its embedded \`\`\`view blocks`
+      );
     }
   }
   // SWIT-111: the knobs first — every `{name}` in the source, the panels and
@@ -2564,7 +2607,7 @@ const VIEW_TOOL = {
     "`drill` when the rows have instances behind them: {kind, title, source} where the " +
     "source strings carry {key} (the opened row's key-column value / bin label / marker id; " +
     "in a file path it is reduced to one component, [A-Za-z0-9._-] with everything else " +
-    "as _; in a query url it is URL-encoded) — opening a row then shows the child beside " +
+    "as _; in a query url it is URL-encoded; in a query body it is JSON-escaped) — opening a row then shows the child beside " +
     "the terminal with back. Declare `filters` [{column, kind:'select'|'date'}] so the " +
     "user can slice the loaded rows themselves without asking you. When the user will want to " +
     "TWEAK a setting that changes the data itself, declare `controls` (<=4) and put {name} in " +
@@ -2572,7 +2615,9 @@ const VIEW_TOOL = {
     "default:'front'}] with source:{type:'file', path:'.sb-views/gamma/book-{expiry}.json'}, " +
     "one file per setting you wrote — and the panel draws the knob and re-reads the source on " +
     "each change (select: options <=24; number: default, min?, max?, step?; date: default " +
-    "YYYY-MM-DD; a panel or the drill may name the same {name}). Prefer ONE line view " +
+    "YYYY-MM-DD; a panel or the drill may name the same {name}; in a file path a value is one " +
+    "path component, in a query url it is URL-encoded, in a query body it is JSON-escaped). " +
+    "Prefer ONE line view " +
     "with `panels` [{title, source}] (small multiples: a 2-up grid with the main chart, " +
     "shared time axis, <=6, no {key}) over several near-identical views, and give every " +
     "view a `definition` that says what to look at; anchors and pins publish from the main " +
@@ -2608,7 +2653,8 @@ const VIEW_TOOL = {
     "(labelled by the column name; those columns are never drawn as series) — never encode a " +
     "level as a constant column or an entry as a series. The user writes a one-line note per " +
     "card, autosaved to `<deck dir>/notes.json` beside the deck's index file (Read it: " +
-    "{version:1, notes:{[key]:{text, updatedAt, sentAt?}}}), and `send N notes` delivers every " +
+    "{version:1, notes:{[key]:{text, updatedAt, sentAt?}}}; a note made at a non-default control " +
+    "setting is keyed `<key> @ expiry=all`), and `send N notes` delivers every " +
     "unsent note to you as ONE message: `Chart notes on <title> (N):` then `- <key>: <note>` " +
     "per line. SETS: several views of one kind go in as ONE tab — the panel steps through " +
     "them — instead of opening N tabs: show each view, then `show` with " +
@@ -2697,7 +2743,7 @@ const VIEW_TOOL = {
         type: "array",
         items: { type: "object" },
         description:
-          "Up to 4 knobs that RE-READ the source with a different setting: [{name ([a-z][a-zA-Z0-9_]*, not 'key'), kind:'select'|'number'|'date', label?, default, options? (select: <=24, each <=60 chars) | min?, max?, step? (number)}]. The source path / url / body (and a panel's or the drill's) names each as {name}: a file value becomes one path component ([A-Za-z0-9._-], else _), a query value is URL-encoded. Every {name} must be declared and every control used. Not on a report — declare them on its ```view blocks.",
+          "Up to 4 knobs that RE-READ the source with a different setting: [{name ([a-z][a-zA-Z0-9_]*, not 'key'), kind:'select'|'number'|'date', label?, default, options? (select: <=24, each <=60 chars) | min?, max?, step? (number)}]. The source path / url / body (and a panel's or the drill's) names each as {name}: a file value becomes one path component ([A-Za-z0-9._-], else _), a query url value is URL-encoded, a query body value is JSON-escaped; a number's plain form is at most 64 characters. Every {name} must be declared and every control used. Not on a report — declare them on its ```view blocks.",
       },
       seriesLabels: {
         type: "object",
@@ -2731,7 +2777,7 @@ const VIEW_TOOL = {
       drill: {
         type: "object",
         description:
-          "What is behind an opened row/bin/bar/marker: {kind, title, source:{type:'file', path:'per/{key}.json'} | {type:'query', url:'http://127.0.0.1:…?k={key}', body?}, columns?, keyColumn?, series?, valueColumn?, sizeColumn?, definition?, levels?, markers?, markerColumns?}. {key} = the anchor's key value (file: one path component, [A-Za-z0-9._-], else _; query: URL-encoded). A table with a drill is a DECK: the user steps its children with next/prev and notes each one.",
+          "What is behind an opened row/bin/bar/marker: {kind, title, source:{type:'file', path:'per/{key}.json'} | {type:'query', url:'http://127.0.0.1:…?k={key}', body?}, columns?, keyColumn?, series?, valueColumn?, sizeColumn?, definition?, levels?, markers?, markerColumns?}. {key} = the anchor's key value (file: one path component, [A-Za-z0-9._-], else _; query url: URL-encoded; query body: JSON-escaped). A table with a drill is a DECK: the user steps its children with next/prev and notes each one.",
       },
     },
     // SWIT-79: kind/title/source are required for a VIEW and checked in code
@@ -3558,6 +3604,8 @@ module.exports = {
   CONTROL_LABEL_CAP,
   CONTROL_NAME_RE,
   RESERVED_CONTROL_NAMES,
+  CONTROL_VALUE_CAP,
+  formatControlNumber,
   VIEW_DEFINITION_CAP,
   VIEW_FILTER_CAP,
   VIEW_FILTER_KINDS,

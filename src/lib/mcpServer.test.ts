@@ -27,8 +27,10 @@ import {
   CONTROL_NAME_RE,
   CONTROL_OPTION_CAP,
   CONTROL_OPTION_LEN,
+  CONTROL_VALUE_CAP,
   RESERVED_CONTROL_NAMES,
   VIEW_CONTROL_KINDS,
+  formatControlNumber,
 } from "./viewControls";
 import { parseInboxFile } from "./pageStore";
 import { parseBacklogInbox } from "./backlogStore";
@@ -950,6 +952,29 @@ describe("the view tool — controls, views you can tweak (SWIT-111)", () => {
       ])
     ).toThrow(/repeats the name expiry/);
     expect(() => withControls("expiry" as unknown as unknown[])).toThrow(/controls must be an array/);
+  });
+
+  it("review #7: formatControlNumber is the reader's, and a number that cannot print within the cap is refused", () => {
+    const fmt = srv.formatControlNumber as (n: number) => string;
+    for (const n of [0, -0, 5, -2.5, 0.1 + 0.2, 1e21, -1.5e21, 1e-7, -1.5e-7, 123456.789, 1e60, 1e70, Number.NaN]) {
+      expect(fmt(n)).toBe(formatControlNumber(n));
+    }
+    expect(srv.CONTROL_VALUE_CAP).toBe(CONTROL_VALUE_CAP);
+    expect(() => withControls([{ name: "expiry", kind: "number", default: 1e70 }])).toThrow(
+      /default prints as 71 characters; a control value is at most 64/
+    );
+    expect(() => withControls([{ name: "expiry", kind: "number", default: 1, max: 1e70 }])).toThrow(/max prints as/);
+    expect(() => withControls([{ name: "expiry", kind: "number", default: 1, max: 1e60 }])).not.toThrow();
+  });
+
+  it("review #8: a report path with a placeholder says reports take none (not 'add controls')", () => {
+    expect(() =>
+      server.buildViewSpec({ ...gamma, controls: undefined, kind: "report", source: { type: "file", path: "r-{x}.md" } }, [], NOW)
+    ).toThrow(/a report's path takes no placeholders \(\{x\}\)/);
+  });
+
+  it("review #2: the description says a body value is JSON-escaped", () => {
+    expect(server.VIEW_TOOL.description).toMatch(/in a query body it is JSON-escaped/);
   });
 
   it("the tool description carries the gamma sentence; the schema carries `controls`", () => {

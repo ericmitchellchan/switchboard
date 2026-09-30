@@ -156,9 +156,85 @@ export function markSent(file: ViewNotesFile, keys: readonly string[], now: stri
  *
  *  A note's internal line breaks fold to one space so each bullet stays one
  *  line and the message stays the composer's multi-line shape. Pure. */
-export function formatBatch(parentTitle: string, entries: readonly { key: string; text: string }[]): string {
+export function formatBatch(
+  parentTitle: string,
+  entries: readonly { key: string; text: string }[],
+  /** SWIT-111 (review of 9605373, #3): the control SETTING the notes were
+   *  written at (`noteSettingKey` — `expiry=all`); "" = the defaults, and the
+   *  header reads exactly as before. */
+  setting = ""
+): string {
   const lines = entries.map((e) => `- ${e.key}: ${e.text.replace(/\s*\r?\n\s*/g, " ").trim()}`);
-  return [`Chart notes on ${parentTitle.trim()} (${entries.length}):`, ...lines].join("\n");
+  const at = setting.length > 0 ? ` at ${settingLabel(setting)}` : "";
+  return [`Chart notes on ${parentTitle.trim()}${at} (${entries.length}):`, ...lines].join("\n");
+}
+
+// ── Notes per control SETTING (SWIT-111, review of 9605373, #3) ─────────────
+// A deck whose parent source names a control in its FILE NAME
+// (`book-{expiry}.json`) keeps every setting's rows in one directory — one
+// notes.json — so a note is keyed by the deck key AND the setting it was
+// written at: `<key> @ expiry=all`. The DEFAULT setting keeps the bare key,
+// so a notes.json written before controls existed (or a deck with none)
+// reads exactly as it did. The agent reads the key as written.
+
+const SETTING_SEP = " @ ";
+/** A setting string as `controlValuesKey` writes it: `name=value(&name=value)*`. */
+const SETTING_RE = /^[a-z][a-zA-Z0-9_]{0,31}=[^&]*(&[a-z][a-zA-Z0-9_]{0,31}=[^&]*)*$/;
+
+/** The notes.json key for a deck key at a setting ("" = the defaults). Pure. */
+export function noteStorageKey(key: string, setting: string): string {
+  return setting.length > 0 ? `${key}${SETTING_SEP}${setting}` : key;
+}
+
+/** A notes.json key back into its deck key and setting — a key without a
+ *  well-formed setting suffix is the DEFAULT setting's, whole. Pure. */
+export function splitNoteKey(storageKey: string): { key: string; setting: string } {
+  const at = storageKey.lastIndexOf(SETTING_SEP);
+  if (at > 0) {
+    const setting = storageKey.slice(at + SETTING_SEP.length);
+    if (SETTING_RE.test(setting)) return { key: storageKey.slice(0, at), setting };
+  }
+  return { key: storageKey, setting: "" };
+}
+
+/** `expiry=all&width=5` → `expiry=all, width=5` (decoded) for the batch's
+ *  header. Pure. */
+export function settingLabel(setting: string): string {
+  return setting
+    .split("&")
+    .filter((p) => p.length > 0)
+    .map((p) => {
+      const eq = p.indexOf("=");
+      const dec = (s: string) => {
+        try {
+          return decodeURIComponent(s);
+        } catch {
+          return s;
+        }
+      };
+      return eq < 0 ? dec(p) : `${dec(p.slice(0, eq))}=${dec(p.slice(eq + 1))}`;
+    })
+    .join(", ");
+}
+
+/** The unsent notes AT ONE SETTING, in deck order (keys outside the deck
+ *  after, file order) — `key` is the deck key, `storageKey` the notes.json
+ *  key `markSent` stamps. Another setting's notes are never in the batch.
+ *  Pure. */
+export function unsentNotesAt(
+  file: ViewNotesFile,
+  order: readonly string[],
+  setting: string
+): { key: string; storageKey: string; text: string }[] {
+  const out = unsentNotes(file)
+    .map((e) => ({ ...splitNoteKey(e.key), storageKey: e.key, text: e.text }))
+    .filter((e) => e.setting === setting)
+    .map(({ key, storageKey, text }) => ({ key, storageKey, text }));
+  if (order.length > 0) {
+    const rank = new Map(order.map((k, i) => [k, i]));
+    out.sort((a, b) => (rank.get(a.key) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.key) ?? Number.MAX_SAFE_INTEGER));
+  }
+  return out;
 }
 
 /** The wording the disabled button and the rejection carry. */

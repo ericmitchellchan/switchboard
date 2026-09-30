@@ -146,6 +146,7 @@ import {
   controlValuesKey,
   effectiveControlValues,
   parseViewControls,
+  placeholdersIn,
   substituteControls,
   type ControlValues,
   type ViewControl,
@@ -1371,26 +1372,33 @@ export function resolveDrill(
   const raw = key.trim();
   if (raw.length === 0 || raw.length > DRILL_KEY_CAP) return { spec: null, error: "the drill key is empty or too long" };
   const fill = (s: string, v: string) => s.split("{key}").join(v);
-  // SWIT-111: the parent's control values first (the `{key}` left in place),
-  // by the same per-source rule as the parent's own source — a value can no
-  // more leave the working directory in a child's path than in the parent's.
-  const inherited = effectiveControlValues(parent.controls, controlValues);
-  const templated = substituteControls(drill.source, inherited, CONTROL_SUBSTITUTION, ["key"]);
-  if (templated.error !== null) return { spec: null, error: templated.error };
-  const template = templated.source;
-  let source: ViewSource;
-  if (template.type === "file") {
-    const component = drillPathKey(raw);
-    if (component === null) {
-      return { spec: null, error: `the key "${raw}" cannot name a file inside the thread's working directory` };
-    }
-    source = { type: "file", path: fill(template.path, component) };
-  } else {
-    const url = fill(template.url, encodeURIComponent(raw));
-    if (!isLocalBackendUrl(url)) return { spec: null, error: "the drill's query url is not a local backend" };
-    source = { type: "query", url };
-    if (template.body) source.body = fill(template.body, encodeURIComponent(raw));
+  // SWIT-111: the parent's control values AND the key, substituted in ONE
+  // pass by the same per-source rule as the parent's own source (a value can
+  // no more leave the working directory in a child's path than in the
+  // parent's; one pass, so a value that spells `{key}` — or a key that
+  // spells `{expiry}` — is never substituted a second time). Only the
+  // controls the template NAMES are inherited (review of 9605373, #6): a
+  // parent knob the child's source ignores does not split the child's
+  // identity or its pin scope.
+  const named = new Set(placeholdersIn(drill.source.type === "file" ? drill.source.path : `${drill.source.url}${drill.source.body ?? ""}`));
+  const all = effectiveControlValues(parent.controls, controlValues);
+  const inherited: ControlValues = {};
+  for (const k of Object.keys(all)) if (named.has(k)) inherited[k] = all[k];
+  if (drill.source.type === "file" && drillPathKey(raw) === null) {
+    return { spec: null, error: `the key "${raw}" cannot name a file inside the thread's working directory` };
   }
+  // The key rides as one more value: a file component (drillPathKey), a url
+  // component (URL-encoded) or a JSON string's inside in a body (escaped —
+  // review of 9605373, #2: it was URL-encoded there, which a JSON body
+  // received as `MNQ%20short`).
+  const resolved = substituteControls(drill.source, { ...inherited, key: raw }, CONTROL_SUBSTITUTION);
+  if (resolved.error !== null) {
+    return {
+      spec: null,
+      error: resolved.error.startsWith("the view's query url") ? "the drill's query url is not a local backend" : resolved.error,
+    };
+  }
+  const source: ViewSource = resolved.source;
   const spec: ViewSpec = {
     id: `${parent.id}~${drillPathKey(raw) ?? "key"}`,
     kind: drill.kind,
@@ -1615,8 +1623,15 @@ export type ViewControlsRead = {
   /** What the user typed, not yet normalized — a number box shows this
    *  while it has focus, so a clamp never fights the keystroke. */
   draft: ControlValues;
-  /** The values the rows were asked at (after the debounce; normalized). */
+  /** The values the NEXT load asks at (after the debounce; normalized) —
+   *  what chooses the source, nothing else. */
   applied: ControlValues;
+  /** The values the ROWS ON SCREEN were loaded at — recorded in the same
+   *  step as the rows (review of 9605373, #1). The pin scope, a drill, keep
+   *  and `spec` read THIS: while a new setting is in flight, and after a
+   *  failed load or a refused substitution (old rows kept), they still
+   *  describe the old rows. null before the first rows arrive. */
+  loaded: ControlValues | null;
   set: (name: string, value: string) => void;
   /** The source the latest load resolved to — null when substitution
    *  refused it (the error says why). */
@@ -1634,7 +1649,7 @@ const NO_CONTROLS: ViewControl[] = [];
 export function useControlState(
   defs: ViewControl[] | undefined,
   seed: ControlValues | null
-): Omit<ViewControlsRead, "source"> {
+): Omit<ViewControlsRead, "source" | "loaded"> {
   const [initial] = useState<ControlValues>(() => seed ?? NO_VALUES);
   const [raw, setRaw] = useState<ControlValues>(initial);
   const [appliedRaw, setAppliedRaw] = useState<ControlValues>(initial);
@@ -1674,6 +1689,135 @@ function useResolvedSource(spec: ViewSpec | null, values: ControlValues): Resolv
     stableRef.current = { key, spec, value: resolved };
   }
   return stableRef.current.value;
+}
+
+// ── The rows on screen (SWIT-111 review of 9605373, #1 and #4) ──────────────
+
+/** What a view's data load holds: the rows ON SCREEN, their meta, the
+ *  control values those rows were loaded at (`loaded` — recorded in the SAME
+ *  step as the rows), and the last load's error (shown over the rows when
+ *  there are any). */
+export type ViewLoadState = {
+  rows: ViewRow[] | null;
+  meta: ViewMeta | null;
+  loaded: ControlValues | null;
+  error: string | null;
+};
+
+export const EMPTY_VIEW_LOAD: ViewLoadState = { rows: null, meta: null, loaded: null, error: null };
+
+export const NOT_ROWS_ERROR = "the source did not contain rows (expected a JSON array of objects)";
+
+/** One step of a load:
+ *   · `start`  — a load began: the error clears, the rows STAY;
+ *   · `read`   — the source answered: rows → the new rows AND `loaded` → the
+ *     values they were asked at; an answer that is not rows is an ERROR over
+ *     the last good rows (#4 — it used to blank the chart);
+ *   · `failed` — the read failed or the substitution was refused: an error,
+ *     the rows and `loaded` UNCHANGED (#1 — the pin scope, a drill, keep and
+ *     `spec` keep describing the rows actually on screen);
+ *   · `retag`  — the resolved source did not change (a knob only a panel or
+ *     the drill names): the rows on screen ARE at the new values.
+ *  Returns the SAME object when nothing changes. Pure. */
+export type ViewLoadOutcome =
+  | { kind: "start" }
+  | { kind: "read"; raw: string; values: ControlValues }
+  | { kind: "failed"; error: string }
+  | { kind: "retag"; values: ControlValues };
+
+export function nextLoadState(prev: ViewLoadState, outcome: ViewLoadOutcome): ViewLoadState {
+  switch (outcome.kind) {
+    case "start":
+      return prev.error === null ? prev : { ...prev, error: null };
+    case "read": {
+      const parsed = parseViewPayload(outcome.raw);
+      if (parsed === null) return { ...prev, error: NOT_ROWS_ERROR };
+      return { rows: parsed.rows, meta: parsed.meta, loaded: outcome.values, error: null };
+    }
+    case "failed":
+      return prev.error === outcome.error ? prev : { ...prev, error: outcome.error };
+    case "retag":
+      if (prev.rows === null || controlValuesKey(prev.loaded) === controlValuesKey(outcome.values)) return prev;
+      return { ...prev, loaded: outcome.values };
+  }
+}
+
+/** THE data load both hooks share (the standalone view and an embedded
+ *  report block): once per BUILD (id + builtAt + the RESOLVED source) — an
+ *  agent `update` moves builtAt, a knob that moves the resolved source is a
+ *  new build too (Eric's gesture, like re-run); otherwise a query never
+ *  refetches. The rows stay on screen until new ones arrive (a failed load,
+ *  a refused substitution or a non-rows answer keeps them under an error),
+ *  and `loaded` changes only with them. */
+function useViewData(
+  owner: string,
+  spec: ViewSpec | null,
+  applied: ControlValues
+): { data: ViewLoadState; loading: boolean; rerun: () => void; source: ViewSource | null } {
+  const [data, setData] = useState<ViewLoadState>(EMPTY_VIEW_LOAD);
+  const [loading, setLoading] = useState(false);
+  const loadedForRef = useRef<string | null>(null);
+  const loadSeqRef = useRef(0);
+  const resolved = useResolvedSource(spec, applied);
+  const appliedRef = useRef(applied);
+  appliedRef.current = applied;
+  const appliedKey = controlValuesKey(applied);
+
+  const load = useCallback(
+    async (source: ViewSource, values: ControlValues) => {
+      const seq = ++loadSeqRef.current;
+      setLoading(true);
+      setData((p) => nextLoadState(p, { kind: "start" }));
+      try {
+        const raw = await fetchViewRaw(owner, source);
+        if (seq !== loadSeqRef.current) return;
+        setData((p) => nextLoadState(p, { kind: "read", raw, values }));
+      } catch (err) {
+        if (seq !== loadSeqRef.current) return;
+        const error = String(err instanceof Error ? err.message : err);
+        setData((p) => nextLoadState(p, { kind: "failed", error }));
+      } finally {
+        if (seq === loadSeqRef.current) setLoading(false);
+      }
+    },
+    [owner]
+  );
+
+  useEffect(() => {
+    // SWIT-73: a report has no rows — its markdown loads through useView's
+    // poll, and each embedded block loads its own data.
+    if (!spec || spec.kind === "report" || !resolved) {
+      loadedForRef.current = null;
+      loadSeqRef.current++;
+      setLoading(false);
+      setData((p) => (p === EMPTY_VIEW_LOAD ? p : EMPTY_VIEW_LOAD));
+      return;
+    }
+    const buildKey = `${spec.id}:${spec.builtAt}:${
+      resolved.error !== null ? `!${resolved.error}` : viewSourceKey(resolved.source)
+    }`;
+    if (loadedForRef.current === buildKey) {
+      // Same source at new values (a knob only a panel or the drill names):
+      // nothing to read — the rows on screen are at these values.
+      if (resolved.error === null) setData((p) => nextLoadState(p, { kind: "retag", values: appliedRef.current }));
+      return;
+    }
+    loadedForRef.current = buildKey;
+    if (resolved.error !== null) {
+      loadSeqRef.current++;
+      setLoading(false);
+      const error = resolved.error;
+      setData((p) => nextLoadState(p, { kind: "failed", error }));
+      return;
+    }
+    void load(resolved.source, appliedRef.current);
+  }, [spec, resolved, load, appliedKey]);
+
+  const rerun = useCallback(() => {
+    if (spec && spec.kind !== "report" && resolved?.source) void load(resolved.source, appliedRef.current);
+  }, [spec, resolved, load]);
+
+  return { data, loading, rerun, source: resolved?.source ?? null };
 }
 
 export type ViewRead = {
@@ -1716,18 +1860,10 @@ export function useView(
 ): ViewRead {
   const [spec, setSpec] = useState<ViewSpec | null>(null);
   const [specError, setSpecError] = useState<string | null>(null);
-  const [rows, setRows] = useState<ViewRow[] | null>(null);
-  const [meta, setMeta] = useState<ViewMeta | null>(null);
   const [text, setText] = useState<string | null>(null);
-  const [dataError, setDataError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [textError, setTextError] = useState<string | null>(null);
   const lastSpecRawRef = useRef<string | null>(null);
   const lastTextRef = useRef<string | null>(null);
-  // WHICH spec build + resolved source the loaded rows belong to — data
-  // reloads when the agent re-shows (builtAt moves) or a knob moves the
-  // resolved source (SWIT-111); a query never refetches on a timer.
-  const loadedForRef = useRef<string | null>(null);
-  const loadSeqRef = useRef(0);
   // SWIT-111: a child's inherited values, read inside the spec tick (the
   // effects key on their stable string, not the object).
   const inheritedKey = drillKey !== null ? controlValuesKey(controls) : "";
@@ -1738,13 +1874,10 @@ export function useView(
   useEffect(() => {
     lastSpecRawRef.current = null;
     lastTextRef.current = null;
-    loadedForRef.current = null;
     setSpec(null);
     setSpecError(null);
-    setRows(null);
-    setMeta(null);
     setText(null);
-    setDataError(null);
+    setTextError(null);
   }, [owner, viewId, drillKey, block, inheritedKey]);
 
   useEffect(() => {
@@ -1829,10 +1962,10 @@ export function useView(
         if (cancelled || raw === lastTextRef.current) return;
         lastTextRef.current = raw;
         setText(raw);
-        setDataError(null);
+        setTextError(null);
       } catch (err) {
         if (!cancelled && lastTextRef.current === null) {
-          setDataError(String(err instanceof Error ? err.message : err));
+          setTextError(String(err instanceof Error ? err.message : err));
         }
       }
     };
@@ -1848,64 +1981,7 @@ export function useView(
   // none to draw — its applied values are the ones it inherited.
   const knobs = useControlState(spec?.controls, drillKey === null ? controls : null);
   const applied = spec?.inheritedControls ?? knobs.applied;
-  const resolved = useResolvedSource(spec, applied);
-
-  const load = useCallback(
-    async (source: ViewSource) => {
-      const seq = ++loadSeqRef.current;
-      setLoading(true);
-      setDataError(null);
-      try {
-        const raw = await fetchViewRaw(owner, source);
-        if (seq !== loadSeqRef.current) return;
-        const parsed = parseViewPayload(raw);
-        if (parsed === null) {
-          setDataError("the source did not contain rows (expected a JSON array of objects)");
-          setRows(null);
-          setMeta(null);
-        } else {
-          setRows(parsed.rows);
-          setMeta(parsed.meta);
-        }
-      } catch (err) {
-        if (seq !== loadSeqRef.current) return;
-        setDataError(String(err instanceof Error ? err.message : err));
-        // Keep the last good rows if any — degraded beats blanked.
-      } finally {
-        if (seq === loadSeqRef.current) setLoading(false);
-      }
-    },
-    [owner]
-  );
-
-  // Load data once per BUILD (id + builtAt + the RESOLVED source): an agent
-  // `update` moves builtAt (millisecond ISO), so the open tab reloads — file
-  // and query alike, since the update IS a fresh declaration; a knob that
-  // moves the resolved source reloads too (SWIT-111 — Eric's gesture, like
-  // re-run). Otherwise a query never refetches. The previous rows stay on
-  // screen until the new ones arrive; a refused substitution reads NOTHING
-  // and says why.
-  useEffect(() => {
-    // SWIT-73: a report has no rows — its markdown loads through the poll
-    // above, and each embedded view loads its own data (useInlineViewData).
-    if (!spec || spec.kind === "report" || !resolved) return;
-    const buildKey = `${spec.id}:${spec.builtAt}:${
-      resolved.error !== null ? `!${resolved.error}` : viewSourceKey(resolved.source)
-    }`;
-    if (loadedForRef.current === buildKey) return;
-    loadedForRef.current = buildKey;
-    if (resolved.error !== null) {
-      loadSeqRef.current++;
-      setLoading(false);
-      setDataError(resolved.error);
-      return;
-    }
-    void load(resolved.source);
-  }, [spec, resolved, load]);
-
-  const rerun = useCallback(() => {
-    if (spec && spec.kind !== "report" && resolved?.source) void load(resolved.source);
-  }, [spec, resolved, load]);
+  const { data, loading, rerun, source } = useViewData(owner, spec, applied);
 
   const controlsRead = useMemo<ViewControlsRead>(
     () => ({
@@ -1913,17 +1989,18 @@ export function useView(
       shown: knobs.shown,
       draft: knobs.draft,
       applied,
+      loaded: data.loaded,
       set: knobs.set,
-      source: resolved?.source ?? null,
+      source,
     }),
-    [knobs.defs, knobs.shown, knobs.draft, applied, knobs.set, resolved]
+    [knobs.defs, knobs.shown, knobs.draft, applied, data.loaded, knobs.set, source]
   );
 
   return {
     spec,
-    error: specError ?? dataError,
-    rows,
-    meta,
+    error: specError ?? data.error ?? textError,
+    rows: data.rows,
+    meta: data.meta,
     text,
     loading,
     rerun,
@@ -1944,74 +2021,15 @@ export type InlineViewData = {
   controls: ViewControlsRead;
 };
 
-/** Load an EMBEDDED view's data — the same rules as the main hook: once per
- *  build (id + builtAt + the resolved source; the report's `op: update`
- *  moves builtAt for every block at once, a knob moves the source), `rerun`
- *  is Eric's gesture, a failed re-read keeps the last good rows. The spec
- *  arrives already derived (`parseInlineViewSpec`); null = nothing to load. */
+/** Load an EMBEDDED view's data — the same load as the main hook
+ *  (`useViewData`): once per build (id + builtAt + the resolved source; the
+ *  report's `op: update` moves builtAt for every block at once, a knob moves
+ *  the source), `rerun` is Eric's gesture, a failed re-read keeps the last
+ *  good rows. The spec arrives already derived (`parseInlineViewSpec`); null
+ *  = nothing to load. */
 export function useInlineViewData(owner: string, spec: ViewSpec | null): InlineViewData {
-  const [rows, setRows] = useState<ViewRow[] | null>(null);
-  const [meta, setMeta] = useState<ViewMeta | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const loadedForRef = useRef<string | null>(null);
-  const loadSeqRef = useRef(0);
   const knobs = useControlState(spec?.controls, null);
-  const resolved = useResolvedSource(spec, knobs.applied);
-
-  const load = useCallback(
-    async (source: ViewSource) => {
-      const seq = ++loadSeqRef.current;
-      setLoading(true);
-      setError(null);
-      try {
-        const raw = await fetchViewRaw(owner, source);
-        if (seq !== loadSeqRef.current) return;
-        const parsed = parseViewPayload(raw);
-        if (parsed === null) {
-          setError("the source did not contain rows (expected a JSON array of objects)");
-          setRows(null);
-          setMeta(null);
-        } else {
-          setRows(parsed.rows);
-          setMeta(parsed.meta);
-        }
-      } catch (err) {
-        if (seq !== loadSeqRef.current) return;
-        setError(String(err instanceof Error ? err.message : err));
-        // Keep the last good rows if any — degraded beats blanked.
-      } finally {
-        if (seq === loadSeqRef.current) setLoading(false);
-      }
-    },
-    [owner]
-  );
-
-  useEffect(() => {
-    if (!spec || spec.kind === "report" || !resolved) {
-      loadedForRef.current = null;
-      setRows(null);
-      setMeta(null);
-      setError(null);
-      return;
-    }
-    const buildKey = `${spec.id}:${spec.builtAt}:${
-      resolved.error !== null ? `!${resolved.error}` : viewSourceKey(resolved.source)
-    }`;
-    if (loadedForRef.current === buildKey) return;
-    loadedForRef.current = buildKey;
-    if (resolved.error !== null) {
-      loadSeqRef.current++;
-      setLoading(false);
-      setError(resolved.error);
-      return;
-    }
-    void load(resolved.source);
-  }, [spec, resolved, load]);
-
-  const rerun = useCallback(() => {
-    if (spec && spec.kind !== "report" && resolved?.source) void load(resolved.source);
-  }, [spec, resolved, load]);
+  const { data, loading, rerun, source } = useViewData(owner, spec, knobs.applied);
 
   const controls = useMemo<ViewControlsRead>(
     () => ({
@@ -2019,13 +2037,14 @@ export function useInlineViewData(owner: string, spec: ViewSpec | null): InlineV
       shown: knobs.shown,
       draft: knobs.draft,
       applied: knobs.applied,
+      loaded: data.loaded,
       set: knobs.set,
-      source: resolved?.source ?? null,
+      source,
     }),
-    [knobs.defs, knobs.shown, knobs.draft, knobs.applied, knobs.set, resolved]
+    [knobs.defs, knobs.shown, knobs.draft, knobs.applied, data.loaded, knobs.set, source]
   );
 
-  return { rows, meta, error, loading, rerun, controls };
+  return { rows: data.rows, meta: data.meta, error: data.error, loading, rerun, controls };
 }
 
 // ── Small multiples (SWIT-70): each panel's rows ─────────────────────────────
@@ -2065,15 +2084,18 @@ export function useViewPanels(
   values: ControlValues | null = null
 ): PanelData[] {
   const [data, setData] = useState<PanelData[]>(NO_PANELS);
-  const loadedForRef = useRef<string | null>(null);
-  const seqRef = useRef(0);
+  // One load key and one sequence PER PANEL (review of 9605373, #5): a knob
+  // that moves one panel's source reloads that panel alone.
+  const keysRef = useRef<string[]>([]);
+  const seqsRef = useRef<number[]>([]);
   const valuesKey = controlValuesKey(values);
   const valuesRef = useRef(values);
   valuesRef.current = values;
   useEffect(() => {
     const panels = spec?.panels;
     if (!spec || !panels || panels.length === 0) {
-      loadedForRef.current = null;
+      keysRef.current = [];
+      seqsRef.current = seqsRef.current.map((n) => n + 1);
       setData((prev) => (prev.length === 0 ? prev : NO_PANELS));
       return;
     }
@@ -2083,24 +2105,27 @@ export function useViewPanels(
     // not fetch live data under a "frozen" label). Same guard as useView.
     if (owner.length === 0) return;
     const resolved = resolvePanelSources(spec, valuesRef.current);
-    const buildKey = `${spec.id}:${spec.builtAt}:${resolved
-      .map((p) => (p.source !== null ? viewSourceKey(p.source) : `!${p.error}`))
-      .join("|")}`;
-    if (loadedForRef.current === buildKey) return;
-    loadedForRef.current = buildKey;
-    const seq = ++seqRef.current;
+    const prevKeys = keysRef.current;
+    const nextKeys = panelLoadKeys(spec, resolved);
+    const reload = panelsToReload(prevKeys, nextKeys);
+    keysRef.current = nextKeys;
+    if (reload.length === 0 && prevKeys.length === nextKeys.length) return;
+    const seqs = resolved.map((_, i) => (seqsRef.current[i] ?? 0) + (reload.includes(i) ? 1 : 0));
+    seqsRef.current = seqs;
     // Keep what each panel showed (same slot, same title) until its new rows
-    // arrive — a knob never blanks the multiples.
+    // arrive — a knob never blanks the multiples; an untouched panel keeps
+    // everything (rows and error) as it was.
     setData((prev) =>
-      resolved.map((p, i) => ({
-        title: p.title,
-        rows: prev[i]?.title === p.title ? prev[i].rows : null,
-        error: p.error,
-      }))
+      resolved.map((p, i) => {
+        const kept = prev[i]?.title === p.title ? prev[i] : null;
+        if (kept && !reload.includes(i)) return kept;
+        return { title: p.title, rows: kept ? kept.rows : null, error: p.error };
+      })
     );
     resolved.forEach((p, i) => {
-      if (p.source === null) return;
+      if (p.source === null || !reload.includes(i)) return;
       const source = p.source;
+      const seq = seqs[i];
       void (async () => {
         let next: Partial<PanelData>;
         try {
@@ -2113,10 +2138,31 @@ export function useViewPanels(
         } catch (err) {
           next = { error: String(err instanceof Error ? err.message : err) };
         }
-        if (seq !== seqRef.current) return;
+        if (seqsRef.current[i] !== seq) return;
         setData((prev) => prev.map((d, j) => (j === i ? { ...d, ...next } : d)));
       })();
     });
   }, [owner, spec, active, valuesKey]);
   return data;
+}
+
+/** Each panel's LOAD KEY — its build (id + builtAt), slot, title and resolved
+ *  source (or refusal). A panel reloads exactly when its OWN key moves
+ *  (review of 9605373, #5). Pure. */
+export function panelLoadKeys(
+  spec: Pick<ViewSpec, "id" | "builtAt">,
+  resolved: readonly { title: string; source: ViewSource | null; error: string | null }[]
+): string[] {
+  return resolved.map(
+    (p, i) => `${spec.id}:${spec.builtAt}:${i}:${p.title}:${p.source !== null ? viewSourceKey(p.source) : `!${p.error}`}`
+  );
+}
+
+/** The panel slots whose key changed, or are new — the ones to reload. Pure. */
+export function panelsToReload(prev: readonly string[], next: readonly string[]): number[] {
+  const out: number[] = [];
+  next.forEach((k, i) => {
+    if (prev[i] !== k) out.push(i);
+  });
+  return out;
 }

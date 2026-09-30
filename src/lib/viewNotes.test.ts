@@ -26,6 +26,10 @@ import {
   batchSendTarget,
   BATCH_NOT_LIVE,
   __resetViewNotesForTests,
+  noteStorageKey,
+  splitNoteKey,
+  settingLabel,
+  unsentNotesAt,
 } from "./viewNotes";
 
 const T0 = "2026-09-08T10:00:00.000Z";
@@ -121,6 +125,39 @@ describe("formatBatch — the one message the thread receives", () => {
         { key: "2026-02-20", text: "held\n the counter " },
       ])
     ).toBe("Chart notes on gamma deck (2):\n- 2026-02-19: chase, no edge\n- 2026-02-20: held the counter");
+  });
+
+  it("SWIT-111 review #3: names the control SETTING the notes were made at", () => {
+    expect(formatBatch("gamma deck", [{ key: "SPX", text: "flat" }], "expiry=all&width=5")).toBe(
+      "Chart notes on gamma deck at expiry=all, width=5 (1):\n- SPX: flat"
+    );
+    expect(formatBatch("gamma deck", [{ key: "SPX", text: "flat" }], "")).toBe("Chart notes on gamma deck (1):\n- SPX: flat");
+    expect(settingLabel("note=a%20b")).toBe("note=a b");
+  });
+});
+
+describe("notes per control setting (SWIT-111 review #3)", () => {
+  it("the default setting keeps the bare key — an existing notes.json reads as before", () => {
+    expect(noteStorageKey("2026-02-19", "")).toBe("2026-02-19");
+    expect(noteStorageKey("2026-02-19", "expiry=all")).toBe("2026-02-19 @ expiry=all");
+    expect(splitNoteKey("2026-02-19 @ expiry=all")).toEqual({ key: "2026-02-19", setting: "expiry=all" });
+    expect(splitNoteKey("2026-02-19")).toEqual({ key: "2026-02-19", setting: "" });
+    // A key that merely contains ` @ ` without a well-formed setting is a
+    // default-setting key, whole.
+    expect(splitNoteKey("me @ home")).toEqual({ key: "me @ home", setting: "" });
+  });
+
+  it("the batch at one setting carries ONLY that setting's notes, in deck order, with storage keys to stamp", () => {
+    let f = emptyViewNotes();
+    f = setNote(f, "b", "old note", "2026-09-30T10:00:00.000Z"); // written before controls existed
+    f = setNote(f, noteStorageKey("a", "expiry=all"), "at all", "2026-09-30T10:01:00.000Z");
+    f = setNote(f, noteStorageKey("b", "expiry=all"), "b at all", "2026-09-30T10:02:00.000Z");
+    expect(unsentNotesAt(f, ["a", "b"], "")).toEqual([{ key: "b", storageKey: "b", text: "old note" }]);
+    expect(unsentNotesAt(f, ["b", "a"], "expiry=all")).toEqual([
+      { key: "b", storageKey: "b @ expiry=all", text: "b at all" },
+      { key: "a", storageKey: "a @ expiry=all", text: "at all" },
+    ]);
+    expect(unsentNotesAt(f, ["a"], "expiry=front&width=2")).toEqual([]);
   });
 });
 

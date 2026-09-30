@@ -13,9 +13,14 @@
 //     `drillPathKey` rule (`[A-Za-z0-9._-]`, everything else `_`; `.` / `..`
 //     / empty REFUSED), so no value can add a separator or a parent hop. A
 //     refused value is a plain error on the view; nothing is read.
-//   · QUERY url and body — the value is URL-encoded, and the url is re-checked
-//     against the loopback rule AFTER substitution (the caller passes that
-//     predicate in, so this module imports nothing).
+//   · QUERY url — the value is URL-encoded, and the url is re-checked against
+//     the loopback rule AFTER substitution (the caller passes that predicate
+//     in, so this module imports nothing).
+//   · QUERY body — the body is JSON, so the value is JSON-string-ESCAPED
+//     (`jsonStringEscape`: quotes, backslashes, control characters), never
+//     URL-encoded — `front month` arrives as `front month`, not
+//     `front%20month` (review of 9605373, #2; a drill's `{key}` in a body
+//     follows the same rule since the same review).
 //   The Rust `read_view_data` / `read_project_view_data` guards stay the last
 //   line for a file; nothing here widens what a view may read.
 //
@@ -57,8 +62,17 @@ export const CONTROL_NAME_RE = /^[a-z][a-zA-Z0-9_]{0,31}$/;
 /** `{key}` belongs to a drill template — never a control's name. */
 export const RESERVED_CONTROL_NAMES: readonly string[] = ["key"];
 /** A value longer than this is not a value (the longest legal one is an
- *  option ≤ 60 chars, or a plainly-printed number). */
+ *  option ≤ 60 chars). A number whose PLAIN form is longer (1e70 prints 71
+ *  digits) is refused the same way — its control drops at the parse, a typed
+ *  one falls back to the default; the server refuses such a default, min or
+ *  max by name (review of 9605373, #7). */
 export const CONTROL_VALUE_CAP = 64;
+
+/** A value as the inside of a JSON string literal (a query BODY is JSON):
+ *  quotes, backslashes and control characters escaped. Pure. */
+export function jsonStringEscape(v: string): string {
+  return JSON.stringify(v).slice(1, -1);
+}
 
 /** Every `{name}` in a template, in order, duplicates kept once. */
 const PLACEHOLDER_RE = /\{([a-z][a-zA-Z0-9_]{0,31})\}/g;
@@ -163,7 +177,11 @@ export function parseViewControls(raw: unknown): ViewControl[] {
       }
       const stepRaw = c.step === undefined || c.step === null ? null : finite(c.step);
       const step = stepRaw !== null && stepRaw > 0 ? stepRaw : undefined;
-      const num: ViewControl = { name, kind: "number", default: clampControlNumber(d, min, max) };
+      const clamped = clampControlNumber(d, min, max);
+      // A number whose plain form cannot be a value (> CONTROL_VALUE_CAP)
+      // drops the control — its default could never reach a source.
+      if ([clamped, min, max].some((v) => v !== undefined && formatControlNumber(v).length > CONTROL_VALUE_CAP)) continue;
+      const num: ViewControl = { name, kind: "number", default: clamped };
       if (min !== undefined) num.min = min;
       if (max !== undefined) num.max = max;
       if (step !== undefined) num.step = step;
@@ -199,7 +217,10 @@ export function normalizeControlValue(control: ViewControl, raw: unknown): strin
       return control.options.includes(s) ? s : null;
     case "number": {
       const n = finite(s);
-      return n === null ? null : formatControlNumber(clampControlNumber(n, control.min, control.max));
+      if (n === null) return null;
+      const out = formatControlNumber(clampControlNumber(n, control.min, control.max));
+      // 1e70 is a finite number and 71 characters — not a value.
+      return out.length > CONTROL_VALUE_CAP ? null : out;
     }
     case "date":
       return isControlDate(s) ? s : null;
@@ -241,6 +262,25 @@ export function controlPinScope(values: ControlValues | null | undefined): strin
   return key.length > 0 ? `|${key}` : "";
 }
 
+/** THE SETTING a deck note is filed under (review of 9605373, #3): `""`
+ *  when every value is its control's default — so a notes.json written
+ *  before controls existed, or a deck with no controls, reads exactly as it
+ *  did — else `controlValuesKey(values)` (`expiry=all`). Values whose name no
+ *  control declares are ignored. Pure. */
+export function noteSettingKey(values: ControlValues | null | undefined, controls: readonly ViewControl[] | undefined): string {
+  if (!values) return "";
+  const byName = new Map((controls ?? []).map((c) => [c.name, c]));
+  const known: ControlValues = {};
+  let differs = false;
+  for (const k of Object.keys(values)) {
+    const c = byName.get(k);
+    if (!c) continue;
+    known[k] = values[k];
+    if (values[k] !== controlDefault(c)) differs = true;
+  }
+  return differs ? controlValuesKey(known) : "";
+}
+
 /** Tolerant load-gate for values riding on an ARTIFACT (a drilled child's
  *  inherited values): names by the name rule, string values ≤ the value cap,
  *  at most CONTROL_CAP entries. null when nothing survives. Legality against
@@ -269,17 +309,6 @@ export function placeholdersIn(template: string): string[] {
   return out;
 }
 
-/** The placeholders of a template that are neither a declared control nor
- *  one of `allowed` (a drill template's `key`). Pure. */
-export function undeclaredPlaceholders(
-  template: string,
-  controls: readonly ViewControl[] | undefined,
-  allowed: readonly string[] = []
-): string[] {
-  const names = new Set((controls ?? []).map((c) => c.name));
-  return placeholdersIn(template).filter((p) => !names.has(p) && !allowed.includes(p));
-}
-
 /** A source, as the three shapes this module substitutes into. */
 export type ControlSource = { type: "file"; path: string } | { type: "query"; url: string; body?: string };
 
@@ -293,8 +322,9 @@ function fill(template: string, values: ControlValues, encode: (v: string) => st
 
 /** Substitute control values into a source — THE rule, per source type:
  *  a FILE path value through `pathComponent` (viewStore passes
- *  `drillPathKey`; null = refused), a QUERY url/body value URL-encoded, the
- *  url then re-checked with `isLoopback` (viewStore's `isLocalBackendUrl`).
+ *  `drillPathKey`; null = refused), a QUERY url value URL-encoded and the url
+ *  then re-checked with `isLoopback` (viewStore's `isLocalBackendUrl`), a
+ *  query BODY value JSON-string-escaped (the body is JSON).
  *  `values` must already be normalized (`effectiveControlValues`). A
  *  placeholder left over — one no value names, `{key}` in a main source
  *  included — is an ERROR, never a literal read. `allowed` names
@@ -331,7 +361,7 @@ export function substituteControls(
   const url = fill(source.url, values, encodeURIComponent);
   if (!deps.isLoopback(url)) return { source: null, error: "the view's query url is not a local backend with these settings" };
   const out: ControlSource = { type: "query", url };
-  if (source.body) out.body = fill(source.body, values, encodeURIComponent);
+  if (source.body) out.body = fill(source.body, values, jsonStringEscape);
   return { source: out, error: null };
 }
 

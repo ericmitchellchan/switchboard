@@ -146,7 +146,13 @@ import {
   viewOwnerKey,
 } from "../../lib/viewStore";
 import type { ActiveFilters, LinePoints, ViewControlsRead, ViewMeta, ViewRow, ViewSource, ViewSpec } from "../../lib/viewStore";
-import { controlPinScope, controlsAtValues, effectiveControlValues } from "../../lib/viewControls";
+import {
+  controlPinScope,
+  controlsAtValues,
+  controlValuesKey,
+  effectiveControlValues,
+  noteSettingKey,
+} from "../../lib/viewControls";
 import type { ControlValues, ViewControl } from "../../lib/viewControls";
 import {
   useViewNotes,
@@ -155,7 +161,8 @@ import {
   flushViewNotes,
   markViewNotesSent,
   noteFor,
-  unsentNotes,
+  noteStorageKey,
+  unsentNotesAt,
   formatBatch,
   batchSendTarget,
 } from "../../lib/viewNotes";
@@ -515,10 +522,21 @@ export function ViewChrome({
   // applied values, a drilled child's inherited ones, or (a kept view, no
   // knobs state) the spec's defaults, which keep wrote as the setting.
   const specControls = spec?.controls;
+  // Review of 9605373, #1: the values the rows ON SCREEN were loaded at
+  // (`controls.loaded`, recorded with the rows) — not the knob's newest
+  // value, which only chooses the next source. While a new setting loads,
+  // and after a failed load (old rows kept), everything below still
+  // describes the rows actually drawn. Before the first rows: the applied
+  // values (nothing is drawn to disagree with).
   const appliedControls = useMemo<ControlValues>(
-    () => controls?.applied ?? spec?.inheritedControls ?? effectiveControlValues(specControls, null),
-    [controls?.applied, spec?.inheritedControls, specControls]
+    () => controls?.loaded ?? controls?.applied ?? spec?.inheritedControls ?? effectiveControlValues(specControls, null),
+    [controls?.loaded, controls?.applied, spec?.inheritedControls, specControls]
   );
+  // The knob moved and its rows are still on the way (or never came).
+  const controlsPending =
+    controls !== undefined &&
+    controls.loaded !== null &&
+    controlValuesKey(controls.loaded) !== controlValuesKey(controls.applied);
   // The control values join the scope AFTER the filter suffix: a pin dropped
   // at one setting is filed under it and is not drawn at another.
   const pinScope = useMemo(
@@ -567,8 +585,18 @@ export function ViewChrome({
   const deckSource: ViewSource | null = deckSpec ? parent.controls.source : null;
   const notesDir = deckSource && ownerProject === null ? notesDirOf(deckSource) : null;
   const notes = useViewNotes(threadId, notesDir, active && isDeckChild);
-  const noteText = drillKey !== null ? noteFor(notes.file, drillKey) : "";
-  const unsent = useMemo(() => (isDeckChild ? unsentNotes(notes.file, deck) : []), [isDeckChild, notes.file, deck]);
+  // Review of 9605373, #3: a note is filed under the SETTING the child was
+  // opened at ("" = the defaults — the pre-SWIT-111 key), so a deck whose
+  // settings share a directory (`book-{expiry}.json`) never mixes them.
+  const noteSetting = useMemo(
+    () => (deckSpec ? noteSettingKey(inheritedControls, deckSpec.controls) : ""),
+    [deckSpec, inheritedControls]
+  );
+  const noteText = drillKey !== null ? noteFor(notes.file, noteStorageKey(drillKey, noteSetting)) : "";
+  const unsent = useMemo(
+    () => (isDeckChild ? unsentNotesAt(notes.file, deck, noteSetting) : []),
+    [isDeckChild, notes.file, deck, noteSetting]
+  );
   const [sending, setSending] = useState(false);
   // Where the batch would go (review #1): the deck's OWN thread, launched and
   // with a live session — read from the published thread view so the button
@@ -692,7 +720,8 @@ export function ViewChrome({
           viewArtifactLike(artifact, viewId, {
             block,
             drillKey: hit.key,
-            controls: spec.controls ? appliedControls : null,
+            // Only the controls the child's template names (review #6).
+            controls: resolved.spec.inheritedControls ?? null,
           })
         );
         return;
@@ -803,20 +832,20 @@ export function ViewChrome({
       // store tick): a thread that is not live rejects here, notes unsent.
       if (batchTarget.sessionId === null) throw new Error(batchTarget.reason);
       await flushViewNotes(threadId, notesDir);
-      const entries = unsentNotes(getViewNotes(threadId, notesDir).file, deck);
+      const entries = unsentNotesAt(getViewNotes(threadId, notesDir).file, deck, noteSetting);
       if (entries.length === 0) return;
       // The host composes it: multi-line → ONE bracketed paste, then ONE
       // Enter as its own write (the composer's wire format), so the batch
-      // arrives as one message.
-      await submitToThread(threadId, formatBatch(deckSpec.title, entries));
-      await markViewNotesSent(threadId, notesDir, entries.map((e) => e.key));
+      // arrives as one message — naming the setting the notes were made at.
+      await submitToThread(threadId, formatBatch(deckSpec.title, entries, noteSetting));
+      await markViewNotesSent(threadId, notesDir, entries.map((e) => e.storageKey));
       flashNote(`sent ${entries.length} ${entries.length === 1 ? "note" : "notes"}`);
     } catch (err) {
       flashNote(`not sent — ${String(err instanceof Error ? err.message : err)}`);
     } finally {
       setSending(false);
     }
-  }, [deckSpec, notesDir, sending, threadId, deck, flashNote, batchTarget]);
+  }, [deckSpec, notesDir, sending, threadId, deck, flashNote, batchTarget, noteSetting]);
 
   // ── keep → the scratchpad (decided Q4) ─────────────────────────────────────
   const [keeping, setKeeping] = useState(false);
@@ -827,9 +856,14 @@ export function ViewChrome({
       const stamp = new Date().toISOString().slice(0, 10);
       const relPath = `_scratch/${project}/${spec.id}-${stamp}.view.json`;
       // SWIT-111: the snapshot records the SETTING its rows were loaded at —
-      // each control's default becomes the applied value, so the frozen view
-      // prints it under `spec` (a kept view draws no knobs).
-      const kept = spec.controls ? { ...spec, controls: controlsAtValues(spec.controls, appliedControls) } : spec;
+      // each control's default becomes that value, so the frozen view prints
+      // it under `spec` (a kept view draws no knobs). A drilled child's
+      // runtime-only `inheritedControls` is STRIPPED (review #8, decided): it
+      // is never parsed from disk, and the child's source in the snapshot is
+      // already substituted, so the path itself names the setting.
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { inheritedControls: _runtimeOnly, ...onDisk } = spec;
+      const kept = onDisk.controls ? { ...onDisk, controls: controlsAtValues(onDisk.controls, appliedControls) } : onDisk;
       await kbWriteDoc(relPath, JSON.stringify({ spec: kept, rows: rows ?? [] }, null, 2));
       flashNote(`kept — _scratch/${project}/ (promote it from there when it earns a home)`);
     } catch (err) {
@@ -1079,7 +1113,7 @@ export function ViewChrome({
             </>
           )}
         </div>
-        {controls && !frozen && <ControlsRow controls={controls} />}
+        {controls && !frozen && <ControlsRow controls={controls} pending={controlsPending && loading} />}
         {error !== null && rows !== null && (
           // SWIT-111: a failed RE-load (a knob, a re-run) — one line naming
           // what failed; the last good rows stay on screen under it.
@@ -1096,7 +1130,9 @@ export function ViewChrome({
               placeholder={`note for ${drillKey}…`}
               disabled={notesDir === null || !notes.loaded}
               onChange={(e) => {
-                if (notesDir !== null) editViewNote(threadId, notesDir, drillKey, e.target.value);
+                if (notesDir !== null) {
+                  editViewNote(threadId, notesDir, noteStorageKey(drillKey, noteSetting), e.target.value);
+                }
               }}
               onKeyDown={(e) => {
                 // Enter = next card (the loop: write, next, write, next…);
@@ -1156,7 +1192,8 @@ export function ViewChrome({
               onHover={onHoverAnchor}
               owner={owner}
               active={active}
-              controlValues={appliedControls}
+              // Panels load on their own (per panel) — they follow the knob.
+              controlValues={controls?.applied ?? appliedControls}
             />
             {!frozen && pins.marks}
             {hover && hover.fields.length > 0 && !pinMode && (
@@ -1185,7 +1222,7 @@ function shownSourceText(source: ViewSource): string {
 /** The view's controls on their own row: each a dim label + the kit's quiet
  *  select / input at toolbar size. A change shows at once and reloads the
  *  data ~300 ms after the last one (viewStore.useControlState). */
-function ControlsRow({ controls }: { controls: ViewControlsRead }) {
+function ControlsRow({ controls, pending = false }: { controls: ViewControlsRead; pending?: boolean }) {
   if (controls.defs.length === 0) return null;
   return (
     <div style={CONTROLS_ROW_STYLE}>
@@ -1198,6 +1235,18 @@ function ControlsRow({ controls }: { controls: ViewControlsRead }) {
           set={controls.set}
         />
       ))}
+      {pending && (
+        // The knob shows the new pick; the rows below are still the old
+        // setting until the new ones arrive (review of 9605373, #1).
+        <span
+          style={{ color: "var(--text-faint)" }}
+          title={`The rows shown are still at ${Object.entries(controls.loaded ?? {})
+            .map(([k, v]) => `${k}=${v}`)
+            .join(", ")}`}
+        >
+          loading…
+        </span>
+      )}
     </div>
   );
 }
