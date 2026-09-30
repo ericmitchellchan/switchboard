@@ -400,10 +400,13 @@ export type LaunchContextParts = SpawnContextParts & {
   contract: boolean;
   hasBrief: boolean;
   decisions: StandingDecisions | null;
+  /** SWIT-108: the thread's LANE — its name and whether any thread in it
+   *  has written a brief. Null/absent = no lane (the line is unchanged). */
+  lane?: LaneContext | null;
 };
 
 export function assembleLaunchContext(parts: LaunchContextParts, max: number = SPAWN_CONTEXT_MAX): string | null {
-  const head = parts.contract ? pageContractHead(parts.hasBrief) : "";
+  const head = parts.contract ? pageContractHead(parts.hasBrief, parts.lane ?? null) : "";
   const decisionsFor = (named: number) => (parts.contract ? standingDecisionsClause(parts.decisions, named).trim() : "");
   const join = (decisions: string, panel: string | null) =>
     sanitizeForTypedLine(
@@ -604,14 +607,14 @@ export function getScrollbackRootForContext(): string | null {
  *  is composed through `assembleLaunchContext`, which never cuts it. */
 export function buildPageContractLine(
   decisions: StandingDecisions | null = null,
-  opts: { hasBrief?: boolean } = {}
+  opts: { hasBrief?: boolean; lane?: LaneContext | null } = {}
 ): string {
-  return sanitizeForTypedLine(pageContractHead(opts.hasBrief === true) + standingDecisionsClause(decisions), SPAWN_CONTEXT_MAX);
+  return sanitizeForTypedLine(pageContractHead(opts.hasBrief === true, opts.lane ?? null) + standingDecisionsClause(decisions), SPAWN_CONTEXT_MAX);
 }
 
-/** The contract sentences + (SWIT-104) the brief clause — the part of the
- *  launch line that is never cut. */
-function pageContractHead(hasBrief: boolean): string {
+/** The contract sentences + (SWIT-104) the brief clause + (SWIT-108) the
+ *  lane clause — the part of the launch line that is never cut. */
+function pageContractHead(hasBrief: boolean, lane: LaneContext | null = null): string {
   const base =
     "This thread has a PAGE beside the terminal — the one surface the user reads. " +
     "After each turn of work, record what happened with the page tool and keep its " +
@@ -622,9 +625,42 @@ function pageContractHead(hasBrief: boolean): string {
     "undecided ones still open) when the user sends — do not re-ask; resolve settled " +
     "questions every turn. " +
     PANEL_REPORT_SENTENCE;
+  // SWIT-108: a thread in a LANE gets the lane clause instead — it says to
+  // read first too (the read carries the lane), and it is the lane's brief
+  // that is rewritten, so the page-only brief clause would be a second,
+  // narrower instruction about the same act.
+  const laneSentence = lane ? buildLaneSentence(lane) : "";
+  if (laneSentence.length > 0) return `${base} ${laneSentence}`;
   // SWIT-104: the brief clause rides BEFORE the standing decisions — "read
   // the page first" is the instruction the rest depends on.
   return hasBrief ? `${base} ${BRIEF_READ_SENTENCE}` : base;
+}
+
+/** SWIT-108: what the launch line knows about the thread's LANE. */
+export type LaneContext = {
+  name: string;
+  /** Some thread in the lane has written a brief — the lane HAS one. */
+  hasBrief: boolean;
+};
+
+/** THE LANE CLAUSE (SWIT-108, requirements §4): a thread in a lane starts
+ *  from what the lane already knows — `page read` returns its page AND the
+ *  lane's roll-up — and it rewrites the LANE's brief whole, for the whole
+ *  lane (principle 2), at its first seam; with no brief in the lane yet it
+ *  is told to write the first one (requirement 2.3). The lane name is
+ *  sanitized on its own (lanes.ts's charset already survives the sanitizer
+ *  unchanged); an empty one is no clause. Never cut on the launch line. */
+export function buildLaneSentence(lane: LaneContext): string {
+  const name = sanitizeForTypedLine(lane.name, 60);
+  if (name.length === 0) return "";
+  const read =
+    `This thread is in the lane '${name}' — call the page tool (op read) FIRST, before anything else: ` +
+    `it returns this page AND the lane (its brief, findings, newest reports and the other threads' open ` +
+    `questions), so never ask the user for context the lane already holds.`;
+  const brief = lane.hasBrief
+    ? " The newest brief in the lane is the lane's brief: at your first seam rewrite it WHOLE (op brief) for the whole lane, not only your corner of it."
+    : " No thread in the lane has written a brief yet: at your first seam write one (op brief) for the whole lane.";
+  return `${read}${brief}`;
 }
 
 /** SWIT-104: THE PAGE ALREADY HOLDS A BRIEF. "Refresh my memory… where

@@ -12,6 +12,8 @@ import { tabRepoSuffix } from "../lib/tabLabel";
 import { Icon } from "./icons";
 import { TodosButton } from "./BacklogPanel";
 import { noteTitleEditor } from "../lib/threadStore";
+import { navigate } from "../lib/route";
+import type { LaneRef } from "../lib/lanes";
 
 interface TopBarProps {
   route: Route;
@@ -21,6 +23,9 @@ interface TopBarProps {
   /** Whether that session is bound to a thread record — `Thread /` vs
    *  `Shell /`. A plain Ctrl+T shell is not a thread (promote-on-claude). */
   isThread: boolean;
+  /** SWIT-108: the focused thread's LANE — the breadcrumb then reads
+   *  `<lane> / <name>`, the lane a link to its page (requirement 2.1). */
+  lane?: LaneRef | null;
   waitingCount: number;
   /** Clicking the SWITCHBOARD wordmark toggles the left side menu — same
    *  action as Ctrl+Shift+B. */
@@ -57,6 +62,7 @@ export function TopBar({
   route,
   activeSession,
   isThread,
+  lane = null,
   waitingCount,
   onToggleSideMenu,
   onRename,
@@ -142,7 +148,7 @@ export function TopBar({
           fontSize: 12,
         }}
       >
-        <Breadcrumb route={route} activeSession={activeSession} isThread={isThread} onRename={onRename} />
+        <Breadcrumb route={route} activeSession={activeSession} isThread={isThread} lane={lane} onRename={onRename} />
       </div>
 
       {/* Right actions: To-dos · ⇄ side · float · panel. */}
@@ -189,11 +195,13 @@ function Breadcrumb({
   route,
   activeSession,
   isThread,
+  lane,
   onRename,
 }: {
   route: Route;
   activeSession: Session | null;
   isThread: boolean;
+  lane: LaneRef | null;
   onRename?: (id: string, newName: string) => void;
 }) {
   switch (route.screen) {
@@ -212,13 +220,24 @@ function Breadcrumb({
           <span style={BRIGHT}>{route.page}</span>
         </>
       );
+    case "lane":
+      return (
+        <>
+          <span style={DIM}>{route.project} /</span>
+          <span style={BRIGHT}>{route.lane}</span>
+        </>
+      );
     case "terminal": {
       if (!activeSession) return <span style={DIM}>No session</span>;
       const cfg = STATUS_CONFIGS[activeSession.status] || STATUS_CONFIGS.running;
       const suffix = tabRepoSuffix(activeSession.name, activeSession.repo);
       return (
         <>
-          <span style={DIM}>{isThread ? "Thread /" : "Shell /"}</span>
+          {isThread && lane ? (
+            <LaneCrumb lane={lane} />
+          ) : (
+            <span style={DIM}>{isThread ? "Thread /" : "Shell /"}</span>
+          )}
           <PulsingDot color={cfg.color} pulse={cfg.pulse} size={7} />
           <SessionName session={activeSession} onRename={onRename} />
           {suffix && <span style={{ ...DIM, fontSize: 10.5 }}>{suffix}</span>}
@@ -226,6 +245,33 @@ function Breadcrumb({
       );
     }
   }
+}
+
+/** SWIT-108: `<lane> /` in place of `Thread /` for a thread in a lane — the
+ *  lane's name is the link to its page (requirement 2.1). */
+function LaneCrumb({ lane }: { lane: LaneRef }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={() => navigate({ screen: "lane", project: lane.project, lane: lane.name })}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title={`Open the lane ${lane.name} (${lane.project})`}
+      style={{
+        background: "none",
+        border: "none",
+        padding: 0,
+        fontFamily: "var(--font-mono)",
+        fontSize: 12,
+        color: hover ? "var(--text-primary)" : "var(--text-dim)",
+        cursor: "pointer",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {lane.name} /
+    </button>
+  );
 }
 
 /** The session's name, double-click to rename in place — the tab strip's

@@ -29,6 +29,7 @@ const VALID_SCREENS: ReadonlySet<ScreenId> = new Set<ScreenId>([
   "explorer",
   "threads",
   "project",
+  "lane",
 ]);
 
 /** The default route (SWIT-45): a bare URL — a fresh window — lands on Home,
@@ -48,7 +49,7 @@ export const DEFAULT_ROUTE: Route = { screen: "home" };
  *  (`?screen=project&project=lodestar&page=trading&p.instrument=NQ`). A prefix,
  *  not a list — the keys are the page's own — so ownership is a predicate
  *  (`isRouteParamKey`), and every `p.*` key is cleared like the fixed ones. */
-export const ROUTE_PARAM_KEYS = ["screen", "doc", "project", "path", "page", "view"] as const;
+export const ROUTE_PARAM_KEYS = ["screen", "doc", "project", "path", "page", "view", "lane"] as const;
 
 /** The prefix under which a project route's surface params travel. */
 export const ROUTE_SURFACE_PARAM_PREFIX = "p.";
@@ -121,6 +122,15 @@ export function parseRoute(params: URLSearchParams): Route {
         ? { screen: "project", project, page, params: surfaceParams }
         : { screen: "project", project, page };
     }
+    case "lane": {
+      // SWIT-108: project + lane name are both identity (lanes.ts owns the
+      // name rule; a route naming a lane that no longer exists is still a
+      // location — the lane page says so).
+      const project = params.get("project");
+      const lane = params.get("lane");
+      if (!project || !lane) return DEFAULT_ROUTE;
+      return { screen: "lane", project, lane };
+    }
   }
 }
 
@@ -167,6 +177,10 @@ export function routeToParams(route: Route): URLSearchParams {
       }
       break;
     }
+    case "lane":
+      params.set("project", route.project);
+      params.set("lane", route.lane);
+      break;
   }
   return params;
 }
@@ -277,6 +291,15 @@ export function navigate(next: Route): void {
   });
 }
 
+/** REPLACE the current location — no history entry (SWIT-108 review #5: a
+ *  lane rename moves the page to the new name, and `back` must not land on
+ *  the old one). Records it as its screen's last sub-state like navigate. */
+export function replaceRoute(next: Route): void {
+  const s = navState;
+  if (sameRoute(s.route, next)) return;
+  setNavState({ route: next, history: s.history, lastByScreen: { ...s.lastByScreen, [next.screen]: next } });
+}
+
 /** Navigate to a top-level screen, restoring its last sub-state if we've been
  *  there (the side menu uses this so switching away + back doesn't lose the
  *  doc/project you were on). */
@@ -289,7 +312,7 @@ export function navigateToScreen(screen: ScreenId): void {
   // "project" is the one screen whose params are IDENTITY (SWIT-30): with no
   // prior visit there is no page to show, so the jump lands on the default
   // route rather than minting a route the type says cannot exist.
-  if (screen === "project") {
+  if (screen === "project" || screen === "lane") {
     navigate(DEFAULT_ROUTE);
     return;
   }
@@ -344,6 +367,8 @@ export function backTargetLabel(): string | null {
           : "the explorer";
     case "project":
       return `${target.project} / ${target.view !== undefined ? `reports / ${target.view}` : target.page}`;
+    case "lane":
+      return `${target.project} / ${target.lane}`;
   }
 }
 

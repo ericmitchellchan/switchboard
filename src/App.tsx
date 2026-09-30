@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense, Component, Fragment } from "react";
 import { flushSync } from "react-dom";
 import type { CSSProperties, ReactNode } from "react";
-import type { AgentStatus, Artifact, RepoConfig, ScreenId, Session, Thread } from "./types";
+import type { AgentStatus, Artifact, LaneRecord, RepoConfig, ScreenId, Session, Thread } from "./types";
 import { TopBar } from "./components/TabBar";
 import { Home } from "./components/Home";
 import { SessionHeader, DevServerOffer } from "./components/SessionHeader";
@@ -30,6 +30,12 @@ import {
   remapThreadSessionsInStore,
   mergeThreads,
   parseThreadsFromDisk,
+  parseLanesFromDisk,
+  setThreadLane,
+  renameLaneInStore,
+  setLaneArchived,
+  replaceLaneRecords,
+  getLaneRecords,
   createThreadRecord,
   bindThreadSession,
   markThreadLaunched,
@@ -71,8 +77,24 @@ import {
   publishThreadUnread,
   publishThreadQuestions,
   resolveThreadByQuery,
-  activeThreads,
 } from "./lib/threadStore";
+import {
+  briefCountsFor,
+  canonicalLaneName,
+  deriveLanes,
+  findLane,
+  isInLane,
+  laneEditProject,
+  laneFromPage,
+  nextLaneBriefCaches,
+  laneThreadDir,
+  normalizeLaneName,
+  planLaneRename,
+  rollupThreads,
+  threadLane,
+  type LaneRef,
+} from "./lib/lanes";
+import { LaneView } from "./components/LaneView";
 import type { ThreadCreateTarget } from "./lib/threadStore";
 import {
   initPanelStore,
@@ -134,6 +156,7 @@ import {
   type StandingDecisions,
 } from "./lib/agentContext";
 import { runPromotionPass, promotionPassReason, PROMOTION_POLL_MS } from "./lib/threadPromotion";
+import { isOpenItem, isWaitingOnUser, type PageBrief } from "./lib/pageStore";
 import { parsePageFile, parseAnswersFile, parseInboxFile, parseRetractedFile, mergePage, conventionLine, postTimes, countUnreadTimes, nextPassEntry, loadInboxSeen, markInboxSeen, countQuestionStates, requestPageFocus, type ConventionEntry, type ThreadPassEntry } from "./lib/pageStore";
 import { decideTurnSettle, offerNextThing, clearNextThingOffer } from "./lib/nextThing";
 import { getCachedDocList, refreshDocList, resolveWithFreshKbDocs } from "./lib/kb";
@@ -141,7 +164,7 @@ import { requestReportAnchor } from "./lib/reportStore";
 import { viewOwnerKey } from "./lib/viewStore";
 import { parseSetsFile, setArtifactFor } from "./lib/artifactSets";
 import { repoFileOpens, showTargetFor, showsPass } from "./lib/showIntent";
-import { explorerProjects, explorerRead, registerExplorerActions, quickThreadTarget, sessionRepoOptions, useSessionRepos, projectKeyForDir, projectPlaceForDir } from "./lib/explorer";
+import { explorerProjects, explorerRead, registerExplorerActions, quickThreadTarget, sessionRepoOptions, useSessionRepos, projectKeyForDir, projectPlaceForDir, isPathInside } from "./lib/explorer";
 import {
   configureBacklogIO,
   initBacklog,
@@ -166,7 +189,7 @@ import { BackButton } from "./components/BackButton";
 import { ThreadsScreen } from "./components/ThreadsScreen";
 import { ProjectView } from "./components/ProjectView";
 import { findSurface } from "./surfaces/registry";
-import { useRoute, navigate, readRouteFromUrl, getNavState } from "./lib/route";
+import { useRoute, navigate, readRouteFromUrl, getNavState, replaceRoute } from "./lib/route";
 import {
   loadWorkspaceFromStorage,
   buildSavedWorkspace,
@@ -370,6 +393,13 @@ export default function App() {
   // default). The registry fetch is the SAME hook both repo dialogs use; an
   // unanswered registry degrades to no tags, never to a blocked add.
   const sessionRepos = useSessionRepos(config.repos);
+  // SWIT-108: the registry list for callbacks that must not re-arm on it (the
+  // 5s pass reads it to name a thread's project when the agent asks for a
+  // lane). Null until the registry has answered.
+  const registryProjectsRef = useRef(sessionRepos.projects);
+  registryProjectsRef.current = sessionRepos.projects;
+  const registryFailedRef = useRef(sessionRepos.failed);
+  registryFailedRef.current = sessionRepos.failed;
   const backlogProjects = useMemo(
     () => (sessionRepos.projects ?? []).filter((p) => p.status !== "archived").map((p) => p.key),
     [sessionRepos.projects]
@@ -904,6 +934,32 @@ export default function App() {
           log.warn(`Standing decisions unavailable for thread id=${threadId}: ${err}`);
         }
       }
+      // SWIT-108: the thread's LANE, re-read at every spawn like the rest —
+      // the clause says to `page read` first (the read carries the lane's
+      // roll-up) and to keep the LANE's brief; with no brief anywhere in the
+      // lane yet it says to write the first one. "Has a brief" is asked of
+      // every lane thread's page (a failed read counts as none).
+      let lane: { name: string; hasBrief: boolean } | null = null;
+      const laneRef = mcpConfig ? threadLane(getThreadById(threadId) ?? thread) : null;
+      if (laneRef) {
+        // SWIT-108 review #1: a brief counts for the lane only when it was
+        // written FOR it (lanes.briefCountsFor), and the lane record's cached
+        // brief counts too — a lane whose brief-holder moved away or was
+        // deleted still HAS a brief (the clause must not say "write one").
+        const laneNow = findLane(deriveLanes(getThreads(), getLaneRecords()), laneRef);
+        const members = getThreads().filter((t) => isInLane(t, laneRef));
+        const briefs = await Promise.all(
+          members.map((t) =>
+            readThreadFile(t.id, "page.json")
+              .then((raw) => {
+                const b = parsePageFile(raw).brief;
+                return b !== null && laneNow !== null && briefCountsFor(b, t, laneNow);
+              })
+              .catch(() => false)
+          )
+        );
+        lane = { name: laneRef.name, hasBrief: laneNow?.cachedBrief != null || briefs.some(Boolean) };
+      }
       // The page one-liner rides ONLY when the tools actually attached (a
       // sentence about a tool that does not exist would be a lie), and FIRST.
       // The JOINED line is what SPAWN_CONTEXT_MAX caps, so the join is
@@ -915,6 +971,7 @@ export default function App() {
         contract: mcpConfig !== null,
         hasBrief,
         decisions: standing,
+        lane,
       });
       const line = launchCommand({
         chatSessionId: thread.chatSessionId,
@@ -959,6 +1016,10 @@ export default function App() {
          *  gets a `thread` link BEFORE the launch, because the spawn context
          *  finds the item BY that link (re-derived at every spawn). */
         backlogItemId?: string;
+        /** SWIT-108, `+ Thread in this lane`: the lane the thread is born in
+         *  — set BEFORE the launch, because the launch line's lane clause
+         *  reads it off the record. The user's act (`laneSetBy: "user"`). */
+        lane?: LaneRef;
       }
     ) => {
       setNewThreadDialogOpen(false);
@@ -967,6 +1028,7 @@ export default function App() {
       const finalTitle = explicitThreadTitle(title);
       const thread = createThreadRecord({ title: finalTitle, workingDir });
       if (opts?.backlogItemId) backlogAddLink(opts.backlogItemId, { kind: "thread", ref: thread.id });
+      if (opts?.lane) setThreadLane(thread.id, opts.lane, "user");
       // Same re-entrancy gate as handleReviveThread, taken SYNCHRONOUSLY
       // before the first await: the row renders as soon as the record exists,
       // but sessionId stays null until the create below resolves — clicking
@@ -1114,6 +1176,50 @@ export default function App() {
         }
         const project = typeof dir === "string" ? quickThreadTarget(projects, dir, "").project : dir.project;
         await handleCreateThread(project, path, undefined, undefined, title, { backlogItemId: itemId });
+      } finally {
+        creatingThreadRef.current = false;
+      }
+    },
+    [config.repos, handleCreateThread]
+  );
+
+  // SWIT-108 — `+ Thread in this lane` (requirement 4.1): the SAME direct-
+  // create path as the header `+`, targeting the lane's project repo — the
+  // most recently active lane thread's folder when it sits in one of the
+  // project's repos, else the project's first repo (lanes.laneThreadDir) —
+  // with the lane set on the record BEFORE the launch, so the launch line
+  // carries the lane clause and the first `page read` the lane's roll-up.
+  // Title into rename like any `+`. One create at a time, same gate.
+  // Review of ec319c7, #6: every way this starts NOTHING resolves to a
+  // reason the lane page prints — never only a log line.
+  const handleCreateThreadInLane = useCallback(
+    async (lane: LaneRef): Promise<string | null> => {
+      if (creatingThreadRef.current) return "a thread is already being created — a moment";
+      creatingThreadRef.current = true;
+      try {
+        let projects: Awaited<ReturnType<typeof explorerProjects>>;
+        try {
+          projects = await explorerProjects();
+        } catch (err) {
+          log.warn(`Thread in lane ${lane.project}/${lane.name}: the project registry did not answer: ${err}`);
+          return "the project registry could not be read — no thread was started";
+        }
+        const project = projects.find((p) => p.key === lane.project);
+        if (!project) return `${lane.project} is not in the project registry any more — no thread was started`;
+        const members = getThreads().filter((t) => isInLane(t, lane));
+        const dir = laneThreadDir(members, project.repos, isPathInside);
+        if (!dir) {
+          log.warn(`Thread in lane ${lane.project}/${lane.name}: the project has no repo to start in`);
+          return `${lane.project} has no repo to start a thread in`;
+        }
+        const option = sessionRepoOptions(projects, config.repos).find((o) => sameWorkingDir(o.path, dir));
+        const target = { project: lane.project, name: canonicalLaneName(getThreads(), lane.project, lane.name) };
+        if (option) {
+          await handleCreateThread(option.name, option.path, option.color, option.group, "", { renameOnCreate: true, lane: target });
+        } else {
+          await handleCreateThread(threadRepoName(dir), dir, undefined, undefined, "", { renameOnCreate: true, lane: target });
+        }
+        return null;
       } finally {
         creatingThreadRef.current = false;
       }
@@ -1370,6 +1476,65 @@ export default function App() {
     void saveThreadsToDisk();
   }, []);
 
+  // ── Lanes (SWIT-108) ───────────────────────────────────────────────────────
+  // The row menu's `lane…`, the lane page's rename / archive and its `+
+  // Thread in this lane`. Every rule is lanes.ts's; these apply it and flush
+  // the disk mirror at once (the MCP server reads threads.json to learn its
+  // lane — a 30s wait would hand the agent a stale answer).
+
+  /** Put a thread in a lane of ITS project, or take it out (null). Refused
+   *  with the reason for a bad name or a thread in no registry project. */
+  const handleSetThreadLane = useCallback((threadId: string, name: string | null): string | null => {
+    const thread = getThreadById(threadId);
+    if (!thread) return "that thread is gone";
+    if (name === null || name.trim().length === 0) {
+      log.info(`Thread id=${threadId} leaves its lane (user)`);
+      setThreadLane(threadId, null, "user");
+      void saveThreadsToDisk();
+      return null;
+    }
+    const n = normalizeLaneName(name);
+    if (!n.ok) return n.reason;
+    const projects = registryProjectsRef.current;
+    // SWIT-108 review #4: a thread already in a lane stays in THAT lane's
+    // project (frozen when the lane was set) — re-committing a name never
+    // moves it to a same-named lane of another project.
+    const project = laneEditProject(thread, projects ? projectKeyForDir(projects, thread.workingDir) : null);
+    if (!project) {
+      return projects === null
+        ? "the project registry has not loaded yet — try again in a moment"
+        : "this thread's folder is in no registry project, and a lane belongs to a project";
+    }
+    const lane = { project, name: canonicalLaneName(getThreads(), project, n.name) };
+    log.info(`Thread id=${threadId} joins lane ${lane.project}/${lane.name} (user)`);
+    setThreadLane(threadId, lane, "user");
+    void saveThreadsToDisk();
+    return null;
+  }, []);
+
+  const handleRenameLane = useCallback((lane: LaneRef, to: string): string | null => {
+    const plan = planLaneRename(getThreads(), lane.project, lane.name, to);
+    if (!plan.ok) return plan.reason;
+    log.info(`Rename lane ${lane.project}/${lane.name} -> ${plan.name}`);
+    renameLaneInStore(lane, plan.name);
+    void saveThreadsToDisk();
+    // The lane page follows its lane rather than landing on a name that no
+    // longer exists.
+    const route = getNavState().route;
+    // REPLACED, not pushed (review of ec319c7, #5): back must not land on
+    // the old name (a former name still finds the lane — lanes.findLane).
+    if (route.screen === "lane" && route.project === lane.project && isInLane({ lane: route.lane, laneProject: route.project }, lane)) {
+      replaceRoute({ screen: "lane", project: lane.project, lane: plan.name });
+    }
+    return null;
+  }, []);
+
+  const handleSetLaneArchived = useCallback((lane: LaneRef, archived: boolean) => {
+    log.info(`${archived ? "Archive" : "Restore"} lane ${lane.project}/${lane.name}`);
+    setLaneArchived(lane, archived);
+    void saveThreadsToDisk();
+  }, []);
+
   // The composer's `@thread …` form (SWIT-52): resolve the target by title
   // among ACTIVE threads (self excluded), then deliver through the app-side
   // inbox writer. Delivery to the target TERMINAL happens on the inbox poll
@@ -1407,9 +1572,17 @@ export default function App() {
       renameThread: handleRenameThread,
       setThreadArchived: handleSetThreadArchived,
       postToThread: handlePostToThread,
+      setThreadLane: handleSetThreadLane,
+      createThreadInLane: handleCreateThreadInLane,
+      renameLane: handleRenameLane,
+      setLaneArchived: handleSetLaneArchived,
     });
     return () => registerThreadActions(null);
   }, [
+    handleSetThreadLane,
+    handleCreateThreadInLane,
+    handleRenameLane,
+    handleSetLaneArchived,
     handleOpenThread,
     handleReviveThread,
     handleRelaunchThreadWithPageTools,
@@ -1444,6 +1617,9 @@ export default function App() {
   // (`pageStore.nextPassEntry`), because seen is device-local state, not one
   // of the stamped files: a cached count lied for a tick after a tab switch.
   const threadPassCacheRef = useRef(new Map<string, ThreadPassEntry>());
+  // SWIT-108 review #1: each read thread's page brief (null = none), filled
+  // on a re-read like the entry above — what the lane brief cache is fed.
+  const briefByThreadRef = useRef(new Map<string, PageBrief | null>());
   // SWIT-105 — A THREAD NAMES ITSELF. A thread the user never named is
   // `New thread` until someone types a title; the agent's first page THEME
   // already says what it is about. So the pass that reads page.json (stamp
@@ -1479,6 +1655,26 @@ export default function App() {
     },
     [renameSessionLocal]
   );
+  // SWIT-108 — THE AGENT'S LANE. `page.lane` (the server's file) is a
+  // suggestion; `lanes.laneFromPage` is the rule (no lane on the record yet,
+  // the user did not take it out of one, the thread has a project), and the
+  // thread takes the lane as the project already spells it. Returns "retry"
+  // while the registry has not answered (no project can be named yet).
+  const applyPageLane = useCallback((threadId: string, pageLane: string | null): "retry" | "done" => {
+    if (!pageLane) return "done";
+    const thread = getThreadById(threadId);
+    if (!thread || threadLane(thread) !== null || thread.laneSetBy === "user") return "done";
+    const projects = registryProjectsRef.current;
+    // A registry that FAILED will not answer on a later tick either — no
+    // project can be named, so no lane (never a read every 5s forever).
+    if (projects === null) return registryFailedRef.current ? "done" : "retry";
+    const next = laneFromPage(thread, pageLane, projectKeyForDir(projects, thread.workingDir), getThreads());
+    if (next === null) return "done";
+    log.info(`Thread id=${threadId} joins lane ${next.project}/${next.name} (the agent's page)`);
+    setThreadLane(threadId, next, "agent");
+    void saveThreadsToDisk();
+    return "done";
+  }, []);
   useEffect(() => {
     let cancelled = false;
     let busy = false;
@@ -1489,7 +1685,10 @@ export default function App() {
         // SWIT-64: the agent's backlog inbox rides the same pass — one take,
         // folded into backlog.json by the app (the file's only writer).
         await drainBacklogInbox();
-        const threads = activeThreads(getThreads());
+        // SWIT-108: every active thread, plus an ARCHIVED one that is in a
+        // lane — archived is not gone (principle 4): its open questions and
+        // unsent answers still count toward its lane's `· N` in the side menu.
+        const threads = rollupThreads(getThreads(), getLaneRecords());
         const unread: Record<string, number> = {};
         // SWIT-69: open-question counts ride the same pass — the rail row's
         // dim `· N` marker (the filled `?` chip is retired; words, not glyphs).
@@ -1499,6 +1698,10 @@ export default function App() {
         // rail and from Home, not only on the page.
         const questions: Record<string, number> = {};
         const unsent: Record<string, number> = {};
+        // SWIT-108 review #8: what else a lane waits on — requests and items
+        // of Eric's, per thread (lanes.laneWaitingFromCounts is the rule).
+        const requests: Record<string, number> = {};
+        const items: Record<string, number> = {};
         for (const t of threads) {
           const sessionId = t.sessionId;
           const live =
@@ -1542,6 +1745,8 @@ export default function App() {
             }
             if (decision.questions > 0) questions[t.id] = decision.questions;
             if (decision.unsent > 0) unsent[t.id] = decision.unsent;
+            if (decision.items > 0) items[t.id] = decision.items;
+            if (decision.requests > 0) requests[t.id] = decision.requests;
             if (unreadNow > 0) unread[t.id] = unreadNow;
             continue;
           }
@@ -1561,6 +1766,11 @@ export default function App() {
             // SWIT-105: a thread still titled `New thread` takes its name
             // from the first page theme — once, and never over a user's name.
             applyThemeTitle(t.id, pageFile.theme);
+            // SWIT-108: the agent's `page` op `lane` — copied onto the record
+            // only when the record has no lane (the user's choice wins). An
+            // unanswered registry is a retry, not a no: the stamp is left
+            // unmatched so the next tick reads again.
+            if (applyPageLane(t.id, pageFile.lane) === "retry") entry.stamp = -1;
             // SWIT-77: an agent-resolved question is not open either; an
             // answered one with no (or a stale) sentAt is unsent.
             const counts = countQuestionStates(pageFile.questions, parseAnswersFile(answersRaw), parseRetractedFile(retractedRaw));
@@ -1568,6 +1778,11 @@ export default function App() {
             entry.unsent = counts.unsent;
             if (counts.open > 0) questions[t.id] = counts.open;
             if (counts.unsent > 0) unsent[t.id] = counts.unsent;
+            entry.items = pageFile.items.filter((i) => isOpenItem(i) && isWaitingOnUser(i)).length;
+            if (entry.items > 0) items[t.id] = entry.items;
+            // SWIT-108 review #1: the brief this thread holds, for the lane
+            // brief cache below.
+            briefByThreadRef.current.set(t.id, pageFile.brief);
           } catch {
             // a real read error (missing resolves to "") — retry next tick
             entry.stamp = -1;
@@ -1580,6 +1795,8 @@ export default function App() {
             continue;
           }
           if (cancelled) return;
+          entry.requests = posts.filter((p) => p.kind === "request").length;
+          if (entry.requests > 0) requests[t.id] = entry.requests;
           if (posts.length === 0) continue;
           if (isActiveThread) markInboxSeen(t.id);
           entry.postsAt = postTimes(posts);
@@ -1610,9 +1827,23 @@ export default function App() {
         for (const id of [...threadPassCacheRef.current.keys()]) {
           if (!known.has(id)) threadPassCacheRef.current.delete(id);
         }
+        for (const id of [...briefByThreadRef.current.keys()]) {
+          if (!known.has(id)) briefByThreadRef.current.delete(id);
+        }
+        // SWIT-108 review #1: THE LANE BRIEF CACHE. The newest brief a thread
+        // wrote FOR a lane, when newer than the one the lane record holds,
+        // is copied into the record (threads.json's `lanes` — the app's
+        // file; a cache of what a thread wrote, nothing typed in), so the
+        // lane keeps its brief when that thread moves away or is deleted.
+        const all = getThreads();
+        const cached = nextLaneBriefCaches(getLaneRecords(), deriveLanes(all, getLaneRecords()), all, (id) => briefByThreadRef.current.get(id));
+        if (cached !== getLaneRecords()) {
+          replaceLaneRecords(cached);
+          void saveThreadsToDisk();
+        }
         if (!cancelled) {
           publishThreadUnread(unread);
-          publishThreadQuestions(questions, unsent);
+          publishThreadQuestions(questions, unsent, requests, items);
         }
       } finally {
         busy = false;
@@ -3121,12 +3352,20 @@ export default function App() {
       // shell (the claude process died with the app), the transient launched
       // set starts empty: after any app restart, every thread shows revive.
       let diskThreads: Thread[] | null = null;
+      // SWIT-108: the archived-lane records ride the same file and the same
+      // rule — disk wins exactly when it wins for the threads.
+      let diskLanes: LaneRecord[] | null = null;
       try {
-        diskThreads = parseThreadsFromDisk(await loadThreads());
+        const raw = await loadThreads();
+        diskThreads = parseThreadsFromDisk(raw);
+        diskLanes = diskThreads !== null ? parseLanesFromDisk(raw) : null;
       } catch (e) {
         log.warn(`Failed to load threads disk mirror: ${e}`);
       }
-      initThreadStore(mergeThreads(diskThreads, savedWorkspace?.threads ?? []));
+      initThreadStore(
+        mergeThreads(diskThreads, savedWorkspace?.threads ?? []),
+        diskThreads !== null ? (diskLanes ?? []) : (savedWorkspace?.lanes ?? [])
+      );
 
       // A1: seed the panel store from the SAME blob (no disk mirror — a panel
       // binding is machine-local UI state keyed by a session id). Seeded here,
@@ -3451,6 +3690,11 @@ export default function App() {
         isThread={
           effectiveActiveSessionId ? findThreadBySessionId(effectiveActiveSessionId) !== undefined : false
         }
+        // SWIT-108: the focused thread's lane — `<lane> /` links to its page.
+        lane={(() => {
+          const t = effectiveActiveSessionId ? findThreadBySessionId(effectiveActiveSessionId) : undefined;
+          return t ? threadLane(t) : null;
+        })()}
         waitingCount={waitingCount}
         onToggleSideMenu={toggleSideMenu}
         onRename={handleRenameTab}
@@ -3745,6 +3989,21 @@ export default function App() {
         {/* A project PAGE full width (SWIT-30) — the "open full" of a surface
             artifact. Keep-alive like the others; the surface inside is keyed
             on (project, page) so switching pages remounts only the page. */}
+        {/* A LANE's page (SWIT-108) — keep-alive like the project screen:
+            route-driven while active, the last lane route while hidden. */}
+        {activatedScreens.has("lane") && (
+          <div
+            style={{
+              display: route.screen === "lane" ? "flex" : "none",
+              flex: 1,
+              minWidth: 0,
+            }}
+          >
+            <ScreenErrorBoundary resetKey="lane">
+              <LaneScreen />
+            </ScreenErrorBoundary>
+          </div>
+        )}
         {activatedScreens.has("project") && (
           <div
             style={{
@@ -3860,7 +4119,9 @@ function NewSessionDialogLazy({
 // identity: ProjectScreen keys the host on (project, page), so a different
 // page remounts the SURFACE while the screen shell stays put — the same
 // prop-stability trick ExplorerScreen plays with lastByScreen.
-const KEEP_ALIVE_SCREENS = ["home", "terminal", "kb", "explorer", "threads", "project"] as const satisfies readonly ScreenId[];
+// "lane" (SWIT-108) joins the same way: its params are identity, LaneScreen
+// holds the last lane route while hidden.
+const KEEP_ALIVE_SCREENS = ["home", "terminal", "kb", "explorer", "threads", "project", "lane"] as const satisfies readonly ScreenId[];
 const KEEP_ALIVE_SET: ReadonlySet<ScreenId> = new Set(KEEP_ALIVE_SCREENS);
 
 function isKeepAliveScreen(screen: ScreenId): boolean {
@@ -4084,4 +4345,16 @@ function ProjectScreen({ menuHidden }: { menuHidden: boolean }) {
       menuHidden={menuHidden}
     />
   );
+}
+
+/** The lane screen (SWIT-108): route-driven while active; while hidden the
+ *  last lane route keeps the props stable (ProjectScreen's rule), so the page
+ *  stops polling but keeps what it last read. */
+function LaneScreen() {
+  const route = useRoute();
+  const active = route.screen === "lane";
+  const last = getNavState().lastByScreen.lane;
+  const effective = active ? route : last?.screen === "lane" ? last : undefined;
+  if (!effective) return null;
+  return <LaneView project={effective.project} lane={effective.lane} active={active} />;
 }

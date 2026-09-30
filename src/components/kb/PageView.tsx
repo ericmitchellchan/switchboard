@@ -827,15 +827,30 @@ const BRIEF_GRID: CSSProperties = { gridTemplateColumns: "104px minmax(0,1fr)" }
  *  the rule the rest of the page follows: amber marks what waits on the user
  *  (the `Waiting on you` label), nothing else. Pure presentation — the
  *  shape, caps and the non-empty lists are pageStore's (`briefSections`). */
-function BriefBlock({ brief, isNew }: { brief: PageBrief; isNew: boolean }) {
+export function BriefBlock({
+  brief,
+  isNew,
+  title = "Where things stand",
+  note,
+}: {
+  brief: PageBrief;
+  isNew: boolean;
+  /** SWIT-108: the lane page draws the same block as the lane's `Brief`. */
+  title?: string;
+  /** SWIT-108: replaces the `rewritten <age>` note (the lane page names the
+   *  thread that wrote it too). */
+  note?: ReactNode;
+}) {
   const sections = briefSections(brief);
   const dated = !Number.isNaN(Date.parse(brief.updatedAt));
   return (
     <PageBlock
-      title="Where things stand"
+      title={title}
       dataPageBlock="brief"
       note={
-        dated ? (
+        note !== undefined ? (
+          note
+        ) : dated ? (
           <>
             rewritten <Age at={brief.updatedAt} isNew={isNew} />
           </>
@@ -1483,8 +1498,9 @@ function ItemRow({ item, link }: { item: PageItem; link: ReactNode }) {
   );
 }
 
-/** The shared link shape for an address that OPENS something. */
-function AddressButton({
+/** The shared link shape for an address that OPENS something. Exported for
+ *  the lane page's report links (SWIT-108). */
+export function AddressButton({
   text,
   title,
   onOpen,
@@ -1545,7 +1561,7 @@ function AddressButton({
  *  caller resolves; this component only draws. `lateTarget` (SWIT-101) is the
  *  caller's one-shot re-resolve for a row that fell back to a repo file: the
  *  click awaits it and opens what it says, else the target it was drawn with. */
-function EvidenceAddress({
+export function EvidenceAddress({
   address,
   target,
   lateTarget,

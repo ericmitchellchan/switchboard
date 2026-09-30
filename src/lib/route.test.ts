@@ -20,6 +20,7 @@ import {
   navigate,
   navigateToScreen,
   navigateBack,
+  replaceRoute,
   canNavigateBack,
   backTargetLabel,
   routeKey,
@@ -508,5 +509,42 @@ describe("project route (a page full width)", () => {
     navigate({ screen: "terminal" });
     navigateToScreen("project");
     expect(getNavState().route).toEqual({ screen: "project", project: "lodestar", page: "trading" });
+  });
+});
+
+describe("lane route (SWIT-108)", () => {
+  it("round-trips project + lane; both are identity (a half route falls back to Home)", () => {
+    const route: Route = { screen: "lane", project: "lodestar", lane: "Gamma model" };
+    const params = routeToParams(route);
+    expect(params.toString()).toBe("screen=lane&project=lodestar&lane=Gamma+model");
+    expect(parseRoute(params)).toEqual(route);
+    expect(parseRoute(new URLSearchParams("screen=lane&project=lodestar"))).toEqual({ screen: "home" });
+    expect(parseRoute(new URLSearchParams("screen=lane&lane=x"))).toEqual({ screen: "home" });
+    expect(ROUTE_PARAM_KEYS).toContain("lane");
+    // Stale lane params never leak into another screen's URL.
+    expect(applyRouteToParams(params, { screen: "home" }).toString()).toBe("screen=home");
+  });
+
+  it("back reads `project / lane`, and a side-menu jump to a never-visited lane lands on Home", () => {
+    __resetNavForTests({ screen: "lane", project: "lodestar", lane: "Tennis" });
+    navigate({ screen: "home" });
+    expect(backTargetLabel()).toBe("lodestar / Tennis");
+    __resetNavForTests({ screen: "terminal" });
+    navigateToScreen("lane");
+    expect(getNavState().route).toEqual({ screen: "home" });
+  });
+});
+
+describe("replaceRoute (SWIT-108 review #5 — a lane rename moves the page without a history entry)", () => {
+  it("swaps the location; back goes where it went before the rename, never to the old name", () => {
+    __resetNavForTests({ screen: "home" });
+    navigate({ screen: "lane", project: "lodestar", lane: "Gamma" });
+    replaceRoute({ screen: "lane", project: "lodestar", lane: "Gamma model" });
+    expect(getNavState().route).toEqual({ screen: "lane", project: "lodestar", lane: "Gamma model" });
+    expect(getNavState().lastByScreen.lane).toEqual({ screen: "lane", project: "lodestar", lane: "Gamma model" });
+    expect(backTargetLabel()).toBe("home");
+    navigateBack();
+    expect(getNavState().route).toEqual({ screen: "home" });
+    expect(canNavigateBack()).toBe(false);
   });
 });

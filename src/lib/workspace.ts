@@ -5,6 +5,7 @@ import { capSerialized } from "./scrollbackRestore";
 import { saveScrollback, saveThreads } from "./ipc";
 import {
   getThreads,
+  getLaneRecords,
   serializeThreadsForDisk,
   migrateSavedWorkspace,
   applyWorkspaceStaleness,
@@ -60,6 +61,8 @@ export function buildSavedWorkspace(
     // SWIT-33/69/90: the panel sides the user set with ⇄ (both values; only
     // the toggle writes here since v7). Absent = the default, right.
     panelSides: getPanelSidesRecord(),
+    // SWIT-108: the archived lanes, beside the threads they belong to.
+    lanes: [...getLaneRecords()],
   };
 }
 
@@ -160,7 +163,7 @@ export function saveThreadsToDisk(): Promise<void> {
   // Chaining onto a single promise makes the writes strictly sequential in
   // call order. Each link swallows its own failure so one bad write can never
   // reject the chain and strand every later save.
-  const payload = serializeThreadsForDisk(getThreads());
+  const payload = serializeThreadsForDisk(getThreads(), getLaneRecords());
   diskWriteChain = diskWriteChain.then(() =>
     saveThreads(payload).catch(() => {
       // disk mirror is best-effort; localStorage still has the records

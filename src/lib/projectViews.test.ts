@@ -182,8 +182,8 @@ describe("the project-view indexes (the KB band's `reports`, Home's Kept views)"
       "api"
     );
     expect(rows).toEqual([
-      { project: "lodestar", id: "v2", title: "gamma", kind: "report", builtAt: "2026-09-30T10:00:00.000Z", threadId: "t1", repo: "api" },
-      { project: "lodestar", id: "v1", title: "v1", kind: "view", builtAt: "", threadId: "", repo: "api" },
+      { project: "lodestar", id: "v2", title: "gamma", kind: "report", builtAt: "2026-09-30T10:00:00.000Z", threadId: "t1", repo: "api", lane: "" },
+      { project: "lodestar", id: "v1", title: "v1", kind: "view", builtAt: "", threadId: "", repo: "api", lane: "" },
     ]);
     const many = Array.from({ length: PROJECT_VIEW_INDEX_CAP + 5 }, (_, i) => ({ id: `v${i}` }));
     expect(parseProjectViewIndex(index(many), "p")).toHaveLength(PROJECT_VIEW_INDEX_CAP);
@@ -207,6 +207,7 @@ describe("the project-view indexes (the KB band's `reports`, Home's Kept views)"
       builtAt,
       threadId: "",
       repo: "",
+      lane: "",
     });
     const views: Record<string, ProjectViewEntry[]> = {
       lodestar: [e("lodestar", "l2", "2026-09-30T00:00:00Z"), e("lodestar", "l1", "2026-09-01T00:00:00Z")],

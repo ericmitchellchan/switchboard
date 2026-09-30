@@ -577,6 +577,34 @@ row** label voice (9.5px mono uppercase `.08em` `--text-faint`); `Waiting on you
 12.5px / 1.5 reading-face `--text-primary`, stacked 2px apart, no bullets. Not a list of
 click targets: rows do not light on hover. No brief, no block.
 
+## Lanes (SWIT-108)
+
+A lane is a roll-up of its threads, so every lane surface is composed from the shapes above.
+**The lane page** (`LaneView`, the mock's `lane` scene, Overview only): the full-width
+screens' 36px header bar (BackButton · `project / lane` · `rename` and `archive`/`restore`
+as **Button** text links at the right; rename is an inline **Input** that turns its border
+`--tone-rose` and prints the refusal as one faint line beside it), then ONE column (max
+820px, 18px apart): the head — lane name 17px 600 reading face, the project 10.5px mono
+faint, a dim `archived` **Status pill** when archived, `+ Thread in this lane` the one
+**PRIMARY** at the right — then **Page blocks**: `Brief` (the **Brief block** retitled, its
+note `rewritten <Age> by <thread>`), `Findings` (the **Findings block** grid, the thread's
+title dim after the claim), `Reports` (flat rows: title · thread (none when deleted) · kind ·
+Age), `Decisions` (note `answered on their own thread's page`; rows = question + thread dim
++ an amber `Open` / `Not sent` pill, answered ones behind a **Fold**), `Threads` (dot · title
+· last activity, archived behind a **Fold**). No brief → no block, one 11px mono faint line. A `+ Thread in this lane` that started nothing prints why as one 10.5px mono `--tone-rose` line beside the button.
+**Home's lane row** (the first block, `Lanes`): the Home row with two lines — name (reading
+face) + project (10px mono faint), and under it the latest finding else the brief's goal
+(11.5px `--text-muted`) — a dot before the name in the status colour of the lane's LIVELIEST running thread (waiting > running > error > done > idle; none while none runs), and at the right
+the WAITS pill: what the lane waits on in lower-case words (`2 questions · 1 unsent`), 10px
+mono 600 on `--tone-amber`, radius 11 — lower case because it is a count, not a status word,
+so it is not the one-width **Status pill** — then the last-activity age. **The side menu's
+`LANES` band** (above THREADS, both shell modes): the band header voice, a project line
+10.5px `--text-muted`, lanes as **List rows** indented 22px with the thread rows' dim `· N`
+marker (worded `title`), archived lanes behind a **Fold** at the foot. **The `lane…`
+editor** (a thread row's `⋯`): the row's inline **Input** (as Rename) with the project's
+lanes in a portalled menu under it — the row menu's surface and item style, `no lane` last
+behind a hairline.
+
 ## Set frame (SWIT-79)
 
 ONE tab for a collection: a switcher row over the member's ordinary surface. Nothing

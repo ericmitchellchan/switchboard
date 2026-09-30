@@ -61,13 +61,34 @@ import type { MenuSession } from "../lib/threadStore";
 import { questionMarkerTitle } from "../lib/pageStore";
 import { navigate } from "../lib/route";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
-import { getExplorerActions, useSessionRepos, quickThreadTarget } from "../lib/explorer";
+import { getExplorerActions, useSessionRepos, quickThreadTarget, projectKeyForDir } from "../lib/explorer";
+import { getRegistryProjects, refreshRepoKb, useRepoListings } from "../lib/repoListing";
+import { laneEditProject } from "../lib/lanes";
 import { sessionDirFor } from "../lib/devServer";
 import { getActiveTabSession } from "../lib/panelStore";
 import { getHomeDir } from "../lib/ipc";
 import { useShellMode } from "../lib/shellMode";
 import { tabRepoSuffix } from "../lib/tabLabel";
-import { ThreadRowMenu, ThreadTitleEditor, threadMenuItems } from "./ThreadRowMenu";
+import { ThreadLaneEditor, ThreadRowMenu, ThreadTitleEditor, threadMenuItems } from "./ThreadRowMenu";
+
+/** SWIT-108: the reason a thread cannot join a lane (its folder is in no
+ *  registry project), or null. Unknown while the registry has not loaded —
+ *  the menu item stays choosable and the commit says so if it must. */
+export const NO_PROJECT_LANE_HINT = "This thread's folder is in no registry project — a lane belongs to a project";
+
+export function useThreadProject(thread: Pick<Thread, "workingDir" | "lane" | "laneProject">): { project: string | null; laneBlocked: string | null } {
+  useRepoListings();
+  useEffect(() => {
+    refreshRepoKb();
+  }, []);
+  const projects = getRegistryProjects().projects;
+  const resolved = projects ? projectKeyForDir(projects, thread.workingDir) : null;
+  // Review of ec319c7, #4: a thread IN a lane can always open `lane…` (so
+  // `no lane` works even when its folder no longer resolves), and the lanes
+  // it offers are its lane's frozen project's — never a re-resolved one.
+  const project = laneEditProject(thread, resolved);
+  return { project, laneBlocked: project === null && projects && !resolved ? NO_PROJECT_LANE_HINT : null };
+}
 
 /** Dead rows use the EXITED status colour — read from statusConfig, the
  *  single source of truth, so a palette change lands here too. */
@@ -357,6 +378,8 @@ function ThreadRow({
   const [focusWithin, setFocusWithin] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [laneEditing, setLaneEditing] = useState(false);
+  const { project, laneBlocked } = useThreadProject(thread);
   const actions = getThreadActions();
 
   useEffect(() => {
@@ -395,11 +418,15 @@ function ThreadRow({
   // gutter movement, and no invalid nesting. The row's click actions are
   // deliberately absent while editing: a click inside the box is a caret
   // placement, not "open this thread".
-  if (editing) {
+  if (editing || laneEditing) {
     return (
       <div style={{ ...ROW_STYLE, paddingLeft: 22, cursor: "default", background: "var(--bg-active)" }}>
         {dot}
-        <ThreadTitleEditor thread={thread} onDone={() => setEditing(false)} />
+        {editing ? (
+          <ThreadTitleEditor thread={thread} onDone={() => setEditing(false)} />
+        ) : (
+          <ThreadLaneEditor thread={thread} project={project} onDone={() => setLaneEditing(false)} />
+        )}
         <span style={MENU_SLOT_STYLE} />
       </div>
     );
@@ -491,7 +518,14 @@ function ThreadRow({
           <ThreadRowMenu
             ariaLabel="Thread actions"
             onOpenChange={setMenuOpen}
-            items={threadMenuItems({ thread, live, openVerb: false, onRename: () => setEditing(true) })}
+            items={threadMenuItems({
+              thread,
+              live,
+              openVerb: false,
+              onRename: () => setEditing(true),
+              onLane: () => setLaneEditing(true),
+              laneBlocked,
+            })}
           />
         </span>
       </span>

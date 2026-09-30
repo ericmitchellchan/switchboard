@@ -34,7 +34,8 @@ import {
   threadRepoName,
 } from "../lib/threadStore";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
-import { ThreadRowMenu, ThreadTitleEditor, threadMenuItems } from "./ThreadRowMenu";
+import { ThreadLaneEditor, ThreadRowMenu, ThreadTitleEditor, threadMenuItems } from "./ThreadRowMenu";
+import { useThreadProject } from "./ThreadsSection";
 
 /** Dead rows use the EXITED status colour — read from statusConfig, the
  *  single source of truth, so a palette change lands here too. */
@@ -300,6 +301,9 @@ function HistoryRow({
   const [hover, setHover] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [editing, setEditing] = useState(false);
+  // SWIT-108: `⋯ → lane…` — the same inline editor as the rail's.
+  const [laneEditing, setLaneEditing] = useState(false);
+  const { project, laneBlocked } = useThreadProject(thread);
   const actions = getThreadActions();
 
   // Dead = no claude process behind the row (app restart, session exit, tab
@@ -322,7 +326,7 @@ function HistoryRow({
     <div
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      onClick={editing ? undefined : activateRow}
+      onClick={editing || laneEditing ? undefined : activateRow}
       onDoubleClick={(e) => {
         // ARCHIVED rows are not renameable, matching threadMenuItems, which
         // deliberately offers an archived row only Unarchive + Delete. A
@@ -351,6 +355,8 @@ function HistoryRow({
       />
       {editing ? (
         <ThreadTitleEditor thread={thread} onDone={() => setEditing(false)} />
+      ) : laneEditing ? (
+        <ThreadLaneEditor thread={thread} project={project} onDone={() => setLaneEditing(false)} />
       ) : (
         <span
           style={{
@@ -376,6 +382,7 @@ function HistoryRow({
           color: "var(--text-dim)",
         }}
       >
+        {thread.lane ? `${thread.lane} · ` : ""}
         {threadRepoName(thread.workingDir)}
       </span>
       <span
@@ -429,7 +436,13 @@ function HistoryRow({
           borderRadius: 4,
           color: menuOpen ? "var(--text-primary)" : "var(--text-muted)",
         }}
-        items={threadMenuItems({ thread, live, onRename: () => setEditing(true) })}
+        items={threadMenuItems({
+          thread,
+          live,
+          onRename: () => setEditing(true),
+          onLane: () => setLaneEditing(true),
+          laneBlocked,
+        })}
       />
     </div>
   );
