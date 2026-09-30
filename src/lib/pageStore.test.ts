@@ -57,7 +57,15 @@ import {
   BRIEF_GOAL_CAP,
   BRIEF_LINE_CAP,
   BRIEF_LINES_CAP,
+  parseFindings,
+  FINDING_VERDICTS,
+  FINDING_CAP,
+  FINDING_CLAIM_CAP,
+  FINDING_N_CAP,
+  FINDING_REPORT_CAP,
 } from "./pageStore";
+import { statusTone, verdictTone } from "./statusPill";
+import { evidenceKindOf } from "./evidenceModel";
 import type { PageQuestion, RetractedEvidence } from "./pageStore";
 
 const PAGE = {
@@ -515,6 +523,56 @@ describe("mergePage", () => {
     expect(
       mergePage(EMPTY_PAGE, {}, [{ id: "p", from: "a", kind: "update", text: "t", at: "" }]).isEmpty
     ).toBe(false);
+  });
+});
+
+describe("the findings ledger (SWIT-106)", () => {
+  const ROW = { id: "f1", claim: "Debt by 02:00 predicts the Europe-open block", verdict: "lead", n: "264 nights", report: "view:model4-debt", updatedAt: "2026-09-29T02:41:00Z" };
+
+  it("parses a well-formed ledger; the merge sorts it newest first by updatedAt", () => {
+    const p = parsePageFile(
+      JSON.stringify({ findings: [ROW, { id: "f2", claim: "Charm dominates quiet nights", verdict: "open", n: 4, report: null, updatedAt: "2026-09-30T09:00:00Z" }] })
+    );
+    expect(p.findings).toEqual([ROW, { id: "f2", claim: "Charm dominates quiet nights", verdict: "open", n: "4", report: null, updatedAt: "2026-09-30T09:00:00Z" }]);
+    expect(mergePage(p, {}, []).findings.map((f) => f.id)).toEqual(["f2", "f1"]);
+    expect(mergePage(parsePageFile(JSON.stringify({ findings: [ROW] })), {}, []).isEmpty).toBe(false);
+    expect(mergePage(EMPTY_PAGE, {}, []).findings).toEqual([]);
+  });
+
+  it("a malformed entry drops ALONE — no id, no claim, an unknown verdict, a repeat; fields are cut to the caps; not an array → none", () => {
+    const p = parsePageFile(
+      JSON.stringify({
+        ...PAGE,
+        findings: [
+          ROW,
+          { claim: "no id", verdict: "open" },
+          { id: "f3", verdict: "open" },
+          { id: "f4", claim: "maybe", verdict: "maybe" },
+          { id: "f1", claim: "dup", verdict: "dead" },
+          null,
+          { id: "f5", claim: ` ${"c".repeat(FINDING_CLAIM_CAP + 9)} `, verdict: "dead", n: "n".repeat(FINDING_N_CAP + 5), report: "r".repeat(FINDING_REPORT_CAP + 5) },
+        ],
+      })
+    );
+    expect(p.findings.map((f) => f.id)).toEqual(["f1", "f5"]);
+    expect(p.findings[1]).toMatchObject({ claim: "c".repeat(FINDING_CLAIM_CAP), n: "n".repeat(FINDING_N_CAP), report: "r".repeat(FINDING_REPORT_CAP), updatedAt: "" });
+    expect(p.theme).toBe(PAGE.theme); // the rest of the page is untouched
+    expect(parseFindings({ f1: ROW })).toEqual([]);
+    expect(parseFindings(Array.from({ length: FINDING_CAP + 5 }, (_, i) => ({ ...ROW, id: `f${i}` })))).toHaveLength(FINDING_CAP);
+  });
+
+  it("the verdict pill tone: lead = the accent, fact = neutral, open = amber, dead = dim — not statusTone's reading of `open`", () => {
+    expect(FINDING_VERDICTS.map((v) => [v, verdictTone(v)])).toEqual([
+      ["lead", "green"],
+      ["open", "amber"],
+      ["fact", "neutral"],
+      ["dead", "dim"],
+    ]);
+    expect(statusTone("open")).toBe("blue"); // why the verdict has its own rule
+  });
+
+  it("the old `finding:<id>` evidence form still reads as an ordinary row", () => {
+    expect(evidenceKindOf("finding:gamma-1")).toBe("other");
   });
 });
 

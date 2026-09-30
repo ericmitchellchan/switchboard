@@ -4,7 +4,9 @@
 // an optional `start here →` line (the turn's reviewFirst address), then
 // Where things stand (SWIT-104 — the agent's standing brief, when it wrote
 // one: the goal, then Established / Dead / Live lead / Waiting on you) · Open
-// questions · To do · What happened · Evidence · Decided · Done · Dropped. "What
+// questions · This turn · To do · Findings (SWIT-106 — the agent's ledger:
+// verdict pill · claim · n · report · age) · Evidence · Decided · Done ·
+// Dropped. "What
 // happened" sits deliberately BELOW the material that needs the user: the
 // reason to open the page comes first (Ky's rule, and Eric's, verbatim).
 //
@@ -151,8 +153,8 @@ import { getThreads } from "../../lib/threadStore";
 import { parseViewSpec } from "../../lib/viewStore";
 import { OptionRow } from "./OptionRow";
 import { log } from "../../lib/logger";
-import { itemPill, titleCase } from "../../lib/statusPill";
-import { Age, ARTIFACT_GRID, ColumnHeads, Fold, PageBlock, StatusPill, TODO_GRID, TURN_GRID, TypeTabs } from "./PageBlock";
+import { itemPill, titleCase, verdictTone } from "../../lib/statusPill";
+import { Age, ARTIFACT_GRID, ColumnHeads, FINDING_GRID, Fold, PageBlock, StatusPill, TODO_GRID, TURN_GRID, TypeTabs } from "./PageBlock";
 
 const MONO = "var(--font-mono)";
 /** The reading face (Ky's `font-sans`): bodies, not chrome. */
@@ -658,6 +660,38 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
           ))}
           {page.openItems.map((i) => (
             <ItemRow key={i.id} item={i} link={itemLink(i)} />
+          ))}
+        </PageBlock>
+      )}
+
+      {/* SWIT-106: THE FINDINGS LEDGER, after To do — what the work has
+          established, newest first. The report opens exactly like an
+          Evidence address (renderAddress: the same resolver, the same
+          click-time KB re-resolve for a report written seconds ago). */}
+      {page.findings.length > 0 && (
+        <PageBlock title="Findings" dataPageBlock="findings">
+          <ColumnHeads grid={FINDING_GRID} labels={["Verdict", "Claim", "n", "Report", { label: "Updated", right: true }]} />
+          {page.findings.map((f) => (
+            <div
+              key={f.id}
+              className="page-block-row"
+              style={{ display: "grid", ...FINDING_GRID, columnGap: 11, alignItems: "center", padding: "7px 0", borderBottom: "1px solid var(--border)" }}
+            >
+              <span style={{ minWidth: 0 }}>
+                <StatusPill word={f.verdict} tone={verdictTone(f.verdict)} />
+              </span>
+              <span title={f.claim} style={{ minWidth: 0, fontSize: 12.5, lineHeight: 1.45, color: "var(--text-primary)" }}>
+                {f.claim}
+              </span>
+              <span
+                title={f.n ?? undefined}
+                style={{ minWidth: 0, fontFamily: MONO, fontSize: 10.5, color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+              >
+                {f.n ?? "—"}
+              </span>
+              <span style={{ minWidth: 0, overflow: "hidden" }}>{f.report ? renderAddress(f.report, { fontSize: 10.5 }) : null}</span>
+              <Age at={f.updatedAt} isNew={isNewSince(f.updatedAt, seenAt)} />
+            </div>
           ))}
         </PageBlock>
       )}

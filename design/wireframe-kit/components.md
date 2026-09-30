@@ -544,6 +544,24 @@ simpler than Ky's own — every stamp on the ✦ page is recent thread activity,
 never needs to step past days): under a minute → `now`, else `Xm` / `Xh` / `Xd`. An
 unparseable or absent stamp draws an empty column, never `NaN` or a dash.
 
+## Findings block (SWIT-106)
+
+THE FINDINGS LEDGER — `PageView`'s `Findings` **Page block**, after To do (the mock's lane
+scene: Claim · Verdict · n · Report). Column heads `Verdict · Claim · n · Report · Updated`
+over the grid `58px minmax(0,1fr) 72px 150px 52px` (`PageBlock.FINDING_GRID`), gap 11,
+rows `padding: 7px 0` with a hairline under each, lit `--bg-hover` like every block row.
+The verdict is a **Status pill** whose tone comes from `statusPill.verdictTone`, not the
+word table: **lead** the accent fill (worth chasing) · **open** amber (unsettled — it still
+wants the reader) · **fact** the neutral solid (established, nothing to do) · **dead** the
+dim outline (ruled out). The claim is 12.5px reading-face `--text-primary`, wrapping; `n`
+10.5px mono `--text-secondary` (`—` when not stated); the report is the Evidence address
+exactly (kind colour, `.page-address` hairline, opens beside the thread); **Age** at the
+right with the NEW dot. Newest first by the row's last update. No ledger, no block.
+
+**Home's Findings** (under Needs you): the newest 8 across the active threads, each a flat
+Home row — the claim (reading face) with its thread's title dim mono beside it, the verdict
+pill (58px slot) at the right; the row opens the thread.
+
 ## Brief block (SWIT-104)
 
 WHERE THINGS STAND — the agent's standing brief, the first **Page block** under the page

@@ -9,7 +9,8 @@
 // one file shipped as a plain Tauri resource. Runs on any Node ≥ 18.
 //
 // ONE WRITER, ONE FILE: this process is the SOLE writer of its thread's
-// page.json (and of views/, sets.json and — SWIT-102 — shows.json beside
+// page.json (its brief — SWIT-104 — and findings ledger — SWIT-106 —
+// included; and of views/, sets.json and — SWIT-102 — shows.json beside
 // it), and (SWIT-64) ONE OF MANY APPENDERS to the app-wide
 // backlog-inbox.json — an append-only NDJSON file with one taker (the app),
 // never of backlog.json, which the app alone rewrites after draining the
@@ -74,6 +75,17 @@ const BRIEF_LINES_CAP = 6;
 const BRIEF_LISTS = ["established", "dead", "lead", "waiting"];
 /** SWIT-104: `page read` answers with at most this many characters. */
 const READ_CAP = 6000;
+/** SWIT-106: THE FINDINGS LEDGER — claim · verdict · n · report. The verdict
+ *  words are the one-platform mock's (lead · open · fact · dead). Caps
+ *  mirrored in pageStore.ts (FINDING_*). */
+const FINDING_VERDICTS = ["lead", "open", "fact", "dead"];
+const FINDING_CAP = 60;
+const FINDING_CLAIM_CAP = 240;
+const FINDING_N_CAP = 40;
+const FINDING_REPORT_CAP = 300; // an address, like reviewFirst / show
+/** The retired evidence form an older thread used for a finding — still
+ *  rendered, never written again (op finding is the way). */
+const FINDING_ADDRESS_PREFIX = "finding:";
 
 // ── Pure core ────────────────────────────────────────────────────────────────
 
@@ -102,6 +114,9 @@ function parsePage(raw) {
   if (typeof data.brief === "object" && data.brief !== null && !Array.isArray(data.brief)) {
     page.brief = data.brief;
   }
+  // SWIT-106: the findings ledger, the same way — present only while it
+  // holds something.
+  if (Array.isArray(data.findings) && data.findings.length > 0) page.findings = data.findings;
   return page;
 }
 
@@ -252,6 +267,13 @@ function applyOp(page, args, now, answeredIds = new Set(), dismissedIds = new Se
     }
     case "evidence": {
       const address = text(args.address, "address");
+      // SWIT-106: a finding is a ledger row with a verdict now, not an
+      // evidence row — rows an older thread wrote in this form still render.
+      if (address.startsWith(FINDING_ADDRESS_PREFIX)) {
+        throw new OpError(
+          "a finding is not an evidence row — record it with op finding {claim, verdict, n?, report?} (the page's Findings ledger)"
+        );
+      }
       const label = text(args.label, "label");
       const status =
         typeof args.status === "string" && args.status.trim().length > 0
@@ -494,6 +516,87 @@ function applyOp(page, args, now, answeredIds = new Set(), dismissedIds = new Se
         message: `${had ? "Brief rewritten" : "Brief written"} — it is the first block on the page. Rewrite it whole at the next seam.`,
       };
     }
+    case "finding": {
+      // SWIT-106 — THE FINDINGS LEDGER: what the work has established, one
+      // row per claim, with a verdict, the sample it rests on and the report
+      // behind it. Same id = the SAME row, updated in place (a claim moves
+      // from open to lead to fact, it is not re-filed); findingOp drop
+      // removes one.
+      const findings = Array.isArray(page.findings) ? page.findings.filter((f) => f && typeof f.id === "string") : [];
+      const withFindings = (list) => {
+        if (list.length > 0) return { ...page, findings: list };
+        const { findings: _gone, ...rest } = page;
+        return rest;
+      };
+      if (args.findingOp !== undefined && args.findingOp !== null && args.findingOp !== "drop") {
+        throw new OpError('findingOp must be "drop" (or omitted, to add or update)');
+      }
+      if (args.findingOp === "drop") {
+        const id = text(args.id, "id");
+        if (!findings.some((f) => f.id === id)) throw new OpError(`no finding with id ${id} — the page lists them (op read too)`);
+        return { page: withFindings(findings.filter((f) => f.id !== id)), message: `Finding ${id} dropped.` };
+      }
+      const id = args.id === undefined || args.id === null ? null : text(args.id, "id");
+      if (id !== null && !/^[A-Za-z0-9_-]{1,40}$/.test(id)) {
+        throw new OpError("id must be a short stable key (letters, digits, _ and -; ≤ 40) — or omit it and one is minted");
+      }
+      const prev = id === null ? undefined : findings.find((f) => f.id === id);
+      const given = (v) => v !== undefined && v !== null;
+      // A new finding needs a claim and a verdict; an update keeps what it
+      // does not name (Ky's evidence rule: omitting a field is not erasing it).
+      if (!prev && !given(args.claim)) throw new OpError("claim is required — ONE sentence saying what was found");
+      if (!prev && !given(args.verdict)) throw new OpError(`verdict is required — one of ${FINDING_VERDICTS.join(", ")}`);
+      let claim = prev ? prev.claim : null;
+      if (given(args.claim)) {
+        claim = text(args.claim, "claim");
+        if (claim.length > FINDING_CLAIM_CAP) {
+          throw new OpError(`claim is too long (${claim.length} chars; the cap is ${FINDING_CLAIM_CAP}) — one sentence; the detail is the report`);
+        }
+      }
+      let verdict = prev ? prev.verdict : null;
+      if (given(args.verdict)) {
+        if (!FINDING_VERDICTS.includes(args.verdict)) {
+          throw new OpError(`verdict must be one of ${FINDING_VERDICTS.join(", ")} (lead = worth chasing; open = not settled; fact = established; dead = ruled out)`);
+        }
+        verdict = args.verdict;
+      }
+      // n and report: omitted keeps; "" or null CLEARS (the only way to take
+      // a report off a finding).
+      let n = prev && typeof prev.n === "string" ? prev.n : null;
+      if (args.n !== undefined) {
+        if (args.n === null || (typeof args.n === "string" && args.n.trim().length === 0)) n = null;
+        else if (typeof args.n === "number" && Number.isFinite(args.n)) n = String(args.n);
+        else if (typeof args.n === "string") n = args.n.trim();
+        else throw new OpError("n must be a short string (\"264 nights\", \"10 tests\") or a number");
+        if (n !== null && n.length > FINDING_N_CAP) {
+          throw new OpError(`n is too long (${n.length} chars; the cap is ${FINDING_N_CAP}) — the sample size, e.g. "264 nights"`);
+        }
+      }
+      let report = prev && typeof prev.report === "string" ? prev.report : null;
+      if (args.report !== undefined) {
+        if (args.report === null || (typeof args.report === "string" && args.report.trim().length === 0)) report = null;
+        else {
+          report = text(args.report, "report");
+          if (report.length > FINDING_REPORT_CAP) {
+            throw new OpError(`report is too long (${report.length} chars; the cap is ${FINDING_REPORT_CAP}) — it is an address (view:<id>, a doc or file path, surface:<project>/<page>), not prose`);
+          }
+        }
+      }
+      const row = { id: prev ? prev.id : id ?? nextId(findings, "f"), claim, verdict, n, report, updatedAt: at };
+      if (prev) {
+        return {
+          page: withFindings(findings.map((f) => (f.id === prev.id ? row : f))),
+          message: `Finding ${row.id} updated (${verdict}).`,
+        };
+      }
+      if (findings.length >= FINDING_CAP) {
+        throw new OpError(`${FINDING_CAP} findings are already on the page — drop the ones that no longer matter (findingOp drop) before adding more`);
+      }
+      return {
+        page: withFindings([row, ...findings]),
+        message: `Finding ${row.id} recorded (${verdict}) in the page's Findings ledger. Update it by id as the verdict moves; never file it twice.`,
+      };
+    }
     case "show":
       // SWIT-102: `show` writes shows.json, never page.json — performOp routes
       // it to performShowOp before this function is reached.
@@ -503,7 +606,7 @@ function applyOp(page, args, now, answeredIds = new Set(), dismissedIds = new Se
       // performReadOp before this function is reached.
       throw new OpError("read does not write the page — it returns it (performReadOp)");
     default:
-      throw new OpError('op must be one of "theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "brief", "show", "read"');
+      throw new OpError('op must be one of "theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "brief", "finding", "show", "read"');
   }
 }
 
@@ -516,10 +619,10 @@ function applyOp(page, args, now, answeredIds = new Set(), dismissedIds = new Se
 
 const READ_TURNS = 3;
 const READ_LEVELS = [
-  { clip: 240, questions: 20, items: 30, decisions: 12 },
-  { clip: 140, questions: 12, items: 16, decisions: 8 },
-  { clip: 80, questions: 8, items: 10, decisions: 5 },
-  { clip: 50, questions: 5, items: 6, decisions: 3 },
+  { clip: 240, questions: 20, items: 30, decisions: 12, findings: 20 },
+  { clip: 140, questions: 12, items: 16, decisions: 8, findings: 12 },
+  { clip: 80, questions: 8, items: 10, decisions: 5, findings: 8 },
+  { clip: 50, questions: 5, items: 6, decisions: 3, findings: 5 },
 ];
 /** The brief's lists as `read` names them to the AGENT (the page says
  *  "Waiting on you" to the user — the same list). */
@@ -630,6 +733,24 @@ function renderPageRead(page, answers, dismissedIds, lim) {
   }
   more(decisions.length, lim.decisions);
   if (decisions.length === 0) out.push("  (none)");
+
+  // SWIT-106: the findings ledger, newest first by its last update.
+  const findings = newestFirstBy(
+    (Array.isArray(page.findings) ? page.findings : []).filter(
+      (f) => f && typeof f.id === "string" && typeof f.claim === "string" && FINDING_VERDICTS.includes(f.verdict)
+    ),
+    (f) => f.updatedAt
+  );
+  out.push("");
+  out.push(`FINDINGS (${findings.length}):`);
+  for (const f of findings.slice(0, lim.findings)) {
+    const tail =
+      (typeof f.n === "string" && f.n.length > 0 ? ` | n: ${clipLine(f.n, FINDING_N_CAP)}` : "") +
+      (typeof f.report === "string" && f.report.length > 0 ? ` | report: ${clipLine(f.report, lim.clip)}` : "");
+    out.push(`  ${f.id} [${f.verdict}] ${clipLine(f.claim, lim.clip)}${tail}`);
+  }
+  more(findings.length, lim.findings);
+  if (findings.length === 0) out.push("  (none)");
 
   const turns = page.turns.filter((t) => t && Array.isArray(t.lines)).slice(0, READ_TURNS);
   out.push("");
@@ -2037,14 +2158,45 @@ const PAGE_TOOL = {
     "the detail a report. op read RETURNS THE PAGE as compact plain text — theme, the brief, " +
     "the open questions with their ids, the open items, the standing decisions, the last " +
     "three turns — and writes nothing. It is how you see your own page: call it FIRST when " +
-    "you are resumed, and before you rewrite the brief.",
+    "you are resumed, and before you rewrite the brief. RECORD WHAT THE WORK ESTABLISHED as " +
+    "op finding {claim, verdict, n?, report?} — the page's Findings ledger, the record that " +
+    "outlives the thread: claim is ONE sentence (≤ 240 chars); verdict is lead (worth " +
+    "chasing) | open (not settled) | fact (established) | dead (ruled out); n is the sample " +
+    "it rests on in a few words (\"264 nights\", \"10 tests\"; ≤ 40); report is the address " +
+    "of the report or view behind it (view:<id>, a doc or file path, surface:<project>/<page>) " +
+    "and opens like an evidence row. Pass the finding's id (the result gives it) to UPDATE it " +
+    "in place as the verdict moves — never file the same claim twice; fields you omit are " +
+    "kept, n or report \"\" clears one; findingOp drop {id} removes one that was never right. " +
+    "At most 60 per page. A finding is never an evidence row (finding:<id> is refused).",
   inputSchema: {
     type: "object",
     properties: {
       op: {
         type: "string",
-        enum: ["theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "brief", "show", "read"],
+        enum: ["theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "brief", "finding", "show", "read"],
         description: "Which page operation to perform.",
+      },
+      claim: {
+        type: "string",
+        description: "finding: ONE sentence (≤ 240 chars) saying what was found.",
+      },
+      verdict: {
+        type: "string",
+        enum: ["lead", "open", "fact", "dead"],
+        description: "finding: lead = worth chasing; open = not settled; fact = established; dead = ruled out.",
+      },
+      n: {
+        type: "string",
+        description: "finding: the sample the claim rests on, a few words (\"264 nights\", \"10 tests\"; ≤ 40). \"\" clears it.",
+      },
+      report: {
+        type: "string",
+        description: "finding: the address of the report behind it — view:<id>, a doc or file path, surface:<project>/<page> (≤ 300). \"\" clears it.",
+      },
+      findingOp: {
+        type: "string",
+        enum: ["drop"],
+        description: "finding: drop removes the finding named by id. Omit to add (no id, or a new id) or update (an existing id).",
       },
       goal: {
         type: "string",
@@ -2123,7 +2275,7 @@ const PAGE_TOOL = {
         enum: ["add", "update", "close", "drop"],
         description: "item: which item operation. close = done (the work happened); drop = never the right row (leaves the plan, not an accomplishment).",
       },
-      id: { type: "string", description: "item update/close/drop: the item id. resolve: the question id. ask: optional stable question id." },
+      id: { type: "string", description: "item update/close/drop: the item id. resolve: the question id. ask: optional stable question id. finding: the finding to update or drop (omit to add one)." },
       title: { type: "string", description: "item: a few plain words." },
       owner: { type: "string", enum: ["agent", "user", "team"], description: "item: who owns it." },
       state: { type: "string", enum: ["todo", "in_progress", "waiting", "done"], description: "item: its state." },
@@ -2335,6 +2487,11 @@ module.exports = {
   trimOption,
   dismissedQuestionIds,
   OPTION_CAP,
+  FINDING_VERDICTS,
+  FINDING_CAP,
+  FINDING_CLAIM_CAP,
+  FINDING_N_CAP,
+  FINDING_REPORT_CAP,
   BRIEF_GOAL_CAP,
   BRIEF_LINE_CAP,
   BRIEF_LINES_CAP,

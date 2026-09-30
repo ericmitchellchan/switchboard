@@ -3,7 +3,9 @@
 //
 //   page.json    ← the agent, through the MCP server (SWIT-49). Theme, turns,
 //                  evidence rows, questions, to-do items, and (SWIT-104) the
-//                  standing BRIEF — where things stand, rewritten whole.
+//                  standing BRIEF — where things stand, rewritten whole —
+//                  and (SWIT-106) the FINDINGS ledger: claim · verdict · n ·
+//                  report, one row per claim, updated in place by id.
 //   answers.json ← the app (SWIT-51): Eric's answers, joined to questions by
 //                  id at render time — page.json is never touched. Each answer
 //                  ALSO renders as a `decision:<id>` evidence row (SWIT-58),
@@ -160,6 +162,29 @@ export const BRIEF_LISTS = [
 ] as const;
 export type BriefListKey = (typeof BRIEF_LISTS)[number]["key"];
 
+/** SWIT-106: THE FINDINGS LEDGER — what the work has established, one row
+ *  per claim (the tennis thread improvised `finding:` evidence rows for it;
+ *  Eric: "Document this in the ledger: the summary of each one, linked to
+ *  whatever artifact or report"). The verdict words are the one-platform
+ *  mock's. Mirrors the server's FINDING_* caps. */
+export const FINDING_VERDICTS = ["lead", "open", "fact", "dead"] as const;
+export type FindingVerdict = (typeof FINDING_VERDICTS)[number];
+export const FINDING_CAP = 60;
+export const FINDING_CLAIM_CAP = 240;
+export const FINDING_N_CAP = 40;
+export const FINDING_REPORT_CAP = 300;
+export type PageFinding = {
+  id: string;
+  /** One sentence. */
+  claim: string;
+  verdict: FindingVerdict;
+  /** The sample it rests on, in words (`264 nights`); null = not stated. */
+  n: string | null;
+  /** The report behind it — an Evidence-style address; null = none. */
+  report: string | null;
+  updatedAt: string;
+};
+
 /** page.json — the agent's half, newest-first arrays. */
 export type PageFile = {
   theme: string | null;
@@ -169,6 +194,8 @@ export type PageFile = {
   items: PageItem[];
   /** SWIT-104: null while the agent has written none (or cleared it). */
   brief: PageBrief | null;
+  /** SWIT-106: the findings ledger, in file order (newest filed first). */
+  findings: PageFinding[];
 };
 
 export const EMPTY_PAGE: PageFile = Object.freeze({
@@ -178,6 +205,7 @@ export const EMPTY_PAGE: PageFile = Object.freeze({
   questions: [],
   items: [],
   brief: null,
+  findings: [],
 });
 
 /** answers.json — question id → Eric's answer. SWIT-77: `sentAt` = when the
@@ -317,7 +345,46 @@ export function parsePageFile(raw: string): PageFile {
     }
   }
 
-  return { theme: str(data.theme), turns, evidence, questions, items, brief: parseBrief(data.brief) };
+  return {
+    theme: str(data.theme),
+    turns,
+    evidence,
+    questions,
+    items,
+    brief: parseBrief(data.brief),
+    findings: parseFindings(data.findings),
+  };
+}
+
+function isFindingVerdict(v: unknown): v is FindingVerdict {
+  return typeof v === "string" && (FINDING_VERDICTS as readonly string[]).includes(v);
+}
+
+/** Tolerant parse of `page.findings` (SWIT-106): a malformed entry — no id,
+ *  no claim, an unknown verdict — drops ALONE; a repeated id keeps its first;
+ *  an over-long field is cut; capped at FINDING_CAP. Not an array → none. */
+export function parseFindings(raw: unknown): PageFinding[] {
+  if (!Array.isArray(raw)) return [];
+  const out: PageFinding[] = [];
+  const seen = new Set<string>();
+  for (const f of raw) {
+    if (!isRecord(f)) continue;
+    const id = str(f.id);
+    const claim = str(typeof f.claim === "string" ? f.claim.trim() : null);
+    if (!id || !claim || seen.has(id) || !isFindingVerdict(f.verdict)) continue;
+    seen.add(id);
+    const n = typeof f.n === "number" && Number.isFinite(f.n) ? String(f.n) : str(typeof f.n === "string" ? f.n.trim() : null);
+    out.push({
+      id,
+      claim: claim.slice(0, FINDING_CLAIM_CAP),
+      verdict: f.verdict,
+      n: n?.slice(0, FINDING_N_CAP) ?? null,
+      report: str(typeof f.report === "string" ? f.report.trim() : null)?.slice(0, FINDING_REPORT_CAP) ?? null,
+      updatedAt: str(f.updatedAt) ?? "",
+    });
+    if (out.length >= FINDING_CAP) break;
+  }
+  return out;
 }
 
 /** Tolerant parse of `page.brief` (SWIT-104). A malformed brief is ABSENT,
@@ -699,6 +766,9 @@ export type RenderedPage = {
   /** SWIT-104: where things stand — the first block under the summary; null
    *  = no block. */
   brief: PageBrief | null;
+  /** SWIT-106: the findings ledger, NEWEST FIRST by `updatedAt` (a finding
+   *  whose verdict just moved comes to the top). */
+  findings: PageFinding[];
   /** OPEN questions — nobody has settled them (Home's Needs You lists these;
    *  a decided-but-unsent one is NOT here, it is in `unsentDecisions`). */
   openQuestions: PageQuestion[];
@@ -857,6 +927,7 @@ export function mergePage(
   const merged: RenderedPage = {
     theme: page.theme,
     brief: page.brief,
+    findings: [...page.findings].sort((a, b) => newestFirst(a.updatedAt, b.updatedAt)),
     openQuestions,
     unsentDecisions,
     decisionQuestions,
@@ -877,6 +948,7 @@ export function mergePage(
     isEmpty:
       page.theme === null &&
       page.brief === null &&
+      page.findings.length === 0 &&
       page.turns.length === 0 &&
       page.evidence.length === 0 &&
       page.questions.length === 0 &&

@@ -9,6 +9,8 @@
 //                      the batch is sent from the page, so the row says so
 //                      and opens the thread). Answering HERE calls the same
 //                      bridge the page uses (acceptance 7).
+//   Findings         → (SWIT-106) the newest 8 findings across the active
+//                      threads' ledgers, each with its thread; opens it.
 //   Live now         → launched threads + the latest turn's first line.
 //   Between threads  → the last hour of cross-thread posts.
 //   Listening        → announced dev servers, probed (never "healthy").
@@ -66,8 +68,9 @@ import { useBacklog, openItems, HOME_BACKLOG_LIMIT } from "../lib/backlogStore";
 import type { BacklogItem } from "../lib/backlogStore";
 import { BacklogListing } from "./BacklogPanel";
 import { OptionRow } from "./kb/OptionRow";
-import { Fold } from "./kb/PageBlock";
-import { olderThreadIds, olderQuestionsLabel } from "../lib/homeModel";
+import { Fold, StatusPill } from "./kb/PageBlock";
+import { olderThreadIds, olderQuestionsLabel, recentFindings } from "../lib/homeModel";
+import { verdictTone } from "../lib/statusPill";
 
 /** The page's H2 + trailing meta (10px mono faint, pushed right). */
 const SECTION_META: CSSProperties = {
@@ -266,8 +269,10 @@ export function Home({
     view.launched
   );
   const recentPosts = collectRecentPosts(digests);
+  const findings = recentFindings(digests);
   const quiet: string[] = [];
   if (needsCount === 0) quiet.push("needs you");
+  if (findings.length === 0) quiet.push("findings");
   if (openBacklog.length === 0) quiet.push("backlog");
   if (liveRows.length === 0) quiet.push("live now");
   if (recentPosts.length === 0) quiet.push("between threads");
@@ -302,6 +307,7 @@ export function Home({
           }}
         >
           {needsCount > 0 && <NeedsYou digests={digests} launched={view.launched} />}
+          {findings.length > 0 && <Findings rows={findings} />}
           {openBacklog.length > 0 && (
             <BacklogBlock items={openBacklog} projectOptions={backlogProjects} />
           )}
@@ -536,6 +542,31 @@ function UserItemCard({ digest, item }: { digest: ThreadDigest; item: PageItem }
       </span>
       <span style={ROW_META}>open →</span>
     </Row>
+  );
+}
+
+// ── Findings (SWIT-106) ──────────────────────────────────────────────────────
+
+/** The newest findings across the active threads (homeModel.recentFindings),
+ *  one flat row each: the claim, its thread (later: its lane) dim beside it,
+ *  the verdict pill at the right — the page's own pill and tone rule. The row
+ *  opens the thread; the ledger itself lives on its page. */
+function Findings({ rows }: { rows: ReturnType<typeof recentFindings<Thread>> }) {
+  return (
+    <div>
+      <SectionHeader label="Findings" meta={String(rows.length)} />
+      {rows.map(({ thread, finding }) => (
+        <Row key={`${thread.id}-${finding.id}`} title={finding.claim} onClick={() => getThreadActions()?.openThread(thread.id)}>
+          <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <span style={TITLE}>{finding.claim}</span>
+            <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)" }}> {thread.title}</span>
+          </span>
+          <span style={{ flex: "none", width: 58, display: "flex", alignSelf: "center" }}>
+            <StatusPill word={finding.verdict} tone={verdictTone(finding.verdict)} />
+          </span>
+        </Row>
+      ))}
+    </div>
   );
 }
 

@@ -7,6 +7,8 @@ import {
   isThreadRecent,
   olderThreadIds,
   olderQuestionsLabel,
+  recentFindings,
+  HOME_FINDINGS_LIMIT,
 } from "./homeModel";
 import { mergePage, parsePageFile } from "./pageStore";
 
@@ -57,5 +59,29 @@ describe("homeModel — older questions fold on Home (SWIT-105)", () => {
   it("the fold's words", () => {
     expect(olderQuestionsLabel(1)).toBe("older question");
     expect(olderQuestionsLabel(3)).toBe("older questions");
+  });
+});
+
+describe("homeModel — Home's Findings block (SWIT-106)", () => {
+  const withFindings = (rows: Array<{ id: string; verdict: string; updatedAt: string }>) =>
+    mergePage(parsePageFile(JSON.stringify({ findings: rows.map((r) => ({ ...r, claim: `claim ${r.id}` })) })), {}, []);
+
+  it("the newest HOME_FINDINGS_LIMIT across threads, each carrying its thread; an unparseable stamp sorts last", () => {
+    expect(HOME_FINDINGS_LIMIT).toBe(8);
+    const a = { id: "A", title: "gamma" };
+    const b = { id: "B", title: "tennis" };
+    const digests = [
+      { thread: a, page: withFindings([{ id: "a1", verdict: "lead", updatedAt: "2026-09-30T02:00:00Z" }, { id: "a2", verdict: "dead", updatedAt: "garbage" }]) },
+      { thread: b, page: withFindings([{ id: "b1", verdict: "open", updatedAt: "2026-09-30T09:00:00Z" }]) },
+    ];
+    expect(recentFindings(digests).map((r) => [r.thread.title, r.finding.id])).toEqual([
+      ["tennis", "b1"],
+      ["gamma", "a1"],
+      ["gamma", "a2"],
+    ]);
+    expect(recentFindings(digests, 1).map((r) => r.finding.id)).toEqual(["b1"]);
+    const many = [{ thread: a, page: withFindings(Array.from({ length: 12 }, (_, i) => ({ id: `f${i}`, verdict: "open", updatedAt: new Date(NOW - i * 1000).toISOString() }))) }];
+    expect(recentFindings(many).map((r) => r.finding.id)).toEqual(["f0", "f1", "f2", "f3", "f4", "f5", "f6", "f7"]);
+    expect(recentFindings([])).toEqual([]);
   });
 });

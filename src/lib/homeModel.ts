@@ -1,4 +1,4 @@
-// HOME'S ROLL-UP RULES — pure. Home (components/Home.tsx) has no content of
+// HOME'S ROLL-UP RULES — pure. (SWIT-105 older questions; SWIT-106 findings.) Home (components/Home.tsx) has no content of
 // its own: every block is a view over the threads' page files, and the rules
 // that decide WHAT a block lists live here, tested, so the component only
 // draws.
@@ -15,7 +15,7 @@
 // record stamp is old but whose agent asked yesterday is therefore recent.
 
 import type { Thread } from "../types";
-import type { RenderedPage } from "./pageStore";
+import type { PageFinding, RenderedPage } from "./pageStore";
 
 /** How far back "active" reaches for Needs you's questions. */
 export const NEEDS_YOU_RECENT_DAYS = 14;
@@ -61,6 +61,28 @@ export function olderThreadIds(
     if (!isThreadRecent(threadLastActive(d.thread, d.page), launched.has(d.thread.id), now)) out.add(d.thread.id);
   }
   return out;
+}
+
+// ── Findings (SWIT-106) ──────────────────────────────────────────────────────
+// Home's Findings block: the newest HOME_FINDINGS_LIMIT across the threads
+// Home already reads (the active ones), each carrying its thread so the row
+// can name it and open it. No new read and no new timer — the page files
+// Home's own poll merges already hold the ledger.
+
+export const HOME_FINDINGS_LIMIT = 8;
+
+/** The newest findings across threads, by `updatedAt` (an unparseable stamp
+ *  sorts last; ties keep thread order, then the ledger's own). Pure. */
+export function recentFindings<T extends { id: string }>(
+  digests: readonly { thread: T; page: Pick<RenderedPage, "findings"> }[],
+  limit: number = HOME_FINDINGS_LIMIT
+): { thread: T; finding: PageFinding }[] {
+  const all = digests.flatMap((d) => d.page.findings.map((finding) => ({ thread: d.thread, finding })));
+  const at = (s: string) => {
+    const t = Date.parse(s);
+    return Number.isFinite(t) ? t : -Infinity;
+  };
+  return all.sort((a, b) => at(b.finding.updatedAt) - at(a.finding.updatedAt)).slice(0, Math.max(0, limit));
 }
 
 /** The fold's words (PageBlock.Fold prints `<count> <label> · show`). */

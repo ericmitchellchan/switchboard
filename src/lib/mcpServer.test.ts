@@ -8,7 +8,18 @@ import { describe, it, expect } from "vitest";
 // @ts-expect-error — no @types/node in the frontend tsconfig; vitest's node
 // runtime provides the real module, and the require result is cast below.
 import { createRequire } from "node:module";
-import { parsePageFile, mergePage, BRIEF_GOAL_CAP, BRIEF_LINE_CAP, BRIEF_LINES_CAP } from "./pageStore";
+import {
+  parsePageFile,
+  mergePage,
+  BRIEF_GOAL_CAP,
+  BRIEF_LINE_CAP,
+  BRIEF_LINES_CAP,
+  FINDING_VERDICTS,
+  FINDING_CAP,
+  FINDING_CLAIM_CAP,
+  FINDING_N_CAP,
+  FINDING_REPORT_CAP,
+} from "./pageStore";
 import { parseViewSpec } from "./viewStore";
 import { parseInboxFile } from "./pageStore";
 import { parseBacklogInbox } from "./backlogStore";
@@ -411,7 +422,7 @@ describe("ROUND-TRIP: the server's writes parse through pageStore (the seam)", (
     }
     const props = (server.PAGE_TOOL.inputSchema as { properties: Record<string, { enum?: string[] }> }).properties;
     expect(props.kind.enum).toEqual(["decision", "convention", "info"]);
-    expect(props.op.enum).toEqual(["theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "brief", "show", "read"]);
+    expect(props.op.enum).toEqual(["theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "brief", "finding", "show", "read"]);
     expect(props.default).toBeDefined();
     expect(props.reviewFirst).toBeDefined();
     expect(props.why).toBeDefined();
@@ -1727,6 +1738,9 @@ describe("the page tool — the standing brief + op read (SWIT-104)", () => {
         "  decision:q2 State variable? → net over gross (the user)",
         "  decision:q3 Keep the old keys? → moot — the keys are gone (settled by you)",
         "",
+        "FINDINGS (0):",
+        "  (none)",
+        "",
         "LAST TURNS (newest first, 3 of 4):",
         `  ${AT}: Fourth turn — the newest.`,
         `  ${AT}: Third turn.`,
@@ -1745,6 +1759,7 @@ describe("the page tool — the standing brief + op read (SWIT-104)", () => {
       "OPEN QUESTIONS (0):",
       "TO DO (0 open):",
       "STANDING DECISIONS (0):",
+      "FINDINGS (0):",
       "LAST TURNS (newest first, 0 of 0):",
     ]) {
       expect(text).toContain(heading);
@@ -1783,6 +1798,10 @@ describe("the page tool — the standing brief + op read (SWIT-104)", () => {
     for (let i = 0; i < server.TURN_CAP; i++) {
       page = server.applyOp(page, { op: "turn", lines: Array.from({ length: 6 }, (_, j) => long(`turn ${i} line ${j}`, 500)) }, NOW).page;
     }
+    // SWIT-106: a full ledger too.
+    for (let i = 0; i < 60; i++) {
+      page = server.applyOp(page, { op: "finding", claim: long(`finding ${i}`, 240), verdict: "open", n: "n".repeat(40), report: `docs/${"r".repeat(280)}.md` }, NOW + i).page;
+    }
     const text = brief.formatPageRead(page, {});
     expect(text.length).toBeLessThanOrEqual(brief.READ_CAP);
     for (const heading of [
@@ -1791,6 +1810,7 @@ describe("the page tool — the standing brief + op read (SWIT-104)", () => {
       "OPEN QUESTIONS (20):",
       "TO DO (60 open):",
       "STANDING DECISIONS (0):",
+      "FINDINGS (60):",
       "LAST TURNS (newest first, 3 of 30):",
     ]) {
       expect(text).toContain(heading);
@@ -1852,5 +1872,127 @@ describe("the page tool — the standing brief + op read (SWIT-104)", () => {
     for (const list of ["established", "dead", "lead", "waiting"]) expect(props[list].type).toBe("array");
     // The caps stated to the agent are the caps the app's parser applies.
     expect([brief.BRIEF_GOAL_CAP, brief.BRIEF_LINE_CAP, brief.BRIEF_LINES_CAP]).toEqual([BRIEF_GOAL_CAP, BRIEF_LINE_CAP, BRIEF_LINES_CAP]);
+  });
+});
+
+describe("the page tool — op finding, the Findings ledger (SWIT-106)", () => {
+  const f = server as unknown as {
+    formatPageRead: (page: Record<string, unknown>, answers: unknown) => string;
+    FINDING_VERDICTS: string[];
+    FINDING_CAP: number;
+    FINDING_CLAIM_CAP: number;
+    FINDING_N_CAP: number;
+    FINDING_REPORT_CAP: number;
+  };
+  type Row = { id: string; claim: string; verdict: string; n: string | null; report: string | null; updatedAt: string };
+  const findingsOf = (page: Record<string, unknown>) => (page.findings ?? []) as Row[];
+
+  it("adds a finding with a minted id, newest first; the row round-trips through pageStore", () => {
+    let page = server.applyOp(empty(), { op: "finding", claim: " Debt by 02:00 predicts the Europe-open block ", verdict: "lead", n: 264, report: "view:model4-debt" }, NOW).page;
+    const second = server.applyOp(page, { op: "finding", claim: "All-expiry ÷ vendor total = 0.58", verdict: "fact", n: "531 nights" }, NOW + 1000);
+    page = second.page;
+    expect(second.message).toMatch(/^Finding f2 recorded \(fact\) in the page's Findings ledger/);
+    expect(findingsOf(page)).toEqual([
+      { id: "f2", claim: "All-expiry ÷ vendor total = 0.58", verdict: "fact", n: "531 nights", report: null, updatedAt: new Date(NOW + 1000).toISOString() },
+      { id: "f1", claim: "Debt by 02:00 predicts the Europe-open block", verdict: "lead", n: "264", report: "view:model4-debt", updatedAt: new Date(NOW).toISOString() },
+    ]);
+    const parsed = parsePageFile(JSON.stringify(page));
+    expect(parsed.findings).toEqual(findingsOf(page));
+    const merged = mergePage(parsed, {}, []);
+    expect(merged.findings.map((x) => x.id)).toEqual(["f2", "f1"]);
+    expect(merged.isEmpty).toBe(false);
+  });
+
+  it("the same id UPDATES in place — omitted fields kept, \"\" clears n / report; the moved row sorts first in the merge", () => {
+    let page = run([
+      { op: "finding", claim: "Charm dominates quiet nights", verdict: "open", n: "4", report: "reports/charm.md" },
+      { op: "finding", claim: "Second", verdict: "open" },
+    ]);
+    const upd = server.applyOp(page, { op: "finding", id: "f1", verdict: "dead", n: "" }, NOW + 60_000);
+    page = upd.page;
+    expect(upd.message).toBe("Finding f1 updated (dead).");
+    const rows = findingsOf(page);
+    expect(rows.map((r) => r.id)).toEqual(["f2", "f1"]); // in place in the file
+    expect(rows[1]).toEqual({ id: "f1", claim: "Charm dominates quiet nights", verdict: "dead", n: null, report: "reports/charm.md", updatedAt: new Date(NOW + 60_000).toISOString() });
+    page = server.applyOp(page, { op: "finding", id: "f1", report: "" }, NOW + 61_000).page;
+    expect(findingsOf(page)[1].report).toBeNull();
+    // A caller-chosen stable id is a NEW finding the first time, then updates.
+    page = server.applyOp(page, { op: "finding", id: "gap-audit", claim: "Gap audit", verdict: "fact" }, NOW).page;
+    page = server.applyOp(page, { op: "finding", id: "gap-audit", verdict: "lead" }, NOW + 1).page;
+    expect(findingsOf(page).filter((r) => r.id === "gap-audit")).toHaveLength(1);
+    expect(findingsOf(page)[0]).toMatchObject({ id: "gap-audit", verdict: "lead", claim: "Gap audit" });
+    // The merge puts the most recently moved finding first.
+    expect(mergePage(parsePageFile(JSON.stringify(page)), {}, []).findings[0].id).toBe("f1");
+  });
+
+  it("findingOp drop removes one; the last one out takes the key with it", () => {
+    const page = run([{ op: "finding", claim: "Only one", verdict: "open" }]);
+    const dropped = server.applyOp(page, { op: "finding", findingOp: "drop", id: "f1" }, NOW);
+    expect(dropped.message).toBe("Finding f1 dropped.");
+    expect("findings" in dropped.page).toBe(false);
+    expect(() => server.applyOp(page, { op: "finding", findingOp: "drop", id: "f9" }, NOW)).toThrow(/no finding with id f9/);
+    expect(() => server.applyOp(page, { op: "finding", findingOp: "vanish", id: "f1" }, NOW)).toThrow(/findingOp must be "drop"/);
+    // A page without findings serializes as before; the ledger survives other ops.
+    expect("findings" in empty()).toBe(false);
+    const kept = server.applyOp(server.parsePage(JSON.stringify(page)), { op: "turn", lines: ["t"] }, NOW).page;
+    expect(findingsOf(kept)).toHaveLength(1);
+  });
+
+  it("caps and shapes are VISIBLE errors", () => {
+    expect(f.FINDING_VERDICTS).toEqual(["lead", "open", "fact", "dead"]);
+    expect([f.FINDING_CAP, f.FINDING_CLAIM_CAP, f.FINDING_N_CAP, f.FINDING_REPORT_CAP]).toEqual([60, 240, 40, 300]);
+    expect(() => server.applyOp(empty(), { op: "finding", verdict: "lead" }, NOW)).toThrow(/claim is required/);
+    expect(() => server.applyOp(empty(), { op: "finding", claim: "c" }, NOW)).toThrow(/verdict is required/);
+    expect(() => server.applyOp(empty(), { op: "finding", claim: "c", verdict: "maybe" }, NOW)).toThrow(/verdict must be one of lead, open, fact, dead/);
+    expect(() => server.applyOp(empty(), { op: "finding", claim: "c".repeat(241), verdict: "open" }, NOW)).toThrow(/claim is too long \(241 chars; the cap is 240\)/);
+    expect(() => server.applyOp(empty(), { op: "finding", claim: "c".repeat(240), verdict: "open" }, NOW)).not.toThrow();
+    expect(() => server.applyOp(empty(), { op: "finding", claim: "c", verdict: "open", n: "n".repeat(41) }, NOW)).toThrow(/n is too long/);
+    expect(() => server.applyOp(empty(), { op: "finding", claim: "c", verdict: "open", n: { a: 1 } }, NOW)).toThrow(/n must be a short string/);
+    expect(() => server.applyOp(empty(), { op: "finding", claim: "c", verdict: "open", report: "r".repeat(301) }, NOW)).toThrow(/report is too long .* it is an address/);
+    expect(() => server.applyOp(empty(), { op: "finding", id: "bad id!", claim: "c", verdict: "open" }, NOW)).toThrow(/id must be a short stable key/);
+    let page = empty();
+    for (let i = 0; i < f.FINDING_CAP; i++) page = server.applyOp(page, { op: "finding", claim: `c${i}`, verdict: "open" }, NOW).page;
+    expect(() => server.applyOp(page, { op: "finding", claim: "one more", verdict: "open" }, NOW)).toThrow(/60 findings are already on the page — drop/);
+    // An UPDATE at the cap is fine.
+    expect(() => server.applyOp(page, { op: "finding", id: "f3", verdict: "fact" }, NOW)).not.toThrow();
+    // A hand-corrupted ledger (nulls) does not break the op.
+    const corrupted = server.parsePage(JSON.stringify({ findings: [null, { id: "f2", claim: "x", verdict: "open" }] }));
+    expect(findingsOf(server.applyOp(corrupted, { op: "finding", claim: "y", verdict: "lead" }, NOW).page)[0].id).toBe("f3");
+  });
+
+  it("nothing new writes the old `finding:` evidence form — and a row written in it still parses and renders", () => {
+    expect(() => server.applyOp(empty(), { op: "evidence", address: "finding:gamma-1", label: "x" }, NOW)).toThrow(/a finding is not an evidence row — record it with op finding/);
+    const legacy = parsePageFile(JSON.stringify({ evidence: [{ address: "finding:gamma-1", label: "old", status: "open", updatedAt: "t" }] }));
+    expect(mergePage(legacy, {}, []).evidence.map((e) => e.address)).toEqual(["finding:gamma-1"]);
+  });
+
+  it("op read lists the ledger newest first with n and report; the tool table states the op", () => {
+    const page = run([
+      { op: "finding", claim: "Older claim", verdict: "dead", n: "10 tests" },
+      { op: "finding", claim: "Newer claim", verdict: "lead", report: "view:v1" },
+    ]);
+    const bumped = server.applyOp(page, { op: "finding", id: "f1", verdict: "dead" }, NOW + 5000).page; // f1 moved last
+    const text = f.formatPageRead(bumped, {});
+    expect(text).toContain("FINDINGS (2):\n  f1 [dead] Older claim | n: 10 tests\n  f2 [lead] Newer claim | report: view:v1");
+    for (const rule of [
+      "RECORD WHAT THE WORK ESTABLISHED as op finding {claim, verdict, n?, report?}",
+      "verdict is lead (worth chasing) | open (not settled) | fact (established) | dead (ruled out)",
+      "Pass the finding's id (the result gives it) to UPDATE it in place as the verdict moves — never file the same claim twice",
+      "findingOp drop {id} removes one that was never right",
+      "At most 60 per page",
+      "A finding is never an evidence row",
+    ]) {
+      expect(server.PAGE_TOOL.description).toContain(rule);
+    }
+    const props = (server.PAGE_TOOL.inputSchema as { properties: Record<string, { enum?: string[] }> }).properties;
+    expect(props.op.enum).toContain("finding");
+    expect(props.verdict.enum).toEqual(["lead", "open", "fact", "dead"]);
+    expect(props.findingOp.enum).toEqual(["drop"]);
+    expect(props.claim).toBeDefined();
+    expect(props.n).toBeDefined();
+    expect(props.report).toBeDefined();
+    // Caps mirrored in pageStore.
+    expect([...FINDING_VERDICTS]).toEqual(f.FINDING_VERDICTS);
+    expect([FINDING_CAP, FINDING_CLAIM_CAP, FINDING_N_CAP, FINDING_REPORT_CAP]).toEqual([f.FINDING_CAP, f.FINDING_CLAIM_CAP, f.FINDING_N_CAP, f.FINDING_REPORT_CAP]);
   });
 });
