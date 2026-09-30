@@ -38,10 +38,35 @@ function dockerReachable(): boolean {
 type Row = Record<string, unknown> & { name: string };
 type Snapshot = { sampledAt: string; idleMinutes: number; dryRun: boolean; holdUntil: number; containers: Row[] };
 
-/** Run the sampler for ~3 s (three ticks at MW_CHECK_SECONDS=1) and return the state dir's files.
+/** Run the sampler for ~`seconds` (three ticks at MW_CHECK_SECONDS=1 in 3 s) and return the state dir's files.
  *  Grace (the idle window after a watcher start) is OFF unless asked, so the seeded idle rows are
  *  actually idle to the rule. */
-function runWatcher(opts: { dryRun: boolean; holdSeconds?: number; grace?: boolean; traffic: string; requests?: string[]; staleRequests?: string[] }) {
+type WatcherOpts = { dryRun: boolean; holdSeconds?: number; grace?: boolean; traffic: string; requests?: string[]; staleRequests?: string[] };
+
+/** How many ticks a run completed: the ledger gets one row per RUNNING container per tick, so the
+ *  most rows any one name has is the tick count. */
+function ticksOf(run: { ledger: Row[] }): number {
+  const perName = new Map<string, number>();
+  for (const row of run.ledger) perName.set(row.name, (perName.get(row.name) ?? 0) + 1);
+  return Math.max(0, ...perName.values());
+}
+
+/** The assertions below need at least TWO ticks (a first delta and a following one). Three fit in
+ *  3 s on a quiet machine; on a loaded one (the whole suite running, Docker busy with
+ *  machinePanel's containers) the container can spend most of the window starting up and complete
+ *  one tick or none. That is the harness being slow, not the sampler being wrong — so a run that
+ *  did not reach two ticks is repeated once with a longer window. A run that did is never
+ *  repeated, whatever it says. */
+function runWatcher(opts: WatcherOpts) {
+  const first = runWatcherOnce(opts, 3);
+  const ticks = ticksOf(first);
+  if (ticks >= 2) return first;
+  first.cleanup();
+  console.warn(`dockerWatch.test.ts: ${ticks} tick(s) within 3 s — repeating the run with 10 s`);
+  return runWatcherOnce(opts, 10);
+}
+
+function runWatcherOnce(opts: WatcherOpts, seconds: number) {
   const state = fs.mkdtempSync(path.join(os.tmpdir(), "sb-watch-"));
   const cleanup = () => fs.rmSync(state, { recursive: true, force: true });
   fs.writeFileSync(path.join(state, "traffic.tsv"), opts.traffic);
@@ -62,7 +87,7 @@ function runWatcher(opts: { dryRun: boolean; holdSeconds?: number; grace?: boole
     "tr -d '\\r' < /fake/docker > /fakebin/docker && chmod +x /fakebin/docker",
     "tr -d '\\r' < /mw/docker-watch.sh > /tmp/w.sh",
     "export PATH=/fakebin:$PATH",
-    "timeout 3 sh /tmp/w.sh; true",
+    `timeout ${seconds} sh /tmp/w.sh; true`,
   ].join(" && ");
   let log: string;
   try {
