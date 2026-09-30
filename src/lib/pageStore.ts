@@ -441,6 +441,40 @@ export function isRetracted(
 /** The synthesized decision row's address prefix (`decisionAddress`). */
 export const DECISION_ADDRESS_PREFIX = "decision:";
 
+// ── Dismissed questions (SWIT-105) ───────────────────────────────────────────
+// A question the user does not need answered is DISMISSED — `not needed` on
+// its card. page.json is the agent's file, so (exactly like an evidence row)
+// the app records it in retracted.json, under the address `question:<id>`,
+// and every reader of "is this question open" folds it out. Reversible by
+// the agent, on purpose: RE-ASKING the id stamps a newer `askedAt`, and a
+// question asked AFTER its dismissal is open again.
+
+/** The retracted.json address a dismissed question is recorded under. */
+export const QUESTION_ADDRESS_PREFIX = "question:";
+export function questionAddress(questionId: string): string {
+  return `${QUESTION_ADDRESS_PREFIX}${questionId}`;
+}
+
+/** When the user dismissed this question, or null when it is not dismissed.
+ *  Dismissed = a `question:<id>` retraction that is NOT OLDER than the ask —
+ *  a later SECOND of `askedAt` (a re-ask) brings it back, the same clock rule
+ *  `isRetracted` applies to a re-posted evidence row; an unparseable stamp on
+ *  either side keeps it dismissed (a dismissal stands until the agent
+ *  demonstrably re-asks). Pure. */
+export function questionDismissedAt(
+  q: { id: string; askedAt?: string },
+  retracted: readonly RetractedEvidence[]
+): string | null {
+  if (retracted.length === 0) return null;
+  const address = questionAddress(q.id);
+  const hit = retracted.find((r) => r.address === address);
+  if (!hit) return null;
+  const askedAt = Date.parse(q.askedAt ?? "");
+  const dismissedAt = Date.parse(hit.at);
+  if (!Number.isFinite(askedAt) || !Number.isFinite(dismissedAt)) return hit.at;
+  return Math.floor(askedAt / 1000) <= Math.floor(dismissedAt / 1000) ? hit.at : null;
+}
+
 /** Fold the retractions out of a row list (agent-clock rows: `updatedAt` is
  *  consulted). Returns the SAME array when nothing is hidden. Pure. */
 export function applyRetractions<T extends Pick<PageEvidence, "address" | "updatedAt">>(
@@ -472,13 +506,14 @@ export function isAnswerUnsent(answer: PageAnswer | undefined): boolean {
  *  `isQuestionOpen`; `unsent` = answered in answers.json and not yet sent
  *  (`isAnswerUnsent`). Pure. */
 export function countQuestionStates(
-  questions: readonly Pick<PageQuestion, "id" | "resolved">[],
-  answers: AnswersFile
+  questions: readonly OpenQuestionFields[],
+  answers: AnswersFile,
+  retracted: readonly RetractedEvidence[] = NO_RETRACTIONS
 ): { open: number; unsent: number } {
   let open = 0;
   let unsent = 0;
   for (const q of questions) {
-    if (isQuestionOpen(q, answers)) open += 1;
+    if (isQuestionOpen(q, answers, retracted)) open += 1;
     else if (isAnswerUnsent(answers[q.id])) unsent += 1;
   }
   return { open, unsent };
@@ -631,6 +666,8 @@ export type AnsweredQuestion = { question: PageQuestion; answer: PageAnswer };
  *  answer, or the agent's resolution. `by` picks the page's word: `you:` /
  *  `settled:`. */
 export type SettledQuestion = { question: PageQuestion; answer: string; at: string; by: "user" | "agent" };
+/** SWIT-105: a question the user dismissed as not needed, and when. */
+export type DismissedQuestion = { question: PageQuestion; at: string };
 
 /** Is the item waiting on the USER — owned by the user, or parked in
  *  `waiting` (whoever owns it)? Home's Needs You and the To do owner column
@@ -639,10 +676,21 @@ export function isWaitingOnUser(item: Pick<PageItem, "owner" | "state">): boolea
   return item.owner === "user" || item.state === "waiting";
 }
 
+/** What "is it open" reads off a question (`askedAt` only matters once there
+ *  are dismissals to compare it with). */
+export type OpenQuestionFields = Pick<PageQuestion, "id" | "resolved"> & { askedAt?: string };
+
 /** Nobody has settled it: no user answer in answers.json, no agent
- *  resolution on the question. Pure — App's 5s pass counts with it too. */
-export function isQuestionOpen(q: Pick<PageQuestion, "id" | "resolved">, answers: AnswersFile): boolean {
-  return !(q.id in answers) && q.resolved === null;
+ *  resolution on the question — and (SWIT-105) the user has not dismissed it
+ *  as not needed (`questionDismissedAt`; the retractions default to none, so
+ *  a caller that never read retracted.json sees the pre-SWIT-105 answer).
+ *  Pure — App's 5s pass counts with it too. */
+export function isQuestionOpen(
+  q: OpenQuestionFields,
+  answers: AnswersFile,
+  retracted: readonly RetractedEvidence[] = NO_RETRACTIONS
+): boolean {
+  return !(q.id in answers) && q.resolved === null && questionDismissedAt(q, retracted) === null;
 }
 
 /** What PageView renders — the three files folded into R2's section order. */
@@ -687,6 +735,11 @@ export type RenderedPage = {
   /** DECIDED — the settled questions (user answers that went, agent
    *  resolutions), newest first; the page folds them. */
   settledQuestions: SettledQuestion[];
+  /** SWIT-105: questions the user dismissed as not needed (retracted.json's
+   *  `question:<id>` entries that are not older than the ask), newest first —
+   *  listed under the folded Decided block as `dismissed`. Out of Open
+   *  questions, the batch, Home and every count; never a decision row. */
+  dismissedQuestions: DismissedQuestion[];
   /** DONE — folded past DONE_FOLD. */
   doneItems: PageItem[];
   doneFolded: number;
@@ -733,7 +786,17 @@ export function mergePage(
   inbox: InboxPost[],
   retracted: readonly RetractedEvidence[] = NO_RETRACTIONS
 ): RenderedPage {
-  const openQuestions = page.questions.filter((q) => isQuestionOpen(q, answers));
+  const openQuestions = page.questions.filter((q) => isQuestionOpen(q, answers, retracted));
+  // SWIT-105: dismissed = would be open but for the user's `not needed`. An
+  // answer or a resolution outranks a dismissal (something was SAID), so
+  // those stay decisions; a dismissed question is never a decision row.
+  const dismissedQuestions: DismissedQuestion[] = page.questions
+    .filter((q) => !(q.id in answers) && q.resolved === null)
+    .flatMap((q) => {
+      const at = questionDismissedAt(q, retracted);
+      return at === null ? [] : [{ question: q, at }];
+    })
+    .sort((a, b) => newestFirst(a.at, b.at));
   // PRECEDENCE (SWIT-77): the user's answer in answers.json is ground truth
   // over the agent's resolution of the same question — the agent settles
   // what the user left, never what the user said.
@@ -806,6 +869,7 @@ export function mergePage(
     evidence,
     decisions,
     settledQuestions,
+    dismissedQuestions,
     doneItems,
     doneFolded: Math.max(0, doneAll.length - DONE_FOLD),
     droppedItems,
@@ -866,6 +930,15 @@ export function sendErrorNote(err: unknown): AnswerNote {
   return {
     kind: "error",
     text: `not sent — ${err instanceof Error ? err.message : String(err)}`,
+  };
+}
+
+/** SWIT-105: a `not needed` did not save — the question stays on the page
+ *  (it leaves only when the merged files say so), the reason beside Send. */
+export function dismissErrorNote(err: unknown): AnswerNote {
+  return {
+    kind: "error",
+    text: `not dismissed — ${err instanceof Error ? err.message : String(err)}`,
   };
 }
 
@@ -994,7 +1067,8 @@ export type ThreadPassEntry = {
   /** The stamp the entry was read under; -1 = a failed stat or read, which
    *  never matches, so the next tick re-reads. */
   stamp: number;
-  /** Open questions at the read — page.json + answers.json, both stamped. */
+  /** Open questions at the read — page.json + answers.json + (SWIT-105, the
+   *  dismissals) retracted.json, all three stamped. */
   questions: number;
   /** Decided-but-unsent answers at the read (answers.json, stamped) — the
    *  same pass, the same two files (`countQuestionStates`). */

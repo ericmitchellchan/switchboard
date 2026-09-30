@@ -48,6 +48,7 @@ import {
   parsePageFile,
   parseAnswersFile,
   parseInboxFile,
+  parseRetractedFile,
   mergePage,
   orderedOptions,
   answerSuccessNote,
@@ -65,6 +66,8 @@ import { useBacklog, openItems, HOME_BACKLOG_LIMIT } from "../lib/backlogStore";
 import type { BacklogItem } from "../lib/backlogStore";
 import { BacklogListing } from "./BacklogPanel";
 import { OptionRow } from "./kb/OptionRow";
+import { Fold } from "./kb/PageBlock";
+import { olderThreadIds, olderQuestionsLabel } from "../lib/homeModel";
 
 /** The page's H2 + trailing meta (10px mono faint, pushed right). */
 const SECTION_META: CSSProperties = {
@@ -209,15 +212,18 @@ export function Home({
         const next: ThreadDigest[] = [];
         for (const thread of threads) {
           try {
-            const [pageRaw, answersRaw, inboxRaw] = await Promise.all([
+            const [pageRaw, answersRaw, inboxRaw, retractedRaw] = await Promise.all([
               readThreadFile(thread.id, "page.json"),
               readThreadFile(thread.id, "answers.json"),
               readThreadFile(thread.id, "inbox.json"),
+              // SWIT-105: a question dismissed on the page (`not needed`) is
+              // not open here either — the dismissals live in this file.
+              readThreadFile(thread.id, "retracted.json"),
             ]);
             const posts = parseInboxFile(inboxRaw);
             next.push({
               thread,
-              page: mergePage(parsePageFile(pageRaw), parseAnswersFile(answersRaw), posts),
+              page: mergePage(parsePageFile(pageRaw), parseAnswersFile(answersRaw), posts, parseRetractedFile(retractedRaw)),
               posts,
             });
           } catch {
@@ -295,7 +301,7 @@ export function Home({
             gap: 18,
           }}
         >
-          {needsCount > 0 && <NeedsYou digests={digests} />}
+          {needsCount > 0 && <NeedsYou digests={digests} launched={view.launched} />}
           {openBacklog.length > 0 && (
             <BacklogBlock items={openBacklog} projectOptions={backlogProjects} />
           )}
@@ -343,11 +349,19 @@ function BacklogBlock({
 
 // ── Needs you ────────────────────────────────────────────────────────────────
 
-function NeedsYou({ digests }: { digests: ThreadDigest[] }) {
+function NeedsYou({ digests, launched }: { digests: ThreadDigest[]; launched: ReadonlySet<string> }) {
   const entries: ReactNode[] = [];
+  // SWIT-105: questions from threads with no sign of life in the last 14
+  // days (homeModel.olderThreadIds) fold behind ONE line under the list —
+  // a month-old question no longer sits above today's. Everything else a
+  // thread needs (an unsent batch, a request, an item) still lists.
+  const older = olderThreadIds(digests, launched, Date.now());
+  const olderCards: ReactNode[] = [];
   for (const d of digests) {
     for (const q of d.page.openQuestions) {
-      entries.push(<QuestionCard key={`q-${d.thread.id}-${q.id}`} digest={d} question={q} />);
+      (older.has(d.thread.id) ? olderCards : entries).push(
+        <QuestionCard key={`q-${d.thread.id}-${q.id}`} digest={d} question={q} />
+      );
     }
     if (d.page.unsentDecisions.length > 0) {
       entries.push(<UnsentRow key={`u-${d.thread.id}`} digest={d} count={d.page.unsentDecisions.length} />);
@@ -363,6 +377,11 @@ function NeedsYou({ digests }: { digests: ThreadDigest[] }) {
     <div>
       <SectionHeader label="Needs you" meta={String(entries.length)} />
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>{entries}</div>
+      {olderCards.length > 0 && (
+        <Fold label={olderQuestionsLabel(olderCards.length)} count={olderCards.length}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>{olderCards}</div>
+        </Fold>
+      )}
     </div>
   );
 }

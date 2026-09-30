@@ -476,7 +476,10 @@ const RETRACTED_CAP: usize = 200;
 /// refused too: those rows are synthesized from answers.json at the merge and
 /// are corrected on their question, never taken off — the merge ignores the
 /// prefix as well (pageStore.isRetracted), so a hand-edited file cannot hide
-/// one either.
+/// one either. SWIT-105: a `question:<id>` address is how an OPEN question is
+/// DISMISSED (`not needed` on its card) — the same file, the same command,
+/// the same guard; the frontend folds it out of every "is it open" reading
+/// until the agent re-asks the id (pageStore.questionDismissedAt).
 const RETRACTED_ADDRESS_CAP: usize = 500;
 const DECISION_ADDRESS_PREFIX: &str = "decision:";
 
@@ -589,6 +592,27 @@ mod retracted_evidence_tests {
         // A decision row is corrected on its question, never retracted.
         assert!(!valid_evidence_address("decision:q1"));
         assert!(valid_evidence_address("decisions/q1.md"));
+        // SWIT-105: dismissing an open question writes `question:<id>` through
+        // this same guard — it must pass, and stay distinct from a decision.
+        assert!(valid_evidence_address("question:q1"));
+        assert!(valid_evidence_address("question:my-stable-id"));
+    }
+
+    #[test]
+    fn a_dismissed_question_is_one_entry_that_a_re_dismissal_re_stamps() {
+        // SWIT-105: the entry is `{address: "question:<id>", at}` like any
+        // other; dismissing the same question again (after a re-ask brought
+        // it back) MOVES its stamp, which is what makes the second dismissal
+        // newer than the re-ask.
+        let first = retract_evidence_address(&[], "question:q1", "2026-09-30T10:00:00.000Z");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0]["address"], "question:q1");
+        let with_row = retract_evidence_address(&first, "docs/a.md", "2026-09-30T10:05:00.000Z");
+        let again = retract_evidence_address(&with_row, "question:q1", "2026-09-30T11:00:00.000Z");
+        assert_eq!(again.len(), 2);
+        assert_eq!(again[0]["address"], "question:q1");
+        assert_eq!(again[0]["at"], "2026-09-30T11:00:00.000Z");
+        assert_eq!(again[1]["address"], "docs/a.md");
     }
 }
 

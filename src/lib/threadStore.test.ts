@@ -51,6 +51,9 @@ import {
   quickCreateWorkingDir,
   explicitThreadTitle,
   NEW_THREAD_TITLE,
+  autoThreadTitle,
+  themeThreadTitle,
+  THEME_TITLE_MAX,
   requestThreadRename,
   clearThreadRenameRequest,
   renameEditorHoldsFocus,
@@ -1404,5 +1407,52 @@ describe("thread prepared state (SWIT-65)", () => {
     prep.setThreadPrepared(t2.id, { prepared: false, reason: "r" });
     prep.deleteThread(t2.id);
     expect(prep.getThreadsView().prepared.has(t2.id)).toBe(false);
+  });
+});
+
+describe("a thread names itself from its page theme (SWIT-105)", () => {
+  it("themeThreadTitle: whitespace folded; ≤ 40 kept whole; longer cut at a word boundary with …", () => {
+    expect(THEME_TITLE_MAX).toBe(40);
+    expect(themeThreadTitle("  Pin   the grid like Ky  ")).toBe("Pin the grid like Ky");
+    expect(themeThreadTitle("x".repeat(40))).toBe("x".repeat(40));
+    const t = themeThreadTitle("Build a gamma measure of our own that a discretionary trader can lean on");
+    expect(t).toBe("Build a gamma measure of our own that a…");
+    expect(Array.from(t).length).toBeLessThanOrEqual(41);
+    // A cut that lands exactly at a word's end keeps that word.
+    expect(themeThreadTitle(`${"abcd ".repeat(7)}abcde more words`)).toBe("abcd abcd abcd abcd abcd abcd abcd abcde…");
+    // Trailing punctuation before the cut goes.
+    expect(themeThreadTitle("Give every market an anchor, then check pins in every view")).toBe("Give every market an anchor, then check…");
+    // No space in reach: a hard cut.
+    expect(themeThreadTitle("y".repeat(60))).toBe(`${"y".repeat(40)}…`);
+    // Emoji are never halved.
+    expect(themeThreadTitle("😀".repeat(50))).toBe(`${"😀".repeat(40)}…`);
+    expect(themeThreadTitle("   ")).toBe("");
+  });
+
+  it("autoThreadTitle: ONLY a title that is exactly the default is ever renamed", () => {
+    expect(autoThreadTitle(NEW_THREAD_TITLE, "Pin the grid like Ky")).toBe("Pin the grid like Ky");
+    // A user's name always wins — including a renamed-then-cleared thread,
+    // whose emptied box fell back to `repo · date`.
+    expect(autoThreadTitle("gamma review", "Pin the grid like Ky")).toBeNull();
+    expect(autoThreadTitle(defaultThreadTitle("lodestar", new Date(2026, 8, 30)), "Pin the grid")).toBeNull();
+    expect(autoThreadTitle("new thread", "Pin the grid")).toBeNull(); // exact, case included
+    // No theme, a blank one, or one that says `New thread`: nothing to do.
+    expect(autoThreadTitle(NEW_THREAD_TITLE, null)).toBeNull();
+    expect(autoThreadTitle(NEW_THREAD_TITLE, undefined)).toBeNull();
+    expect(autoThreadTitle(NEW_THREAD_TITLE, "   ")).toBeNull();
+    expect(autoThreadTitle(NEW_THREAD_TITLE, " New   thread ")).toBeNull();
+  });
+
+  it("through the primitive, once: the renamed title is no longer the default, so a later theme never moves it", () => {
+    __resetThreadStoreForTests();
+    const t = createThreadRecord({ title: NEW_THREAD_TITLE, workingDir: "C:/p/switchboard" });
+    const first = autoThreadTitle(getThreadById(t.id)!.title, "Pin the grid like Ky");
+    renameThread(t.id, first!);
+    expect(getThreadById(t.id)!.title).toBe("Pin the grid like Ky");
+    expect(autoThreadTitle(getThreadById(t.id)!.title, "A different theme later")).toBeNull();
+    // A user rename back to the literal default is a choice the rule cannot
+    // tell apart — stated here; App applies the rule at most once per thread
+    // per app session, so it does not fight the user within one.
+    __resetThreadStoreForTests();
   });
 });

@@ -134,13 +134,38 @@ describe("applyOp semantics", () => {
     ).toThrow(/decision:q1/);
   });
 
-  it("an ask option beyond 60 chars is a VISIBLE error (SWIT-69)", () => {
+  it("an ask option beyond 60 chars is TRIMMED at a word boundary with …, and the result says which (SWIT-105; was a refusal, SWIT-69)", () => {
+    const trim = (server as unknown as { trimOption: (o: string) => string; OPTION_CAP: number });
+    expect(trim.OPTION_CAP).toBe(60);
+    const long = "Release model on Model 4 debt, run against the whole forward stream";
+    const { page, message } = server.applyOp(
+      empty(),
+      { op: "ask", text: "Which?", options: ["ok", long], default: long },
+      NOW
+    );
+    const q = (page.questions as Array<Record<string, unknown>>)[0];
+    const cut = (q.options as string[])[1];
+    expect(cut).toBe("Release model on Model 4 debt, run against the whole…");
+    expect(cut.length).toBeLessThanOrEqual(60);
+    expect(long.startsWith(cut.slice(0, -1))).toBe(true);
+    // The default names the option by its FULL text — matched after trimming.
+    expect(q.default).toBe(cut);
+    expect(message).toContain(`Trimmed 1 option to 60 chars: "${cut}"`);
+    // An option at the cap is untouched, and the result carries no note.
+    const exact = server.applyOp(empty(), { op: "ask", text: "Which?", options: ["x".repeat(60)] }, NOW);
+    expect((exact.page.questions as Array<{ options: string[] }>)[0].options).toEqual(["x".repeat(60)]);
+    expect(exact.message).not.toContain("Trimmed");
+    // One unbroken word is cut hard, still ≤ 60 with the ellipsis.
+    expect(trim.trimOption("y".repeat(90))).toBe(`${"y".repeat(59)}…`);
+    // Two options that read the same once trimmed are a VISIBLE error.
+    const twin = "a ".repeat(40);
     expect(() =>
-      server.applyOp(empty(), { op: "ask", text: "Which?", options: ["ok", "x".repeat(61)] }, NOW)
-    ).toThrow(/cap is 60/);
+      server.applyOp(empty(), { op: "ask", text: "Which?", options: [`${twin}one`, `${twin}two`] }, NOW)
+    ).toThrow(/read the same once trimmed/);
+    // A default that is none of the options, trimmed or not, still refuses.
     expect(() =>
-      server.applyOp(empty(), { op: "ask", text: "Which?", options: ["x".repeat(60)] }, NOW)
-    ).not.toThrow();
+      server.applyOp(empty(), { op: "ask", text: "Which?", options: ["ok", long], default: "z".repeat(80) }, NOW)
+    ).toThrow(/default must be one of the options/);
   });
 
   it("a turn's reviewFirst is validated like an address, stored on the turn, and round-trips (SWIT-67)", () => {
@@ -1459,6 +1484,84 @@ describe("the view tool claims the words a user says (SWIT-102): report, artifac
     // The rest of the description is still there, after the claim.
     expect(d).toContain("SHOW the user rendered data in the panel");
     expect(d).toContain("report: ONE document with live views embedded");
+  });
+});
+
+describe("a dismissed question (SWIT-105) — the app's retracted.json, read-only here", () => {
+  const d = server as unknown as {
+    dismissedQuestionIds: (page: Record<string, unknown>, retracted: unknown) => Set<string>;
+    formatPageRead: (page: Record<string, unknown>, answers: unknown, retracted?: unknown) => string;
+    performOp: (threadDir: string, args: Record<string, unknown>, now: number) => string;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeFs = require("fs") as {
+    mkdtempSync: (p: string) => string;
+    writeFileSync: (p: string, d: string) => void;
+    readFileSync: (p: string, e: string) => string;
+    rmSync: (p: string, o: { recursive: boolean; force: boolean }) => void;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeOs = require("os") as { tmpdir: () => string };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodePath = require("path") as { join: (...p: string[]) => string };
+  const asked = () => run([{ op: "ask", id: "q1", text: "A?" }, { op: "ask", id: "q2", text: "B?" }]); // askedAt = NOW
+  const LATER = new Date(NOW + 60_000).toISOString();
+  const EARLIER = new Date(NOW - 60_000).toISOString();
+
+  it("dismissedQuestionIds: a question:<id> entry not older than the ask; a re-ask after it brings the question back", () => {
+    const page = asked();
+    expect(d.dismissedQuestionIds(page, { version: 1, evidence: [{ address: "question:q1", at: LATER }] })).toEqual(new Set(["q1"]));
+    // Same second as the ask — still dismissed (whole seconds, pageStore's rule).
+    expect(d.dismissedQuestionIds(page, [{ address: "question:q1", at: new Date(NOW + 400).toISOString() }])).toEqual(new Set(["q1"]));
+    // Dismissed BEFORE the (re-)ask: the question is back.
+    expect(d.dismissedQuestionIds(page, [{ address: "question:q1", at: EARLIER }]).size).toBe(0);
+    // Unparseable stamp stays dismissed; evidence rows, unknown ids and junk are ignored.
+    expect(d.dismissedQuestionIds(page, [{ address: "question:q2", at: "garbage" }, { address: "SWIT-1", at: LATER }, { address: "question:q9", at: LATER }, null])).toEqual(new Set(["q2"]));
+    expect(d.dismissedQuestionIds(page, null).size).toBe(0);
+    expect(d.dismissedQuestionIds(page, "junk").size).toBe(0);
+  });
+
+  it("a dismissed question does not count against the ask cap; re-asking it brings it back and SAYS so", () => {
+    let page = empty();
+    for (let i = 0; i < server.QUESTION_CAP; i++) page = server.applyOp(page, { op: "ask", text: `q ${i}` }, NOW).page;
+    expect(() => server.applyOp(page, { op: "ask", text: "one more" }, NOW)).toThrow(/already OPEN/);
+    const applyDismissed = server.applyOp as unknown as (
+      p: Record<string, unknown>, a: Record<string, unknown>, n: number, answered: Set<string>, dismissed: Set<string>
+    ) => { page: Record<string, unknown>; message: string };
+    expect(() => applyDismissed(page, { op: "ask", text: "one more" }, NOW, new Set(), new Set(["q1"]))).not.toThrow();
+    const back = applyDismissed(asked(), { op: "ask", id: "q1", text: "A, again?" }, NOW + 120_000, new Set(), new Set(["q1"]));
+    expect(back.message).toMatch(/^Question q1 is back on the page — the user had dismissed it as not needed/);
+    expect((back.page.questions as Array<Record<string, unknown>>).find((q) => q.id === "q1")!.askedAt).toBe(new Date(NOW + 120_000).toISOString());
+    // A dismissed question can still be resolved (the agent closing it out).
+    expect(() => applyDismissed(asked(), { op: "resolve", id: "q1", answer: "moot" }, NOW, new Set(), new Set(["q1"]))).not.toThrow();
+  });
+
+  it("op read names a dismissed question by id, outside OPEN QUESTIONS; performOp reads retracted.json", () => {
+    const text = d.formatPageRead(asked(), {}, { evidence: [{ address: "question:q1", at: LATER }] });
+    expect(text).toContain("OPEN QUESTIONS (1):\n  q2 [decision] B?");
+    expect(text).toContain("1 was dismissed by the user as not needed (q1) — do not wait on it; re-ask (same id) only if the answer has come to matter.");
+    expect(text).not.toContain("q1 [decision]");
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-dismiss-"));
+    try {
+      d.performOp(dir, { op: "ask", id: "q1", text: "A?" }, NOW);
+      nodeFs.writeFileSync(nodePath.join(dir, "retracted.json"), JSON.stringify({ version: 1, evidence: [{ address: "question:q1", at: LATER }] }));
+      expect(d.performOp(dir, { op: "read" }, NOW)).toContain("dismissed by the user as not needed (q1)");
+      // Re-asking through the real entry point: the message says it is back.
+      expect(d.performOp(dir, { op: "ask", id: "q1", text: "A?" }, NOW + 120_000)).toMatch(/^Question q1 is back on the page/);
+      expect(d.performOp(dir, { op: "read" }, NOW + 120_000)).toContain("OPEN QUESTIONS (1):\n  q1 [decision] A?");
+    } finally {
+      nodeFs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("the tool table states dismissal and trimming", () => {
+    for (const rule of [
+      "An option over 60 chars is CUT at a word boundary with … (the result says which)",
+      "The user can DISMISS a question as not needed: it leaves the page and op read names it",
+      "re-ask it (same id) only if the answer has come to matter",
+    ]) {
+      expect(server.PAGE_TOOL.description).toContain(rule);
+    }
   });
 });
 

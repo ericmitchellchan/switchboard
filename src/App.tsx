@@ -55,6 +55,7 @@ import {
   createChatStartDetector,
   defaultThreadTitle,
   explicitThreadTitle,
+  autoThreadTitle,
   requestThreadRename,
   quickCreateWorkingDir,
   publishSessionStatuses,
@@ -1433,6 +1434,35 @@ export default function App() {
   // (`pageStore.nextPassEntry`), because seen is device-local state, not one
   // of the stamped files: a cached count lied for a tick after a tab switch.
   const threadPassCacheRef = useRef(new Map<string, ThreadPassEntry>());
+  // SWIT-105 — A THREAD NAMES ITSELF. A thread the user never named is
+  // `New thread` until someone types a title; the agent's first page THEME
+  // already says what it is about. So the pass that reads page.json (stamp
+  // moved) hands the theme here: `threadStore.autoThreadTitle` is the rule
+  // (null unless the title is EXACTLY the default — a user's name, or a
+  // cleared box's `repo · date`, is never touched), applied at most ONCE per
+  // thread per app session, through the PRIMITIVES (renameThread +
+  // renameSessionLocal + the session IPC — the one-name rule's own calls, so
+  // the tab follows and there is no handler ping-pong).
+  const autoTitledRef = useRef(new Set<string>());
+  const applyThemeTitle = useCallback(
+    (threadId: string, theme: string | null) => {
+      if (autoTitledRef.current.has(threadId)) return;
+      const before = getThreadById(threadId);
+      if (!before) return;
+      const title = autoThreadTitle(before.title, theme);
+      if (title === null) return;
+      autoTitledRef.current.add(threadId);
+      log.info(`Thread id=${threadId} named from its page theme: ${title}`);
+      renameThread(threadId, title);
+      void saveThreadsToDisk();
+      const after = getThreadById(threadId);
+      if (after?.sessionId) {
+        renameSessionLocal(after.sessionId, after.title);
+        renameSession(after.sessionId, after.title).catch(console.error);
+      }
+    },
+    [renameSessionLocal]
+  );
   useEffect(() => {
     let cancelled = false;
     let busy = false;
@@ -1501,14 +1531,22 @@ export default function App() {
           const entry: ThreadPassEntry = { stamp, questions: 0, unsent: 0, postsAt: [] };
           threadPassCacheRef.current.set(t.id, entry);
           try {
-            const [pageRaw, answersRaw] = await Promise.all([
+            const [pageRaw, answersRaw, retractedRaw] = await Promise.all([
               readThreadFile(t.id, "page.json"),
               readThreadFile(t.id, "answers.json"),
+              // SWIT-105: a dismissed question (`question:<id>` in the app's
+              // retracted.json — one of the stamped files, so a dismissal
+              // moves the stamp and lands here) is not open either.
+              readThreadFile(t.id, "retracted.json"),
             ]);
             if (cancelled) return;
+            const pageFile = parsePageFile(pageRaw);
+            // SWIT-105: a thread still titled `New thread` takes its name
+            // from the first page theme — once, and never over a user's name.
+            applyThemeTitle(t.id, pageFile.theme);
             // SWIT-77: an agent-resolved question is not open either; an
             // answered one with no (or a stale) sentAt is unsent.
-            const counts = countQuestionStates(parsePageFile(pageRaw).questions, parseAnswersFile(answersRaw));
+            const counts = countQuestionStates(pageFile.questions, parseAnswersFile(answersRaw), parseRetractedFile(retractedRaw));
             entry.questions = counts.open;
             entry.unsent = counts.unsent;
             if (counts.open > 0) questions[t.id] = counts.open;

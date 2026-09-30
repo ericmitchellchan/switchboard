@@ -383,6 +383,19 @@ shape for restored workspaces only.
   `--text-muted` over `you: <answer>` / `settled: <answer>` (the agent's `resolve`) in
   `--text-secondary` with the label dim; the legacy tab centres the same voice, or the one
   line `This question is no longer on the page.`
+- **`not needed` (SWIT-105):** on an OPEN card only (a decided one is corrected with
+  `change`), after the state word on the first line: the kit TEXT_LINK voice (10px mono
+  `--text-faint`, `--text-primary` on hover and on keyboard focus — `.page-textlink`),
+  always visible, `title` = `Take this question off the page — you do not need it
+  answered. The agent can ask again if it comes to matter.` It takes `keepFocus` like the
+  option rows, so a click never blurs (and so saves) a box being typed in; it dims to .4
+  while its write is in flight and every one is disabled while any retraction writes. A
+  dismissed question lists under DECIDED, after the answered ones, as the question in
+  `--text-secondary` over `dismissed` (10px mono `--text-faint`). A failed dismissal is the
+  footer's outcome line, `not dismissed — …`, and the card stays.
+- **Home's Needs you, older questions (SWIT-105):** questions from threads with no sign of
+  life in 14 days sit under the listed cards behind ONE PageBlock `Fold` line — `N older
+  questions · show` / `hide` — the cards inside unchanged.
 
 ## The page sections
 

@@ -117,13 +117,16 @@ import {
   isOpenItem,
   DECISION_ADDRESS_PREFIX,
   briefSections,
+  questionAddress,
+  dismissErrorNote,
   subscribePageFocus,
   pageFocusNonce,
   takePageFocus,
   peekPageFocus,
 } from "../../lib/pageStore";
 import { nextThingFor, openableAddressIn } from "../../lib/nextThing";
-import type { AnswerNote, InboxPost, PageAnswer, PageBrief, PageItem, PageQuestion, RenderedPage, SettledQuestion } from "../../lib/pageStore";
+import type { AnswerNote, DismissedQuestion, InboxPost, PageAnswer, PageBrief, PageItem, PageQuestion, RenderedPage, SettledQuestion } from "../../lib/pageStore";
+import { TEXT_LINK } from "../kit";
 import { parseSurfaceAddress } from "../../lib/surfaceParams";
 import { answerQuestion, openArtifact, openInPanel, getActiveTabSession, submitToThread } from "../../lib/panelStore";
 import type { OpenableArtifact } from "../../lib/panelStore";
@@ -350,6 +353,25 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
         refresh();
       } catch (err) {
         log.warn(`Could not take ${address} off the page: ${err}`);
+      } finally {
+        setRetracting(null);
+      }
+    },
+    [threadId, refresh]
+  );
+  // SWIT-105: `not needed` on an open question — the SAME app write as the
+  // evidence `×` (retracted.json, under `question:<id>`), the same in-flight
+  // state (the retractions share one tmp file, so one write at a time across
+  // both controls), and the same rule for leaving: the card goes when the
+  // merged files say so (`refresh`), never from local hide state. A failed
+  // write rejects — the block prints it beside Send.
+  const dismissQuestion = useCallback(
+    async (questionId: string) => {
+      const address = questionAddress(questionId);
+      setRetracting(address);
+      try {
+        await retractThreadEvidence(threadId, address);
+        refresh();
       } finally {
         setRetracting(null);
       }
@@ -600,7 +622,7 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
 
       {page.brief && <BriefBlock brief={page.brief} isNew={isNewSince(page.brief.updatedAt, seenAt)} />}
 
-      <DecisionsBlock threadId={threadId} page={page} seenAt={seenAt} />
+      <DecisionsBlock threadId={threadId} page={page} seenAt={seenAt} retracting={retracting} onDismiss={dismissQuestion} />
 
       {(page.latestTurn || page.updates.length > 0) && (
         <PageBlock title="This turn">
@@ -692,7 +714,9 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
         </PageBlock>
       )}
 
-      {page.settledQuestions.length > 0 && <DecidedSection rows={page.settledQuestions} />}
+      {(page.settledQuestions.length > 0 || page.dismissedQuestions.length > 0) && (
+        <DecidedSection rows={page.settledQuestions} dismissed={page.dismissedQuestions} />
+      )}
 
       {page.doneItems.length > 0 && (
         <PageBlock title="Done" note={page.doneFolded > 0 ? `+ ${page.doneFolded} more` : undefined}>
@@ -831,10 +855,18 @@ function DecisionsBlock({
   threadId,
   page,
   seenAt,
+  retracting,
+  onDismiss,
 }: {
   threadId: string;
   page: RenderedPage;
   seenAt: number | null;
+  /** The retracted.json address whose write is in flight on this page (an
+   *  evidence `×` or a question's `not needed`) — one write at a time. */
+  retracting: string | null;
+  /** SWIT-105: record `question:<id>` as dismissed and re-read the page.
+   *  Rejects when the write failed. */
+  onDismiss: (questionId: string) => Promise<void>;
 }) {
   // The overlay between an action and the poll that shows it on the page:
   // answers saved HERE (until the files carry them), ids SENT here (until
@@ -970,6 +1002,26 @@ function DecisionsBlock({
   };
   const keepFocus = (e: { preventDefault: () => void }) => e.preventDefault();
 
+  /** SWIT-105: `not needed` — the user does not need this one answered. The
+   *  card leaves when the poll shows the dismissal (the host re-reads at
+   *  once); a failed write is one line beside Send and the card stays. A
+   *  keyboard dismissal hands focus to a neighbouring card's `not needed`
+   *  (else Send) first, so it does not land on `body` when the card goes. */
+  const dismiss = async (q: PageQuestion, button: HTMLButtonElement) => {
+    if (frozen || retracting !== null) return;
+    setNote(null);
+    try {
+      await onDismiss(q.id);
+      if (document.activeElement === button) {
+        const others = Array.from(rootRef.current?.querySelectorAll<HTMLButtonElement>("[data-dismiss]") ?? []);
+        const at = others.indexOf(button);
+        (others[at + 1] ?? others[at - 1] ?? rootRef.current?.querySelector<HTMLButtonElement>("[data-send]"))?.focus();
+      }
+    } catch (err) {
+      setNote(dismissErrorNote(err));
+    }
+  };
+
   const send = async () => {
     if ((decided === 0 && !hasDraft) || frozen) return;
     setSending(true);
@@ -1100,6 +1152,29 @@ function DecisionsBlock({
                   {chosen ? "decided" : "open"}
                 </span>
                 {chosen && <span style={UNSENT} title={UNSENT_TITLE}>{UNSENT_WORD}</span>}
+                {/* SWIT-105: only an OPEN question is dismissed — a decided
+                    one is corrected with `change`. keepFocus: a click must
+                    not blur (and so save) a box being typed in. */}
+                {!chosen && (
+                  <button
+                    type="button"
+                    className="page-textlink"
+                    data-dismiss=""
+                    disabled={frozen || retracting !== null}
+                    onMouseDown={keepFocus}
+                    onClick={(e) => void dismiss(q, e.currentTarget)}
+                    title="Take this question off the page — you do not need it answered. The agent can ask again if it comes to matter."
+                    style={{
+                      ...TEXT_LINK,
+                      flex: "none",
+                      marginTop: 0,
+                      opacity: retracting === questionAddress(q.id) ? 0.4 : 1,
+                      cursor: frozen || retracting !== null ? "default" : "pointer",
+                    }}
+                  >
+                    not needed
+                  </button>
+                )}
               </div>
               {rec && (
                 <div style={{ marginLeft: CARD_INDENT, fontSize: 12, color: "var(--text-secondary)" }}>
@@ -1193,6 +1268,7 @@ function DecisionsBlock({
           {note?.kind === "error" && <span style={{ color: "var(--text-muted)" }}>{note.text}</span>}
           <button
             type="button"
+            data-send=""
             disabled={cannotSend}
             onMouseDown={keepFocus}
             onClick={() => void send()}
@@ -1214,11 +1290,13 @@ function DecisionsBlock({
 }
 
 /** DECIDED (SWIT-77): the settled questions, folded behind a count —
- *  `you: <answer>` for the user's, `settled: <answer>` for the agent's. */
-function DecidedSection({ rows }: { rows: SettledQuestion[] }) {
+ *  `you: <answer>` for the user's, `settled: <answer>` for the agent's, and
+ *  (SWIT-105) the questions the user took off the page as `dismissed`,
+ *  after them — history, in the same fold. */
+function DecidedSection({ rows, dismissed }: { rows: SettledQuestion[]; dismissed: DismissedQuestion[] }) {
   return (
     <PageBlock title="Decided">
-      <Fold label="decided" count={rows.length}>
+      <Fold label="decided" count={rows.length + dismissed.length}>
         {rows.map(({ question, answer, by }) => (
           <div key={question.id} style={{ ...DENSE_ROW, flexDirection: "column", gap: 2 }}>
             <span style={{ fontSize: 12.5, color: "var(--text-primary)", lineHeight: 1.45 }}>{question.text}</span>
@@ -1226,6 +1304,12 @@ function DecidedSection({ rows }: { rows: SettledQuestion[] }) {
               <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)" }}>{by === "agent" ? "settled: " : "you: "}</span>
               {answer}
             </span>
+          </div>
+        ))}
+        {dismissed.map(({ question }) => (
+          <div key={question.id} style={{ ...DENSE_ROW, flexDirection: "column", gap: 2 }}>
+            <span style={{ fontSize: 12.5, color: "var(--text-secondary)", lineHeight: 1.45 }}>{question.text}</span>
+            <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)" }}>dismissed</span>
           </div>
         ))}
       </Fold>

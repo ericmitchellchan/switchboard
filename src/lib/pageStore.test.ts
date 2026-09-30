@@ -49,6 +49,10 @@ import {
   RETRACTED_CAP,
   parseBrief,
   briefSections,
+  questionAddress,
+  questionDismissedAt,
+  QUESTION_ADDRESS_PREFIX,
+  dismissErrorNote,
   BRIEF_LISTS,
   BRIEF_GOAL_CAP,
   BRIEF_LINE_CAP,
@@ -511,6 +515,61 @@ describe("mergePage", () => {
     expect(
       mergePage(EMPTY_PAGE, {}, [{ id: "p", from: "a", kind: "update", text: "t", at: "" }]).isEmpty
     ).toBe(false);
+  });
+});
+
+describe("a dismissed question (SWIT-105)", () => {
+  const ASKED = "2026-09-30T10:00:00.000Z";
+  const qs = parsePageFile(
+    JSON.stringify({
+      questions: [
+        { id: "q1", text: "A?", askedAt: ASKED },
+        { id: "q2", text: "B?", askedAt: ASKED },
+        { id: "q3", text: "C?", askedAt: ASKED, answer: "moot", answeredAt: "2026-09-30T10:30:00Z" },
+      ],
+    })
+  );
+  const gone = (id: string, at: string): RetractedEvidence => ({ address: questionAddress(id), at });
+
+  it("questionAddress / questionDismissedAt: dismissed until a re-ask NEWER (by a whole second) than the dismissal", () => {
+    expect(questionAddress("q1")).toBe("question:q1");
+    expect(QUESTION_ADDRESS_PREFIX).toBe("question:");
+    const q = { id: "q1", askedAt: ASKED };
+    expect(questionDismissedAt(q, [])).toBeNull();
+    expect(questionDismissedAt(q, [gone("q1", "2026-09-30T11:00:00Z")])).toBe("2026-09-30T11:00:00Z");
+    expect(questionDismissedAt(q, [gone("q1", "2026-09-30T10:00:00.900Z")])).not.toBeNull(); // same second
+    expect(questionDismissedAt({ id: "q1", askedAt: "2026-09-30T12:00:00Z" }, [gone("q1", "2026-09-30T11:00:00Z")])).toBeNull(); // re-asked
+    expect(questionDismissedAt({ id: "q1", askedAt: "" }, [gone("q1", "2026-09-30T11:00:00Z")])).not.toBeNull(); // unparseable stays dismissed
+    expect(questionDismissedAt(q, [gone("q2", "2026-09-30T11:00:00Z"), { address: "q1", at: "2026-09-30T11:00:00Z" }])).toBeNull();
+  });
+
+  it("isQuestionOpen / countQuestionStates honour it; with no retractions nothing changes", () => {
+    const r = [gone("q1", "2026-09-30T11:00:00Z")];
+    expect(isQuestionOpen(qs.questions[0], {}, r)).toBe(false);
+    expect(isQuestionOpen(qs.questions[0], {})).toBe(true);
+    expect(countQuestionStates(qs.questions, {}, r)).toEqual({ open: 1, unsent: 0 });
+    expect(countQuestionStates(qs.questions, {})).toEqual({ open: 2, unsent: 0 });
+  });
+
+  it("the merge takes it out of Open questions, the batch and Home's list, and lists it under dismissedQuestions — never a decision", () => {
+    const m = mergePage(qs, {}, [], [gone("q1", "2026-09-30T11:00:00Z"), gone("q3", "2026-09-30T11:00:00Z")]);
+    expect(m.openQuestions.map((q) => q.id)).toEqual(["q2"]);
+    expect(m.decisionQuestions.map((q) => q.id)).toEqual(["q2"]);
+    // q3 was SETTLED — an answer outranks a dismissal; it stays a decision.
+    expect(m.dismissedQuestions).toEqual([{ question: qs.questions[0], at: "2026-09-30T11:00:00Z" }]);
+    expect(m.decisions.map((d) => d.address)).toEqual(["decision:q3"]);
+    expect(m.evidence.some((e) => e.address.startsWith(QUESTION_ADDRESS_PREFIX))).toBe(false);
+    // A user answer to a dismissed question wins too (it is answered, not dismissed).
+    const answered = mergePage(qs, { q1: { text: "yes", at: "2026-09-30T12:00:00Z" } }, [], [gone("q1", "2026-09-30T11:00:00Z")]);
+    expect(answered.dismissedQuestions).toEqual([]);
+    expect(answered.unsentDecisions.map((a) => a.question.id)).toEqual(["q1"]);
+    // No retractions: the pre-SWIT-105 merge.
+    expect(mergePage(qs, {}, []).dismissedQuestions).toEqual([]);
+  });
+
+  it("dismissErrorNote keeps the card: an error note, never a success", () => {
+    expect(dismissErrorNote(new Error("disk full"))).toEqual({ kind: "error", text: "not dismissed — disk full" });
+    expect(noteReplacesForm(dismissErrorNote("x"))).toBe(false);
   });
 });
 

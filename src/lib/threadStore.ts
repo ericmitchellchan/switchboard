@@ -141,6 +141,43 @@ export function explicitThreadTitle(typed: string | undefined | null): string {
   return t.length > 0 ? t : NEW_THREAD_TITLE;
 }
 
+/** SWIT-105: how long a title taken from a page theme may be. */
+export const THEME_TITLE_MAX = 40;
+
+/** A thread title cut from its page THEME (SWIT-105): whitespace folded, the
+ *  first THEME_TITLE_MAX characters, cut back to a word boundary when one
+ *  sits in the last 40% of the cut, trailing punctuation dropped, `…` when
+ *  anything was cut (backlogThreadTitle's shape). Counted in code points, so
+ *  an emoji is never halved. Empty when the theme is. Pure. */
+export function themeThreadTitle(theme: string): string {
+  const clean = theme.replace(/\s+/g, " ").trim();
+  const points = Array.from(clean);
+  if (points.length <= THEME_TITLE_MAX) return clean;
+  let cut = points.slice(0, THEME_TITLE_MAX).join("");
+  // A cut that already ends on a whole word (the next character is a space)
+  // keeps that word; otherwise back up to the last space, if it is near.
+  if (points[THEME_TITLE_MAX] !== " ") {
+    const space = cut.lastIndexOf(" ");
+    if (space >= THEME_TITLE_MAX * 0.6) cut = cut.slice(0, space);
+  }
+  return `${cut.replace(/[\s,;:.\-–—]+$/, "")}…`;
+}
+
+/** A THREAD NAMES ITSELF (SWIT-105): the title a thread should take from its
+ *  page theme, or NULL to leave it alone. Only a thread whose title is still
+ *  EXACTLY the explicit-creation default (`New thread`) is ever named — a
+ *  user's rename always wins and is never overwritten, a box the user
+ *  emptied fell back to `repo · date` (derivedThreadTitle) and is not the
+ *  default either, and a promoted thread was never `New thread`. Null too
+ *  when there is no theme, or the theme yields nothing new. Pure; the caller
+ *  applies it once, through the rename primitives. */
+export function autoThreadTitle(currentTitle: string, theme: string | null | undefined): string | null {
+  if (currentTitle !== NEW_THREAD_TITLE) return null;
+  if (typeof theme !== "string") return null;
+  const title = themeThreadTitle(theme);
+  return title.length > 0 && title !== NEW_THREAD_TITLE ? title : null;
+}
+
 /** Do two paths name the same directory? Windows-shaped comparison: separator
  *  style, a trailing separator, the verbatim `\\?\` prefix and CASE are all
  *  insignificant here (NTFS is case-insensitive, and the two strings reach us

@@ -314,7 +314,8 @@ button.page-address:hover {
   color: var(--text-primary);
   border-bottom-color: var(--text-secondary);
 }
-.page-textlink:hover {
+.page-textlink:hover,
+.page-textlink:focus-visible {
   color: var(--text-primary) !important;
 }
 .page-next:hover {

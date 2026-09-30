@@ -13,7 +13,9 @@
 // it), and (SWIT-64) ONE OF MANY APPENDERS to the app-wide
 // backlog-inbox.json — an append-only NDJSON file with one taker (the app),
 // never of backlog.json, which the app alone rewrites after draining the
-// inbox (the app writes answers.json / inbox.json; the rendered page is
+// inbox (the app writes answers.json / inbox.json / retracted.json — this
+// process only READS answers.json and, since SWIT-105, retracted.json's
+// `question:<id>` dismissals; the rendered page is
 // a merge — see src/lib/pageStore.ts, whose parser this file's shapes MUST
 // round-trip through; the vitest suite asserts exactly that). Thread identity
 // arrives by ENV (SWITCHBOARD_THREAD_DIR), so tools carry no thread-id param
@@ -39,7 +41,10 @@ const TURN_LINE_CAP = 6;
 const EVIDENCE_CAP = 60;
 const QUESTION_CAP = 20;
 const TEXT_CAP = 500; // any single text field — a page line is a sentence, not a document
-const OPTION_CAP = 60; // an ask option is a short choice, not a paragraph (SWIT-69)
+const OPTION_CAP = 60; // an ask option is a short choice, not a paragraph (SWIT-69; a longer one is trimmed — SWIT-105)
+/** SWIT-105: a dismissed question's address in the app's retracted.json —
+ *  mirrors pageStore.QUESTION_ADDRESS_PREFIX. */
+const QUESTION_ADDRESS_PREFIX = "question:";
 const REVIEW_FIRST_CAP = 300; // a turn's reviewFirst is an ADDRESS, not prose (SWIT-67)
 const WHY_CAP = 240; // an ask's `why` is ONE line on the recommendation (SWIT-77, Ky's cap)
 /** SWIT-58: what an `ask` wants back. decision = a choice that shapes this
@@ -113,6 +118,49 @@ function text(v, field) {
   return t;
 }
 
+/** SWIT-105: an `ask` option (or its `default`) over OPTION_CAP is cut at a
+ *  word boundary and ends in `…` — never longer than the cap, never a halved
+ *  surrogate pair. A short one passes through untouched. Pure. */
+function trimOption(opt) {
+  if (opt.length <= OPTION_CAP) return opt;
+  let head = opt.slice(0, OPTION_CAP - 1).replace(/[\uD800-\uDBFF]$/, "");
+  // A cut that lands on a whole word (the next character is a space) keeps
+  // it; otherwise back up to the last space, when there is one past halfway.
+  if (opt[head.length] !== " ") {
+    const space = head.lastIndexOf(" ");
+    if (space >= OPTION_CAP / 2) head = head.slice(0, space);
+  }
+  return `${head.replace(/[\s,;:.\-–—]+$/, "")}…`;
+}
+
+/** SWIT-105: the ids of the questions the USER DISMISSED as not needed — a
+ *  `question:<id>` entry in the app's retracted.json (READ-only here) that is
+ *  not older than the ask; a re-ask stamps a newer askedAt and the question
+ *  is back. Mirrors pageStore.questionDismissedAt (whole seconds; an
+ *  unparseable stamp stays dismissed). `retracted` = the file as parsed JSON.
+ *  Pure. */
+function dismissedQuestionIds(page, retracted) {
+  const list =
+    retracted && Array.isArray(retracted.evidence) ? retracted.evidence : Array.isArray(retracted) ? retracted : [];
+  const dismissedAt = new Map();
+  for (const r of list) {
+    if (!r || typeof r.address !== "string" || !r.address.startsWith(QUESTION_ADDRESS_PREFIX)) continue;
+    const id = r.address.slice(QUESTION_ADDRESS_PREFIX.length);
+    if (!dismissedAt.has(id)) dismissedAt.set(id, typeof r.at === "string" ? r.at : "");
+  }
+  const out = new Set();
+  if (dismissedAt.size === 0) return out;
+  for (const q of page.questions) {
+    if (!q || typeof q.id !== "string" || !dismissedAt.has(q.id)) continue;
+    const asked = Date.parse(q.askedAt);
+    const gone = Date.parse(dismissedAt.get(q.id));
+    if (!Number.isFinite(asked) || !Number.isFinite(gone) || Math.floor(asked / 1000) <= Math.floor(gone / 1000)) {
+      out.add(q.id);
+    }
+  }
+  return out;
+}
+
 /** One of the brief's lists (SWIT-104): absent → []; a bare string is one
  *  line; blank lines drop; more than the cap, or a line over its cap, is a
  *  VISIBLE error — the brief is a summary, and a silently cut line would be
@@ -155,7 +203,7 @@ function nextId(list, prefix) {
  *  answers.json — READ-only, so one-writer-per-file holds), so the question
  *  cap counts OPEN questions rather than every question ever asked (review:
  *  a lifetime cap would refuse forever with advice that cannot unblock it). */
-function applyOp(page, args, now, answeredIds = new Set()) {
+function applyOp(page, args, now, answeredIds = new Set(), dismissedIds = new Set()) {
   const at = new Date(now).toISOString();
   const op = args && args.op;
   // SWIT-77: a question is SETTLED by the user's answer (answers.json, the
@@ -164,6 +212,11 @@ function applyOp(page, args, now, answeredIds = new Set()) {
   // re-ask refusal.
   const settled = (q) =>
     !!q && (answeredIds.has(q.id) || (typeof q.answeredAt === "string" && q.answeredAt.length > 0));
+  // SWIT-105: a question the user DISMISSED as not needed (`dismissedIds`,
+  // from the app's retracted.json — read-only here) is not settled — it can
+  // be re-asked, which brings it back — but it is not open either: it is off
+  // the page, so it does not count against the cap.
+  const isOpen = (q) => !!q && !settled(q) && !dismissedIds.has(q.id);
   switch (op) {
     case "theme": {
       const t = text(args.text, "text");
@@ -244,20 +297,30 @@ function applyOp(page, args, now, answeredIds = new Set()) {
     }
     case "ask": {
       const t = text(args.text, "text");
+      // SWIT-69: an option is a SHORT choice — long ones wrap into paragraphs
+      // the multiple-choice list cannot carry. SWIT-105: a long one is
+      // TRIMMED (at a word boundary, with `…`), not refused — the refusal
+      // cost a whole round trip for a choice that read fine cut — and the
+      // result names what was cut.
+      const trimmed = [];
       const options = Array.isArray(args.options)
         ? args.options
             .filter((o) => typeof o === "string" && o.trim().length > 0)
+            .slice(0, 6)
             .map((o) => {
               const opt = text(o, "an option");
-              // SWIT-69: an option is a SHORT choice — long ones wrap into
-              // paragraphs the multiple-choice list cannot carry.
-              if (opt.length > OPTION_CAP) {
-                throw new OpError(`an option is too long (${opt.length} chars; the cap is ${OPTION_CAP}) — keep options short; detail belongs in the question text`);
-              }
-              return opt;
+              const short = trimOption(opt);
+              if (short !== opt) trimmed.push(short);
+              return short;
             })
-            .slice(0, 6)
         : [];
+      if (trimmed.length > 0 && new Set(options).size !== options.length) {
+        throw new OpError(`two options read the same once trimmed to ${OPTION_CAP} chars (${trimmed.map((o) => `"${o}"`).join(", ")}) — shorten them so they differ`);
+      }
+      const trimNote =
+        trimmed.length > 0
+          ? ` Trimmed ${trimmed.length} option${trimmed.length === 1 ? "" : "s"} to ${OPTION_CAP} chars: ${trimmed.map((o) => `"${o}"`).join(", ")} — keep options short; detail belongs in the question text.`
+          : "";
       // SWIT-58 — a question says WHAT KIND of answer it wants and PROPOSES
       // one. `kind` defaults to decision (the common case); `default` must be
       // one of the options, so the proposal is a real choice the UI can list
@@ -272,7 +335,9 @@ function applyOp(page, args, now, answeredIds = new Set()) {
         if (typeof args.default !== "string" || args.default.trim().length === 0) {
           throw new OpError("default must be one of the options (a non-empty string)");
         }
-        dflt = args.default.trim();
+        // SWIT-105: matched AFTER trimming — the default names an option by
+        // its full text, and the option it names may have been cut.
+        dflt = trimOption(args.default.trim());
         if (!options.includes(dflt)) {
           throw new OpError(`default must be one of the options (${options.length === 0 ? "none were given" : options.map((o) => `"${o}"`).join(", ")})`);
         }
@@ -301,19 +366,24 @@ function applyOp(page, args, now, answeredIds = new Set()) {
           throw new OpError(`question ${id} was already settled — its answer is evidence row decision:${id}; reuse it instead of re-asking`);
         }
         const questions = page.questions.map((q, i) => (i === existingIndex ? asked : q));
+        // SWIT-105: re-asking an id the user DISMISSED brings it back (the
+        // new askedAt is newer than the dismissal) — say that it had been.
+        const back = dismissedIds.has(id)
+          ? `Question ${id} is back on the page — the user had dismissed it as not needed, so it should be here only because the answer now matters.`
+          : `Question ${id} replaced on the page (superseded).`;
         return {
           page: { ...page, questions },
-          message: `Question ${id} replaced on the page (superseded). ${arrives}`,
+          message: `${back} ${arrives}${trimNote}`,
         };
       }
-      const open = page.questions.filter((q) => q && !settled(q)).length;
+      const open = page.questions.filter(isOpen).length;
       if (open >= QUESTION_CAP) {
         throw new OpError(`${QUESTION_CAP} questions are already OPEN on the page — wait for answers before asking more`);
       }
       const questions = [asked, ...page.questions];
       return {
         page: { ...page, questions },
-        message: `Question ${id} recorded on the page. ${arrives} Do not ask it again.`,
+        message: `Question ${id} recorded on the page. ${arrives} Do not ask it again.${trimNote}`,
       };
     }
     case "resolve": {
@@ -331,7 +401,7 @@ function applyOp(page, args, now, answeredIds = new Set()) {
       const questions = page.questions.map((q, i) =>
         i === index ? { ...q, answer, answeredAt: at, resolvedBy: "agent" } : q
       );
-      const stillOpen = questions.filter((q) => q && !settled(q)).length;
+      const stillOpen = questions.filter(isOpen).length;
       return {
         page: { ...page, questions },
         message: `Question ${id} resolved (evidence row decision:${id}, status settled). ${stillOpen} still open on the page.`,
@@ -469,7 +539,7 @@ function newestFirstBy(list, stampOf) {
   return [...list].sort((a, b) => ms(b) - ms(a));
 }
 
-function renderPageRead(page, answers, lim) {
+function renderPageRead(page, answers, dismissedIds, lim) {
   const out = [];
   const more = (total, shown) => {
     if (total > shown) out.push(`  (+ ${total - shown} more — the page lists them)`);
@@ -502,7 +572,10 @@ function renderPageRead(page, answers, lim) {
   // than the answer — pageStore.isAnswerUnsent's rule); until then the user
   // may still change it, so only the fact that it is coming is stated.
   const sent = (a) => typeof a.sentAt === "string" && a.sentAt.length > 0 && !(a.sentAt < String(a.at || ""));
-  const open = questions.filter((q) => !answerOf(q) && !resolved(q));
+  // SWIT-105: a question the user dismissed as not needed is off the page —
+  // not open, not a decision; named by id so the agent knows not to wait.
+  const dismissed = questions.filter((q) => !answerOf(q) && !resolved(q) && dismissedIds.has(q.id));
+  const open = questions.filter((q) => !answerOf(q) && !resolved(q) && !dismissedIds.has(q.id));
   const pending = questions.filter((q) => answerOf(q) && !sent(answerOf(q)));
   out.push("");
   out.push(`OPEN QUESTIONS (${open.length}):`);
@@ -519,6 +592,11 @@ function renderPageRead(page, answers, lim) {
   if (pending.length > 0) {
     out.push(
       `  ${pending.length} more ${pending.length === 1 ? "is" : "are"} answered on the page and not sent yet (${pending.map((q) => q.id).join(", ")}) — the answer arrives in the Decisions message; do not re-ask.`
+    );
+  }
+  if (dismissed.length > 0) {
+    out.push(
+      `  ${dismissed.length} ${dismissed.length === 1 ? "was" : "were"} dismissed by the user as not needed (${dismissed.map((q) => q.id).join(", ")}) — do not wait on ${dismissed.length === 1 ? "it" : "them"}; re-ask (same id) only if the answer has come to matter.`
     );
   }
 
@@ -565,35 +643,45 @@ function renderPageRead(page, answers, lim) {
 }
 
 /** THE READ FORMATTER. `page` = parsePage's shape (arrays unvalidated — every
- *  entry is guarded here); `answers` = answers.json as parsed JSON (the app's
- *  file, READ-only). Pure. Always ≤ READ_CAP characters. */
-function formatPageRead(page, answers) {
+ *  entry is guarded here); `answers` = answers.json and (SWIT-105)
+ *  `retracted` = retracted.json, both as parsed JSON (the app's files,
+ *  READ-only). Pure. Always ≤ READ_CAP characters. */
+function formatPageRead(page, answers, retracted) {
   const known = typeof answers === "object" && answers !== null && !Array.isArray(answers) ? answers : {};
+  const dismissedIds = dismissedQuestionIds(page, retracted);
   let text = "";
   for (const lim of READ_LEVELS) {
-    text = renderPageRead(page, known, lim);
+    text = renderPageRead(page, known, dismissedIds, lim);
     if (text.length <= READ_CAP) return text;
   }
   const cut = "\n… (cut — the page holds more)";
   return text.slice(0, READ_CAP - cut.length) + cut;
 }
 
-/** `page` op `read` — reads page.json + answers.json, writes nothing. */
-function performReadOp(threadDir) {
-  const readOr = (name) => {
-    try {
-      return fs.readFileSync(path.join(threadDir, name), "utf-8");
-    } catch {
-      return "";
-    }
-  };
-  let answers = {};
+/** One of the app's files beside page.json, as parsed JSON — READ-only (the
+ *  app is their one writer). Missing or junk → `fallback`. */
+function readAppJson(threadDir, name, fallback) {
   try {
-    answers = JSON.parse(readOr("answers.json"));
+    return JSON.parse(fs.readFileSync(path.join(threadDir, name), "utf-8"));
   } catch {
-    // no answers yet, or junk — every question reads as open
+    return fallback;
   }
-  return formatPageRead(parsePage(readOr("page.json")), answers);
+}
+
+/** `page` op `read` — reads page.json + answers.json + retracted.json,
+ *  writes nothing. */
+function performReadOp(threadDir) {
+  let raw = "";
+  try {
+    raw = fs.readFileSync(pagePathFor(threadDir), "utf-8");
+  } catch {
+    // no page yet — the read says so
+  }
+  return formatPageRead(
+    parsePage(raw),
+    readAppJson(threadDir, "answers.json", {}),
+    readAppJson(threadDir, "retracted.json", null)
+  );
 }
 
 // ── Shows (SWIT-102) — put an EXISTING doc or file in front of the user ──────
@@ -1910,7 +1998,10 @@ const PAGE_TOOL = {
     "Something only the user can " +
     "answer: op ask (prefer 2–4 short options, each ≤ 60 chars, YOUR recommendation first or " +
     "named as default, plus why: one line on that recommendation) — it renders under Open " +
-    "questions on the page, answerable in place. Answers arrive as ONE message when the user " +
+    "questions on the page, answerable in place. An option over 60 chars is CUT at a word " +
+    "boundary with … (the result says which), so write short ones. The user can DISMISS a " +
+    "question as not needed: it leaves the page and op read names it — do not wait on it, " +
+    "and re-ask it (same id) only if the answer has come to matter. Answers arrive as ONE message when the user " +
     "sends — \"Decisions:\" numbering every open question with its answer or \"still open\" — " +
     "so never ask the same question twice (re-asking an open id replaces that question), and " +
     "do not re-ask a \"still open\" one; the user chose to leave it. Asking is HELP ME " +
@@ -2015,7 +2106,7 @@ const PAGE_TOOL = {
       options: {
         type: "array",
         items: { type: "string" },
-        description: "ask: 2–4 short answer options, each ≤ 60 chars (free text is always possible).",
+        description: "ask: 2–4 short answer options, each ≤ 60 chars — a longer one is cut at a word boundary with … (free text is always possible).",
       },
       kind: {
         type: "string",
@@ -2025,7 +2116,7 @@ const PAGE_TOOL = {
       },
       default: {
         type: "string",
-        description: "ask: your proposal — must be one of options. Listed first and marked as the default; the user confirms it in one click.",
+        description: "ask: your proposal — must be one of options (matched after an over-long option is trimmed). Listed first and marked as the default; the user confirms it in one click.",
       },
       itemOp: {
         type: "string",
@@ -2065,15 +2156,16 @@ function performOp(threadDir, args, now) {
   // Answered question ids (READ-only — the app writes answers.json): what
   // makes the ask cap an OPEN-question cap.
   const answeredIds = new Set();
-  try {
-    const answers = JSON.parse(fs.readFileSync(path.join(threadDir, "answers.json"), "utf-8"));
-    if (answers && typeof answers === "object" && !Array.isArray(answers)) {
-      for (const k of Object.keys(answers)) answeredIds.add(k);
-    }
-  } catch {
-    // no answers yet, or junk — every question counts as open
+  const answers = readAppJson(threadDir, "answers.json", null);
+  // no answers yet, or junk — every question counts as open
+  if (answers && typeof answers === "object" && !Array.isArray(answers)) {
+    for (const k of Object.keys(answers)) answeredIds.add(k);
   }
-  const { page, message } = applyOp(parsePage(raw), args, now, answeredIds);
+  // SWIT-105: the questions the user dismissed (READ-only — the app writes
+  // retracted.json): off the page, so not counted against the ask cap.
+  const current = parsePage(raw);
+  const dismissedIds = dismissedQuestionIds(current, readAppJson(threadDir, "retracted.json", null));
+  const { page, message } = applyOp(current, args, now, answeredIds, dismissedIds);
   fs.mkdirSync(threadDir, { recursive: true });
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(page, null, 2));
@@ -2240,6 +2332,9 @@ module.exports = {
   performOp,
   formatPageRead,
   performReadOp,
+  trimOption,
+  dismissedQuestionIds,
+  OPTION_CAP,
   BRIEF_GOAL_CAP,
   BRIEF_LINE_CAP,
   BRIEF_LINES_CAP,
