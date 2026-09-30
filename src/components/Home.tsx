@@ -19,6 +19,11 @@
 //                      bridge the page uses (acceptance 7).
 //   Findings         → (SWIT-106) the newest 8 findings across the active
 //                      threads' ledgers, each with its thread; opens it.
+//   Jobs             → (SWIT-109) every running job, then the ones that
+//                      ended in the last 24 h; a failure's pill is amber.
+//   Watching N       → (SWIT-110) folded at the bottom: every watch, with a
+//                      two-click unwatch; a FAILING one is also the first
+//                      row of Needs you.
 //   Live now         → launched threads + the latest turn's first line.
 //   Between threads  → the last hour of cross-thread posts.
 //   Listening        → announced dev servers, probed (never "healthy").
@@ -101,6 +106,10 @@ import { OptionRow } from "./kb/OptionRow";
 import { Fold, StatusPill } from "./kb/PageBlock";
 import { needsYouMeta, olderThreadIds, olderQuestionsLabel, recentFindings } from "../lib/homeModel";
 import { verdictTone } from "../lib/statusPill";
+import { failingWatches, homeJobs, jobPill, jobStateAt, orderWatches, parseWatches, publishWatches, useJobs, useWatches, watchSummary } from "../lib/jobs";
+import type { JobRow, Watch } from "../lib/jobs";
+import { watchesRead, watchRemove } from "../lib/ipc";
+import { ArmButton } from "./JobsBlock";
 
 /** The page's H2 + trailing meta (10px mono faint, pushed right). */
 const SECTION_META: CSSProperties = {
@@ -229,6 +238,8 @@ export function Home({
   const view = useThreadsView();
   const backlog = useBacklog();
   const servers = useAllKnownServers();
+  const allJobs = useJobs();
+  const watches = useWatches();
   const [digests, setDigests] = useState<ThreadDigest[]>([]);
   const [kept, setKept] = useState<string[]>([]);
   const digestCacheRef = useRef<DigestCache>(new Map());
@@ -310,7 +321,10 @@ export function Home({
 
   // Which sections have anything to say — an empty one folds into the quiet
   // line instead of rendering (page order preserved in both places).
-  const needsCount = unlaned.reduce(
+  // SWIT-110: a failing watch is one Needs-you row, whatever lane its thread
+  // is in — a check that stopped passing is the machine asking, not a thread.
+  const failing = failingWatches(watches);
+  const needsCount = failing.length + unlaned.reduce(
     (n, d) =>
       n +
       d.page.openQuestions.length +
@@ -328,10 +342,13 @@ export function Home({
   // they did before lanes.
   const recentPosts = collectRecentPosts(digests.filter((d) => !isArchivedThread(d.thread)));
   const findings = recentFindings(findingDigests);
+  // SWIT-109: App's 5s pass publishes the jobs snapshot; Home only reads it.
+  const jobRows = homeJobs(allJobs, now);
   const quiet: string[] = [];
   if (laneRows.length === 0) quiet.push("lanes");
   if (needsCount === 0) quiet.push("needs you");
   if (findings.length === 0) quiet.push("findings");
+  if (jobRows.length === 0) quiet.push("jobs");
   if (openBacklog.length === 0) quiet.push("backlog");
   if (liveRows.length === 0) quiet.push("live now");
   if (recentPosts.length === 0) quiet.push("between threads");
@@ -366,8 +383,9 @@ export function Home({
           }}
         >
           {laneRows.length > 0 && <Lanes rows={laneRows} launched={view.launched} statuses={view.sessionStatuses} />}
-          {needsCount > 0 && <NeedsYou digests={unlaned} launched={view.launched} />}
+          {needsCount > 0 && <NeedsYou digests={unlaned} launched={view.launched} failing={failing} />}
           {findings.length > 0 && <Findings rows={findings} />}
+          {jobRows.length > 0 && <Jobs rows={jobRows} threads={view.threads} />}
           {openBacklog.length > 0 && (
             <BacklogBlock items={openBacklog} projectOptions={backlogProjects} />
           )}
@@ -375,6 +393,7 @@ export function Home({
           {recentPosts.length > 0 && <BetweenThreads recent={recentPosts} />}
           {servers.length > 0 && <Listening active={active} servers={servers} />}
           {(kept.length > 0 || reports.length > 0) && <KeptViews kept={kept} reports={reports} />}
+          {watches.length > 0 && <Watching watches={orderWatches(watches)} threads={view.threads} now={now} />}
           {quiet.length > 0 && (
             <div style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)", lineHeight: 1.5 }}>
               {quiet.join(" · ")} — all quiet
@@ -415,8 +434,10 @@ function BacklogBlock({
 
 // ── Needs you ────────────────────────────────────────────────────────────────
 
-function NeedsYou({ digests, launched }: { digests: ThreadDigest[]; launched: ReadonlySet<string> }) {
-  const entries: ReactNode[] = [];
+function NeedsYou({ digests, launched, failing }: { digests: ThreadDigest[]; launched: ReadonlySet<string>; failing: readonly Watch[] }) {
+  // SWIT-110: failing watches first — a capture that stopped writing is
+  // exactly the thing that went unnoticed for a month.
+  const entries: ReactNode[] = failing.map((w) => <FailingWatchRow key={`w-${w.name}`} watch={w} />);
   // SWIT-105: questions from threads with no sign of life in the last 14
   // days (homeModel.olderThreadIds) fold behind ONE line under the list —
   // a month-old question no longer sits above today's. Everything else a
@@ -587,6 +608,20 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
   );
 }
 
+/** A failing watch (SWIT-110): `watch <name> failing · <last line>`, opening
+ *  the watch's thread. */
+function FailingWatchRow({ watch }: { watch: Watch }) {
+  return (
+    <Row title={watch.lastLine || watch.command} onClick={() => getThreadActions()?.openThread(watch.threadId)}>
+      <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", ...TITLE }}>
+        watch {watch.name} failing
+        {watch.lastLine && <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)" }}> · {watch.lastLine}</span>}
+      </span>
+      <span style={ROW_META}>open →</span>
+    </Row>
+  );
+}
+
 /** Decisions saved on a thread's page and not yet sent — ONE flat row per
  *  thread (a roll-up sends nothing; the page does), opening the thread.
  *  Without it a decided question dropped off Home the moment it saved and
@@ -667,6 +702,88 @@ function Findings({ rows }: { rows: ReturnType<typeof recentFindings<Thread>> })
           </Row>
         );
       })}
+    </div>
+  );
+}
+
+// ── Jobs (SWIT-109) ──────────────────────────────────────────────────────────
+
+/** Every running job, then the ones that settled in the last 24 h
+ *  (jobs.homeJobs) — one flat row each: the name, its thread and last output
+ *  line dim beside it, the state pill (a failure — a non-zero exit, a
+ *  timeout, lost — is the amber one), the age. The row opens the thread; the
+ *  log and the stop live on its page. */
+function Jobs({ rows, threads }: { rows: JobRow[]; threads: readonly Thread[] }) {
+  return (
+    <div>
+      <SectionHeader label="Jobs" meta={String(rows.length)} />
+      {rows.map((job) => {
+        const thread = threads.find((t) => t.id === job.threadId);
+        const pill = jobPill(job);
+        return (
+          <Row key={job.id} title={job.lastLine || job.command} onClick={() => getThreadActions()?.openThread(job.threadId)}>
+            <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <span style={TITLE}>{job.name}</span>
+              <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)" }}>
+                {" "}
+                {thread?.title ?? "a closed thread"}
+                {job.lastLine ? ` · ${job.lastLine}` : ""}
+              </span>
+            </span>
+            <span style={{ flex: "none", width: 124, display: "flex", alignSelf: "center" }}>
+              <StatusPill word={pill.word} tone={pill.tone} />
+            </span>
+            <span style={{ ...ROW_META, marginLeft: 0, width: 32, textAlign: "right" }}>{ago(new Date(jobStateAt(job)).toISOString())}</span>
+          </Row>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Watching (SWIT-110) ──────────────────────────────────────────────────────
+
+/** Every watch, folded at Home's bottom behind `Watching N`: name, its
+ *  reading and cadence, its thread; the row opens the thread, and a two-click
+ *  `unwatch` (the user's hand — any thread's watch) ends it. */
+function Watching({ watches, threads, now }: { watches: Watch[]; threads: readonly Thread[]; now: number }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div>
+      <button
+        type="button"
+        className="page-textlink"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        style={{ ...TEXT_LINK, marginTop: 0, padding: "4px 0" }}
+      >
+        {open ? "hide" : `Watching ${watches.length} · show`}
+      </button>
+      {open &&
+        watches.map((w) => (
+          <div key={w.name} style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+            <Row title={w.lastLine || w.command} onClick={() => getThreadActions()?.openThread(w.threadId)}>
+              <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                <span style={TITLE}>{w.name}</span>
+                <span style={{ fontFamily: MONO, fontSize: 10, color: w.status === "fail" ? "var(--tone-amber)" : "var(--text-faint)" }}>
+                  {" "}
+                  {watchSummary(w, now)}
+                </span>
+                <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)" }}> · {threads.find((t) => t.id === w.threadId)?.title ?? "a closed thread"}</span>
+              </span>
+            </Row>
+            <ArmButton
+              label="unwatch"
+              busyLabel="…"
+              title={`Stop watching ${w.name}`}
+              armedTitle={`Click again to stop watching ${w.name} (its runs stop; its thread keeps its history)`}
+              onConfirm={async () => {
+                await watchRemove(null, w.name);
+                publishWatches(parseWatches(await watchesRead()));
+              }}
+            />
+          </div>
+        ))}
     </div>
   );
 }
