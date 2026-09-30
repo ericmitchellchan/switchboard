@@ -59,6 +59,9 @@ pub const LOG_LINES_MAX: usize = 400;
 pub const LAST_LINE_CAP: usize = 240;
 /// A settled job (ended and its line posted) is kept this long, then pruned.
 const JOB_KEEP_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+/// Agent `job` records only (M4 of the review): watch runs are bounded on
+/// their own — WATCH_RUNS_KEPT per watch × WATCHES_CAP — so a full set of
+/// watches can never push a settled job out before its 7 days.
 const JOBS_INDEX_CAP: usize = 300;
 /// Settled runs kept per watch (SWIT-110) — the rest of their dirs go.
 pub const WATCH_RUNS_KEPT: usize = 5;
@@ -115,13 +118,16 @@ pub fn cwd_ok(cwd: &str) -> Result<PathBuf, String> {
         return Err("invalid working directory".into());
     }
     let p = PathBuf::from(c);
+    // The messages never echo the path: a refusal is typed back into the
+    // thread under the app's `[switchboard]` prefix, and the path is the
+    // agent's text (review of 119bc6b, M1).
     if !p.is_absolute() {
-        return Err(format!("working directory must be absolute: {}", c));
+        return Err("the working directory must be an absolute path".into());
     }
     match std::fs::metadata(&p) {
         Ok(m) if m.is_dir() => Ok(p),
-        Ok(_) => Err(format!("not a directory: {}", c)),
-        Err(_) => Err(format!("working directory does not exist: {}", c)),
+        Ok(_) => Err("the working directory is not a directory".into()),
+        Err(_) => Err("the working directory does not exist".into()),
     }
 }
 
@@ -150,6 +156,11 @@ pub struct JobRecord {
     pub stopped_at: Option<u64>,
     #[serde(default)]
     pub lost_at: Option<u64>,
+    /// The FIRST probe that found the process gone with no exit.json. A
+    /// second consecutive miss makes the job lost; a live probe clears it
+    /// (one failed OpenProcess is not a death).
+    #[serde(default)]
+    pub missed_at: Option<u64>,
     /// When the one "ended" line was posted to the thread's inbox.
     #[serde(default)]
     pub notified_at: Option<u64>,
@@ -171,7 +182,15 @@ pub fn read_index(dir: &Path) -> Result<JobsIndex, String> {
             if raw.trim().is_empty() {
                 return Ok(JobsIndex { version: 1, jobs: Vec::new() });
             }
-            serde_json::from_str::<JobsIndex>(raw).map_err(|e| format!("jobs.json is unreadable ({}) — not rewriting it", e))
+            let mut index = serde_json::from_str::<JobsIndex>(raw).map_err(|e| format!("jobs.json is unreadable ({}) — not rewriting it", e))?;
+            // A record whose id is not app-minted (a hand edit) is never
+            // joined onto a path: it is dropped here, before any probe.
+            let before = index.jobs.len();
+            index.jobs.retain(|r| job_id_ok(&r.id));
+            if index.jobs.len() != before {
+                log::warn!("jobs.json: dropped {} record(s) with an invalid id", before - index.jobs.len());
+            }
+            Ok(index)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(JobsIndex { version: 1, jobs: Vec::new() }),
         Err(e) => Err(e.to_string()),
@@ -243,10 +262,14 @@ pub fn parse_exit(raw: &str) -> ExitInfo {
     }
 }
 
-/// THE state rule (mirrored in lib/jobs.ts `deriveJobState` and the MCP
-/// server's `jobState`). `alive` must be read BEFORE `exit`: the supervisor
-/// writes exit.json and then exits, so "not alive, then no exit.json" can only
-/// mean it died without reaching its last line.
+/// THE state rule (lib/jobs.ts `deriveJobState` and the MCP server's
+/// `jobState` mirror it minus the miss count — only this side stamps, and the
+/// frontend takes this side's word). `alive` must be read BEFORE `exit`: the
+/// supervisor writes exit.json and then exits, so "not alive, then no
+/// exit.json" can only mean it died without reaching its last line — but a
+/// SINGLE such probe is not trusted (an OpenProcess can fail for a live
+/// process): the first miss reads running and is stamped `missedAt`, the
+/// second consecutive one is lost.
 pub fn derive_state(rec: &JobRecord, exit: Option<&ExitInfo>, alive: bool) -> JobState {
     if exit.is_some() {
         JobState::Ended
@@ -254,7 +277,7 @@ pub fn derive_state(rec: &JobRecord, exit: Option<&ExitInfo>, alive: bool) -> Jo
         JobState::Stopped
     } else if rec.lost_at.is_some() {
         JobState::Lost
-    } else if alive {
+    } else if alive || rec.missed_at.is_none() {
         JobState::Running
     } else {
         JobState::Lost
@@ -269,6 +292,9 @@ fn read_exit(job_dir: &Path) -> Option<ExitInfo> {
 /// after. A record already settled (stopped/lost) is never probed — its pid
 /// may belong to anyone by now.
 pub fn probe(dir: &Path, rec: &JobRecord) -> (Option<ExitInfo>, bool) {
+    if !job_id_ok(&rec.id) {
+        return (None, false);
+    }
     let job_dir = dir.join(&rec.id);
     if rec.stopped_at.is_some() || rec.lost_at.is_some() {
         return (read_exit(&job_dir), false);
@@ -296,6 +322,7 @@ const INNER_SCRIPT: &str = r#"# Switchboard job runner (SWIT-109) - written by t
 # command prints goes to log.txt. No job text is part of this file.
 $ErrorActionPreference = 'Continue'
 $here = $PSScriptRoot
+Remove-Item Env:CLAUDECODE -ErrorAction SilentlyContinue
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 try { [Console]::OutputEncoding = $utf8 } catch {}
 $OutputEncoding = $utf8
@@ -320,6 +347,7 @@ function Write-JobLog([string]$line) {
   }
 }
 $code = 0
+$script:psError = $false
 try {
   $source = [System.IO.File]::ReadAllText((Join-Path $here 'command.txt'), $utf8)
   $block = [ScriptBlock]::Create($source)
@@ -327,10 +355,18 @@ try {
   & $block *>&1 | ForEach-Object {
     $item = $_
     if ($item -is [string]) { Write-JobLog $item }
-    elseif ($item -is [System.Management.Automation.ErrorRecord]) { Write-JobLog ($item.ToString()) }
+    elseif ($item -is [System.Management.Automation.ErrorRecord]) {
+      # A native command's stderr arrives as NativeCommandError records and
+      # is only output; any OTHER error record (a command not found, a missing
+      # file) is a PowerShell failure and fails the run.
+      if ($item.FullyQualifiedErrorId -notlike 'NativeCommandError*') { $script:psError = $true }
+      Write-JobLog ($item.ToString())
+    }
     else { foreach ($l in ($item | Out-String -Stream -Width 240)) { if ($l.Trim().Length -gt 0) { Write-JobLog $l } } }
   }
-  if ($null -ne $global:LASTEXITCODE) { $code = $global:LASTEXITCODE }
+  if ($null -ne $global:LASTEXITCODE -and $global:LASTEXITCODE -ne 0) { $code = $global:LASTEXITCODE }
+  elseif ($script:psError) { $code = 1 }
+  elseif ($null -ne $global:LASTEXITCODE) { $code = $global:LASTEXITCODE }
 } catch {
   Write-JobLog ('error: ' + $_)
   $code = 1
@@ -340,19 +376,83 @@ exit $code
 "#;
 
 /// The SUPERVISOR. Constant text (one integer substituted: the timeout). It
-/// starts the runner as a child with no window, waits, kills the runner's
-/// tree on a timeout (exit 124, `timedOut: true`), and writes exit.json as
-/// its LAST act, through a tmp + move. A start failure (the cwd vanished)
-/// still writes exit.json, with code -1 and the reason.
-const RUN_SCRIPT: &str = r#"# Switchboard job supervisor (SWIT-109) - written by the app. It starts
+/// starts the runner as a child with no window, waits, and writes exit.json
+/// as its LAST act, through a tmp + move. A start failure (the cwd vanished)
+/// still writes exit.json, with code -1 and the reason in `error`.
+///
+/// ON A TIMEOUT (exit 124, `timedOut: true`) it kills the runner's tree the
+/// way `kill_tree` does — never `taskkill /T`, which follows parent pids with
+/// no age check (review of 119bc6b, H1). The runner dies through the .NET
+/// Process object's own handle (the one CreateProcess returned, so it cannot
+/// be a recycled pid, and holding it keeps the runner's pid reserved while
+/// its children are walked); then a small constant C# helper (`SwbTree`,
+/// compiled only on this path) takes one Toolhelp snapshot, descends ONLY
+/// through processes created no earlier than their own parent, and
+/// terminates each after re-reading its creation time through the handle
+/// that terminates it. A helper that fails to compile leaves the runner's
+/// children running — it never falls back to an unchecked kill.
+const RUN_SCRIPT: &str = r##"# Switchboard job supervisor (SWIT-109) - written by the app. It starts
 # inner.ps1 (which runs the job's command), waits for it, and writes exit.json
 # last. Every value it needs is read from a file beside it.
 $ErrorActionPreference = 'Continue'
 $here = $PSScriptRoot
+Remove-Item Env:CLAUDECODE -ErrorAction SilentlyContinue
 $timeoutMs = __TIMEOUT_MS__
 $code = $null
 $timedOut = $false
 $failure = $null
+$treeHelper = @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public static class SwbTree {
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  struct Entry { public uint dwSize; public uint cntUsage; public uint pid; public IntPtr heap; public uint module; public uint threads; public uint ppid; public int prio; public uint flags; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string exe; }
+  [DllImport("kernel32.dll")] static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool Process32FirstW(IntPtr snap, ref Entry e);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool Process32NextW(IntPtr snap, ref Entry e);
+  [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+  [DllImport("kernel32.dll")] static extern bool GetProcessTimes(IntPtr h, out long c, out long e, out long k, out long u);
+  [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr h, uint code);
+  const uint QUERY = 0x1000, TERMINATE = 0x0001;
+  public static long CreatedOf(IntPtr h) { long c, e, k, u; return GetProcessTimes(h, out c, out e, out k, out u) ? c : -1; }
+  static long Created(uint pid) { IntPtr h = OpenProcess(QUERY, false, pid); if (h == IntPtr.Zero) return -1; long c = CreatedOf(h); CloseHandle(h); return c; }
+  public static int KillDescendants(uint root, long rootCreated) {
+    var children = new Dictionary<uint, List<uint>>();
+    IntPtr snap = CreateToolhelp32Snapshot(2, 0);
+    if (snap == new IntPtr(-1)) return 0;
+    var e = new Entry(); e.dwSize = (uint)Marshal.SizeOf(typeof(Entry));
+    if (Process32FirstW(snap, ref e)) {
+      do {
+        if (e.pid != 0 && e.pid != e.ppid) { List<uint> l; if (!children.TryGetValue(e.ppid, out l)) { l = new List<uint>(); children[e.ppid] = l; } l.Add(e.pid); }
+      } while (Process32NextW(snap, ref e));
+    }
+    CloseHandle(snap);
+    var plan = new List<KeyValuePair<uint, long>>();
+    var seen = new HashSet<uint>(); seen.Add(root);
+    var stack = new Stack<KeyValuePair<uint, long>>(); stack.Push(new KeyValuePair<uint, long>(root, rootCreated));
+    while (stack.Count > 0) {
+      var cur = stack.Pop(); List<uint> kids;
+      if (!children.TryGetValue(cur.Key, out kids)) continue;
+      foreach (uint k in kids) {
+        if (!seen.Add(k)) continue;
+        long c = Created(k);
+        if (c < 0 || c < cur.Value) continue;
+        plan.Add(new KeyValuePair<uint, long>(k, c)); stack.Push(new KeyValuePair<uint, long>(k, c));
+      }
+    }
+    int n = 0;
+    foreach (var p in plan) {
+      IntPtr h = OpenProcess(QUERY | TERMINATE, false, p.Key);
+      if (h == IntPtr.Zero) continue;
+      if (CreatedOf(h) == p.Value && TerminateProcess(h, 1)) n++;
+      CloseHandle(h);
+    }
+    return n;
+  }
+}
+'@
 try {
   $cwd = [System.IO.File]::ReadAllText((Join-Path $here 'cwd.txt'), (New-Object System.Text.UTF8Encoding($false)))
   $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -365,8 +465,13 @@ try {
   if ($timeoutMs -gt 0) {
     if (-not $p.WaitForExit($timeoutMs)) {
       $timedOut = $true
-      & (Join-Path $env:SystemRoot 'System32\taskkill.exe') /T /F /PID $p.Id | Out-Null
+      $helper = $true
+      try { Add-Type -TypeDefinition $treeHelper -Language CSharp -ErrorAction Stop } catch { $helper = $false }
+      $rootCreated = -1
+      if ($helper) { $rootCreated = [SwbTree]::CreatedOf($p.Handle) }
+      try { $p.Kill() } catch {}
       $p.WaitForExit(5000) | Out-Null
+      if ($helper -and $rootCreated -ge 0) { [SwbTree]::KillDescendants([uint32]$p.Id, [long]$rootCreated) | Out-Null }
     }
   } else {
     $p.WaitForExit()
@@ -381,7 +486,7 @@ if ($failure) { $result.error = $failure }
 $tmp = Join-Path $here 'exit.json.tmp'
 [System.IO.File]::WriteAllText($tmp, ($result | ConvertTo-Json -Compress), (New-Object System.Text.UTF8Encoding($false)))
 Move-Item -LiteralPath $tmp -Destination (Join-Path $here 'exit.json') -Force
-"#;
+"##;
 
 pub fn run_script(timeout_secs: u32) -> String {
     RUN_SCRIPT.replace("__TIMEOUT_MS__", &(u64::from(timeout_secs) * 1000).to_string())
@@ -499,10 +604,14 @@ fn terminate_if_same(_pid: u32, _created: u64) -> bool {
 }
 
 /// Which descendants of `root` to kill, pure: walk the parent→children index
-/// from the root, descending ONLY through processes created at or after the
-/// root (`created` answers per pid; None = gone or unreadable, skipped). An
-/// older process listing the root as parent is an orphan whose parent pid
-/// was recycled into the root — never ours, and neither is anything under it.
+/// from the root, descending ONLY through a process created at or after its
+/// OWN PARENT (`created` answers per pid; None = gone or unreadable, skipped)
+/// — discovery.rs's freshness rule, applied at every step. The root's age is
+/// not enough (review of 119bc6b, H1): a long-running job's subprocess can
+/// hold a pid recycled from an exited launcher, and a process that launcher
+/// started still lists that pid as its parent — younger than the root, older
+/// than the subprocess, and never ours. Nothing under a refused process is
+/// followed either.
 pub fn kill_plan(
     root: u32,
     root_created: u64,
@@ -511,16 +620,16 @@ pub fn kill_plan(
 ) -> Vec<(u32, u64)> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::from([root]);
-    let mut stack = vec![root];
-    while let Some(cur) = stack.pop() {
+    let mut stack = vec![(root, root_created)];
+    while let Some((cur, cur_created)) = stack.pop() {
         for &child in children.get(&cur).map(|v| v.as_slice()).unwrap_or(&[]) {
             if !seen.insert(child) {
                 continue;
             }
             match created(child) {
-                Some(t) if t >= root_created => {
+                Some(t) if t >= cur_created => {
                     out.push((child, t));
-                    stack.push(child);
+                    stack.push((child, t));
                 }
                 _ => {}
             }
@@ -732,6 +841,7 @@ pub fn start_job(
         timeout_secs: spec.timeout_secs,
         stopped_at: None,
         lost_at: None,
+        missed_at: None,
         notified_at: None,
     };
     index.jobs.push(rec.clone());
@@ -774,7 +884,8 @@ fn settled_at(rec: &JobRecord, exit: Option<&ExitInfo>) -> u64 {
 /// the newest WATCH_RUNS_KEPT settled ones, and every settled run of a watch
 /// that no longer exists (`watches` = the names in watches.json; None when
 /// that file is unreadable, and then no run is judged orphaned); then, over
-/// JOBS_INDEX_CAP, the oldest settled records until it fits.
+/// JOBS_INDEX_CAP `job` records, the oldest settled JOBS until it fits
+/// (watch runs never count toward, or are pruned by, that cap).
 pub fn prune_plan(
     records: &[JobRecord],
     states: &[(JobState, Option<ExitInfo>)],
@@ -801,11 +912,13 @@ pub fn prune_plan(
             drop.push(records[i].id.clone());
         }
     }
-    let remaining = records.len().saturating_sub(drop.len());
-    if remaining > JOBS_INDEX_CAP {
-        let mut rest: Vec<usize> = (0..records.len()).filter(|&i| settled(i) && !drop.contains(&records[i].id)).collect();
+    let jobs_left = (0..records.len()).filter(|&i| records[i].kind == "job" && !drop.contains(&records[i].id)).count();
+    if jobs_left > JOBS_INDEX_CAP {
+        let mut rest: Vec<usize> = (0..records.len())
+            .filter(|&i| records[i].kind == "job" && settled(i) && !drop.contains(&records[i].id))
+            .collect();
         rest.sort_by_key(|&i| settled_at(&records[i], states[i].1.as_ref()));
-        for &i in rest.iter().take(remaining - JOBS_INDEX_CAP) {
+        for &i in rest.iter().take(jobs_left - JOBS_INDEX_CAP) {
             drop.push(records[i].id.clone());
         }
     }
@@ -866,9 +979,18 @@ pub fn log_tail_lines(job_dir: &Path, n: usize) -> Vec<String> {
     lines.into_iter().skip(skip).collect()
 }
 
-/// lastLine cache: (log len, last line) per job id — a log is re-read only
-/// when it grew, so the 5s snapshot costs one stat per job.
+/// lastLine cache: (log.txt's length, last line) per job id — the tail is
+/// re-read only when that length changed (grew, or restarted after a
+/// rotation), so the 5s snapshot costs one stat per job. A pruned job's entry
+/// is dropped with it.
 static LAST_LINES: std::sync::Mutex<Option<HashMap<String, (u64, String)>>> = std::sync::Mutex::new(None);
+
+fn forget_last_line(id: &str) {
+    let mut guard = LAST_LINES.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(map) = guard.as_mut() {
+        map.remove(id);
+    }
+}
 
 fn cached_last_line(job_dir: &Path, id: &str) -> String {
     let path = job_dir.join("log.txt");
@@ -898,11 +1020,17 @@ pub fn snapshot(dir: &Path) -> Result<serde_json::Value, String> {
     let probes = states_of(dir, &index);
     let now = now_ms();
     let mut dirty = false;
-    for (rec, (state, _, _)) in index.jobs.iter_mut().zip(&probes) {
+    for (rec, (state, exit, alive)) in index.jobs.iter_mut().zip(&probes) {
         if *state == JobState::Lost && rec.lost_at.is_none() {
             rec.lost_at = Some(now);
             dirty = true;
-            log::warn!("Job lost id={} name={} (pid {} gone with no exit.json)", rec.id, rec.name, rec.pid);
+            log::warn!("Job lost id={} name={} (pid {} gone with no exit.json, twice)", rec.id, rec.name, rec.pid);
+        } else if *state == JobState::Running && exit.is_none() && !*alive && rec.missed_at.is_none() {
+            rec.missed_at = Some(now);
+            dirty = true;
+        } else if *alive && rec.missed_at.is_some() {
+            rec.missed_at = None;
+            dirty = true;
         }
     }
     let states: Vec<(JobState, Option<ExitInfo>)> = probes.iter().map(|(s, e, _)| (*s, e.clone())).collect();
@@ -915,6 +1043,7 @@ pub fn snapshot(dir: &Path) -> Result<serde_json::Value, String> {
             if job_id_ok(&rec.id) {
                 let _ = std::fs::remove_dir_all(dir.join(&rec.id));
             }
+            forget_last_line(&rec.id);
             continue;
         }
         kept.push(rec.clone());
@@ -928,6 +1057,7 @@ pub fn snapshot(dir: &Path) -> Result<serde_json::Value, String> {
             // Never hand the pid out: nothing on the frontend acts on it.
             obj.remove("pid");
             obj.remove("pidStartedAt");
+            obj.remove("missedAt");
         }
         rows.push(row);
     }
@@ -966,7 +1096,16 @@ pub fn take_inbox(path: &Path) -> Result<String, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
         Err(e) => return Err(e.to_string()),
     }
-    let content = std::fs::read_to_string(&taken).map_err(|e| e.to_string())?;
+    // Bytes, then a LOSSY decode: invalid UTF-8 (a torn multi-byte append)
+    // costs the line it is in — whose JSON then fails alone — never the batch.
+    let bytes = std::fs::read(&taken).map_err(|e| e.to_string())?;
+    let content = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(e) => {
+            log::warn!("jobs inbox held invalid UTF-8; the lines around it are kept");
+            String::from_utf8_lossy(e.as_bytes()).into_owned()
+        }
+    };
     if let Err(e) = std::fs::remove_file(&taken) {
         log::warn!("Could not remove taken jobs inbox: {}", e);
     }
@@ -1137,22 +1276,32 @@ pub fn remove_watch(dir: &Path, thread_id: Option<&str>, name: &str) -> Result<(
 
 /// RUN one watch now (App's pass decides it is due): a `watch-run` job with
 /// the watch's name, thread, command and cwd and the WATCH_TIMEOUT_SECS
-/// timeout. `lastRunAt` moves either way — a run that could not START is
-/// recorded as failing with the reason as its line, and is tried again at
-/// the next due time, not on every tick.
+/// timeout. Three outcomes (review of 5ef0419, H2):
+/// - a run of it is already IN FLIGHT (the watch was re-set while its old
+///   run was running): Ok(None), and NOTHING is recorded — a conflict means
+///   "skip this tick", never "failing";
+/// - started: Ok(Some(run)); `lastRunAt` + `lastJobId` move;
+/// - could not start (anything: a missing threads mirror, an unknown thread,
+///   a vanished cwd, a spawn error): `lastRunAt` moves on EVERY such path so
+///   it is retried at the next due time and not every tick, the watch reads
+///   failing with the reason, and `judgedJobId` is set to the last run so
+///   that older run is never judged again (it would read "passing" and flap).
 pub fn run_watch(
     dir: &Path,
-    mirror_raw: &str,
+    mirror: &Result<String, String>,
     name: &str,
     now: u64,
     spawn: &dyn Fn(&Path, &str, &Path) -> Result<(u32, u64), String>,
-) -> Result<JobRecord, String> {
+) -> Result<Option<JobRecord>, String> {
     let _guard = WATCHES_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let mut file = read_watches(dir)?;
     let Some(i) = file.watches.iter().position(|w| w.name == name) else {
         return Err(format!("no watch named {}", name));
     };
     let w = file.watches[i].clone();
+    if run_in_flight(dir, &w.name)? {
+        return Ok(None);
+    }
     let spec = StartSpec {
         thread_id: &w.thread_id,
         name: &w.name,
@@ -1162,7 +1311,10 @@ pub fn run_watch(
         watch: Some(&w.name),
         timeout_secs: WATCH_TIMEOUT_SECS,
     };
-    let result = start_job(dir, mirror_raw, &spec, spawn);
+    let result = match mirror {
+        Ok(m) => start_job(dir, m, &spec, spawn),
+        Err(e) => Err(e.clone()),
+    };
     let entry = &mut file.watches[i];
     entry.last_run_at = Some(now);
     match &result {
@@ -1172,12 +1324,25 @@ pub fn run_watch(
                 entry.changed_at = Some(now);
             }
             entry.status = "fail".into();
-            entry.judged_job_id = None;
+            entry.judged_job_id = entry.last_job_id.clone();
             entry.last_line = format!("could not start: {}", e).chars().take(LAST_LINE_CAP).collect();
         }
     }
     write_watches(dir, &file)?;
-    result
+    result.map(Some)
+}
+
+/// Is a run of this watch running now? (Under the caller's WATCHES_LOCK; this
+/// takes JOBS_LOCK — the one lock order.)
+fn run_in_flight(dir: &Path, watch: &str) -> Result<bool, String> {
+    let _guard = lock();
+    let index = read_index(dir)?;
+    let states = states_of(dir, &index);
+    Ok(index
+        .jobs
+        .iter()
+        .zip(states)
+        .any(|(r, (s, _, _))| r.kind == "watch-run" && r.watch.as_deref() == Some(watch) && s == JobState::Running))
 }
 
 /// RECORD a finished run's reading. Only the watch's CURRENT run can be
@@ -1226,7 +1391,9 @@ pub async fn watch_remove(thread_id: Option<String>, name: String) -> Result<(),
 
 #[tauri::command]
 pub async fn watch_run(name: String) -> Result<(), String> {
-    run_watch(&jobs_dir()?, &mirror_raw()?, &name, now_ms(), &spawn_detached).map(|_| ())
+    // The mirror's failure is a start failure like any other: run_watch
+    // records it (and moves lastRunAt), it is not an early return.
+    run_watch(&jobs_dir()?, &mirror_raw(), &name, now_ms(), &spawn_detached).map(|_| ())
 }
 
 #[tauri::command]
@@ -1300,6 +1467,10 @@ pub async fn job_notify(id: String, text: String) -> Result<bool, String> {
     let Some(rec) = claim_notify(&jobs_dir()?, &id)? else {
         return Ok(false);
     };
+    // A deleted thread gets no line (and no `threads/<id>/` recreated for it).
+    if super::working_dir_from_mirror(&mirror_raw()?, &rec.thread_id).is_err() {
+        return Ok(false);
+    }
     super::append_app_post(&rec.thread_id, &format!("job-{}", rec.id), &text)?;
     Ok(true)
 }
@@ -1307,6 +1478,9 @@ pub async fn job_notify(id: String, text: String) -> Result<bool, String> {
 /// Post one line from the jobs machinery to a thread (a refused request).
 #[tauri::command]
 pub async fn jobs_post(thread_id: String, text: String) -> Result<(), String> {
+    // Only a thread the mirror knows: a request's thread id is the inbox's
+    // text, and an unknown one must not create `threads/<id>/`.
+    super::working_dir_from_mirror(&mirror_raw()?, &thread_id)?;
     let n = ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     super::append_app_post(&thread_id, &format!("jn{:x}-{:x}", now_ms(), n), &text)
 }
@@ -1342,6 +1516,7 @@ mod tests {
             timeout_secs: 0,
             stopped_at: None,
             lost_at: None,
+            missed_at: None,
             notified_at: None,
         }
     }
@@ -1380,7 +1555,10 @@ mod tests {
         let exit = ExitInfo { code: Some(0), ended_at: Some(5), timed_out: false, error: None };
         assert_eq!(derive_state(&r, Some(&exit), true), JobState::Ended, "exit.json wins even while the supervisor exits");
         assert_eq!(derive_state(&r, None, true), JobState::Running);
-        assert_eq!(derive_state(&r, None, false), JobState::Lost);
+        assert_eq!(derive_state(&r, None, false), JobState::Running, "ONE miss is not a loss");
+        let missed = JobRecord { missed_at: Some(9), ..r.clone() };
+        assert_eq!(derive_state(&missed, None, false), JobState::Lost, "two consecutive misses are");
+        assert_eq!(derive_state(&missed, None, true), JobState::Running);
         let stopped = JobRecord { stopped_at: Some(9), ..r.clone() };
         assert_eq!(derive_state(&stopped, None, false), JobState::Stopped);
         let lost = JobRecord { lost_at: Some(9), ..r.clone() };
@@ -1398,6 +1576,9 @@ mod tests {
         assert!(run_script(0).contains("$timeoutMs = 0"));
         assert!(!run.contains("__"), "every placeholder substituted");
         assert!(run.contains("'cwd.txt'") && run.contains("'inner.ps1'") && run.contains("'exit.json'"));
+        assert!(!run.to_lowercase().contains("taskkill"), "no unchecked /T tree kill");
+        assert!(run.contains("c < cur.Value"), "the helper applies the parent-age rule");
+        assert!(run.contains("Remove-Item Env:CLAUDECODE") && inner_script().contains("Remove-Item Env:CLAUDECODE"));
         let inner = inner_script();
         assert!(inner.contains(&format!("$cap = {}", LOG_ROTATE_BYTES)));
         assert!(!inner.contains("__"));
@@ -1505,7 +1686,12 @@ mod tests {
         assert_eq!(rows[0]["exit"]["code"], 2);
         assert_eq!(rows[0]["lastLine"], "two");
         assert!(rows[0].get("pid").is_none(), "no pid leaves Rust");
-        assert_eq!(rows[1]["state"], "lost");
+        assert_eq!(rows[1]["state"], "running", "the first miss is not trusted");
+        assert!(read_index(&d).unwrap().jobs[1].missed_at.is_some());
+        assert!(read_index(&d).unwrap().jobs[1].lost_at.is_none());
+        assert!(rows[1].get("missedAt").is_none());
+        let rows = snapshot(&d).unwrap();
+        assert_eq!(rows.as_array().unwrap()[1]["state"], "lost");
         let lost_at = read_index(&d).unwrap().jobs[1].lost_at.expect("stamped");
         snapshot(&d).unwrap();
         assert_eq!(read_index(&d).unwrap().jobs[1].lost_at, Some(lost_at), "stamped once");
@@ -1567,6 +1753,26 @@ mod tests {
     }
 
     #[test]
+    fn kill_plan_needs_each_child_younger_than_its_own_parent() {
+        // Root 100 (created 50). Its subprocess D holds pid 201 (created 90),
+        // a pid recycled from an exited launcher P that, at 70, started an
+        // unrelated U (pid 202) — younger than the ROOT, older than D. U still
+        // lists 201 as its parent. The root-age rule would kill U; the
+        // parent-age rule does not, nor anything under U.
+        let children = discovery_children(&[(201, 100), (202, 201), (203, 202), (204, 201)]);
+        let created = |p: u32| match p {
+            201 => Some(90),
+            202 => Some(70),
+            203 => Some(95),
+            204 => Some(99),
+            _ => None,
+        };
+        let mut plan = kill_plan(100, 50, &children, &created);
+        plan.sort();
+        assert_eq!(plan, vec![(201, 90), (204, 99)]);
+    }
+
+    #[test]
     fn a_watch_is_set_replaced_capped_and_removed_by_its_own_thread() {
         let d = temp_dir("watch");
         let work = temp_dir("wwork");
@@ -1614,7 +1820,8 @@ mod tests {
         let m = mirror(&work);
         set_watch(&d, &m, &WatchSpec { thread_id: THREAD, name: "itf", command: "python itf.py", cwd: None, every_min: 5 }, 1).unwrap();
         let fake = |_: &Path, _: &str, _: &Path| -> Result<(u32, u64), String> { Ok((u32::MAX - 9, 1)) };
-        let rec = run_watch(&d, &m, "itf", 100, &fake).unwrap();
+        let mm = Ok(m.clone());
+        let rec = run_watch(&d, &mm, "itf", 100, &fake).unwrap().expect("started");
         assert_eq!((rec.kind.as_str(), rec.watch.as_deref(), rec.timeout_secs), ("watch-run", Some("itf"), WATCH_TIMEOUT_SECS));
         assert!(std::fs::read_to_string(d.join(&rec.id).join("run.ps1")).unwrap().contains("$timeoutMs = 120000"));
         let w = &read_watches(&d).unwrap().watches[0];
@@ -1627,14 +1834,111 @@ mod tests {
         let w = &read_watches(&d).unwrap().watches[0];
         assert_eq!((w.status.as_str(), w.last_line.as_str(), w.changed_at), ("fail", "0 prices captured", Some(200)));
         // A run that cannot start moves lastRunAt and reads failing, with why.
+        // (The first run has ended — a run with no exit.json and one missed
+        // probe still counts as in flight, and the next run would be skipped.)
+        std::fs::write(d.join(&rec.id).join("exit.json"), r#"{"code":1,"endedAt":150,"timedOut":false}"#).unwrap();
         let broken = |_: &Path, _: &str, _: &Path| -> Result<(u32, u64), String> { Err("no powershell".into()) };
-        assert_eq!(run_watch(&d, &m, "itf", 400, &broken).unwrap_err(), "no powershell");
+        assert_eq!(run_watch(&d, &mm, "itf", 400, &broken).unwrap_err(), "no powershell");
         let w = &read_watches(&d).unwrap().watches[0];
         assert_eq!((w.status.as_str(), w.last_run_at), ("fail", Some(400)));
         assert!(w.last_line.contains("could not start: no powershell"));
-        assert!(run_watch(&d, &m, "nope", 1, &fake).is_err());
+        assert!(run_watch(&d, &mm, "nope", 1, &fake).is_err());
         let _ = std::fs::remove_dir_all(&d);
         let _ = std::fs::remove_dir_all(&work);
+    }
+
+    /// Review of 5ef0419, H2: after a PASSING run, a watch that cannot start
+    /// reads failing and STAYS failing — the old passing run is never judged
+    /// again — and every failure path moves lastRunAt.
+    #[test]
+    fn a_watch_that_cannot_start_stays_failing_and_waits_for_its_next_due_time() {
+        let d = temp_dir("wflap");
+        let work = temp_dir("wflapwork");
+        let m = mirror(&work);
+        let mm: Result<String, String> = Ok(m.clone());
+        set_watch(&d, &m, &WatchSpec { thread_id: THREAD, name: "cap", command: "x", cwd: None, every_min: 5 }, 1).unwrap();
+        let fake = |_: &Path, _: &str, _: &Path| -> Result<(u32, u64), String> { Ok((u32::MAX - 11, 1)) };
+        let first = run_watch(&d, &mm, "cap", 100, &fake).unwrap().unwrap();
+        // The run ended passing and was judged so.
+        std::fs::write(d.join(&first.id).join("exit.json"), r#"{"code":0,"endedAt":150,"timedOut":false}"#).unwrap();
+        record_watch(&d, "cap", &first.id, "pass", "ok", 160).unwrap();
+        // The next run cannot start.
+        let broken = |_: &Path, _: &str, _: &Path| -> Result<(u32, u64), String> { Err("spawn failed".into()) };
+        assert!(run_watch(&d, &mm, "cap", 400, &broken).is_err());
+        let w = read_watches(&d).unwrap().watches[0].clone();
+        assert_eq!(w.status, "fail");
+        assert_eq!(w.judged_job_id.as_deref(), Some(first.id.as_str()), "the old run is marked judged");
+        assert_eq!(w.last_run_at, Some(400));
+        // Re-recording that old run (what the pass would try) changes nothing.
+        record_watch(&d, "cap", &first.id, "pass", "ok", 500).unwrap();
+        assert_eq!(read_watches(&d).unwrap().watches[0].status, "fail");
+        // A missing threads mirror is a start failure too — recorded, lastRunAt moved.
+        let no_mirror: Result<String, String> = Err("threads mirror unreadable".into());
+        assert!(run_watch(&d, &no_mirror, "cap", 700, &fake).is_err());
+        let w = read_watches(&d).unwrap().watches[0].clone();
+        assert_eq!((w.status.as_str(), w.last_run_at), ("fail", Some(700)));
+        assert!(w.last_line.contains("threads mirror unreadable"));
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    /// H2 (b): re-setting a watch while its run is in flight is a SKIP.
+    #[test]
+    fn a_run_in_flight_is_skipped_never_recorded_failing() {
+        let d = temp_dir("wskip");
+        let work = temp_dir("wskipwork");
+        let m = mirror(&work);
+        let mm: Result<String, String> = Ok(m.clone());
+        set_watch(&d, &m, &WatchSpec { thread_id: THREAD, name: "cap", command: "x", cwd: None, every_min: 5 }, 1).unwrap();
+        // A run "in flight": this test process's own pid + creation time.
+        let me = std::process::id();
+        let created = crate::discovery::process_start_time_ms(me).unwrap();
+        let alive = |_: &Path, _: &str, _: &Path| -> Result<(u32, u64), String> { Ok((me, created)) };
+        run_watch(&d, &mm, "cap", 100, &alive).unwrap().unwrap();
+        // The agent re-sets it: the reading starts over, the old run still runs.
+        set_watch(&d, &m, &WatchSpec { thread_id: THREAD, name: "cap", command: "y", cwd: None, every_min: 5 }, 200).unwrap();
+        let never = |_: &Path, _: &str, _: &Path| -> Result<(u32, u64), String> { panic!("started a second run") };
+        assert!(run_watch(&d, &mm, "cap", 300, &never).unwrap().is_none());
+        let w = read_watches(&d).unwrap().watches[0].clone();
+        assert_eq!((w.status.as_str(), w.last_run_at, w.last_line.as_str()), ("unknown", None, ""));
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn the_index_cap_counts_jobs_not_watch_runs() {
+        let now = 10 * 24 * 60 * 60 * 1000u64;
+        let mut records = Vec::new();
+        let mut states = Vec::new();
+        // 300 recent, posted jobs + 320 watch runs (64 watches × 5).
+        for i in 0..300 {
+            records.push(JobRecord { notified_at: Some(1), started_at: now - 1000 + i as u64, ..rec(&format!("j{i}"), "a", "job") });
+            states.push((JobState::Ended, None));
+        }
+        for i in 0..320 {
+            records.push(JobRecord { watch: Some(format!("w{}", i / 5)), started_at: now - 500, ..rec(&format!("r{i}"), "w", "watch-run") });
+            states.push((JobState::Ended, None));
+        }
+        let watches: std::collections::HashSet<String> = (0..64).map(|i| format!("w{i}")).collect();
+        assert!(prune_plan(&records, &states, now, Some(&watches)).is_empty(), "no recent job is pushed out by watch runs");
+        records.push(JobRecord { notified_at: Some(1), started_at: 1, ..rec("oldest", "a", "job") });
+        states.push((JobState::Ended, None));
+        let dropped = prune_plan(&records, &states, 1_000_000, Some(&watches));
+        assert_eq!(dropped, vec!["oldest".to_string()], "one job over the cap: the oldest settled job goes");
+    }
+
+    #[test]
+    fn the_inbox_take_keeps_the_lines_around_invalid_utf8() {
+        let d = temp_dir("inbox");
+        let path = d.join("jobs-inbox.json");
+        let mut bytes = b"{\"op\":\"stop\",\"name\":\"a\"}\n".to_vec();
+        bytes.extend_from_slice(&[0xff, 0xfe, b'\n']);
+        bytes.extend_from_slice(b"{\"op\":\"stop\",\"name\":\"b\"}\n");
+        std::fs::write(&path, bytes).unwrap();
+        let text = take_inbox(&path).unwrap();
+        assert!(text.contains("\"a\"") && text.contains("\"b\""), "{text}");
+        assert!(!path.exists() && !path.with_extension("json.taking").exists());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -1687,6 +1991,86 @@ mod tests {
         assert!(lines.contains(&"hi"), "{log}");
         assert!(lines.contains(&"it's \"quoted\""), "{log}");
         assert!(lines.iter().any(|l| l.contains("from-stderr")), "{log}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn run_sync(d: &Path) -> ExitInfo {
+        let out = std::process::Command::new(powershell_exe())
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(d.join("run.ps1"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{:?}", out);
+        parse_exit(&std::fs::read_to_string(d.join("exit.json")).unwrap())
+    }
+
+    /// Review of 119bc6b, H3: a command that is not found, or a file that is
+    /// missing, FAILS the run (exit 1) — a native command's stderr does not,
+    /// and an explicit `exit` wins.
+    #[cfg(windows)]
+    #[test]
+    fn a_powershell_error_fails_the_run_and_native_stderr_does_not() {
+        let cases: [(&str, i64); 5] = [
+            ("definitely-not-a-command-swb", 1),
+            ("Get-Content -LiteralPath 'C:\\definitely\\missing\\swb.txt'", 1),
+            ("cmd /c \"echo warn 1>&2\"", 0),
+            ("Get-Content -LiteralPath 'C:\\definitely\\missing\\swb.txt'; exit 0", 0),
+            ("cmd /c \"exit 4\"; 'after'", 4),
+        ];
+        for (cmd, want) in cases {
+            let d = temp_dir("pserr");
+            write_job_files(&d, cmd, &d, 0).unwrap();
+            assert_eq!(run_sync(&d).code, Some(want), "{cmd}");
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// H1: a timeout kills the runner AND the command's own child — with the
+    /// safe helper, not `taskkill /T`.
+    #[cfg(windows)]
+    #[test]
+    fn a_timeout_kills_the_commands_child_too() {
+        struct Reaper(Option<(u32, u64)>, Option<std::process::Child>);
+        impl Drop for Reaper {
+            fn drop(&mut self) {
+                if let Some((pid, created)) = self.0 {
+                    let _ = kill_tree(pid, created);
+                }
+                if let Some(c) = self.1.as_mut() {
+                    let _ = c.kill();
+                }
+            }
+        }
+        let d = temp_dir("treekill");
+        let cmd = "$c = Start-Process -FilePath ping.exe -ArgumentList '-n','60','127.0.0.1' -NoNewWindow -PassThru; [IO.File]::WriteAllText((Join-Path (Get-Location) 'child.txt'), [string]$c.Id); $c.WaitForExit()";
+        write_job_files(&d, cmd, &d, 3).unwrap();
+        let supervisor = std::process::Command::new(powershell_exe())
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(d.join("run.ps1"))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut reaper = Reaper(None, Some(supervisor));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let child_pid: u32 = loop {
+            if let Ok(t) = std::fs::read_to_string(d.join("child.txt")) {
+                if let Ok(p) = t.trim().parse() {
+                    break p;
+                }
+            }
+            assert!(std::time::Instant::now() < deadline, "the command never started its child");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
+        let created = crate::discovery::process_start_time_ms(child_pid).expect("the child is running");
+        reaper.0 = Some((child_pid, created));
+        let status = reaper.1.as_mut().unwrap().wait().unwrap();
+        assert!(status.success());
+        let exit = parse_exit(&std::fs::read_to_string(d.join("exit.json")).unwrap());
+        assert_eq!((exit.code, exit.timed_out), (Some(124), true));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!process_matches(child_pid, created), "the command's child survived the timeout");
+        drop(reaper);
         let _ = std::fs::remove_dir_all(&d);
     }
 

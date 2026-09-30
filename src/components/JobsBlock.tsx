@@ -88,8 +88,8 @@ export function StopButton({ id, name }: { id: string; name: string }) {
     <ArmButton
       label="stop"
       busyLabel="stopping…"
-      title={`Stop ${name}`}
-      armedTitle={`Click again to stop ${name} and everything it started`}
+      title={`Stop ${name} and the processes under it — anything it started detached (a Docker container, a service) keeps running`}
+      armedTitle={`Click again to stop ${name} and the processes under it`}
       onConfirm={async () => {
         await jobStopId(id);
         // Show the stop now rather than on the next 5s tick.

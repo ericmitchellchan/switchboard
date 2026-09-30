@@ -39,7 +39,6 @@ import type { PillTone } from "./statusPill";
 
 // ── Caps, mirrored from src-tauri/src/jobs.rs and the MCP server ─────────────
 
-export const JOB_NAME_MAX = 48;
 export const JOB_NAME_RE = /^[A-Za-z0-9_.-]{1,48}$/;
 /** Characters (code points), not bytes. */
 export const JOB_COMMAND_CAP = 2000;
@@ -49,6 +48,12 @@ export const JOB_LOG_LINES_MAX = 400;
 /** A watch's cadence, minutes (SWIT-110) — mirrored in jobs.rs. */
 export const WATCH_EVERY_MIN = 5;
 export const WATCH_EVERY_MAX = 7 * 24 * 60;
+/** Requests acted on per pass (review of 119bc6b); the rest are refused in
+ *  ONE line per thread, never silently. */
+export const JOB_REQUESTS_PER_PASS = 32;
+/** Watch runs STARTED per pass (review M3): after an app start with many
+ *  overdue watches they go four at a time, most overdue first — the stagger. */
+export const WATCH_RUNS_PER_PASS = 4;
 /** Home's Jobs block keeps an ended job this long. */
 export const HOME_JOBS_ENDED_MS = 24 * 60 * 60 * 1000;
 const THREAD_ID_RE = /^[A-Za-z0-9-]{1,64}$/;
@@ -105,6 +110,10 @@ export function deriveJobState(
 
 // ── Tolerant parses ──────────────────────────────────────────────────────────
 
+function isJobState(v: unknown): v is JobState {
+  return v === "running" || v === "ended" || v === "stopped" || v === "lost";
+}
+
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
@@ -120,9 +129,10 @@ function parseExit(v: unknown): JobExit | null {
   return { code: num(v.code), endedAt: num(v.endedAt), timedOut: v.timedOut === true, error: str(v.error) };
 }
 
-/** Rust's `jobs_snapshot` rows → JobRow[]. A malformed row drops alone; the
- *  state is RE-DERIVED here from the facts (Rust's own `state` word is not
- *  trusted over the rule). */
+/** Rust's `jobs_snapshot` rows → JobRow[]. A malformed row drops alone.
+ *  RUST'S STATE WORD WINS when it is one of the four (only Rust probes, and
+ *  only Rust counts misses — a first missed probe reads `running` there, a
+ *  second `lost`); `deriveJobState` is the fallback for a row without one. */
 export function parseJobsSnapshot(raw: string): JobRow[] {
   let data: unknown;
   try {
@@ -158,7 +168,7 @@ export function parseJobsSnapshot(raw: string): JobRow[] {
       notifiedAt: num(r.notifiedAt),
       exit,
       alive,
-      state: deriveJobState({ stoppedAt, lostAt }, exit, alive),
+      state: isJobState(r.state) ? r.state : deriveJobState({ stoppedAt, lostAt }, exit, alive),
       lastLine: typeof r.lastLine === "string" ? r.lastLine : "",
     });
   }
@@ -217,13 +227,10 @@ export function parseJobsInbox(raw: string): JobRequest[] {
 
 // ── What a row says ──────────────────────────────────────────────────────────
 
-/** Not running, and not in a way that is fine: a non-zero exit, a timeout,
- *  a start that failed, or lost. A stop is the user's (or the agent's) act,
- *  not a failure. */
-export function isJobFailure(row: Pick<JobRow, "state" | "exit">): boolean {
-  if (row.state === "lost") return true;
-  if (row.state !== "ended" || !row.exit) return false;
-  return row.exit.timedOut || row.exit.code !== 0;
+/** Did the SUPERVISOR fail to start the command? Keyed on the supervisor's
+ *  `error`, never on the code — a real program may exit -1 (review M2). */
+function didNotStart(exit: JobExit | null): boolean {
+  return exit !== null && exit.error !== null;
 }
 
 /** The state pill: running blue, a clean exit green, a failure amber, a stop
@@ -239,7 +246,7 @@ export function jobPill(row: Pick<JobRow, "state" | "exit">): { word: string; to
     case "ended": {
       const exit = row.exit;
       if (exit?.timedOut) return { word: "timed out", tone: "amber" };
-      if (exit?.code === -1) return { word: "did not start", tone: "amber" };
+      if (didNotStart(exit)) return { word: "did not start", tone: "amber" };
       if (exit?.code === 0) return { word: "exit 0", tone: "green" };
       return { word: exit?.code === null || exit === null ? "ended" : `exit ${exit.code}`, tone: "amber" };
     }
@@ -270,25 +277,27 @@ function capLine(s: string): string {
   return [...one].length > LINE_CAP ? `${[...one].slice(0, LINE_CAP - 1).join("")}…` : one;
 }
 
-/** THE ONE LINE a job's end posts to its thread's inbox. A failure carries
- *  its last output line, so the agent reading it knows where to look. */
+/** Where a failure's output is — the line says so instead of quoting it. */
+const OUTPUT_ON_PAGE = " — its last output is on the page (`job log` reads more)";
+
+/** THE ONE LINE a job's end posts to its thread's inbox. It is TYPED into
+ *  the thread under the app's `[switchboard]` voice, so it carries only what
+ *  the app itself knows — name, exit code, duration — and NEVER the job's
+ *  output (review M1: output is the job's text, and it stays on the page and
+ *  in `log`). The one supervisor-written reason (`could not start`) is capped. */
 export function jobEndedLine(row: JobRow, now: number): string {
   const ranFor = jobDuration(jobStateAt(row) - row.startedAt);
-  const last = row.lastLine.trim();
-  const tail = last ? ` · last line: ${last}` : "";
   switch (row.state) {
     case "stopped":
       return capLine(`job ${row.name} stopped after ${ranFor}`);
     case "lost":
-      return capLine(
-        `job ${row.name} lost: its process is gone and left no exit code (started ${jobDuration(now - row.startedAt)} ago)${tail}`
-      );
+      return capLine(`job ${row.name} lost: its process is gone and left no exit code (started ${jobDuration(now - row.startedAt)} ago)${OUTPUT_ON_PAGE}`);
     case "ended": {
       const exit = row.exit;
-      if (exit?.code === -1) return capLine(`job ${row.name} could not start: ${exit.error ?? (last || "unknown reason")}`);
-      if (exit?.timedOut) return capLine(`job ${row.name} timed out after ${ranFor}${tail}`);
+      if (didNotStart(exit)) return capLine(`job ${row.name} could not start: ${[...(exit?.error ?? "")].slice(0, 160).join("")}`);
+      if (exit?.timedOut) return capLine(`job ${row.name} timed out after ${ranFor}${OUTPUT_ON_PAGE}`);
       const code = exit?.code === null || exit === null ? "no exit code" : `exit ${exit.code}`;
-      return capLine(`job ${row.name} ended: ${code} after ${ranFor}${exit?.code === 0 ? "" : tail}`);
+      return capLine(`job ${row.name} ended: ${code} after ${ranFor}${exit?.code === 0 ? "" : OUTPUT_ON_PAGE}`);
     }
     case "running":
       return capLine(`job ${row.name} is running`);
@@ -412,15 +421,49 @@ function failWord(run: Pick<JobRow, "state" | "exit">): string {
   if (run.state === "lost") return "lost";
   if (run.state === "stopped") return "stopped";
   if (run.exit?.timedOut) return "timed out";
-  if (run.exit?.code === -1) return "could not start";
+  if (didNotStart(run.exit)) return "could not start";
   return run.exit?.code === null || !run.exit ? "no exit code" : `exit ${run.exit.code}`;
 }
 
-/** The ONE line an edge posts to the watch's thread. */
-export function watchEdgeLine(name: string, edge: "failing" | "recovered", why: string, lastLine: string): string {
+/** The ONE line an edge posts to the watch's thread — what the app knows
+ *  (the reason in two words), never the run's output (review M1: that is on
+ *  Home's row and in `log`). */
+export function watchEdgeLine(name: string, edge: "failing" | "recovered", why: string): string {
   if (edge === "recovered") return capLine(`watch ${name} passing again`);
-  const last = lastLine.trim();
-  return capLine(`watch ${name} failing: ${why}${last ? ` · ${last}` : ""}`);
+  return capLine(`watch ${name} failing: ${why} — its last output is on Home (\`job log ${name}\` reads more)`);
+}
+
+/** Which due watches start THIS pass: the most overdue first, at most
+ *  WATCH_RUNS_PER_PASS (a never-run watch is the most overdue). */
+export function watchesToRun<W extends Pick<Watch, "name" | "lastRunAt" | "lastJobId" | "everyMin">>(
+  watches: readonly W[],
+  rows: readonly JobRow[],
+  now: number,
+  cap: number = WATCH_RUNS_PER_PASS
+): W[] {
+  const dueAt = (w: W) => (w.lastRunAt === null ? -Infinity : w.lastRunAt + w.everyMin * 60_000);
+  return watches.filter((w) => isWatchDue(w, rows, now)).sort((a, b) => dueAt(a) - dueAt(b)).slice(0, Math.max(0, cap));
+}
+
+/** The requests this pass acts on: identical requests (same op, thread and
+ *  name — an agent that asked twice within one drain) collapse to the first,
+ *  then at most `cap`; the overflow is counted per thread so each thread
+ *  hears ONE line about it. Pure. */
+export function planJobRequests(
+  requests: readonly JobRequest[],
+  cap: number = JOB_REQUESTS_PER_PASS
+): { act: JobRequest[]; dropped: Map<string, number> } {
+  const seen = new Set<string>();
+  const unique: JobRequest[] = [];
+  for (const r of requests) {
+    const key = `${r.op}\u0000${r.threadId}\u0000${r.name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(r);
+  }
+  const dropped = new Map<string, number>();
+  for (const r of unique.slice(cap)) dropped.set(r.threadId, (dropped.get(r.threadId) ?? 0) + 1);
+  return { act: unique.slice(0, cap), dropped };
 }
 
 /** Due = no run of it in flight, and never run or `every` minutes since the
@@ -475,7 +518,14 @@ export async function runJobsPass(io: JobsIO, now: number, warn: (msg: string) =
   } catch (err) {
     warn(`jobs inbox take failed: ${err}`);
   }
-  for (const req of requests) {
+  const plan = planJobRequests(requests);
+  for (const [threadId, n] of plan.dropped) {
+    warn(`jobs: ${n} request(s) from thread ${threadId} over the per-pass cap`);
+    await io
+      .post(threadId, capLine(`${n} job request${n === 1 ? "" : "s"} not acted on (cap ${JOB_REQUESTS_PER_PASS} per pass) — send ${n === 1 ? "it" : "them"} again`))
+      .catch((e) => warn(`job overflow post failed: ${e}`));
+  }
+  for (const req of plan.act) {
     try {
       if (req.op === "start") await io.start(req.threadId, req.name, req.command, req.cwd);
       else if (req.op === "stop") await io.stop(req.threadId, req.name);
@@ -521,25 +571,29 @@ async function runWatchesPass(io: JobsIO, rows: readonly JobRow[], now: number, 
           await io.recordWatch(w.name, run.id, outcome, run.lastLine);
           changed = true;
           const edge = watchEdge(w.status, outcome);
-          if (edge) await io.post(w.threadId, watchEdgeLine(w.name, edge, failWord(run), run.lastLine));
+          if (edge) await io.post(w.threadId, watchEdgeLine(w.name, edge, failWord(run)));
           w.status = outcome;
         } catch (err) {
           warn(`watch ${w.name} record failed: ${err}`);
         }
       }
     }
-    if (isWatchDue(w, rows, now)) {
-      changed = true;
-      try {
-        await io.runWatch(w.name);
-      } catch (err) {
-        // Rust recorded it failing (lastRunAt moved, so the next try is at
-        // the next due time); the edge line is ours.
-        const why = String(err instanceof Error ? err.message : err);
-        const edge = watchEdge(w.status, "fail");
-        if (edge) await io.post(w.threadId, watchEdgeLine(w.name, edge, "could not start", why)).catch(() => {});
-        warn(`watch ${w.name} could not start: ${why}`);
-      }
+  }
+  // Start what is due — at most WATCH_RUNS_PER_PASS, most overdue first. A
+  // run already in flight is Rust's SKIP (resolves, records nothing); a run
+  // that cannot start is recorded failing by Rust on EVERY path, with
+  // lastRunAt moved (so it is retried at its next due time, not next tick)
+  // and the previous run marked judged (so it never reads "passing" again).
+  for (const w of watchesToRun(watches, rows, now)) {
+    changed = true;
+    try {
+      await io.runWatch(w.name);
+    } catch (err) {
+      const why = String(err instanceof Error ? err.message : err);
+      const edge = watchEdge(w.status, "fail");
+      if (edge) await io.post(w.threadId, watchEdgeLine(w.name, edge, "could not start")).catch(() => {});
+      w.status = "fail";
+      warn(`watch ${w.name} could not start: ${why}`);
     }
   }
   if (changed) {

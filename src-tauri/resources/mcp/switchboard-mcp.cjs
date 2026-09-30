@@ -3013,13 +3013,14 @@ function readJobExit(jobDir) {
   }
 }
 
-/** The tail of one log file as lines (the last 512 KB; a cut first line dropped). */
-function readLogFileTail(file) {
+/** The tail of one log file as lines (the last `maxBytes`, default 512 KB;
+ *  a cut first line dropped). */
+function readLogFileTail(file, maxBytes = 512 * 1024) {
   let fd;
   try {
     fd = fs.openSync(file, "r");
     const size = fs.fstatSync(fd).size;
-    const len = Math.min(size, 512 * 1024);
+    const len = Math.min(size, maxBytes);
     const buf = Buffer.alloc(len);
     fs.readSync(fd, buf, 0, len, size - len);
     let t = buf.toString("utf-8").replace(/^\uFEFF/, "");
@@ -3050,7 +3051,10 @@ function jobRows(jobsDir, alive) {
     let exit = readJobExit(dir);
     const live = !exit && !settled ? alive(rec.pid) : false;
     if (!exit && !settled) exit = readJobExit(dir); // alive first, exit.json after — the app's order
-    const last = jobLogTail(dir, 1)[0] || "";
+    // The last line only needs the last 8 KB (as Rust reads it) — not a
+    // 512 KB tail per record on every `list` (review M3).
+    const lines = readLogFileTail(path.join(dir, "log.txt"), 8 * 1024);
+    const last = lines[lines.length - 1] || readLogFileTail(path.join(dir, "log.1.txt"), 8 * 1024).pop() || "";
     return { ...rec, exit, state: jobState(rec, exit, live), lastLine: last.slice(0, 240) };
   });
 }
@@ -3080,7 +3084,8 @@ function jobStateWords(row, now) {
     case "lost":
       return `lost — its process is gone with no exit code (noticed ${ago} ago)`;
     default:
-      if (exit && exit.code === -1) return `could not start: ${exit.error || "unknown reason"}`;
+      // Keyed on the supervisor's error, never on the code: a real program may exit -1 (review M2).
+      if (exit && exit.error) return `could not start: ${exit.error}`;
       if (exit && exit.timedOut) return `timed out after ${ran} (${ago} ago)`;
       return `${exit && exit.code !== null ? `exit ${exit.code}` : "ended"} after ${ran} (${ago} ago)`;
   }
@@ -3189,6 +3194,9 @@ function performJobOp(env, args, now, deps) {
     return { message: [head, ...(lines.length ? lines : ["(no output yet)"])].join("\n") };
   }
   if (!env.jobsInboxPath) throw new OpError("jobs are not wired in this session (an older app?)");
+  // A request with no thread would be refused by the app after we said
+  // "Queued" — refuse it here, where the agent can read why.
+  if (!env.selfThreadId) throw new OpError("this session has no thread id, so the app cannot run a job for it");
   const entry = buildJobRequest(args, env, rows, now, isDir, watches);
   fs.mkdirSync(path.dirname(env.jobsInboxPath), { recursive: true });
   // Append-only: one syscall, no read, no tmp — every live thread may do this at once.
@@ -3212,7 +3220,12 @@ const JOB_TOOL = {
     "session, so it keeps running when this conversation ends, the terminal closes or claude restarts " +
     "(a reboot still ends it, and then it reads `lost`). Ops: start {name, command, cwd?} runs the " +
     "command in Windows PowerShell in cwd (default: this thread's working directory) with ALL its " +
-    "output going to a log file; stop {name} ends its whole process tree; list shows this thread's " +
+    "output going to a log file — in the APP's environment, not this shell's (PATH and variables as " +
+    "the app saw them when it launched; set anything else inside the command). It FAILS when it " +
+    "exits non-zero, or when it raises any PowerShell error (a command not found, a missing file) " +
+    "and sets no exit code of its own; a native program's stderr alone is output, not failure. " +
+    "stop {name} ends its process tree — but a process that left the tree (something it started " +
+    "detached, a Docker container, a service) keeps running; list shows this thread's " +
     "jobs as running / ended (exit code) / stopped / lost with each one's last output line; log " +
     "{name, lines?} prints the last lines of its output (default 40, max 400). CONTRACT: the app runs " +
     "it — start and stop are requests it acts on within ~5 s (`list` confirms, and a refusal comes " +

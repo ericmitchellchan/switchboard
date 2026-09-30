@@ -1293,7 +1293,7 @@ export function usePage(threadId: string, active: boolean): PageRead {
           THREAD_FILE_NAMES.map((name) => readThreadFile(threadId, name))
         );
         if (cancelled) return;
-        const combined = `${pageRaw} ${answersRaw} ${inboxRaw} ${retractedRaw}`;
+        const combined = `${pageRaw}\u0000${answersRaw}\u0000${inboxRaw}\u0000${retractedRaw}`;
         if (combined === lastRawRef.current) return; // unchanged — no re-render
         lastRawRef.current = combined;
         const page = mergePage(

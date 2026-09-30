@@ -3152,3 +3152,77 @@ describe("the job tool's watches (SWIT-110)", () => {
     expect(srv.JOB_TOOL.inputSchema.properties).toHaveProperty("every");
   });
 });
+
+// ── Review fixes for SWIT-109/110, the server half ───────────────────────────
+
+describe("the job tool — review fixes (SWIT-109/110)", () => {
+  type JobEnv = { jobsInboxPath?: string; jobsDir?: string; selfThreadId?: string; cwd?: string };
+  const srv = server as unknown as {
+    JOB_TOOL: { description: string };
+    performJobOp: (env: JobEnv, args: Record<string, unknown>, now: number, deps?: { alive?: (pid: number) => boolean; isDir?: (p: string) => boolean }) => { message: string };
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const fs = require("fs") as {
+    mkdtempSync: (p: string) => string;
+    mkdirSync: (p: string, o?: { recursive: boolean }) => void;
+    writeFileSync: (p: string, d: string) => void;
+    existsSync: (p: string) => boolean;
+    rmSync: (p: string, o: { recursive: boolean; force: boolean }) => void;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const os = require("os") as { tmpdir: () => string };
+  const SELF = "3f1c2a9e-0b7d-4c1e-9a55-1234567890ab";
+  const deps = { alive: () => false, isDir: () => true };
+
+  function world(jobs: Array<Record<string, unknown>>) {
+    const root = fs.mkdtempSync(`${os.tmpdir()}/swb-jobfix-`).split("\\").join("/");
+    const jobsDir = `${root}/jobs`;
+    fs.mkdirSync(jobsDir, { recursive: true });
+    fs.writeFileSync(`${jobsDir}/jobs.json`, JSON.stringify({ version: 1, jobs }));
+    for (const j of jobs) fs.mkdirSync(`${jobsDir}/${j.id}`, { recursive: true });
+    return { root, jobsDir, env: { jobsInboxPath: `${root}/inbox.json`, jobsDir, selfThreadId: SELF, cwd: root } as JobEnv, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
+  }
+  const job = (id: string, name: string) => ({ id, name, threadId: SELF, command: "x", cwd: "C:\w", kind: "job", pid: 1, pidStartedAt: 1, startedAt: NOW - 60_000 });
+
+  it("M2: exit -1 from a real program is an exit code; `could not start` needs the supervisor's error", () => {
+    const w = world([job("ja", "real"), job("jb", "nostart")]);
+    try {
+      fs.writeFileSync(`${w.jobsDir}/ja/exit.json`, JSON.stringify({ code: -1, endedAt: NOW, timedOut: false }));
+      fs.writeFileSync(`${w.jobsDir}/jb/exit.json`, JSON.stringify({ code: -1, endedAt: NOW, timedOut: false, error: "The directory name is invalid" }));
+      const list = srv.performJobOp(w.env, { op: "list" }, NOW, deps).message;
+      expect(list).toContain("- real · exit -1 after 1 min");
+      expect(list).toContain("- nostart · could not start: The directory name is invalid");
+    } finally {
+      w.cleanup();
+    }
+  });
+
+  it("M3: the last line comes from the log's last 8 KB, even for a big log", () => {
+    const w = world([job("ja", "big")]);
+    try {
+      fs.writeFileSync(`${w.jobsDir}/ja/log.txt`, `${"x".repeat(100)}\n`.repeat(10_000) + "the end\n");
+      expect(srv.performJobOp(w.env, { op: "list" }, NOW, deps).message).toContain("last: the end");
+    } finally {
+      w.cleanup();
+    }
+  });
+
+  it("an empty thread id is refused, never `Queued`", () => {
+    const w = world([]);
+    try {
+      const env = { ...w.env, selfThreadId: "" };
+      expect(() => srv.performJobOp(env, { op: "start", name: "a", command: "x" }, NOW, deps)).toThrow(/no thread id/);
+      expect(fs.existsSync(w.env.jobsInboxPath as string)).toBe(false);
+    } finally {
+      w.cleanup();
+    }
+  });
+
+  it("the description says whose environment, how failure is decided, and what a stop cannot reach", () => {
+    const d = srv.JOB_TOOL.description;
+    expect(d).toMatch(/in the APP's environment, not this shell's/);
+    expect(d).toMatch(/raises any PowerShell error \(a command not found, a missing file\)/);
+    expect(d).toMatch(/a native program's stderr alone is output, not failure/);
+    expect(d).toMatch(/a process that left the tree .* keeps running/);
+  });
+});

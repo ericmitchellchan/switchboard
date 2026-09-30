@@ -1058,6 +1058,9 @@ async fn write_thread_post(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
+    if !post_from_id_ok(&from_id) {
+        return Err("that sender id is reserved for the app".into());
+    }
     let kind = if kind == "update" { "update" } else { "request" };
     let from = if from_title.trim().is_empty() { "you".to_string() } else { from_title.trim().to_string() };
     append_thread_post(&target_thread_id, &format!("p{:x}", now_ms), &from, &from_id, kind, &text)
@@ -1067,6 +1070,25 @@ async fn write_thread_post(
 /// `pageStore.APP_POST_FROM_ID` — the typed delivery reads it to print
 /// `[switchboard]` instead of `[from thread "…"]`.
 const APP_POST_FROM_ID: &str = "switchboard";
+
+/// The composer's post path may not claim the app's own sender id: a post
+/// with it is TYPED into a thread as `[switchboard] …`, and only the app's
+/// own append (`append_app_post`) may speak with that voice (review of
+/// 119bc6b, M1).
+fn post_from_id_ok(from_id: &str) -> bool {
+    from_id.trim() != APP_POST_FROM_ID
+}
+
+#[cfg(test)]
+mod app_post_tests {
+    #[test]
+    fn the_app_voice_is_reserved() {
+        assert!(!super::post_from_id_ok("switchboard"));
+        assert!(!super::post_from_id_ok(" switchboard "));
+        assert!(super::post_from_id_ok("user"));
+        assert!(super::post_from_id_ok("3f1c2a9e-0b7d-4c1e-9a55-1234567890ab"));
+    }
+}
 
 /// One `update` line from the app itself (a job ended, a request refused).
 /// The id is the CALLER's, so a job's ended-line has a stable id
