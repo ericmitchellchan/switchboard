@@ -23,6 +23,7 @@ import {
 import { parseViewSpec } from "./viewStore";
 import { parseInboxFile } from "./pageStore";
 import { parseBacklogInbox } from "./backlogStore";
+import { parseJobsInbox, deriveJobState, JOB_LOG_LINES_MAX } from "./jobs";
 import { parseSetsFile } from "./artifactSets";
 import { parseShowsFile, showTargetFor, SHOW_CAP, SHOW_ADDRESS_CAP } from "./showIntent";
 import { parseSurfaceQuery } from "./surfaceParams";
@@ -2890,5 +2891,180 @@ describe("the page tool — the lane brief outlives its thread (SWIT-108 review 
     } finally {
       w.cleanup();
     }
+  });
+});
+
+// ── SWIT-109: the job tool — requests the app acts on, files it reads ────────
+
+describe("the job tool (SWIT-109) — the app runs it, the server only queues and reads", () => {
+  type JobEnv = { jobsInboxPath?: string; jobsDir?: string; selfThreadId?: string; cwd?: string };
+  const srv = server as unknown as {
+    JOB_TOOL: { name: string; description: string; inputSchema: { properties: Record<string, { enum?: string[] }>; required: string[] } };
+    JOB_OPS: string[];
+    JOB_COMMAND_CAP: number;
+    JOB_LOG_LINES_MAX: number;
+    jobState: (rec: Record<string, unknown>, exit: unknown, alive: boolean) => string;
+    performJobOp: (env: JobEnv, args: Record<string, unknown>, now: number, deps?: { alive?: (pid: number) => boolean; isDir?: (p: string) => boolean }) => { message: string };
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const fs = require("fs") as {
+    mkdtempSync: (p: string) => string;
+    mkdirSync: (p: string, o?: { recursive: boolean }) => void;
+    writeFileSync: (p: string, d: string) => void;
+    readFileSync: (p: string, e: string) => string;
+    existsSync: (p: string) => boolean;
+    rmSync: (p: string, o: { recursive: boolean; force: boolean }) => void;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const os = require("os") as { tmpdir: () => string };
+  const SELF = "3f1c2a9e-0b7d-4c1e-9a55-1234567890ab";
+  const MIN = 60_000;
+
+  function world(jobs: Array<Record<string, unknown>>) {
+    const root = fs.mkdtempSync(`${os.tmpdir()}/swb-jobtool-`).split("\\").join("/");
+    const jobsDir = `${root}/jobs`;
+    fs.mkdirSync(jobsDir, { recursive: true });
+    fs.writeFileSync(`${jobsDir}/jobs.json`, JSON.stringify({ version: 1, jobs }));
+    for (const j of jobs) fs.mkdirSync(`${jobsDir}/${j.id}`, { recursive: true });
+    const env: JobEnv = { jobsInboxPath: `${root}/jobs-inbox.json`, jobsDir, selfThreadId: SELF, cwd: root };
+    return { root, jobsDir, env, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
+  }
+  const job = (id: string, name: string, over: Record<string, unknown> = {}) => ({
+    id,
+    name,
+    threadId: SELF,
+    command: "python x.py",
+    cwd: "C:\\work",
+    kind: "job",
+    pid: 4242,
+    pidStartedAt: 1,
+    startedAt: NOW - 42 * MIN,
+    ...over,
+  });
+  const alive = { alive: () => true, isDir: () => true };
+  const dead = { alive: () => false, isDir: () => true };
+
+  it("the state rule is the app's (jobs.ts deriveJobState — same table)", () => {
+    const e = { code: 0, endedAt: 1, timedOut: false, error: null };
+    const cases: Array<[Record<string, unknown>, unknown, boolean]> = [
+      [{}, e, true],
+      [{}, null, true],
+      [{}, null, false],
+      [{ stoppedAt: 5 }, null, false],
+      [{ lostAt: 5 }, null, true],
+      [{ stoppedAt: 5 }, e, false],
+    ];
+    for (const [rec, exit, live] of cases) {
+      const stoppedAt = typeof rec.stoppedAt === "number" ? rec.stoppedAt : null;
+      const lostAt = typeof rec.lostAt === "number" ? rec.lostAt : null;
+      expect(srv.jobState(rec, exit, live)).toBe(deriveJobState({ stoppedAt, lostAt }, exit as never, live));
+    }
+  });
+
+  it("start QUEUES one NDJSON line the app's parse reads — it never starts anything", () => {
+    const w = world([]);
+    try {
+      const r = srv.performJobOp(w.env, { op: "start", name: "capture", command: "  python capture.py --loop  " }, NOW, alive);
+      expect(r.message).toMatch(/outlives this session/);
+      expect(r.message).toMatch(/one line arrives in this thread when it ends/);
+      srv.performJobOp(w.env, { op: "start", name: "second", command: "x", cwd: "sub" }, NOW, alive);
+      const parsed = parseJobsInbox(fs.readFileSync(w.env.jobsInboxPath as string, "utf-8"));
+      expect(parsed.map((p) => [p.op, p.name, p.threadId])).toEqual([
+        ["start", "capture", SELF],
+        ["start", "second", SELF],
+      ]);
+      expect(parsed[0].op === "start" && parsed[0].command).toBe("python capture.py --loop");
+      // cwd defaults to the thread's own and resolves relative ones against it.
+      expect(parsed[0].op === "start" && parsed[0].cwd?.split("\\").join("/")).toBe(w.root);
+      expect(parsed[1].op === "start" && parsed[1].cwd?.split("\\").join("/")).toBe(`${w.root}/sub`);
+      // Nothing under the jobs dir was written by the server.
+      expect(JSON.parse(fs.readFileSync(`${w.jobsDir}/jobs.json`, "utf-8")).jobs).toEqual([]);
+      expect(mcpServerSource).toContain("fs.appendFileSync(env.jobsInboxPath");
+    } finally {
+      w.cleanup();
+    }
+  });
+
+  it("start refuses early with a sentence: name, command cap, cwd, a running name, the per-thread cap", () => {
+    const running = Array.from({ length: 8 }, (_, i) => job(`j${i}`, `n${i}`));
+    const w = world(running);
+    try {
+      const go = (args: Record<string, unknown>, deps = alive) => () => srv.performJobOp(w.env, { op: "start", ...args }, NOW, deps);
+      expect(go({ name: "sp ace", command: "x" })).toThrow(/`name` must be/);
+      expect(go({ name: "a", command: "  " })).toThrow(/non-empty/);
+      expect(go({ name: "a", command: "é".repeat(srv.JOB_COMMAND_CAP + 1) })).toThrow(/cap 2000 characters/);
+      expect(go({ name: "a", command: "x" }, { alive: () => true, isDir: () => false })).toThrow(/not an existing directory/);
+      expect(go({ name: "n3", command: "x" })).toThrow(/already running/);
+      expect(go({ name: "fresh", command: "x" })).toThrow(/cap 8/);
+      // Dead pids free both the name and the slot.
+      expect(() => srv.performJobOp(w.env, { op: "start", name: "n3", command: "x" }, NOW, dead)).not.toThrow();
+      expect(() => srv.performJobOp(w.env, { op: "reboot", name: "a" }, NOW, alive)).toThrow(/`op` must be one of/);
+    } finally {
+      w.cleanup();
+    }
+  });
+
+  it("stop queues only a job of THIS thread that is running", () => {
+    const w = world([
+      job("ja", "capture"),
+      job("jb", "done-one", { stoppedAt: NOW - MIN }),
+      job("jc", "theirs", { threadId: "other" }),
+    ]);
+    try {
+      expect(srv.performJobOp(w.env, { op: "stop", name: "capture" }, NOW, alive).message).toMatch(/stops capture/);
+      expect(() => srv.performJobOp(w.env, { op: "stop", name: "done-one" }, NOW, alive)).toThrow(/already stopped/);
+      expect(() => srv.performJobOp(w.env, { op: "stop", name: "theirs" }, NOW, alive)).toThrow(/no job named theirs in this thread/);
+      expect(parseJobsInbox(fs.readFileSync(w.env.jobsInboxPath as string, "utf-8"))).toEqual([
+        expect.objectContaining({ op: "stop", name: "capture", threadId: SELF }),
+      ]);
+    } finally {
+      w.cleanup();
+    }
+  });
+
+  it("list and log read the app's files: state words, the last line, a capped tail across a rotation", () => {
+    const w = world([
+      job("ja", "capture"),
+      job("jb", "backfill", { startedAt: NOW - 3 * 60 * MIN }),
+      job("jc", "gone", { lostAt: NOW - 5 * MIN }),
+      job("jd", "theirs", { threadId: "other" }),
+    ]);
+    try {
+      fs.writeFileSync(`${w.jobsDir}/ja/log.txt`, "\uFEFFstarting\r\ncaptured 12 prices\r\n");
+      fs.writeFileSync(`${w.jobsDir}/jb/exit.json`, JSON.stringify({ code: 0, endedAt: NOW - 60 * MIN, timedOut: false }));
+      fs.writeFileSync(`${w.jobsDir}/jb/log.1.txt`, Array.from({ length: 30 }, (_, i) => `old ${i}`).join("\n") + "\n");
+      fs.writeFileSync(`${w.jobsDir}/jb/log.txt`, "new 0\nnew 1\n");
+      const list = srv.performJobOp(w.env, { op: "list" }, NOW, alive).message;
+      expect(list).toContain("Jobs of this thread (1 running):");
+      expect(list).toContain("- capture · running 42 min · in C:\\work · last: captured 12 prices");
+      expect(list).toContain("- backfill · exit 0 after 2 h (1 h ago)");
+      expect(list).toContain("- gone · lost");
+      expect(list).not.toContain("theirs");
+      const log = srv.performJobOp(w.env, { op: "log", name: "backfill", lines: 3 }, NOW, alive).message;
+      expect(log.split("\n")).toEqual(["job backfill · exit 0 after 2 h (1 h ago) · last 3 lines:", "old 29", "new 0", "new 1"]);
+      const capped = srv.performJobOp(w.env, { op: "log", name: "backfill", lines: 100_000 }, NOW, alive).message;
+      expect(capped.split("\n")).toHaveLength(1 + 32);
+      expect(srv.performJobOp(w.env, { op: "log", name: "gone" }, NOW, alive).message).toMatch(/\(no output yet\)/);
+      expect(() => srv.performJobOp(w.env, { op: "log", name: "nope" }, NOW, alive)).toThrow(/no job named nope/);
+      // A dead pid with no exit.json reads lost before the app stamps it.
+      expect(srv.performJobOp(w.env, { op: "list" }, NOW, dead).message).toContain("- capture · lost");
+    } finally {
+      w.cleanup();
+    }
+  });
+
+  it("the tool table states the contract in one paragraph", () => {
+    const tool = srv.JOB_TOOL;
+    expect(tool.name).toBe("job");
+    expect(tool.inputSchema.properties.op.enum).toEqual(["start", "stop", "list", "log"]);
+    expect(tool.inputSchema.required).toEqual(["op"]);
+    expect(tool.description).toMatch(/the Switchboard APP starts and owns/);
+    expect(tool.description).toMatch(/keeps running when this conversation ends/);
+    expect(tool.description).toMatch(/read its output with `log`/);
+    expect(tool.description).toMatch(/exactly one line arrives in this thread/);
+    expect(tool.description).not.toContain("\n");
+    expect(mcpServerSource).toContain("SWITCHBOARD_JOBS_INBOX");
+    expect(mcpServerSource).toContain("SWITCHBOARD_JOBS_DIR");
+    expect(srv.JOB_LOG_LINES_MAX).toBe(JOB_LOG_LINES_MAX);
   });
 });

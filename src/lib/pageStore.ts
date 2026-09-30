@@ -253,7 +253,20 @@ export type InboxPost = {
   kind: "update" | "request";
   text: string;
   at: string;
+  /** The sender's id (a thread id, `user`, or APP_POST_FROM_ID). */
+  fromId?: string;
 };
+
+/** The fromId of a line the APP itself posts (SWIT-109: a job ended, a job
+ *  request refused). Paired with lib.rs's APP_POST_FROM_ID. */
+export const APP_POST_FROM_ID = "switchboard";
+
+/** What the inbox delivery TYPES into a thread's terminal for a post: a
+ *  thread's post names the thread; the app's own line names the app, not a
+ *  thread that does not exist. Pure; the caller sanitizes. */
+export function inboxTypedLine(post: Pick<InboxPost, "from" | "text" | "fromId">): string {
+  return post.fromId === APP_POST_FROM_ID ? `[switchboard] ${post.text}` : `[from thread "${post.from}"] ${post.text}`;
+}
 
 // ── Tolerant parses ──────────────────────────────────────────────────────────
 // Same posture as pins.ts: unknown fields ignored, a malformed ENTRY drops
@@ -726,6 +739,7 @@ export function parseInboxFile(raw: string): InboxPost[] {
       kind: p.kind === "request" ? "request" : "update",
       text,
       at: str(p.at) ?? "",
+      ...(str(p.fromId) ? { fromId: str(p.fromId) as string } : {}),
     });
   }
   return out;

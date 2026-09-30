@@ -4,7 +4,8 @@
 // an optional `start here →` line (the turn's reviewFirst address), then
 // Where things stand (SWIT-104 — the agent's standing brief, when it wrote
 // one: the goal, then Established / Dead / Live lead / Waiting on you) · Open
-// questions · This turn · To do · Findings (SWIT-106 — the agent's ledger:
+// questions · This turn · To do · Jobs (SWIT-109 — what the app runs for
+// this thread, components/JobsBlock) · Findings (SWIT-106 — the agent's ledger:
 // verdict pill · claim · n · report · age) · Evidence · Decided · Done ·
 // Dropped. "What
 // happened" sits deliberately BELOW the material that needs the user: the
@@ -153,6 +154,7 @@ import { projectPlaceForDir } from "../../lib/explorer";
 import { getThreads } from "../../lib/threadStore";
 import { parseViewSpec } from "../../lib/viewStore";
 import { OptionRow } from "./OptionRow";
+import { PageJobsBlock } from "../JobsBlock";
 import { log } from "../../lib/logger";
 import { itemPill, titleCase, verdictTone } from "../../lib/statusPill";
 import { Age, ARTIFACT_GRID, ColumnHeads, FINDING_GRID, Fold, PageBlock, StatusPill, TODO_GRID, TURN_GRID, TypeTabs } from "./PageBlock";
@@ -704,6 +706,10 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
           ))}
         </PageBlock>
       )}
+
+      {/* SWIT-109: the thread's JOBS — what the app is running for it,
+          outliving the session; nothing renders until it has one. */}
+      <PageJobsBlock threadId={threadId} />
 
       {/* SWIT-106: THE FINDINGS LEDGER, after To do — what the work has
           established, newest first. The report opens exactly like an

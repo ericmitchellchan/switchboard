@@ -19,6 +19,8 @@
 //                      bridge the page uses (acceptance 7).
 //   Findings         → (SWIT-106) the newest 8 findings across the active
 //                      threads' ledgers, each with its thread; opens it.
+//   Jobs             → (SWIT-109) every running job, then the ones that
+//                      ended in the last 24 h; a failure's pill is amber.
 //   Live now         → launched threads + the latest turn's first line.
 //   Between threads  → the last hour of cross-thread posts.
 //   Listening        → announced dev servers, probed (never "healthy").
@@ -101,6 +103,8 @@ import { OptionRow } from "./kb/OptionRow";
 import { Fold, StatusPill } from "./kb/PageBlock";
 import { needsYouMeta, olderThreadIds, olderQuestionsLabel, recentFindings } from "../lib/homeModel";
 import { verdictTone } from "../lib/statusPill";
+import { homeJobs, jobPill, jobStateAt, useJobs } from "../lib/jobs";
+import type { JobRow } from "../lib/jobs";
 
 /** The page's H2 + trailing meta (10px mono faint, pushed right). */
 const SECTION_META: CSSProperties = {
@@ -229,6 +233,7 @@ export function Home({
   const view = useThreadsView();
   const backlog = useBacklog();
   const servers = useAllKnownServers();
+  const allJobs = useJobs();
   const [digests, setDigests] = useState<ThreadDigest[]>([]);
   const [kept, setKept] = useState<string[]>([]);
   const digestCacheRef = useRef<DigestCache>(new Map());
@@ -328,10 +333,13 @@ export function Home({
   // they did before lanes.
   const recentPosts = collectRecentPosts(digests.filter((d) => !isArchivedThread(d.thread)));
   const findings = recentFindings(findingDigests);
+  // SWIT-109: App's 5s pass publishes the jobs snapshot; Home only reads it.
+  const jobRows = homeJobs(allJobs, now);
   const quiet: string[] = [];
   if (laneRows.length === 0) quiet.push("lanes");
   if (needsCount === 0) quiet.push("needs you");
   if (findings.length === 0) quiet.push("findings");
+  if (jobRows.length === 0) quiet.push("jobs");
   if (openBacklog.length === 0) quiet.push("backlog");
   if (liveRows.length === 0) quiet.push("live now");
   if (recentPosts.length === 0) quiet.push("between threads");
@@ -368,6 +376,7 @@ export function Home({
           {laneRows.length > 0 && <Lanes rows={laneRows} launched={view.launched} statuses={view.sessionStatuses} />}
           {needsCount > 0 && <NeedsYou digests={unlaned} launched={view.launched} />}
           {findings.length > 0 && <Findings rows={findings} />}
+          {jobRows.length > 0 && <Jobs rows={jobRows} threads={view.threads} />}
           {openBacklog.length > 0 && (
             <BacklogBlock items={openBacklog} projectOptions={backlogProjects} />
           )}
@@ -664,6 +673,41 @@ function Findings({ rows }: { rows: ReturnType<typeof recentFindings<Thread>> })
             <span style={{ flex: "none", width: 58, display: "flex", alignSelf: "center" }}>
               <StatusPill word={finding.verdict} tone={verdictTone(finding.verdict)} />
             </span>
+          </Row>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Jobs (SWIT-109) ──────────────────────────────────────────────────────────
+
+/** Every running job, then the ones that settled in the last 24 h
+ *  (jobs.homeJobs) — one flat row each: the name, its thread and last output
+ *  line dim beside it, the state pill (a failure — a non-zero exit, a
+ *  timeout, lost — is the amber one), the age. The row opens the thread; the
+ *  log and the stop live on its page. */
+function Jobs({ rows, threads }: { rows: JobRow[]; threads: readonly Thread[] }) {
+  return (
+    <div>
+      <SectionHeader label="Jobs" meta={String(rows.length)} />
+      {rows.map((job) => {
+        const thread = threads.find((t) => t.id === job.threadId);
+        const pill = jobPill(job);
+        return (
+          <Row key={job.id} title={job.lastLine || job.command} onClick={() => getThreadActions()?.openThread(job.threadId)}>
+            <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <span style={TITLE}>{job.name}</span>
+              <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)" }}>
+                {" "}
+                {thread?.title ?? "a closed thread"}
+                {job.lastLine ? ` · ${job.lastLine}` : ""}
+              </span>
+            </span>
+            <span style={{ flex: "none", width: 124, display: "flex", alignSelf: "center" }}>
+              <StatusPill word={pill.word} tone={pill.tone} />
+            </span>
+            <span style={{ ...ROW_META, marginLeft: 0, width: 32, textAlign: "right" }}>{ago(new Date(jobStateAt(job)).toISOString())}</span>
           </Row>
         );
       })}

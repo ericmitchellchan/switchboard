@@ -2,6 +2,7 @@ mod config;
 mod discovery;
 mod explorer;
 mod ipc_guard;
+mod jobs;
 mod kb;
 mod power;
 mod pty;
@@ -1053,7 +1054,38 @@ async fn write_thread_post(
     kind: String,
     text: String,
 ) -> Result<(), String> {
-    if !valid_thread_id(&target_thread_id) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let kind = if kind == "update" { "update" } else { "request" };
+    let from = if from_title.trim().is_empty() { "you".to_string() } else { from_title.trim().to_string() };
+    append_thread_post(&target_thread_id, &format!("p{:x}", now_ms), &from, &from_id, kind, &text)
+}
+
+/// The fromId of a line the APP posts about a job (SWIT-109). Paired with
+/// `pageStore.APP_POST_FROM_ID` — the typed delivery reads it to print
+/// `[switchboard]` instead of `[from thread "…"]`.
+const APP_POST_FROM_ID: &str = "switchboard";
+
+/// One `update` line from the app itself (a job ended, a request refused).
+/// The id is the CALLER's, so a job's ended-line has a stable id
+/// (`job-<id>`) and two lines in one millisecond never collide.
+fn append_app_post(target_thread_id: &str, post_id: &str, text: &str) -> Result<(), String> {
+    append_thread_post(target_thread_id, post_id, "jobs", APP_POST_FROM_ID, "update", text)
+}
+
+/// Append one post to a thread's inbox.json (tmp + rename, capped at
+/// INBOX_CAP). Shared by the `@thread` composer form and the jobs lines.
+fn append_thread_post(
+    target_thread_id: &str,
+    post_id: &str,
+    from: &str,
+    from_id: &str,
+    kind: &str,
+    text: &str,
+) -> Result<(), String> {
+    if !valid_thread_id(target_thread_id) {
         return Err("invalid target thread id".into());
     }
     let trimmed = text.trim();
@@ -1063,8 +1095,7 @@ async fn write_thread_post(
     if trimmed.len() > POST_TEXT_CAP {
         return Err(format!("post too long (cap {} bytes)", POST_TEXT_CAP));
     }
-    let kind = if kind == "update" { "update" } else { "request" };
-    let dir = threads_data_dir()?.join(&target_thread_id);
+    let dir = threads_data_dir()?.join(target_thread_id);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let file = dir.join("inbox.json");
     let mut posts: Vec<serde_json::Value> = std::fs::read_to_string(&file)
@@ -1076,13 +1107,9 @@ async fn write_thread_post(
                 .or_else(|| v.as_array().cloned())
         })
         .unwrap_or_default();
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
     posts.push(serde_json::json!({
-        "id": format!("p{:x}", now_ms),
-        "from": if from_title.trim().is_empty() { "you" } else { from_title.trim() },
+        "id": post_id,
+        "from": from,
         "fromId": from_id,
         "kind": kind,
         "text": trimmed,
@@ -1513,6 +1540,12 @@ async fn prepare_thread_launch(app: tauri::AppHandle, thread_id: String) -> Resu
                     // appends its own stop actions. The watcher container
                     // (watcher/mw.sh) is the writer of everything else in it.
                     "SWITCHBOARD_MACHINE_DIR": machine_dir()?.to_string_lossy(),
+                    // SWIT-109: the `job` tool's ONE write target (an
+                    // append-only request inbox the app takes on its 5s pass)
+                    // and the dir it READS for `list` / `log`. jobs.json is
+                    // the app's; the server never writes under the jobs dir.
+                    "SWITCHBOARD_JOBS_INBOX": jobs::jobs_inbox_path()?.to_string_lossy(),
+                    "SWITCHBOARD_JOBS_DIR": jobs::jobs_dir()?.to_string_lossy(),
                 }
             }
         }
@@ -2519,6 +2552,14 @@ fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         read_backlog,
         write_backlog,
         take_backlog_inbox,
+        jobs::take_jobs_inbox,
+        jobs::job_start,
+        jobs::job_stop,
+        jobs::job_stop_id,
+        jobs::jobs_snapshot,
+        jobs::job_log_tail,
+        jobs::job_notify,
+        jobs::jobs_post,
         claude_session_exists,
         discover_claude_sessions,
         clear_scrollback,
