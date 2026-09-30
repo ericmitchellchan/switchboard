@@ -123,10 +123,33 @@
 // TableView renderers call. A report's ```stat tiles take their own `tone`,
 // validated by reportStore alone (the server never sees inside the file).
 
-import { useCallback, useEffect, useRef, useState } from "react";
+// SWIT-111 — views you can TWEAK: a spec's `controls` (≤ 4 knobs: select /
+// number / date) re-ask the SOURCE with a different setting — `filters` only
+// slice rows already loaded. The pure rules (parse, legality, substitution per
+// source type, the pin-scope suffix) live in `lib/viewControls.ts`; this module
+// applies them: `resolveViewSource` substitutes the main source (file values
+// through `drillPathKey`, query values URL-encoded + the loopback re-check),
+// `resolveDrill` gives a child the PARENT's current values for its own
+// template, `useViewPanels` substitutes each panel, and the hooks hold the
+// values (`useControlState` — the input's value at once, the load ~300 ms
+// after the last change; the previous rows stay on screen until the new ones
+// arrive, and a failed load keeps them). NOT persisted in v1: a remount (a
+// tab switch that unmounts, `back` from a drill, a restart) starts at the
+// defaults — the filters' precedent.
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { readProjectView, readProjectViewData, readThreadView, readViewData } from "./ipc";
 import { splitReport } from "./reportStore";
 import { isBarTone, parseTableTones, type BarTone, type TableTone } from "./viewTone";
+import {
+  controlLine,
+  controlValuesKey,
+  effectiveControlValues,
+  parseViewControls,
+  substituteControls,
+  type ControlValues,
+  type ViewControl,
+} from "./viewControls";
 
 // ── Owners (SWIT-107) ────────────────────────────────────────────────────────
 // A view is owned by a THREAD (its spec in the thread dir, its data relative
@@ -276,6 +299,13 @@ export type ViewSpec = {
   tone?: BarTone;
   /** table (SWIT-81): up to TABLE_TONES_CAP per-column cell-colour rules. */
   tones?: TableTone[];
+  /** SWIT-111: the knobs that re-ask the source (`{name}` placeholders in
+   *  the source, the panels and the drill template). Never on a report. */
+  controls?: ViewControl[];
+  /** SWIT-111, RUNTIME ONLY (never parsed from disk): a DRILLED CHILD's
+   *  values inherited from its parent — what its source was substituted
+   *  with (`resolveDrill`). Its pin scope and `spec` lines read them. */
+  inheritedControls?: ControlValues;
 };
 
 /** Caps, mirrored from the MCP server (the writer) — the reader trims to the
@@ -602,6 +632,13 @@ export function parseViewSpec(raw: string): { spec: ViewSpec | null; specError: 
   if (kind === "table") {
     const tones = parseTableTones(data.tones);
     if (tones.length > 0) spec.tones = tones;
+  }
+  // SWIT-111 — the knobs, tolerated as ABSENT (a malformed one drops alone; a
+  // placeholder it left behind is an error at load time, never a read). A
+  // report has no source of rows to re-ask — its blocks declare their own.
+  if (kind !== "report") {
+    const controls = parseViewControls(data.controls);
+    if (controls.length > 0) spec.controls = controls;
   }
   return { spec, specError: null };
 }
@@ -1323,25 +1360,36 @@ export function markerAtBar(
  *  true (a template with `{key}` in the authority is refused either way). */
 export function resolveDrill(
   parent: ViewSpec,
-  key: string
+  key: string,
+  /** SWIT-111: the PARENT's current control values — a drill template that
+   *  names the parent's `{name}` placeholders is substituted with them
+   *  (normalized against the parent's controls; absent = the defaults). */
+  controlValues: ControlValues | null = null
 ): { spec: ViewSpec; error: null } | { spec: null; error: string } {
   const drill = parent.drill;
   if (!drill) return { spec: null, error: `${parent.title} declares no drill` };
   const raw = key.trim();
   if (raw.length === 0 || raw.length > DRILL_KEY_CAP) return { spec: null, error: "the drill key is empty or too long" };
   const fill = (s: string, v: string) => s.split("{key}").join(v);
+  // SWIT-111: the parent's control values first (the `{key}` left in place),
+  // by the same per-source rule as the parent's own source — a value can no
+  // more leave the working directory in a child's path than in the parent's.
+  const inherited = effectiveControlValues(parent.controls, controlValues);
+  const templated = substituteControls(drill.source, inherited, CONTROL_SUBSTITUTION, ["key"]);
+  if (templated.error !== null) return { spec: null, error: templated.error };
+  const template = templated.source;
   let source: ViewSource;
-  if (drill.source.type === "file") {
+  if (template.type === "file") {
     const component = drillPathKey(raw);
     if (component === null) {
       return { spec: null, error: `the key "${raw}" cannot name a file inside the thread's working directory` };
     }
-    source = { type: "file", path: fill(drill.source.path, component) };
+    source = { type: "file", path: fill(template.path, component) };
   } else {
-    const url = fill(drill.source.url, encodeURIComponent(raw));
+    const url = fill(template.url, encodeURIComponent(raw));
     if (!isLocalBackendUrl(url)) return { spec: null, error: "the drill's query url is not a local backend" };
     source = { type: "query", url };
-    if (drill.source.body) source.body = fill(drill.source.body, encodeURIComponent(raw));
+    if (template.body) source.body = fill(template.body, encodeURIComponent(raw));
   }
   const spec: ViewSpec = {
     id: `${parent.id}~${drillPathKey(raw) ?? "key"}`,
@@ -1363,7 +1411,33 @@ export function resolveDrill(
   if (drill.levels) spec.levels = drill.levels;
   if (drill.markers) spec.markers = drill.markers;
   if (drill.markerColumns) spec.markerColumns = drill.markerColumns;
+  // The child draws no knobs of its own; it records the setting it was
+  // opened at (its pin scope and `spec` lines read it).
+  if (Object.keys(inherited).length > 0) spec.inheritedControls = inherited;
   return { spec, error: null };
+}
+
+/** The substitution deps viewStore hands viewControls: a file value is ONE
+ *  path component by the drill-key rule; a query url is re-checked against
+ *  the loopback rule after substitution. */
+const CONTROL_SUBSTITUTION = { pathComponent: (v: string) => drillPathKey(v), isLoopback: isLocalBackendUrl };
+
+/** The source a view READS at these control values (SWIT-111): the spec's
+ *  source with every `{name}` substituted (`substituteControls` — file values
+ *  one safe path component, query values URL-encoded + the loopback
+ *  re-check), or the plain error that says why nothing is read (a refused
+ *  value, a placeholder no control declares). A spec with no controls and no
+ *  placeholders resolves to its own source. Pure. */
+export function resolveViewSource(
+  spec: ViewSpec,
+  values: ControlValues | null
+): { source: ViewSource; error: null } | { source: null; error: string } {
+  return substituteControls(spec.source, effectiveControlValues(spec.controls, values), CONTROL_SUBSTITUTION);
+}
+
+/** A source as one comparable string (file path, or url + body). Pure. */
+export function viewSourceKey(source: ViewSource): string {
+  return source.type === "file" ? `file ${source.path}` : `query ${source.url} ${source.body ?? ""}`;
 }
 
 // ── The deck (SWIT-75): a drilled child's siblings ──────────────────────────
@@ -1444,8 +1518,27 @@ export function drillFallbackSentence(viewTitle: string, anchorLabel: string): s
 
 /** The lines the toolbar's `spec` disclosure prints — plain text, no
  *  narration. Pure. */
-export function specLines(spec: ViewSpec): string[] {
+export function specLines(
+  spec: ViewSpec,
+  /** SWIT-111: the values the rows on screen were loaded at — each control
+   *  prints its current value (absent = its default). */
+  controlValues: ControlValues | null = null
+): string[] {
   const lines: string[] = [`kind      ${spec.kind}`];
+  // SWIT-111 — the knobs, each with the value in force and its range, then
+  // a drilled child's inherited setting.
+  if (spec.controls && spec.controls.length > 0) {
+    const values = effectiveControlValues(spec.controls, controlValues);
+    lines.push(`controls  ${spec.controls.map((c) => controlLine(c, values[c.name])).join(" · ")}`);
+  }
+  if (spec.inheritedControls && Object.keys(spec.inheritedControls).length > 0) {
+    lines.push(
+      `controls  ${Object.keys(spec.inheritedControls)
+        .sort()
+        .map((k) => `${k} = ${spec.inheritedControls?.[k]}`)
+        .join(" · ")} (from the parent)`
+    );
+  }
   lines.push(
     `source    ${spec.source.type === "file" ? `file ${spec.source.path}` : `query ${spec.source.url}`}`
   );
@@ -1503,9 +1596,91 @@ async function fetchViewRaw(owner: string, source: ViewSource): Promise<string> 
   return res.text();
 }
 
+// ── Controls (SWIT-111): the knobs' state ────────────────────────────────────
+
+/** How long after the last change a control waits before the data reloads —
+ *  a number box typed digit by digit asks the source once, not per key. */
+export const CONTROL_DEBOUNCE_MS = 300;
+
+/** What a view's knobs are doing — the toolbar draws `defs` from `shown`, a
+ *  number box types into `draft`, and everything that must agree with the
+ *  rows on screen (the pin scope, a drilled child's inherited values, keep)
+ *  reads `applied`. */
+export type ViewControlsRead = {
+  /** The knobs the toolbar draws — [] for a drilled child (its values are
+   *  inherited, not chosen) and for a view that declares none. */
+  defs: ViewControl[];
+  /** Each knob's value NOW (normalized — what a select/date shows). */
+  shown: ControlValues;
+  /** What the user typed, not yet normalized — a number box shows this
+   *  while it has focus, so a clamp never fights the keystroke. */
+  draft: ControlValues;
+  /** The values the rows were asked at (after the debounce; normalized). */
+  applied: ControlValues;
+  set: (name: string, value: string) => void;
+  /** The source the latest load resolved to — null when substitution
+   *  refused it (the error says why). */
+  source: ViewSource | null;
+};
+
+const NO_VALUES: ControlValues = {};
+const NO_CONTROLS: ViewControl[] = [];
+
+/** The knobs' state for one view instance: the user's raw values (seeded —
+ *  a deck's parent read starts at its child's inherited values), and the
+ *  same values APPLIED `CONTROL_DEBOUNCE_MS` after the last change. Both are
+ *  normalized against the declared controls at read time, so a default
+ *  never waits on the debounce. Component state: not persisted (v1). */
+export function useControlState(
+  defs: ViewControl[] | undefined,
+  seed: ControlValues | null
+): Omit<ViewControlsRead, "source"> {
+  const [initial] = useState<ControlValues>(() => seed ?? NO_VALUES);
+  const [raw, setRaw] = useState<ControlValues>(initial);
+  const [appliedRaw, setAppliedRaw] = useState<ControlValues>(initial);
+  useEffect(() => {
+    const id = window.setTimeout(
+      () => setAppliedRaw((prev) => (controlValuesKey(prev) === controlValuesKey(raw) ? prev : raw)),
+      CONTROL_DEBOUNCE_MS
+    );
+    return () => window.clearTimeout(id);
+  }, [raw]);
+  const shown = useMemo(() => effectiveControlValues(defs, raw), [defs, raw]);
+  const applied = useMemo(() => effectiveControlValues(defs, appliedRaw), [defs, appliedRaw]);
+  const set = useCallback((name: string, value: string) => {
+    setRaw((prev) => (prev[name] === value ? prev : { ...prev, [name]: value }));
+  }, []);
+  return { defs: defs ?? NO_CONTROLS, shown, draft: raw, applied, set };
+}
+
+type ResolvedSource = { source: ViewSource; error: null } | { source: null; error: string };
+
+/** A resolved-source memo that changes identity only when the RESOLUTION
+ *  changes (a new source string or a new error), so a re-render with equal
+ *  values never re-triggers a load. */
+function useResolvedSource(spec: ViewSpec | null, values: ControlValues): ResolvedSource | null {
+  const resolved = useMemo(
+    () => (spec && spec.kind !== "report" ? resolveViewSource(spec, values) : null),
+    [spec, values]
+  );
+  const key =
+    resolved === null ? "" : resolved.error !== null ? `!${resolved.error}` : viewSourceKey(resolved.source);
+  const stableRef = useRef<{ key: string; spec: ViewSpec | null; value: ResolvedSource | null }>({
+    key,
+    spec,
+    value: resolved,
+  });
+  if (stableRef.current.key !== key || stableRef.current.spec !== spec) {
+    stableRef.current = { key, spec, value: resolved };
+  }
+  return stableRef.current.value;
+}
+
 export type ViewRead = {
   spec: ViewSpec | null;
-  /** Why there is no spec / no rows — the cannot-render card's copy. */
+  /** Why there is no spec / no rows — the cannot-render card's copy. With
+   *  rows on screen it is the failed RE-load's line (SWIT-111: the last good
+   *  rows stay; the chrome prints this under the toolbar). */
   error: string | null;
   rows: ViewRow[] | null;
   /** The data file's `meta` object, when it carries one (T8). */
@@ -1514,10 +1689,12 @@ export type ViewRead = {
    *  tab is active, reference-stable on unchanged content. null for every
    *  other kind. */
   text: string | null;
-  /** Rows are loading right now (first load or a re-run). */
+  /** Rows are loading right now (first load, a re-run, a control change). */
   loading: boolean;
   /** Eric's re-run (query sources; a file source re-reads the file). */
   rerun: () => void;
+  /** SWIT-111: the knobs. */
+  controls: ViewControlsRead;
 };
 
 export function useView(
@@ -1531,7 +1708,11 @@ export function useView(
   /** SWIT-73: the spec file holds a REPORT and the effective view is its
    *  embedded block <n> (always set together with drillKey on a child
    *  drilled from an embedded view). */
-  block: number | null = null
+  block: number | null = null,
+  /** SWIT-111: for a drilled CHILD, the parent's values it was opened at
+   *  (its template is substituted with them); for a parent, the SEED of its
+   *  knobs (a deck's parent read starts at the child's setting). */
+  controls: ControlValues | null = null
 ): ViewRead {
   const [spec, setSpec] = useState<ViewSpec | null>(null);
   const [specError, setSpecError] = useState<string | null>(null);
@@ -1542,10 +1723,16 @@ export function useView(
   const [loading, setLoading] = useState(false);
   const lastSpecRawRef = useRef<string | null>(null);
   const lastTextRef = useRef<string | null>(null);
-  // WHICH spec build the loaded rows belong to — file data reloads when the
-  // agent re-shows (builtAt moves); query data does not (re-run is Eric's).
+  // WHICH spec build + resolved source the loaded rows belong to — data
+  // reloads when the agent re-shows (builtAt moves) or a knob moves the
+  // resolved source (SWIT-111); a query never refetches on a timer.
   const loadedForRef = useRef<string | null>(null);
   const loadSeqRef = useRef(0);
+  // SWIT-111: a child's inherited values, read inside the spec tick (the
+  // effects key on their stable string, not the object).
+  const inheritedKey = drillKey !== null ? controlValuesKey(controls) : "";
+  const inheritedRef = useRef<ControlValues | null>(controls);
+  inheritedRef.current = controls;
 
   // Spec poll (pins cadence, active-gated, no-op on unchanged raw).
   useEffect(() => {
@@ -1558,7 +1745,7 @@ export function useView(
     setMeta(null);
     setText(null);
     setDataError(null);
-  }, [owner, viewId, drillKey, block]);
+  }, [owner, viewId, drillKey, block, inheritedKey]);
 
   useEffect(() => {
     if (!active || owner.length === 0 || viewId.length === 0) return;
@@ -1580,7 +1767,7 @@ export function useView(
               markdown = null;
             }
           }
-          changeKey = `${raw} ${markdown ?? ""}`;
+          changeKey = `${raw} ${markdown ?? ""}`;
         }
         if (cancelled || changeKey === lastSpecRawRef.current) return;
         lastSpecRawRef.current = changeKey;
@@ -1604,9 +1791,10 @@ export function useView(
         }
         // A DRILLED child (T6): the file holds the PARENT; the child is the
         // parent's drill resolved for this key, re-derived on every spec
-        // change so an agent `update` of the parent re-shapes the child too.
+        // change so an agent `update` of the parent re-shapes the child too —
+        // at the parent values the child was opened with (SWIT-111).
         if (base && drillKey !== null) {
-          const child = resolveDrill(base, drillKey);
+          const child = resolveDrill(base, drillKey, inheritedRef.current);
           setSpec(child.spec);
           setSpecError(child.error);
           return;
@@ -1625,7 +1813,7 @@ export function useView(
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [owner, viewId, active, drillKey, block]);
+  }, [owner, viewId, active, drillKey, block, inheritedKey]);
 
   // SWIT-73: a REPORT's markdown polls at the same cadence gates as the spec
   // (active-gated, no-op on unchanged content — the mergeDocRead lesson: an
@@ -1656,13 +1844,19 @@ export function useView(
     };
   }, [owner, spec, active]);
 
+  // SWIT-111: the knobs. A parent's are its own state (seeded); a child has
+  // none to draw — its applied values are the ones it inherited.
+  const knobs = useControlState(spec?.controls, drillKey === null ? controls : null);
+  const applied = spec?.inheritedControls ?? knobs.applied;
+  const resolved = useResolvedSource(spec, applied);
+
   const load = useCallback(
-    async (target: ViewSpec) => {
+    async (source: ViewSource) => {
       const seq = ++loadSeqRef.current;
       setLoading(true);
       setDataError(null);
       try {
-        const raw = await fetchViewRaw(owner, target.source);
+        const raw = await fetchViewRaw(owner, source);
         if (seq !== loadSeqRef.current) return;
         const parsed = parseViewPayload(raw);
         if (parsed === null) {
@@ -1684,24 +1878,46 @@ export function useView(
     [owner]
   );
 
-  // Load data once per BUILD (id + builtAt + source): an agent `update`
-  // moves builtAt (millisecond ISO), so the open tab reloads — file and
-  // query alike, since the update IS a fresh declaration. Between builds a
-  // query never refetches (re-run is Eric's); a file re-reads only through
-  // re-run too.
+  // Load data once per BUILD (id + builtAt + the RESOLVED source): an agent
+  // `update` moves builtAt (millisecond ISO), so the open tab reloads — file
+  // and query alike, since the update IS a fresh declaration; a knob that
+  // moves the resolved source reloads too (SWIT-111 — Eric's gesture, like
+  // re-run). Otherwise a query never refetches. The previous rows stay on
+  // screen until the new ones arrive; a refused substitution reads NOTHING
+  // and says why.
   useEffect(() => {
     // SWIT-73: a report has no rows — its markdown loads through the poll
     // above, and each embedded view loads its own data (useInlineViewData).
-    if (!spec || spec.kind === "report") return;
-    const buildKey = `${spec.id}:${spec.builtAt}:${spec.source.type === "file" ? spec.source.path : spec.source.url}`;
+    if (!spec || spec.kind === "report" || !resolved) return;
+    const buildKey = `${spec.id}:${spec.builtAt}:${
+      resolved.error !== null ? `!${resolved.error}` : viewSourceKey(resolved.source)
+    }`;
     if (loadedForRef.current === buildKey) return;
     loadedForRef.current = buildKey;
-    void load(spec);
-  }, [spec, load]);
+    if (resolved.error !== null) {
+      loadSeqRef.current++;
+      setLoading(false);
+      setDataError(resolved.error);
+      return;
+    }
+    void load(resolved.source);
+  }, [spec, resolved, load]);
 
   const rerun = useCallback(() => {
-    if (spec && spec.kind !== "report") void load(spec);
-  }, [spec, load]);
+    if (spec && spec.kind !== "report" && resolved?.source) void load(resolved.source);
+  }, [spec, resolved, load]);
+
+  const controlsRead = useMemo<ViewControlsRead>(
+    () => ({
+      defs: knobs.defs,
+      shown: knobs.shown,
+      draft: knobs.draft,
+      applied,
+      set: knobs.set,
+      source: resolved?.source ?? null,
+    }),
+    [knobs.defs, knobs.shown, knobs.draft, applied, knobs.set, resolved]
+  );
 
   return {
     spec,
@@ -1711,6 +1927,7 @@ export function useView(
     text,
     loading,
     rerun,
+    controls: controlsRead,
   };
 }
 
@@ -1722,13 +1939,16 @@ export type InlineViewData = {
   error: string | null;
   loading: boolean;
   rerun: () => void;
+  /** SWIT-111: the block's OWN knobs — two blocks of one report never share
+   *  a value. */
+  controls: ViewControlsRead;
 };
 
 /** Load an EMBEDDED view's data — the same rules as the main hook: once per
- *  build (id + builtAt + source; the report's `op: update` moves builtAt for
- *  every block at once), `rerun` is Eric's gesture, a failed re-read keeps
- *  the last good rows. The spec arrives already derived
- *  (`parseInlineViewSpec`); null = nothing to load. */
+ *  build (id + builtAt + the resolved source; the report's `op: update`
+ *  moves builtAt for every block at once, a knob moves the source), `rerun`
+ *  is Eric's gesture, a failed re-read keeps the last good rows. The spec
+ *  arrives already derived (`parseInlineViewSpec`); null = nothing to load. */
 export function useInlineViewData(owner: string, spec: ViewSpec | null): InlineViewData {
   const [rows, setRows] = useState<ViewRow[] | null>(null);
   const [meta, setMeta] = useState<ViewMeta | null>(null);
@@ -1736,14 +1956,16 @@ export function useInlineViewData(owner: string, spec: ViewSpec | null): InlineV
   const [loading, setLoading] = useState(false);
   const loadedForRef = useRef<string | null>(null);
   const loadSeqRef = useRef(0);
+  const knobs = useControlState(spec?.controls, null);
+  const resolved = useResolvedSource(spec, knobs.applied);
 
   const load = useCallback(
-    async (target: ViewSpec) => {
+    async (source: ViewSource) => {
       const seq = ++loadSeqRef.current;
       setLoading(true);
       setError(null);
       try {
-        const raw = await fetchViewRaw(owner, target.source);
+        const raw = await fetchViewRaw(owner, source);
         if (seq !== loadSeqRef.current) return;
         const parsed = parseViewPayload(raw);
         if (parsed === null) {
@@ -1766,24 +1988,44 @@ export function useInlineViewData(owner: string, spec: ViewSpec | null): InlineV
   );
 
   useEffect(() => {
-    if (!spec || spec.kind === "report") {
+    if (!spec || spec.kind === "report" || !resolved) {
       loadedForRef.current = null;
       setRows(null);
       setMeta(null);
       setError(null);
       return;
     }
-    const buildKey = `${spec.id}:${spec.builtAt}:${spec.source.type === "file" ? spec.source.path : spec.source.url}`;
+    const buildKey = `${spec.id}:${spec.builtAt}:${
+      resolved.error !== null ? `!${resolved.error}` : viewSourceKey(resolved.source)
+    }`;
     if (loadedForRef.current === buildKey) return;
     loadedForRef.current = buildKey;
-    void load(spec);
-  }, [spec, load]);
+    if (resolved.error !== null) {
+      loadSeqRef.current++;
+      setLoading(false);
+      setError(resolved.error);
+      return;
+    }
+    void load(resolved.source);
+  }, [spec, resolved, load]);
 
   const rerun = useCallback(() => {
-    if (spec && spec.kind !== "report") void load(spec);
-  }, [spec, load]);
+    if (spec && spec.kind !== "report" && resolved?.source) void load(resolved.source);
+  }, [spec, resolved, load]);
 
-  return { rows, meta, error, loading, rerun };
+  const controls = useMemo<ViewControlsRead>(
+    () => ({
+      defs: knobs.defs,
+      shown: knobs.shown,
+      draft: knobs.draft,
+      applied: knobs.applied,
+      set: knobs.set,
+      source: resolved?.source ?? null,
+    }),
+    [knobs.defs, knobs.shown, knobs.draft, knobs.applied, knobs.set, resolved]
+  );
+
+  return { rows, meta, error, loading, rerun, controls };
 }
 
 // ── Small multiples (SWIT-70): each panel's rows ─────────────────────────────
@@ -1792,16 +2034,42 @@ export type PanelData = { title: string; rows: ViewRow[] | null; error: string |
 
 const NO_PANELS: PanelData[] = [];
 
-/** Load each panel's source ONCE per spec build, like the main load: an
- *  agent `update` moves builtAt and every panel re-reads; between builds a
- *  panel never refetches (v1: the toolbar's `re-run` re-reads the MAIN
- *  source only — a panel is a companion chart, not a live feed). Same
- *  loading rules as the main source: file through the guarded IPC, query
- *  against a loopback URL the parse already vetted. */
-export function useViewPanels(owner: string, spec: ViewSpec | null, active: boolean): PanelData[] {
+/** Each panel's source at the view's control values (SWIT-111) — the same
+ *  substitution as the main source, so a panel that names `{expiry}` follows
+ *  the knob; a refused value is that panel's error. Pure. */
+export function resolvePanelSources(
+  spec: ViewSpec,
+  values: ControlValues | null
+): ({ title: string; source: ViewSource; error: null } | { title: string; source: null; error: string })[] {
+  const effective = effectiveControlValues(spec.controls, values);
+  return (spec.panels ?? []).map((p) => {
+    const r = substituteControls(p.source, effective, CONTROL_SUBSTITUTION);
+    return r.error !== null
+      ? { title: p.title, source: null, error: r.error }
+      : { title: p.title, source: r.source, error: null };
+  });
+}
+
+/** Load each panel's source ONCE per spec build and control setting, like
+ *  the main load: an agent `update` moves builtAt and every panel re-reads;
+ *  a knob that moves a panel's resolved source re-reads it (SWIT-111);
+ *  otherwise a panel never refetches (v1: the toolbar's `re-run` re-reads
+ *  the MAIN source only — a panel is a companion chart, not a live feed).
+ *  A panel keeps its previous rows while its new ones load, and on a failed
+ *  re-read. Same loading rules as the main source: file through the guarded
+ *  IPC, query against a loopback URL the parse already vetted. */
+export function useViewPanels(
+  owner: string,
+  spec: ViewSpec | null,
+  active: boolean,
+  values: ControlValues | null = null
+): PanelData[] {
   const [data, setData] = useState<PanelData[]>(NO_PANELS);
   const loadedForRef = useRef<string | null>(null);
   const seqRef = useRef(0);
+  const valuesKey = controlValuesKey(values);
+  const valuesRef = useRef(values);
+  valuesRef.current = values;
   useEffect(() => {
     const panels = spec?.panels;
     if (!spec || !panels || panels.length === 0) {
@@ -1814,30 +2082,41 @@ export function useViewPanels(owner: string, spec: ViewSpec | null, active: bool
     // panels stay whatever the snapshot held — and a query-sourced panel must
     // not fetch live data under a "frozen" label). Same guard as useView.
     if (owner.length === 0) return;
-    const buildKey = `${spec.id}:${spec.builtAt}:${panels
-      .map((p) => (p.source.type === "file" ? p.source.path : p.source.url))
+    const resolved = resolvePanelSources(spec, valuesRef.current);
+    const buildKey = `${spec.id}:${spec.builtAt}:${resolved
+      .map((p) => (p.source !== null ? viewSourceKey(p.source) : `!${p.error}`))
       .join("|")}`;
     if (loadedForRef.current === buildKey) return;
     loadedForRef.current = buildKey;
     const seq = ++seqRef.current;
-    setData(panels.map((p) => ({ title: p.title, rows: null, error: null })));
-    panels.forEach((p, i) => {
+    // Keep what each panel showed (same slot, same title) until its new rows
+    // arrive — a knob never blanks the multiples.
+    setData((prev) =>
+      resolved.map((p, i) => ({
+        title: p.title,
+        rows: prev[i]?.title === p.title ? prev[i].rows : null,
+        error: p.error,
+      }))
+    );
+    resolved.forEach((p, i) => {
+      if (p.source === null) return;
+      const source = p.source;
       void (async () => {
-        let next: PanelData;
+        let next: Partial<PanelData>;
         try {
-          const raw = await fetchViewRaw(owner, p.source);
+          const raw = await fetchViewRaw(owner, source);
           const parsed = parseViewPayload(raw);
           next =
             parsed === null
-              ? { title: p.title, rows: null, error: "not rows (expected a JSON array of objects)" }
-              : { title: p.title, rows: parsed.rows, error: null };
+              ? { error: "not rows (expected a JSON array of objects)" }
+              : { rows: parsed.rows, error: null };
         } catch (err) {
-          next = { title: p.title, rows: null, error: String(err instanceof Error ? err.message : err) };
+          next = { error: String(err instanceof Error ? err.message : err) };
         }
         if (seq !== seqRef.current) return;
-        setData((prev) => prev.map((d, j) => (j === i ? next : d)));
+        setData((prev) => prev.map((d, j) => (j === i ? { ...d, ...next } : d)));
       })();
     });
-  }, [owner, spec, active]);
+  }, [owner, spec, active, valuesKey]);
   return data;
 }

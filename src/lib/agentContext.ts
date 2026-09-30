@@ -223,6 +223,17 @@ function sessionDisplayName(opts: RefOptions): string {
   return sanitizeForTypedLine(opts.sessionName ?? "", SESSION_NAME_MAX) || "terminal";
 }
 
+/** SWIT-111: a drilled child's inherited control values, as the ref names
+ *  them — ` at expiry=front, width=5` (sorted), `""` with none. The child's
+ *  data depends on them, so the agent must hear the setting. */
+function drillControlsRef(controls: Record<string, string> | undefined): string {
+  if (!controls) return "";
+  const parts = Object.keys(controls)
+    .sort()
+    .map((k) => `${k}=${controls[k]}`);
+  return parts.length > 0 ? ` at ${parts.join(", ")}` : "";
+}
+
 /** How an artifact is NAMED to the agent: `<kind> <path>`.
  *
  *    kb-doc     → `kb C:/Users/eric/projects/personal-kb/switchboard/…/requirements.md`
@@ -293,7 +304,7 @@ export function artifactRef(artifact: Artifact, opts: RefOptions = {}): string {
         return sanitizeForTypedLine(
           `view ${artifact.project}/.sb-views/_project/${artifact.viewId}.json${
             artifact.block !== undefined ? ` block ${artifact.block}` : ""
-          }${artifact.drill ? ` drill ${artifact.drill.key}` : ""}`,
+          }${artifact.drill ? ` drill ${artifact.drill.key}` : ""}${drillControlsRef(artifact.drill?.controls)}`,
           REF_MAX
         );
       }
@@ -309,7 +320,7 @@ export function artifactRef(artifact: Artifact, opts: RefOptions = {}): string {
       return sanitizeForTypedLine(
         `view ${joinPath(root, `${artifact.threadId}/views/${artifact.viewId}.json`)}${
           artifact.block !== undefined ? ` block ${artifact.block}` : ""
-        }${artifact.drill ? ` drill ${artifact.drill.key}` : ""}`,
+        }${artifact.drill ? ` drill ${artifact.drill.key}` : ""}${drillControlsRef(artifact.drill?.controls)}`,
         REF_MAX
       );
     }

@@ -59,6 +59,7 @@ import { log } from "./logger";
 import type { ConventionEntry } from "./pageStore";
 import { surfaceLabel } from "../surfaces/registry";
 import { encodeSurfaceParams, sanitizeSurfaceParams, surfaceParamsSuffix } from "./surfaceParams";
+import { controlValuesKey, sanitizeControlValues } from "./viewControls";
 import { TERMINAL_COLS } from "./terminalGrid";
 // SETS (SWIT-79) — the pure fold/split/position rules; this store applies
 // them and keeps the per-set position map. artifactSets imports nothing back.
@@ -722,9 +723,20 @@ export function sanitizeArtifact(raw: unknown): Artifact | null {
         typeof raw.block === "number" && Number.isInteger(raw.block) && raw.block >= 1 && raw.block <= 999
           ? raw.block
           : null;
+      // SWIT-111: a child's inherited control values ride inside its drill —
+      // names by the control-name rule, short string values, capped; a
+      // malformed set drops alone (the child opens at the defaults).
+      const controls =
+        key !== null && typeof drill === "object" && drill !== null
+          ? sanitizeControlValues((drill as Record<string, unknown>).controls)
+          : null;
       const rest =
         key !== null
-          ? { viewId: raw.viewId, ...(block !== null ? { block } : {}), drill: { key } }
+          ? {
+              viewId: raw.viewId,
+              ...(block !== null ? { block } : {}),
+              drill: { key, ...(controls !== null ? { controls } : {}) },
+            }
           : { viewId: raw.viewId };
       return { kind: "view", ...owner, ...rest } as Artifact;
     }
@@ -811,9 +823,13 @@ export function artifactIdentity(artifact: Artifact): string {
       // embedded views is two children.
       // SWIT-107: a PROJECT view's owner reads `@<project>` — never a thread
       // id (a uuid), so the two owners cannot share an identity.
+      // SWIT-111: a child's inherited control values join it — the same key
+      // at two settings is two children (sorted, so order never splits one).
       return `view:${artifact.project !== undefined ? `@${artifact.project}` : artifact.threadId}:${artifact.viewId}${
         artifact.block !== undefined ? `#b${artifact.block}` : ""
-      }${artifact.drill ? `/${artifact.drill.key}` : ""}`;
+      }${artifact.drill ? `/${artifact.drill.key}` : ""}${
+        artifact.drill?.controls ? `?${controlValuesKey(artifact.drill.controls)}` : ""
+      }`;
     case "question":
       return `question:${artifact.threadId}:${artifact.questionId}`;
     case "set":

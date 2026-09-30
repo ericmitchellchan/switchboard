@@ -241,8 +241,26 @@ export type Artifact =
   // report default) and Rust reads it by project KEY with the explorer's
   // guards — so a report outlives the thread that made it and opens with no
   // thread at all. Exactly one of the two owner fields is present.
-  | { kind: "view"; threadId: string; project?: undefined; viewId: string; block?: number; drill?: { key: string } }
-  | { kind: "view"; project: string; threadId?: undefined; viewId: string; block?: number; drill?: { key: string } }
+  //
+  // SWIT-111: a drilled child's `drill.controls` are the PARENT's control
+  // values it was opened at (control name → value) — its template is
+  // substituted with them, so they are part of its identity.
+  | {
+      kind: "view";
+      threadId: string;
+      project?: undefined;
+      viewId: string;
+      block?: number;
+      drill?: { key: string; controls?: Record<string, string> };
+    }
+  | {
+      kind: "view";
+      project: string;
+      threadId?: undefined;
+      viewId: string;
+      block?: number;
+      drill?: { key: string; controls?: Record<string, string> };
+    }
   // A QUESTION tab (SWIT-51, R3 rule 1) — LEGACY since SWIT-67 (nothing
   // creates it; kept for restored workspaces). Answering writes answers.json
   // and closes it; since SWIT-77 nothing is typed — the ✦ page sends every

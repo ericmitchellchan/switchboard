@@ -1584,6 +1584,19 @@ const BAR_TONES = [
 const TABLE_TONE_KINDS = ["sign", "heat"];
 const TABLE_TONES_CAP = 6;
 const TABLE_TONE_COLUMN_CAP = 64;
+// SWIT-111: views you can TWEAK — `controls` (<=4 knobs) re-ask the source
+// with a different setting; the source (path, url, body), a line view's
+// panels and the drill template name them as `{name}`. Mirrored in
+// src/lib/viewControls.ts (the reader's tolerant parse + the substitution).
+const CONTROL_CAP = 4;
+const CONTROL_KINDS = ["select", "number", "date"];
+const CONTROL_OPTION_CAP = 24;
+const CONTROL_OPTION_LEN = 60;
+const CONTROL_LABEL_CAP = 40;
+const CONTROL_NAME_RE = /^[a-z][a-zA-Z0-9_]{0,31}$/;
+const RESERVED_CONTROL_NAMES = ["key"];
+/** A `{name}` placeholder — the same grammar as a control's name. */
+const PLACEHOLDER_RE = /\{([a-z][a-zA-Z0-9_]{0,31})\}/g;
 
 function validViewSourcePath(p) {
   if (typeof p !== "string" || p.trim().length === 0) return false;
@@ -1621,7 +1634,9 @@ function buildViewSource(source, field) {
   if (typeof source !== "object" || source === null) {
     throw new OpError(`${field} is required: {type:'file', path} or {type:'query', url}`);
   }
-  const fill = (v) => (typeof v === "string" ? v.split("{key}").join("k") : v);
+  // `{key}` and (SWIT-111) every `{name}` control placeholder stand in as a
+  // plain component — which ones are DECLARED is checked by the caller.
+  const fill = (v) => (typeof v === "string" ? v.replace(PLACEHOLDER_RE, "k") : v);
   if (source.type === "file") {
     if (!validViewSourcePath(fill(source.path))) {
       throw new OpError(`${field}.path must be a relative path inside this thread's working directory (no .., no absolute paths)`);
@@ -1640,6 +1655,158 @@ function buildViewSource(source, field) {
     return clean;
   }
   throw new OpError(`${field}.type must be "file" or "query"`);
+}
+
+/** A real calendar day `YYYY-MM-DD` (Feb 30 is not one). Mirrors
+ *  viewControls.isControlDate. Pure. */
+function isControlDate(v) {
+  if (typeof v !== "string") return false;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+  if (!m) return false;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const t = new Date(Date.UTC(y, mo - 1, d));
+  return t.getUTCFullYear() === y && t.getUTCMonth() === mo - 1 && t.getUTCDate() === d;
+}
+
+/** A finite number from a number (or a numeric string); null otherwise. */
+function finiteNumber(v) {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "string" && v.trim().length > 0 && Number.isFinite(Number(v))) return Number(v);
+  return null;
+}
+
+/** `controls` (SWIT-111): the knobs that re-ask the source. STRICT — every
+ *  problem is a visible error naming the control (the reader's parse is the
+ *  tolerant half). Pure; throws OpError. */
+function buildControls(raw, kind) {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) throw new OpError("controls must be an array of {name, kind, label?, default, options? | min/max/step?}");
+  if (raw.length === 0) return undefined;
+  if (kind === "report") {
+    throw new OpError("a report takes no controls — declare them on the embedded ```view blocks instead");
+  }
+  if (raw.length > CONTROL_CAP) throw new OpError(`controls has ${raw.length} entries; the cap is ${CONTROL_CAP}`);
+  const out = [];
+  const seen = new Set();
+  raw.forEach((c, i) => {
+    const at = `controls[${i}]`;
+    if (typeof c !== "object" || c === null || Array.isArray(c)) {
+      throw new OpError(`${at} must be {name, kind, label?, default, options? | min/max/step?}`);
+    }
+    const name = typeof c.name === "string" ? c.name.trim() : "";
+    if (!CONTROL_NAME_RE.test(name)) {
+      throw new OpError(`${at}.name must match [a-z][a-zA-Z0-9_]{0,31} — it is the {name} placeholder in the source`);
+    }
+    if (RESERVED_CONTROL_NAMES.includes(name)) {
+      throw new OpError(`${at}.name cannot be "key" — {key} is a drill's placeholder`);
+    }
+    if (seen.has(name)) throw new OpError(`${at} repeats the name ${name}`);
+    seen.add(name);
+    if (!CONTROL_KINDS.includes(c.kind)) {
+      throw new OpError(`${at}.kind must be one of ${CONTROL_KINDS.join(", ")}`);
+    }
+    if (c.kind !== "select" && c.options !== undefined && c.options !== null) {
+      throw new OpError(`${at}.options apply to a select control`);
+    }
+    if (c.kind !== "number" && [c.min, c.max, c.step].some((v) => v !== undefined && v !== null)) {
+      throw new OpError(`${at}.min / max / step apply to a number control`);
+    }
+    const control = { name, kind: c.kind };
+    if (c.label !== undefined && c.label !== null) {
+      if (typeof c.label !== "string" || c.label.trim().length === 0) {
+        throw new OpError(`${at}.label must be a non-empty string when given`);
+      }
+      if (c.label.trim().length > CONTROL_LABEL_CAP) {
+        throw new OpError(`${at}.label is ${c.label.trim().length} chars; the cap is ${CONTROL_LABEL_CAP}`);
+      }
+      control.label = c.label.trim();
+    }
+    if (c.kind === "select") {
+      if (!Array.isArray(c.options) || c.options.length === 0) {
+        throw new OpError(`${at} is a select and needs options: [\"…\", …]`);
+      }
+      if (c.options.length > CONTROL_OPTION_CAP) {
+        throw new OpError(`${at}.options has ${c.options.length} entries; the cap is ${CONTROL_OPTION_CAP}`);
+      }
+      const options = [];
+      c.options.forEach((o, j) => {
+        if (typeof o !== "string" || o.trim().length === 0) {
+          throw new OpError(`${at}.options[${j}] must be a non-empty string`);
+        }
+        const t = o.trim();
+        if (t.length > CONTROL_OPTION_LEN) {
+          throw new OpError(`${at}.options[${j}] is ${t.length} chars; the cap is ${CONTROL_OPTION_LEN}`);
+        }
+        if (options.includes(t)) throw new OpError(`${at}.options repeats ${JSON.stringify(t)}`);
+        options.push(t);
+      });
+      const d = typeof c.default === "string" ? c.default.trim() : "";
+      if (!options.includes(d)) {
+        throw new OpError(`${at}.default must be one of its options (${options.join(", ")})`);
+      }
+      control.options = options;
+      control.default = d;
+    } else if (c.kind === "number") {
+      const dflt = finiteNumber(c.default);
+      if (dflt === null) throw new OpError(`${at} is a number and needs a finite numeric default`);
+      const bound = (v, which) => {
+        if (v === undefined || v === null) return undefined;
+        const n = finiteNumber(v);
+        if (n === null) throw new OpError(`${at}.${which} must be a finite number`);
+        return n;
+      };
+      const min = bound(c.min, "min");
+      const max = bound(c.max, "max");
+      const step = bound(c.step, "step");
+      if (min !== undefined && max !== undefined && min > max) {
+        throw new OpError(`${at}.min (${min}) is above max (${max})`);
+      }
+      if (step !== undefined && step <= 0) throw new OpError(`${at}.step must be above 0`);
+      if ((min !== undefined && dflt < min) || (max !== undefined && dflt > max)) {
+        throw new OpError(`${at}.default ${dflt} is outside min–max`);
+      }
+      control.default = dflt;
+      if (min !== undefined) control.min = min;
+      if (max !== undefined) control.max = max;
+      if (step !== undefined) control.step = step;
+    } else {
+      const d = typeof c.default === "string" ? c.default.trim() : "";
+      if (!isControlDate(d)) throw new OpError(`${at} is a date and needs a default YYYY-MM-DD (a real day)`);
+      control.default = d;
+    }
+    out.push(control);
+  });
+  return out;
+}
+
+/** The `{name}` placeholders a template carries (duplicates once). */
+function placeholdersIn(template) {
+  const out = [];
+  for (const m of String(template).matchAll(PLACEHOLDER_RE)) {
+    if (!out.includes(m[1])) out.push(m[1]);
+  }
+  return out;
+}
+
+/** The text of a source a placeholder may sit in: path, or url + body. */
+function sourceTemplate(source) {
+  return source.type === "file" ? source.path : `${source.url}${source.body || ""}`;
+}
+
+/** SWIT-111: every placeholder in a source must be a DECLARED control (or,
+ *  in a drill template, `{key}`) — an undeclared one would reach a read as
+ *  literal text. `field` names the source for the error. Pure; throws. */
+function checkPlaceholders(source, controls, field, allowed = []) {
+  const names = (controls || []).map((c) => c.name);
+  for (const p of placeholdersIn(sourceTemplate(source))) {
+    if (names.includes(p) || allowed.includes(p)) continue;
+    if (p === "key") {
+      throw new OpError(`${field} names {key} — {key} belongs in a drill's source; declare a control for a setting instead`);
+    }
+    throw new OpError(
+      `${field} names {${p}}, which no control declares — add controls:[{name:"${p}", kind, default, …}] or remove the placeholder`
+    );
+  }
 }
 
 /** `definition` (T6): the rule that defines the rows, in plain words. Pure. */
@@ -1735,8 +1902,9 @@ function buildMarkers(raw) {
 }
 
 /** `drill` (T6): what is behind an anchor — a child view whose source strings
- *  carry `{key}`. Pure. */
-function buildDrill(raw) {
+ *  carry `{key}`. SWIT-111: the template may also name the PARENT's declared
+ *  controls — the child is read at the parent's current values. Pure. */
+function buildDrill(raw, controls) {
   if (raw === undefined || raw === null) return undefined;
   if (typeof raw !== "object") {
     throw new OpError("drill must be {kind, title, source, columns?, keyColumn?, series?, valueColumn?, sizeColumn?, definition?, levels?, markers?, markerColumns?}");
@@ -1753,6 +1921,7 @@ function buildDrill(raw) {
   if (!template.includes("{key}")) {
     throw new OpError("drill.source must contain {key} somewhere (the anchor's key value is substituted there)");
   }
+  checkPlaceholders(source, controls, "drill.source", ["key"]);
   const drill = { kind: raw.kind, title, source };
   if (Array.isArray(raw.columns)) {
     const columns = raw.columns.filter((c) => typeof c === "string" && c.trim().length > 0).slice(0, 24);
@@ -1828,7 +1997,7 @@ function buildRegions(raw) {
 /** `panels` (SWIT-70): small multiples — line kind only, each source
  *  validated like the main one, `{key}` REFUSED (a panel is a fixed source,
  *  never a drill template). */
-function buildPanels(raw, kind) {
+function buildPanels(raw, kind, controls) {
   if (raw === undefined || raw === null) return undefined;
   if (!Array.isArray(raw)) throw new OpError("panels must be an array of {title, source}");
   if (kind !== "line") throw new OpError("panels apply to the line kind (small multiples)");
@@ -1843,6 +2012,8 @@ function buildPanels(raw, kind) {
     if (template.includes("{key}")) {
       throw new OpError(`panels[${i}].source must not contain {key} — a panel is a fixed source; use drill for templates`);
     }
+    // SWIT-111: a panel may follow the view's knobs — declared ones only.
+    checkPlaceholders(source, controls, `panels[${i}].source`);
     return { title, source };
   });
   return out.length > 0 ? out : undefined;
@@ -1922,6 +2093,10 @@ function buildViewSpec(args, existingIds, now) {
       throw new OpError("a report takes no drill — declare drills on the embedded ```view blocks instead");
     }
   }
+  // SWIT-111: the knobs first — every `{name}` in the source, the panels and
+  // the drill template must be one of them.
+  const controls = buildControls(args.controls, kind);
+  checkPlaceholders(cleanSource, controls, "source");
   let id;
   if (typeof args.id === "string" && args.id.trim().length > 0) {
     id = args.id.trim();
@@ -1971,15 +2146,31 @@ function buildViewSpec(args, existingIds, now) {
   if (definition !== undefined) spec.definition = definition;
   const filters = buildFilters(args.filters);
   if (filters !== undefined) spec.filters = filters;
-  const drill = buildDrill(args.drill);
+  const drill = buildDrill(args.drill, controls);
   if (drill !== undefined) spec.drill = drill;
   // SWIT-70: the line kind's story fields.
   const seriesLabels = buildSeriesLabels(args.seriesLabels);
   if (seriesLabels !== undefined) spec.seriesLabels = seriesLabels;
   const regions = buildRegions(args.regions);
   if (regions !== undefined) spec.regions = regions;
-  const panels = buildPanels(args.panels, kind);
+  const panels = buildPanels(args.panels, kind, controls);
   if (panels !== undefined) spec.panels = panels;
+  // SWIT-111: a knob that no source names would change nothing — a dead
+  // control is refused by name rather than drawn.
+  if (controls !== undefined) {
+    const used = new Set(
+      [cleanSource, ...(panels || []).map((p) => p.source), ...(drill ? [drill.source] : [])].flatMap((s) =>
+        placeholdersIn(sourceTemplate(s))
+      )
+    );
+    const dead = controls.find((c) => !used.has(c.name));
+    if (dead) {
+      throw new OpError(
+        `controls: ${dead.name} is not named by the source, a panel or the drill — put {${dead.name}} where the setting goes (a control that changes nothing is a dead knob)`
+      );
+    }
+    spec.controls = controls;
+  }
   // SWIT-81: colour carries meaning.
   const tone = buildTone(args.tone, kind);
   if (tone !== undefined) spec.tone = tone;
@@ -2375,7 +2566,13 @@ const VIEW_TOOL = {
     "in a file path it is reduced to one component, [A-Za-z0-9._-] with everything else " +
     "as _; in a query url it is URL-encoded) — opening a row then shows the child beside " +
     "the terminal with back. Declare `filters` [{column, kind:'select'|'date'}] so the " +
-    "user can slice the loaded rows themselves without asking you. Prefer ONE line view " +
+    "user can slice the loaded rows themselves without asking you. When the user will want to " +
+    "TWEAK a setting that changes the data itself, declare `controls` (<=4) and put {name} in " +
+    "the source — e.g. controls:[{name:'expiry', kind:'select', options:['front','all'], " +
+    "default:'front'}] with source:{type:'file', path:'.sb-views/gamma/book-{expiry}.json'}, " +
+    "one file per setting you wrote — and the panel draws the knob and re-reads the source on " +
+    "each change (select: options <=24; number: default, min?, max?, step?; date: default " +
+    "YYYY-MM-DD; a panel or the drill may name the same {name}). Prefer ONE line view " +
     "with `panels` [{title, source}] (small multiples: a 2-up grid with the main chart, " +
     "shared time axis, <=6, no {key}) over several near-identical views, and give every " +
     "view a `definition` that says what to look at; anchors and pins publish from the main " +
@@ -2495,6 +2692,12 @@ const VIEW_TOOL = {
         items: { type: "object" },
         description:
           "Up to 4 selectors over the view's own columns: [{column, kind:'select'|'date', label?}]. Values come from the loaded rows; the slice is client-side.",
+      },
+      controls: {
+        type: "array",
+        items: { type: "object" },
+        description:
+          "Up to 4 knobs that RE-READ the source with a different setting: [{name ([a-z][a-zA-Z0-9_]*, not 'key'), kind:'select'|'number'|'date', label?, default, options? (select: <=24, each <=60 chars) | min?, max?, step? (number)}]. The source path / url / body (and a panel's or the drill's) names each as {name}: a file value becomes one path component ([A-Za-z0-9._-], else _), a query value is URL-encoded. Every {name} must be declared and every control used. Not on a report — declare them on its ```view blocks.",
       },
       seriesLabels: {
         type: "object",
@@ -3348,6 +3551,13 @@ if (require.main === module) {
 
 module.exports = {
   isLocalBackendUrl,
+  CONTROL_CAP,
+  CONTROL_KINDS,
+  CONTROL_OPTION_CAP,
+  CONTROL_OPTION_LEN,
+  CONTROL_LABEL_CAP,
+  CONTROL_NAME_RE,
+  RESERVED_CONTROL_NAMES,
   VIEW_DEFINITION_CAP,
   VIEW_FILTER_CAP,
   VIEW_FILTER_KINDS,

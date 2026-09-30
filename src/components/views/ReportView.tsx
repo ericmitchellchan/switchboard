@@ -545,6 +545,7 @@ function EmbeddedView({
         drillKey={null}
         block={block}
         embedded
+        controls={data.controls}
       />
     </div>
   );

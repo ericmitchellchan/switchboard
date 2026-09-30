@@ -45,7 +45,12 @@ import {
   adjacentDrillKey,
   deckPosition,
   notesDirOf,
+  // SWIT-111
+  resolveViewSource,
+  resolvePanelSources,
+  parseInlineViewSpec,
 } from "./viewStore";
+import { controlPinScope } from "./viewControls";
 import type { ViewSpec } from "./viewStore";
 import { formatBatch } from "./viewNotes";
 import { viewPinTargetFor } from "./pins";
@@ -1780,5 +1785,120 @@ describe("SWIT-81 — bar/dist `tone` and table `tones`: tolerant parse, kind-sc
     const { spec, specError } = parseViewSpec(raw);
     expect(specError).toBeNull();
     expect(spec?.tones).toBeUndefined();
+  });
+});
+
+// ── SWIT-111: views you can tweak ─────────────────────────────────────────────
+
+describe("controls — views you can tweak (SWIT-111)", () => {
+  const gamma = {
+    id: "v1",
+    kind: "line",
+    title: "gamma book",
+    source: { type: "file", path: ".sb-views/gamma/book-{expiry}.json" },
+    builtAt: "2026-09-30T10:00:00.000Z",
+    builtBy: "agent",
+    controls: [
+      { name: "expiry", kind: "select", options: ["front", "all"], default: "front" },
+      { name: "width", kind: "number", default: 5, min: 1, max: 10 },
+    ],
+    panels: [{ title: "flow", source: { type: "file", path: ".sb-views/gamma/flow-{expiry}.json" } }],
+    drill: {
+      kind: "table",
+      title: "{key}",
+      source: { type: "file", path: ".sb-views/gamma/{expiry}/{key}.json" },
+    },
+  };
+  const parsed = () => {
+    const { spec, specError } = parseViewSpec(JSON.stringify(gamma));
+    expect(specError).toBeNull();
+    return spec as ViewSpec;
+  };
+
+  it("parses controls tolerantly; a report never carries them", () => {
+    expect(parsed().controls?.map((c) => c.name)).toEqual(["expiry", "width"]);
+    const report = parseViewSpec(
+      JSON.stringify({ id: "r1", kind: "report", title: "r", source: { type: "file", path: "a.md" }, controls: gamma.controls })
+    ).spec;
+    expect(report?.controls).toBeUndefined();
+  });
+
+  it("resolveViewSource substitutes the CURRENT values — the default when none is chosen", () => {
+    const spec = parsed();
+    expect(resolveViewSource(spec, null).source).toEqual({ type: "file", path: ".sb-views/gamma/book-front.json" });
+    expect(resolveViewSource(spec, { expiry: "all" }).source).toEqual({ type: "file", path: ".sb-views/gamma/book-all.json" });
+    // An illegal value falls back to the default — it never reaches the path.
+    expect(resolveViewSource(spec, { expiry: "../../x" }).source).toEqual({
+      type: "file",
+      path: ".sb-views/gamma/book-front.json",
+    });
+  });
+
+  it("a placeholder whose control the (tolerant) parse dropped is a plain error, never a read", () => {
+    const spec = parseViewSpec(
+      JSON.stringify({ ...gamma, controls: [{ name: "expiry", kind: "select", options: [], default: "" }] })
+    ).spec as ViewSpec;
+    expect(spec.controls).toBeUndefined();
+    const r = resolveViewSource(spec, null);
+    expect(r.source).toBeNull();
+    expect(r.error).toMatch(/\{expiry\}.*no control declares/);
+  });
+
+  it("a query value is URL-encoded, a number clamped, the loopback rule re-checked", () => {
+    const spec = parseViewSpec(
+      JSON.stringify({
+        ...gamma,
+        panels: undefined,
+        drill: undefined,
+        source: { type: "query", url: "http://127.0.0.1:8799/book?expiry={expiry}&w={width}" },
+      })
+    ).spec as ViewSpec;
+    expect(resolveViewSource(spec, { expiry: "all", width: "42" }).source).toEqual({
+      type: "query",
+      url: "http://127.0.0.1:8799/book?expiry=all&w=10",
+    });
+  });
+
+  it("panels follow the knob too", () => {
+    expect(resolvePanelSources(parsed(), { expiry: "all" })).toEqual([
+      { title: "flow", source: { type: "file", path: ".sb-views/gamma/flow-all.json" }, error: null },
+    ]);
+  });
+
+  it("A DRILLED CHILD INHERITS THE PARENT'S CURRENT VALUES for the placeholders its template names", () => {
+    const spec = parsed();
+    const child = resolveDrill(spec, "SPX 2026-06-05", { expiry: "all" });
+    expect(child.error).toBeNull();
+    expect(child.spec?.source).toEqual({ type: "file", path: ".sb-views/gamma/all/SPX_2026-06-05.json" });
+    // The child records the setting it was opened at (its pin scope, `spec`).
+    expect(child.spec?.inheritedControls).toEqual({ expiry: "all", width: "5" });
+    expect(child.spec?.controls).toBeUndefined();
+    // No values handed down → the parent's defaults, never a literal {expiry}.
+    expect(resolveDrill(spec, "SPX", null).spec?.source).toEqual({ type: "file", path: ".sb-views/gamma/front/SPX.json" });
+    // A parent with no controls: a template naming {expiry} is an error.
+    const bare = parseViewSpec(
+      JSON.stringify({ ...gamma, controls: undefined, panels: undefined, source: { type: "file", path: "b.json" } })
+    ).spec as ViewSpec;
+    expect(resolveDrill(bare, "SPX").error).toMatch(/\{expiry\}/);
+  });
+
+  it("an inline ```view block carries its own controls (each block its own knobs)", () => {
+    const report = parseViewSpec(
+      JSON.stringify({ id: "r1", kind: "report", title: "r", source: { type: "file", path: "a.md" }, builtAt: "b", builtBy: "agent" })
+    ).spec as ViewSpec;
+    const block = parseInlineViewSpec(JSON.stringify({ ...gamma, id: undefined }), 2, report);
+    expect(block.spec?.id).toBe("r1~b2");
+    expect(block.spec?.controls?.[0].name).toBe("expiry");
+  });
+
+  it("specLines lists the controls with the value in force, and a child's inherited setting", () => {
+    expect(specLines(parsed(), { expiry: "all" })).toContain("controls  expiry = all [front · all] · width = 5 [1–10]");
+    const child = resolveDrill(parsed(), "SPX", { expiry: "all" }).spec as ViewSpec;
+    expect(specLines(child)).toContain("controls  expiry = all · width = 5 (from the parent)");
+  });
+
+  it("the control values are filed in the pin doc key after the filter suffix", () => {
+    const scope = `${viewPinScope({ day: "2026-06-05" }, null)}${controlPinScope({ expiry: "all", width: "5" })}`;
+    expect(viewPinTargetFor("lodestar", "t1", "v1", scope).docKey).toBe("view:t1:v1?day=2026-06-05|expiry=all&width=5");
   });
 });

@@ -21,6 +21,15 @@ import {
   FINDING_REPORT_CAP,
 } from "./pageStore";
 import { parseViewSpec } from "./viewStore";
+import {
+  CONTROL_CAP,
+  CONTROL_LABEL_CAP,
+  CONTROL_NAME_RE,
+  CONTROL_OPTION_CAP,
+  CONTROL_OPTION_LEN,
+  RESERVED_CONTROL_NAMES,
+  VIEW_CONTROL_KINDS,
+} from "./viewControls";
 import { parseInboxFile } from "./pageStore";
 import { parseBacklogInbox } from "./backlogStore";
 import { parseSetsFile } from "./artifactSets";
@@ -817,6 +826,137 @@ describe("the view tool (SWIT-50)", () => {
       const props = (server.VIEW_TOOL.inputSchema as { properties: Record<string, unknown> }).properties;
       expect(Object.keys(props)).toEqual(expect.arrayContaining(["definition", "filters", "drill"]));
     });
+  });
+});
+
+describe("the view tool — controls, views you can tweak (SWIT-111)", () => {
+  const srv = server as unknown as Record<string, unknown>;
+  const gamma = {
+    op: "show",
+    kind: "line",
+    title: "gamma book",
+    source: { type: "file", path: ".sb-views/gamma/book-{expiry}.json" },
+    controls: [{ name: "expiry", kind: "select", options: ["front", "all"], default: "front" }],
+  };
+  const build = (extra: Record<string, unknown>) => server.buildViewSpec({ ...gamma, ...extra }, [], NOW);
+  const withControls = (controls: unknown[], source: unknown = gamma.source) =>
+    server.buildViewSpec({ ...gamma, controls, source }, [], NOW);
+
+  it("the caps and the name rule are the reader's (viewControls.ts)", () => {
+    expect(srv.CONTROL_CAP).toBe(CONTROL_CAP);
+    expect(srv.CONTROL_OPTION_CAP).toBe(CONTROL_OPTION_CAP);
+    expect(srv.CONTROL_OPTION_LEN).toBe(CONTROL_OPTION_LEN);
+    expect(srv.CONTROL_LABEL_CAP).toBe(CONTROL_LABEL_CAP);
+    expect(String(srv.CONTROL_NAME_RE)).toBe(String(CONTROL_NAME_RE));
+    expect(srv.CONTROL_KINDS).toEqual([...VIEW_CONTROL_KINDS]);
+    expect(srv.RESERVED_CONTROL_NAMES).toEqual([...RESERVED_CONTROL_NAMES]);
+  });
+
+  it("builds the gamma example and ROUND-TRIPS through the reader", () => {
+    const spec = build({
+      controls: [
+        { name: "expiry", kind: "select", options: [" front ", "all"], default: "front", label: " Expiry " },
+        { name: "width", kind: "number", default: "5", min: 1, max: 10, step: 1 },
+        { name: "day", kind: "date", default: "2026-06-05" },
+      ],
+      source: { type: "query", url: "http://127.0.0.1:8799/book?e={expiry}&w={width}", body: '{"day":"{day}"}' },
+    });
+    expect(spec.controls).toEqual([
+      { name: "expiry", kind: "select", label: "Expiry", options: ["front", "all"], default: "front" },
+      { name: "width", kind: "number", default: 5, min: 1, max: 10, step: 1 },
+      { name: "day", kind: "date", default: "2026-06-05" },
+    ]);
+    const parsed = parseViewSpec(JSON.stringify(spec)).spec;
+    expect(parsed?.controls).toEqual([
+      { name: "expiry", kind: "select", label: "Expiry", options: ["front", "all"], default: "front" },
+      { name: "width", kind: "number", default: 5, min: 1, max: 10, step: 1 },
+      { name: "day", kind: "date", default: "2026-06-05" },
+    ]);
+  });
+
+  it("an UNDECLARED placeholder is a visible error — in the source, a panel, or the drill", () => {
+    expect(() => withControls(gamma.controls, { type: "file", path: "x/{nope}.json" })).toThrow(/names \{nope\}, which no control declares/);
+    expect(() => build({ controls: undefined })).toThrow(/names \{expiry\}, which no control declares/);
+    expect(() => withControls(gamma.controls, { type: "file", path: "x/{expiry}/{key}.json" })).toThrow(/\{key\} belongs in a drill/);
+    expect(() =>
+      build({ panels: [{ title: "flow", source: { type: "file", path: "flow-{other}.json" } }] })
+    ).toThrow(/panels\[0\]\.source names \{other\}/);
+    expect(() =>
+      build({ kind: "table", drill: { kind: "table", title: "{key}", source: { type: "file", path: "d/{key}-{other}.json" } } })
+    ).toThrow(/drill\.source names \{other\}/);
+  });
+
+  it("a panel and the drill may name a DECLARED control", () => {
+    const spec = build({
+      panels: [{ title: "flow", source: { type: "file", path: ".sb-views/gamma/flow-{expiry}.json" } }],
+    });
+    expect((spec.panels as { source: { path: string } }[])[0].source.path).toBe(".sb-views/gamma/flow-{expiry}.json");
+    const table = build({
+      kind: "table",
+      drill: { kind: "table", title: "{key}", source: { type: "file", path: ".sb-views/gamma/{expiry}/{key}.json" } },
+    });
+    expect((table.drill as { source: { path: string } }).source.path).toBe(".sb-views/gamma/{expiry}/{key}.json");
+    // A control named only by the drill still counts as used.
+    const drillOnly = server.buildViewSpec(
+      {
+        ...gamma,
+        kind: "table",
+        source: { type: "file", path: "rows.json" },
+        drill: { kind: "table", title: "{key}", source: { type: "file", path: "d/{expiry}/{key}.json" } },
+      },
+      [],
+      NOW
+    );
+    expect(drillOnly.controls).toBeDefined();
+  });
+
+  it("a placeholder in the url's authority is refused by the loopback check", () => {
+    expect(() =>
+      withControls([{ name: "host", kind: "select", options: ["a"], default: "a" }], { type: "query", url: "http://{host}/rows" })
+    ).toThrow(/local backend/);
+  });
+
+  it("refuses a dead knob, a report's controls, and every malformed control by name", () => {
+    expect(() => withControls([...gamma.controls, { name: "width", kind: "number", default: 1 }])).toThrow(/width is not named/);
+    expect(() =>
+      server.buildViewSpec({ ...gamma, kind: "report", source: { type: "file", path: "a.md" } }, [], NOW)
+    ).toThrow(/a report takes no controls/);
+    const bad: [unknown, RegExp][] = [
+      [{ name: "Expiry", kind: "select", options: ["a"], default: "a" }, /name must match/],
+      [{ name: "key", kind: "select", options: ["a"], default: "a" }, /cannot be "key"/],
+      [{ name: "expiry", kind: "slider", default: 1 }, /kind must be one of select, number, date/],
+      [{ name: "expiry", kind: "select", options: [], default: "a" }, /needs options/],
+      [{ name: "expiry", kind: "select", options: ["a", "a"], default: "a" }, /repeats "a"/],
+      [{ name: "expiry", kind: "select", options: ["x".repeat(CONTROL_OPTION_LEN + 1)], default: "a" }, /cap is 60/],
+      [{ name: "expiry", kind: "select", options: ["a"], default: "b" }, /default must be one of its options/],
+      [{ name: "expiry", kind: "select", options: ["a"], default: "a", min: 1 }, /min \/ max \/ step apply to a number/],
+      [{ name: "expiry", kind: "number", default: 1, options: ["a"] }, /options apply to a select/],
+      [{ name: "expiry", kind: "number", default: "x" }, /finite numeric default/],
+      [{ name: "expiry", kind: "number", default: 5, min: 10, max: 1 }, /above max/],
+      [{ name: "expiry", kind: "number", default: 50, min: 1, max: 10 }, /outside min–max/],
+      [{ name: "expiry", kind: "number", default: 5, step: 0 }, /step must be above 0/],
+      [{ name: "expiry", kind: "date", default: "2026-02-30" }, /YYYY-MM-DD/],
+      [{ name: "expiry", kind: "select", options: ["a"], default: "a", label: "x".repeat(CONTROL_LABEL_CAP + 1) }, /label is/],
+    ];
+    for (const [control, message] of bad) expect(() => withControls([control])).toThrow(message);
+    const opts = Array.from({ length: CONTROL_OPTION_CAP + 1 }, (_, i) => `o${i}`);
+    expect(() => withControls([{ name: "expiry", kind: "select", options: opts, default: "o0" }])).toThrow(/cap is 24/);
+    const five = Array.from({ length: CONTROL_CAP + 1 }, (_, i) => ({ name: `c${i}`, kind: "select", options: ["a"], default: "a" }));
+    expect(() => withControls(five)).toThrow(/cap is 4/);
+    expect(() =>
+      withControls([
+        { name: "expiry", kind: "select", options: ["a"], default: "a" },
+        { name: "expiry", kind: "select", options: ["b"], default: "b" },
+      ])
+    ).toThrow(/repeats the name expiry/);
+    expect(() => withControls("expiry" as unknown as unknown[])).toThrow(/controls must be an array/);
+  });
+
+  it("the tool description carries the gamma sentence; the schema carries `controls`", () => {
+    expect(server.VIEW_TOOL.description).toMatch(/TWEAK a setting that changes the data itself, declare `controls`/);
+    expect(server.VIEW_TOOL.description).toMatch(/book-\{expiry\}\.json/);
+    const props = (server.VIEW_TOOL.inputSchema as { properties: Record<string, unknown> }).properties;
+    expect(Object.keys(props)).toContain("controls");
   });
 });
 

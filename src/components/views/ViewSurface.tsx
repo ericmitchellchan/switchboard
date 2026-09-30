@@ -145,7 +145,9 @@ import {
   parseViewOwnerKey,
   viewOwnerKey,
 } from "../../lib/viewStore";
-import type { ActiveFilters, LinePoints, ViewMeta, ViewRow, ViewSpec } from "../../lib/viewStore";
+import type { ActiveFilters, LinePoints, ViewControlsRead, ViewMeta, ViewRow, ViewSource, ViewSpec } from "../../lib/viewStore";
+import { controlPinScope, controlsAtValues, effectiveControlValues } from "../../lib/viewControls";
+import type { ControlValues, ViewControl } from "../../lib/viewControls";
 import {
   useViewNotes,
   getViewNotes,
@@ -266,6 +268,36 @@ const NOTE_INPUT_STYLE: CSSProperties = {
   outline: "none",
 };
 
+/** The knobs' row (SWIT-111): its own line under the toolbar — the toolbar
+ *  is one clipped line, and a knob that scrolled out of it is the "scrolling
+ *  back and forth" this exists to end. Wraps rather than clips. */
+const CONTROLS_ROW_STYLE: CSSProperties = {
+  flex: "none",
+  display: "flex",
+  flexWrap: "wrap",
+  alignItems: "center",
+  gap: "4px 12px",
+  padding: "4px 10px",
+  borderBottom: "1px solid var(--border)",
+  fontFamily: MONO,
+  fontSize: 10,
+  color: "var(--text-dim)",
+};
+
+/** A failed load's one line (SWIT-111) — the last good rows stay under it. */
+const LOAD_ERROR_STYLE: CSSProperties = {
+  flex: "none",
+  padding: "3px 10px",
+  borderBottom: "1px solid var(--border)",
+  fontFamily: MONO,
+  fontSize: 10,
+  lineHeight: 1.5,
+  color: "var(--tone-rose)",
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+};
+
 /** The parent kinds whose rows form a DECK — the kinds where a drill key IS
  *  a row's key-column value (the table's anchor rule, which `deckKeys`
  *  walks). NOT `dist` (review #2): its drill key is the BIN LABEL, which no
@@ -318,12 +350,18 @@ type ViewArtifact = Extract<Artifact, { kind: "view" }>;
 function viewArtifactLike(
   host: ViewArtifact,
   viewId: string,
-  extra: { block: number | null; drillKey: string | null }
+  extra: { block: number | null; drillKey: string | null; controls?: ControlValues | null }
 ): ViewArtifact {
+  // SWIT-111: a drilled child carries the parent's control values it was
+  // opened at — its template is substituted with them, and they are part of
+  // its identity (the same key at two settings is two children).
+  const controls = extra.controls && Object.keys(extra.controls).length > 0 ? extra.controls : null;
   const rest = {
     viewId,
     ...(extra.block !== null ? { block: extra.block } : {}),
-    ...(extra.drillKey !== null ? { drill: { key: extra.drillKey } } : {}),
+    ...(extra.drillKey !== null
+      ? { drill: { key: extra.drillKey, ...(controls !== null ? { controls } : {}) } }
+      : {}),
   };
   return host.project !== undefined
     ? { kind: "view", project: host.project, ...rest }
@@ -348,7 +386,10 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
   const owner = viewOwnerKey(artifact);
   const drillKey = artifact.drill?.key ?? null;
   const block = artifact.block ?? null;
-  const view = useView(owner, viewId, active, drillKey, block);
+  // SWIT-111: a drilled child's inherited control values (a parent's are
+  // its own state, starting at the defaults).
+  const inherited = drillKey !== null ? artifact.drill?.controls ?? null : null;
+  const view = useView(owner, viewId, active, drillKey, block, inherited);
 
   // SWIT-73: a REPORT renders as a document (narrative + embedded views) in
   // its own lazy chunk. Only the BARE report artifact takes this branch — a
@@ -383,6 +424,7 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
       active={active}
       drillKey={drillKey}
       block={block}
+      controls={view.controls}
     />
   );
 }
@@ -422,6 +464,12 @@ export type ViewChromeProps = {
    *  `kept <date> · frozen`, computed by the caller from the snapshot's file
    *  name (KeptView owns that derivation; ViewChrome only prints it). */
   frozenLabel?: string;
+  /** SWIT-111: the knobs — drawn on their own row under the toolbar (never
+   *  when frozen), their
+   *  APPLIED values joining the pin scope, a drilled child's artifact and
+   *  keep. Absent (a kept view): the spec's defaults, which keep wrote as
+   *  the values the snapshot's rows were loaded at. */
+  controls?: ViewControlsRead;
 };
 
 /** Everything a rendered view IS — toolbar, filters, spec disclosure, pins,
@@ -444,6 +492,7 @@ export function ViewChrome({
   embedded,
   frozen = false,
   frozenLabel,
+  controls,
 }: ViewChromeProps) {
   // SWIT-107: what the owner means for the THREAD-shaped features — deck
   // notes, the notes batch, the pins/keep project. A project view has no
@@ -462,9 +511,20 @@ export function ViewChrome({
   // SWIT-73: the block namespaces the pin scope (`#b<n>` before the drill/
   // filter suffix) — two identical charts in one report file their pins
   // under two docs and never collide.
+  // SWIT-111: the values the ROWS on screen were loaded at — the knobs'
+  // applied values, a drilled child's inherited ones, or (a kept view, no
+  // knobs state) the spec's defaults, which keep wrote as the setting.
+  const specControls = spec?.controls;
+  const appliedControls = useMemo<ControlValues>(
+    () => controls?.applied ?? spec?.inheritedControls ?? effectiveControlValues(specControls, null),
+    [controls?.applied, spec?.inheritedControls, specControls]
+  );
+  // The control values join the scope AFTER the filter suffix: a pin dropped
+  // at one setting is filed under it and is not drawn at another.
   const pinScope = useMemo(
-    () => `${block !== null ? `#b${block}` : ""}${viewPinScope(activeFilters, drillKey)}`,
-    [activeFilters, drillKey, block]
+    () =>
+      `${block !== null ? `#b${block}` : ""}${viewPinScope(activeFilters, drillKey)}${controlPinScope(appliedControls)}`,
+    [activeFilters, drillKey, block, appliedControls]
   );
   const [showSpec, setShowSpec] = useState(false);
   const [hover, setHover] = useState<HoverHint>(null);
@@ -488,7 +548,11 @@ export function ViewChrome({
   // child (inert — never polls, never loads — for a standalone or embedded
   // view). The parent's file order is the deck order (viewStore.deckKeys).
   const isDeckChild = drillKey !== null;
-  const parent = useView(owner, viewId, active && isDeckChild, null, block);
+  // SWIT-111: the child's inherited values — the deck's parent is read AT
+  // them (its knobs seeded), so the deck walks the rows of the setting the
+  // child was opened from; every sibling carries them on.
+  const inheritedControls = isDeckChild ? artifact.drill?.controls ?? null : null;
+  const parent = useView(owner, viewId, active && isDeckChild, null, block, inheritedControls);
   const deckSpec = isDeckChild && parent.spec && DECK_PARENT_KINDS.has(parent.spec.kind) ? parent.spec : null;
   const deckRows = deckSpec ? parent.rows : null;
   const deckColumn = deckSpec ? deckKeyColumn(deckSpec) : null;
@@ -497,7 +561,11 @@ export function ViewChrome({
     () => (deckRows && drillKey !== null ? deckPosition(deckRows, deckColumn, drillKey) : null),
     [deckRows, deckColumn, drillKey]
   );
-  const notesDir = deckSpec && ownerProject === null ? notesDirOf(deckSpec.source) : null;
+  // SWIT-111: the notes live beside the parent source the deck was READ
+  // from (its placeholders substituted) — a template's `{expiry}` directory
+  // does not exist. A refused substitution has no directory: notes off.
+  const deckSource: ViewSource | null = deckSpec ? parent.controls.source : null;
+  const notesDir = deckSource && ownerProject === null ? notesDirOf(deckSource) : null;
   const notes = useViewNotes(threadId, notesDir, active && isDeckChild);
   const noteText = drillKey !== null ? noteFor(notes.file, drillKey) : "";
   const unsent = useMemo(() => (isDeckChild ? unsentNotes(notes.file, deck) : []), [isDeckChild, notes.file, deck]);
@@ -602,7 +670,9 @@ export function ViewChrome({
       const hit = describeAnchor(el);
       if (!hit) return;
       if (spec.drill) {
-        const resolved = resolveDrill(spec, hit.key);
+        // SWIT-111: at the knobs' current setting — the child's template is
+        // substituted with the parent's applied values.
+        const resolved = resolveDrill(spec, hit.key, appliedControls);
         if (resolved.error !== null) {
           flashNote(resolved.error);
           return;
@@ -615,7 +685,16 @@ export function ViewChrome({
         // SWIT-73: a child drilled from an EMBEDDED view carries the block —
         // useView re-derives the effective parent from the report's markdown.
         // SWIT-107: the child keeps the host's OWNER (a thread or a project).
-        openDrillInPanel(sessionId, artifact, viewArtifactLike(artifact, viewId, { block, drillKey: hit.key }));
+        // SWIT-111: and the parent's control values it was opened at.
+        openDrillInPanel(
+          sessionId,
+          artifact,
+          viewArtifactLike(artifact, viewId, {
+            block,
+            drillKey: hit.key,
+            controls: spec.controls ? appliedControls : null,
+          })
+        );
         return;
       }
       if (!canSend) {
@@ -624,7 +703,7 @@ export function ViewChrome({
       }
       sendToThread(sanitizeForTypedLine(drillFallbackSentence(spec.title, hit.label), REF_MAX));
     },
-    [spec, describeAnchor, flashNote, artifact, viewId, block, canSend, frozen]
+    [spec, describeAnchor, flashNote, artifact, viewId, block, canSend, frozen, appliedControls]
   );
   const onBodyClick = useCallback(
     (e: ReactMouseEvent) => {
@@ -682,14 +761,15 @@ export function ViewChrome({
         flashNote("no thread to open it beside");
         return;
       }
-      const sibling = viewArtifactLike(artifact, viewId, { block, drillKey: key });
+      // SWIT-111: a sibling is opened at the same inherited setting.
+      const sibling = viewArtifactLike(artifact, viewId, { block, drillKey: key, controls: inheritedControls });
       // In place when this child is the preview; a PINNED child steps by
       // opening the sibling as a fresh drill beside it (back → the table).
       if (!stepPreview(sessionId, sibling)) {
         openDrillInPanel(sessionId, viewArtifactLike(artifact, viewId, { block: null, drillKey: null }), sibling);
       }
     },
-    [deckRows, deckColumn, drillKey, artifact, viewId, block, flashNote]
+    [deckRows, deckColumn, drillKey, artifact, viewId, block, flashNote, inheritedControls]
   );
   const onRootKeyDown = useCallback(
     (e: ReactKeyboardEvent) => {
@@ -746,23 +826,31 @@ export function ViewChrome({
     try {
       const stamp = new Date().toISOString().slice(0, 10);
       const relPath = `_scratch/${project}/${spec.id}-${stamp}.view.json`;
-      await kbWriteDoc(relPath, JSON.stringify({ spec, rows: rows ?? [] }, null, 2));
+      // SWIT-111: the snapshot records the SETTING its rows were loaded at —
+      // each control's default becomes the applied value, so the frozen view
+      // prints it under `spec` (a kept view draws no knobs).
+      const kept = spec.controls ? { ...spec, controls: controlsAtValues(spec.controls, appliedControls) } : spec;
+      await kbWriteDoc(relPath, JSON.stringify({ spec: kept, rows: rows ?? [] }, null, 2));
       flashNote(`kept — _scratch/${project}/ (promote it from there when it earns a home)`);
     } catch (err) {
       flashNote(`keep failed: ${String(err)}`);
     } finally {
       setKeeping(false);
     }
-  }, [spec, rows, project, keeping, flashNote]);
+  }, [spec, rows, project, keeping, flashNote, appliedControls]);
 
   // ── The cannot-render card (R4 edge case) ──────────────────────────────────
   if (!spec || (error && rows === null)) {
-    const sourceLine = spec
-      ? spec.source.type === "file"
-        ? `file ${spec.source.path} (in the thread's working directory)`
-        : `query ${spec.source.url}`
+    // SWIT-111: the source this setting READ (placeholders substituted), not
+    // the template — and the knobs stay reachable above the card, because
+    // the way out of a setting with no data is another setting.
+    const shownSource = controls?.source ?? spec?.source ?? null;
+    const sourceLine = shownSource
+      ? shownSource.type === "file"
+        ? `file ${shownSource.path} (in the thread's working directory)`
+        : `query ${shownSource.url}`
       : `views/${viewId}.json`;
-    return (
+    const card = (
       <div
         style={{
           flex: 1,
@@ -792,6 +880,19 @@ export function ViewChrome({
             try again
           </button>
         )}
+      </div>
+    );
+    if (!spec || !controls || frozen || controls.defs.length === 0) return card;
+    return (
+      <div
+        style={
+          embedded
+            ? { minWidth: 0, display: "flex", flexDirection: "column" }
+            : { flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }
+        }
+      >
+        <ControlsRow controls={controls} />
+        {card}
       </div>
     );
   }
@@ -873,7 +974,7 @@ export function ViewChrome({
                 ? hover.verb
                   ? `${hover.label} ${hover.verb}`
                   : hover.label
-                : `${spec.source.type === "file" ? spec.source.path : spec.source.url} · ${
+                : `${shownSourceText(controls?.source ?? spec.source)} · ${
                     spec.builtAt ? spec.builtAt.slice(0, 16).replace("T", " ") : ""
                   } · ${spec.builtBy}${
                     filtered ? ` · ${filteredRows?.length ?? 0} of ${rows?.length ?? 0} rows` : ""
@@ -978,7 +1079,15 @@ export function ViewChrome({
             </>
           )}
         </div>
-        {showSpec && <pre style={SPEC_STYLE}>{specLines(spec).join("\n")}</pre>}
+        {controls && !frozen && <ControlsRow controls={controls} />}
+        {error !== null && rows !== null && (
+          // SWIT-111: a failed RE-load (a knob, a re-run) — one line naming
+          // what failed; the last good rows stay on screen under it.
+          <div style={LOAD_ERROR_STYLE} title={error}>
+            not loaded{controls?.source ? ` · ${shownSourceText(controls.source)}` : ""} — {error}
+          </div>
+        )}
+        {showSpec && <pre style={SPEC_STYLE}>{specLines(spec, appliedControls).join("\n")}</pre>}
         {isDeckChild && drillKey !== null && (
           <div style={NOTE_ROW_STYLE}>
             <input
@@ -1047,6 +1156,7 @@ export function ViewChrome({
               onHover={onHoverAnchor}
               owner={owner}
               active={active}
+              controlValues={appliedControls}
             />
             {!frozen && pins.marks}
             {hover && hover.fields.length > 0 && !pinMode && (
@@ -1062,6 +1172,93 @@ export function ViewChrome({
         {!frozen && pins.rail}
       </div>
     </SurfaceAnchorContext.Provider>
+  );
+}
+
+// ── The knobs (SWIT-111) ─────────────────────────────────────────────────────
+
+/** A source as the toolbar prints it: the file path or the query url. */
+function shownSourceText(source: ViewSource): string {
+  return source.type === "file" ? source.path : source.url;
+}
+
+/** The view's controls on their own row: each a dim label + the kit's quiet
+ *  select / input at toolbar size. A change shows at once and reloads the
+ *  data ~300 ms after the last one (viewStore.useControlState). */
+function ControlsRow({ controls }: { controls: ViewControlsRead }) {
+  if (controls.defs.length === 0) return null;
+  return (
+    <div style={CONTROLS_ROW_STYLE}>
+      {controls.defs.map((c) => (
+        <ControlInput
+          key={c.name}
+          control={c}
+          shown={controls.shown[c.name] ?? ""}
+          draft={controls.draft[c.name]}
+          set={controls.set}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ControlInput({
+  control,
+  shown,
+  draft,
+  set,
+}: {
+  control: ViewControl;
+  shown: string;
+  draft: string | undefined;
+  set: (name: string, value: string) => void;
+}) {
+  const label = control.label ?? control.name;
+  const title = `${label} — changes the data: the view re-reads its source at this setting`;
+  const active = { ...FILTER_SELECT, color: "var(--text-primary)" };
+  let input;
+  if (control.kind === "select") {
+    input = (
+      <select value={shown} onChange={(e) => set(control.name, e.target.value)} title={title} style={active}>
+        {control.options.map((o) => (
+          <option key={o} value={o}>
+            {o}
+          </option>
+        ))}
+      </select>
+    );
+  } else if (control.kind === "date") {
+    input = (
+      <input
+        type="date"
+        value={shown}
+        onChange={(e) => set(control.name, e.target.value)}
+        title={title}
+        style={{ ...active, maxWidth: 130 }}
+      />
+    );
+  } else {
+    // A number box shows what was TYPED until it loses focus, then snaps to
+    // the clamped value — the clamp never fights a keystroke.
+    input = (
+      <input
+        type="number"
+        value={draft ?? shown}
+        min={control.min}
+        max={control.max}
+        step={control.step ?? "any"}
+        onChange={(e) => set(control.name, e.target.value)}
+        onBlur={() => set(control.name, shown)}
+        title={title}
+        style={{ ...active, width: 72 }}
+      />
+    );
+  }
+  return (
+    <label style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+      <span>{label}</span>
+      {input}
+    </label>
   );
 }
 
@@ -1149,7 +1346,15 @@ const ViewBody = memo(function ViewBody({
   onHover,
   owner,
   active,
-}: RendererProps & { priceMode: PriceMode; meta: ViewMeta | null; owner: string; active: boolean }) {
+  controlValues,
+}: RendererProps & {
+  priceMode: PriceMode;
+  meta: ViewMeta | null;
+  owner: string;
+  active: boolean;
+  /** SWIT-111: the values the panels (small multiples) read at. */
+  controlValues: ControlValues;
+}) {
   switch (spec.kind) {
     case "timeline":
       return (
@@ -1179,7 +1384,7 @@ const ViewBody = memo(function ViewBody({
     case "line":
       return (
         <Suspense fallback={<ChartFallback />}>
-          <LineView spec={spec} rows={rows} owner={owner} active={active} />
+          <LineView spec={spec} rows={rows} owner={owner} active={active} controlValues={controlValues} />
         </Suspense>
       );
     case "dist":
@@ -1469,11 +1674,13 @@ function LineView({
   rows,
   owner,
   active,
+  controlValues,
 }: {
   spec: ViewSpec;
   rows: ViewRow[];
   owner: string;
   active: boolean;
+  controlValues: ControlValues;
 }) {
   const points = useMemo(() => toLinePoints(rows, spec), [rows, spec]);
   const labels = spec.seriesLabels;
@@ -1490,7 +1697,8 @@ function LineView({
   const markers = useMemo(() => effectiveMarkers(rows, spec).map((m) => ({ ts: m.ts, label: m.label })), [rows, spec]);
   const regions = spec.regions;
   const levels = spec.levels;
-  const panelData = useViewPanels(owner, spec, active);
+  // SWIT-111: a panel that names a knob's `{name}` follows it.
+  const panelData = useViewPanels(owner, spec, active, controlValues);
   const panelPoints = useMemo(
     () => panelData.map((p) => (p.rows ? toLinePoints(p.rows, spec) : null)),
     [panelData, spec]
@@ -1572,7 +1780,10 @@ function LineView({
         const s = panelSeries[i];
         return (
           <div key={`${p.title}-${i}`} style={{ minWidth: 0 }}>
-            <div style={PANEL_TITLE_STYLE}>{p.title}</div>
+            <div style={PANEL_TITLE_STYLE} title={p.error ?? undefined}>
+              {p.title}
+              {p.error && pts ? <span style={{ color: "var(--tone-rose)" }}> · not loaded</span> : null}
+            </div>
             {pts && s && pts.xs.length > 0 && pts.series.length > 0 ? (
               <LinePanel
                 xs={pts.xs}

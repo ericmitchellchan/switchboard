@@ -2744,6 +2744,25 @@ describe("openDrillInPanel (T6) — the child takes the preview slot; back lands
     ).toEqual(noBlock);
   });
 
+  it("SWIT-111: a child carries its inherited control values — identity (order-free) and sanitize", () => {
+    const atAll: Artifact = { kind: "view", threadId: "t1", viewId: "setups", drill: { key: "ES", controls: { expiry: "all", width: "5" } } };
+    const atFront: Artifact = { kind: "view", threadId: "t1", viewId: "setups", drill: { key: "ES", controls: { expiry: "front", width: "5" } } };
+    expect(artifactIdentity(atAll)).toBe("view:t1:setups/ES?expiry=all&width=5");
+    expect(artifactIdentity(atAll)).not.toBe(artifactIdentity(atFront));
+    expect(
+      artifactIdentity({ kind: "view", threadId: "t1", viewId: "setups", drill: { key: "ES", controls: { width: "5", expiry: "all" } } })
+    ).toBe(artifactIdentity(atAll));
+    expect(sanitizeArtifact({ ...atAll, extra: 1 })).toEqual(atAll);
+    // A malformed value set drops alone; the child survives at the defaults.
+    const bare: Artifact = { kind: "view", threadId: "t1", viewId: "setups", drill: { key: "ES" } };
+    expect(sanitizeArtifact({ ...bare, drill: { key: "ES", controls: "nope" } })).toEqual(bare);
+    expect(sanitizeArtifact({ ...bare, drill: { key: "ES", controls: { Bad: "x", key: "y" } } })).toEqual(bare);
+    expect(sanitizeArtifact({ ...bare, drill: { key: "ES", controls: { expiry: "all", n: 3 } } })).toEqual({
+      ...bare,
+      drill: { key: "ES", controls: { expiry: "all" } },
+    });
+  });
+
   it("parent IS the preview: the ordinary replace-with-back (one step returns to it)", () => {
     openInPanel("s1", PARENT, { preview: true });
     openDrillInPanel("s1", PARENT, CHILD);

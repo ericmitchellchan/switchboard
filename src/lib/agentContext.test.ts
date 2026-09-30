@@ -216,6 +216,14 @@ describe("artifactRef", () => {
         THREADS
       )
     ).toBe("view C:/Users/eric/AppData/Local/switchboard/threads/t1/views/r1.json block 3 drill m-9");
+    // SWIT-111: a child opened at a knob's setting names it — its data
+    // depends on it.
+    expect(
+      artifactRef(
+        { kind: "view", threadId: "t1", viewId: "g1", drill: { key: "SPX", controls: { width: "5", expiry: "all" } } },
+        THREADS
+      )
+    ).toBe("view C:/Users/eric/AppData/Local/switchboard/threads/t1/views/g1.json drill SPX at expiry=all, width=5");
   });
 });
 
