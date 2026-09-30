@@ -531,6 +531,21 @@ simpler than Ky's own — every stamp on the ✦ page is recent thread activity,
 never needs to step past days): under a minute → `now`, else `Xm` / `Xh` / `Xd`. An
 unparseable or absent stamp draws an empty column, never `NaN` or a dash.
 
+## Brief block (SWIT-104)
+
+WHERE THINGS STAND — the agent's standing brief, the first **Page block** under the page
+head (`PageView.BriefBlock`; the one-platform mock's lane scene, `platform-v1.html`, is the
+source: a dated line, the goal as a sentence, then Established / Dead / Live lead /
+Waiting on you). Title `Where things stand`; the block's note is `rewritten` + its **Age**
+(no note when the stamp does not parse). Body: the GOAL as one line — 12.5px / 1.5
+`--font-reading` `--text-primary`, `padding: 8px 0 7px`, a 1px `--border` hairline under it
+while lists follow — then one row per NON-EMPTY list: a grid `104px minmax(0,1fr)`, gap 11,
+`padding: 7px 0`, a hairline between rows (none after the last). The label is the **Facts
+row** label voice (9.5px mono uppercase `.08em` `--text-faint`); `Waiting on you` alone is
+`--tone-amber` — the page's one colour, on the row that waits on the user. The lines are
+12.5px / 1.5 reading-face `--text-primary`, stacked 2px apart, no bullets. Not a list of
+click targets: rows do not light on hover. No brief, no block.
+
 ## Set frame (SWIT-79)
 
 ONE tab for a collection: a switcher row over the member's ordinary surface. Nothing

@@ -20,6 +20,7 @@ import {
   DECISION_LABELS_NAMED,
   DECISION_LABEL_MAX,
   PANEL_REPORT_SENTENCE,
+  BRIEF_READ_SENTENCE,
   artifactRef,
   buildBacklogItemLine,
   buildPageContractLine,
@@ -614,6 +615,68 @@ describe("buildPageContractLine — a report stays in the panel (SWIT-102)", () 
     const joined = [buildPageContractLine(FULL), panel].join(" ");
     const launch = launchCommand({ chatSessionId: "abc-123", resume: true, appendSystemPrompt: joined });
     expect(launch).toContain(PANEL_REPORT_SENTENCE);
+    expect(launch).toContain("and do not re-ask what they settle.");
+    expect(launch).toContain("Workstation context: panel shows surface lodestar/trading");
+  });
+});
+
+describe("buildPageContractLine — the page already holds a brief (SWIT-104)", () => {
+  const FULL: { count: number; labels: string[] } = {
+    count: 999,
+    labels: ["a".repeat(DECISION_LABEL_MAX * 2), "b".repeat(DECISION_LABEL_MAX * 2), "c".repeat(DECISION_LABEL_MAX * 2)],
+  };
+
+  it("says so, and says to read the page FIRST — only when there is a brief", () => {
+    const line = buildPageContractLine(null, { hasBrief: true });
+    expect(line).toContain(
+      "This page already holds a BRIEF of where things stand — call the page tool (op read) FIRST, before anything else, and rewrite the brief whenever it goes stale."
+    );
+    expect(line).toContain(BRIEF_READ_SENTENCE);
+    // No brief, no clause: a sentence about nothing is noise.
+    expect(buildPageContractLine()).not.toContain("BRIEF of where things stand");
+    expect(buildPageContractLine(null, {})).toBe(buildPageContractLine());
+    expect(buildPageContractLine(null, { hasBrief: false })).toBe(buildPageContractLine());
+    expect(line.split("\n")).toHaveLength(1);
+  });
+
+  it("survives the typed-line sanitizer VERBATIM and the launch line's own re-sanitize", () => {
+    expect(sanitizeForTypedLine(BRIEF_READ_SENTENCE, SPAWN_CONTEXT_MAX)).toBe(BRIEF_READ_SENTENCE);
+    expect(BRIEF_READ_SENTENCE).not.toMatch(/["\\$%`\u201C-\u201F\n]/);
+    const launch = launchCommand({
+      chatSessionId: "abc-123",
+      resume: true,
+      appendSystemPrompt: buildPageContractLine(null, { hasBrief: true }),
+    });
+    expect(launch).toContain(BRIEF_READ_SENTENCE);
+    expect((launch.match(/"/g) ?? []).length).toBe(2);
+  });
+
+  it("stays whole inside SPAWN_CONTEXT_MAX with the panel sentence before it AND the longest standing-decisions clause after it", () => {
+    const line = buildPageContractLine(FULL, { hasBrief: true });
+    expect(line.length).toBeLessThanOrEqual(SPAWN_CONTEXT_MAX);
+    expect(line).toContain(PANEL_REPORT_SENTENCE);
+    expect(line).toContain(BRIEF_READ_SENTENCE);
+    expect(line).toContain("already made 999 decisions on this page");
+    // Order: the panel sentence, then the brief, then the decisions — and nothing was cut.
+    expect(line.indexOf(PANEL_REPORT_SENTENCE)).toBeLessThan(line.indexOf(BRIEF_READ_SENTENCE));
+    expect(line.indexOf(BRIEF_READ_SENTENCE)).toBeLessThan(line.indexOf("The user has already made"));
+    expect(line.endsWith("and do not re-ask what they settle.")).toBe(true);
+    expect(line).not.toMatch(/…$/);
+    // The budget, stated: what is left of the 2000 is the panel ref's.
+    expect(buildPageContractLine(null, { hasBrief: true }).length).toBeLessThan(950);
+    expect(line.length).toBeLessThan(1350);
+  });
+
+  it("with a worst-case panel context behind it the whole contract is still there (the panel's tail is what truncates)", () => {
+    const panel = buildSpawnContext({ kind: "surface", project: "lodestar", page: "trading" }, 3, {
+      kbRoot: KB_ROOT,
+      anchorHint: "trade:<id>, bar:<iso>, row:<key>",
+      backlogItem: { id: "b1", text: "x".repeat(400) },
+    });
+    const joined = [buildPageContractLine(FULL, { hasBrief: true }), panel].join(" ");
+    const launch = launchCommand({ chatSessionId: "abc-123", resume: true, appendSystemPrompt: joined });
+    expect(launch).toContain(PANEL_REPORT_SENTENCE);
+    expect(launch).toContain(BRIEF_READ_SENTENCE);
     expect(launch).toContain("and do not re-ask what they settle.");
     expect(launch).toContain("Workstation context: panel shows surface lodestar/trading");
   });

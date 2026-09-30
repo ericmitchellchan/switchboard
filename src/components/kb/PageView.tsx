@@ -1,7 +1,9 @@
 // THE ✦ PAGE (SWIT-48; re-cut SWIT-67/68/69/77/78) — a thread's one living
 // page, rendered from pageStore's merge. Ky's thread panel is the reference:
 // ONE page — a one-paragraph SUMMARY (theme + the newest turn's first line),
-// an optional `start here →` line (the turn's reviewFirst address), then Open
+// an optional `start here →` line (the turn's reviewFirst address), then
+// Where things stand (SWIT-104 — the agent's standing brief, when it wrote
+// one: the goal, then Established / Dead / Live lead / Waiting on you) · Open
 // questions · To do · What happened · Evidence · Decided · Done · Dropped. "What
 // happened" sits deliberately BELOW the material that needs the user: the
 // reason to open the page comes first (Ky's rule, and Eric's, verbatim).
@@ -114,13 +116,14 @@ import {
   applyRetractions,
   isOpenItem,
   DECISION_ADDRESS_PREFIX,
+  briefSections,
   subscribePageFocus,
   pageFocusNonce,
   takePageFocus,
   peekPageFocus,
 } from "../../lib/pageStore";
 import { nextThingFor, openableAddressIn } from "../../lib/nextThing";
-import type { AnswerNote, InboxPost, PageAnswer, PageItem, PageQuestion, RenderedPage, SettledQuestion } from "../../lib/pageStore";
+import type { AnswerNote, InboxPost, PageAnswer, PageBrief, PageItem, PageQuestion, RenderedPage, SettledQuestion } from "../../lib/pageStore";
 import { parseSurfaceAddress } from "../../lib/surfaceParams";
 import { answerQuestion, openArtifact, openInPanel, getActiveTabSession, submitToThread } from "../../lib/panelStore";
 import type { OpenableArtifact } from "../../lib/panelStore";
@@ -595,6 +598,8 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
         ) : null}
       </div>
 
+      {page.brief && <BriefBlock brief={page.brief} isNew={isNewSince(page.brief.updatedAt, seenAt)} />}
+
       <DecisionsBlock threadId={threadId} page={page} seenAt={seenAt} />
 
       {(page.latestTurn || page.updates.length > 0) && (
@@ -700,6 +705,71 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
 
       {page.droppedItems.length > 0 && <DroppedSection rows={page.droppedItems} itemLink={itemLink} />}
     </div>
+  );
+}
+
+/** The facts-row label voice (FactsRow.tsx's LABEL): small mono capitals. */
+const BRIEF_LABEL: CSSProperties = {
+  fontFamily: MONO,
+  fontSize: 9.5,
+  textTransform: "uppercase",
+  letterSpacing: "0.08em",
+  color: "var(--text-faint)",
+  paddingTop: 3,
+};
+const BRIEF_LINE: CSSProperties = { fontFamily: READING, fontSize: 12.5, lineHeight: 1.5, color: "var(--text-primary)" };
+/** label · lines. */
+const BRIEF_GRID: CSSProperties = { gridTemplateColumns: "104px minmax(0,1fr)" };
+
+/** WHERE THINGS STAND (SWIT-104) — the standing brief, the first block under
+ *  the summary: the goal as a line, then the agent's four short lists, each
+ *  under a small label (the facts-row voice). The block's age sits beside
+ *  the title — a brief is only as good as it is recent. The one colour is
+ *  the rule the rest of the page follows: amber marks what waits on the user
+ *  (the `Waiting on you` label), nothing else. Pure presentation — the
+ *  shape, caps and the non-empty lists are pageStore's (`briefSections`). */
+function BriefBlock({ brief, isNew }: { brief: PageBrief; isNew: boolean }) {
+  const sections = briefSections(brief);
+  const dated = !Number.isNaN(Date.parse(brief.updatedAt));
+  return (
+    <PageBlock
+      title="Where things stand"
+      dataPageBlock="brief"
+      note={
+        dated ? (
+          <>
+            rewritten <Age at={brief.updatedAt} isNew={isNew} />
+          </>
+        ) : undefined
+      }
+    >
+      {brief.goal && (
+        <div style={{ ...BRIEF_LINE, padding: "8px 0 7px", borderBottom: sections.length > 0 ? "1px solid var(--border)" : "none" }}>
+          {brief.goal}
+        </div>
+      )}
+      {sections.map((s, i) => (
+        <div
+          key={s.key}
+          style={{
+            display: "grid",
+            ...BRIEF_GRID,
+            columnGap: 11,
+            padding: "7px 0",
+            borderBottom: i < sections.length - 1 ? "1px solid var(--border)" : "none",
+          }}
+        >
+          <span style={{ ...BRIEF_LABEL, color: s.key === "waiting" ? "var(--tone-amber)" : "var(--text-faint)" }}>{s.label}</span>
+          <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+            {s.lines.map((l, j) => (
+              <span key={j} style={BRIEF_LINE}>
+                {l}
+              </span>
+            ))}
+          </div>
+        </div>
+      ))}
+    </PageBlock>
   );
 }
 

@@ -883,6 +883,9 @@ export default function App() {
       // EVERY spawn from the same two files the page renders — never cached
       // on the record — and a failed read is no clause, not a failed launch.
       let standing: StandingDecisions | null = null;
+      // SWIT-104: whether that page already holds a BRIEF rides the same
+      // read — the launch line then says to `page read` first.
+      let hasBrief = false;
       if (mcpConfig) {
         try {
           const [pageRaw, answersRaw] = await Promise.all([
@@ -891,6 +894,7 @@ export default function App() {
           ]);
           const merged = mergePage(parsePageFile(pageRaw), parseAnswersFile(answersRaw), []);
           standing = { count: merged.decisions.length, labels: merged.decisions.map((d) => d.label) };
+          hasBrief = merged.brief !== null;
         } catch (err) {
           log.warn(`Standing decisions unavailable for thread id=${threadId}: ${err}`);
         }
@@ -898,7 +902,7 @@ export default function App() {
       // The page one-liner rides ONLY when the tools actually attached (a
       // sentence about a tool that does not exist would be a lie), and FIRST,
       // so a long panel ref truncates its own tail.
-      const context = [mcpConfig ? buildPageContractLine(standing) : null, panelContext]
+      const context = [mcpConfig ? buildPageContractLine(standing, { hasBrief }) : null, panelContext]
         .filter((s): s is string => s !== null && s.length > 0)
         .join(" ");
       const line = launchCommand({

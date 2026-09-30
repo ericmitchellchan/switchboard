@@ -47,6 +47,12 @@ import {
   applyRetractions,
   isOpenItem,
   RETRACTED_CAP,
+  parseBrief,
+  briefSections,
+  BRIEF_LISTS,
+  BRIEF_GOAL_CAP,
+  BRIEF_LINE_CAP,
+  BRIEF_LINES_CAP,
 } from "./pageStore";
 import type { PageQuestion, RetractedEvidence } from "./pageStore";
 
@@ -505,6 +511,67 @@ describe("mergePage", () => {
     expect(
       mergePage(EMPTY_PAGE, {}, [{ id: "p", from: "a", kind: "update", text: "t", at: "" }]).isEmpty
     ).toBe(false);
+  });
+});
+
+describe("the standing brief (SWIT-104)", () => {
+  const BRIEF = {
+    goal: "A gamma measure of our own that a discretionary trader can lean on live.",
+    established: ["all-expiry sum is about 0.58 of the vendor total"],
+    dead: ["level effects beyond price motion"],
+    lead: ["overnight hedging debt vs the Europe open"],
+    waiting: ["the book", "the state variable"],
+    updatedAt: "2026-09-29T18:00:00.000Z",
+  };
+
+  it("parses a well-formed brief onto the page, and the merge carries it", () => {
+    const p = parsePageFile(JSON.stringify({ brief: BRIEF }));
+    expect(p.brief).toEqual(BRIEF);
+    const merged = mergePage(p, {}, []);
+    expect(merged.brief).toEqual(BRIEF);
+    // A page holding ONLY a brief is not the empty page.
+    expect(merged.isEmpty).toBe(false);
+    expect(mergePage(EMPTY_PAGE, {}, []).brief).toBeNull();
+  });
+
+  it("a malformed brief is ABSENT, never a broken page — the rest still parses", () => {
+    for (const junk of [null, 7, "a brief", ["a", "list"], {}, { goal: "", dead: [] }, { goal: 9, established: "not a list", updatedAt: "t" }]) {
+      const p = parsePageFile(JSON.stringify({ ...PAGE, brief: junk }));
+      expect(p.brief).toBeNull();
+      expect(p.theme).toBe(PAGE.theme);
+      expect(p.items).toHaveLength(3);
+    }
+    expect(parseBrief(undefined)).toBeNull();
+  });
+
+  it("a malformed LINE drops alone; caps are applied on the way in", () => {
+    const b = parseBrief({
+      goal: `  ${"g".repeat(BRIEF_GOAL_CAP + 40)}  `,
+      established: ["kept", 4, null, "   ", "  trimmed  ", "l".repeat(BRIEF_LINE_CAP + 10)],
+      dead: Array.from({ length: BRIEF_LINES_CAP + 3 }, (_, i) => `d${i}`),
+      lead: "not an array",
+      extra: "ignored",
+    })!;
+    expect(b.goal).toBe("g".repeat(BRIEF_GOAL_CAP));
+    expect(b.established).toEqual(["kept", "trimmed", "l".repeat(BRIEF_LINE_CAP)]);
+    expect(b.dead).toHaveLength(BRIEF_LINES_CAP);
+    expect(b.dead[0]).toBe("d0");
+    expect(b.lead).toEqual([]);
+    expect(b.waiting).toEqual([]);
+    expect(b.updatedAt).toBe(""); // no stamp — the block prints no age
+    expect("extra" in b).toBe(false);
+  });
+
+  it("briefSections: the non-empty lists, in page order, with the words the page prints", () => {
+    expect(briefSections(parseBrief(BRIEF)!)).toEqual([
+      { key: "established", label: "Established", lines: BRIEF.established },
+      { key: "dead", label: "Dead", lines: BRIEF.dead },
+      { key: "lead", label: "Live lead", lines: BRIEF.lead },
+      { key: "waiting", label: "Waiting on you", lines: BRIEF.waiting },
+    ]);
+    expect(briefSections(parseBrief({ goal: "g", waiting: ["w"] })!)).toEqual([{ key: "waiting", label: "Waiting on you", lines: ["w"] }]);
+    expect(briefSections(parseBrief({ goal: "only a goal" })!)).toEqual([]);
+    expect(BRIEF_LISTS.map((l) => l.key)).toEqual(["established", "dead", "lead", "waiting"]);
   });
 });
 

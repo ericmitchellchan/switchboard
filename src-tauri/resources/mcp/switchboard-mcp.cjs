@@ -59,6 +59,16 @@ const DROP_EVIDENCE_CAP = 20;
  *  reached only through itemOp drop — the distinction from close (done) is
  *  the point, so it is never a value you can slip into an update. */
 const ITEM_STATES = ["todo", "in_progress", "waiting", "done"];
+/** SWIT-104: THE STANDING BRIEF — where things stand, rewritten whole at
+ *  every seam. `goal` is one sentence; the four lists are short lines. Caps
+ *  mirrored in pageStore.ts (BRIEF_*). */
+const BRIEF_GOAL_CAP = 300;
+const BRIEF_LINE_CAP = 200;
+const BRIEF_LINES_CAP = 6;
+/** The brief's four lists, in the order the page draws them. */
+const BRIEF_LISTS = ["established", "dead", "lead", "waiting"];
+/** SWIT-104: `page read` answers with at most this many characters. */
+const READ_CAP = 6000;
 
 // ── Pure core ────────────────────────────────────────────────────────────────
 
@@ -74,13 +84,20 @@ function parsePage(raw) {
     return empty;
   }
   if (typeof data !== "object" || data === null || Array.isArray(data)) return empty;
-  return {
+  const page = {
     theme: typeof data.theme === "string" && data.theme.length > 0 ? data.theme : null,
     turns: Array.isArray(data.turns) ? data.turns : [],
     evidence: Array.isArray(data.evidence) ? data.evidence : [],
     questions: Array.isArray(data.questions) ? data.questions : [],
     items: Array.isArray(data.items) ? data.items : [],
   };
+  // SWIT-104: the brief rides through every other op untouched. The key
+  // exists only while there is one, so a page with no brief serializes as it
+  // always did.
+  if (typeof data.brief === "object" && data.brief !== null && !Array.isArray(data.brief)) {
+    page.brief = data.brief;
+  }
+  return page;
 }
 
 class OpError extends Error {}
@@ -94,6 +111,28 @@ function text(v, field) {
     throw new OpError(`${field} is too long (${t.length} chars; the cap is ${TEXT_CAP} — detail belongs in evidence rows, tickets or files, not page prose)`);
   }
   return t;
+}
+
+/** One of the brief's lists (SWIT-104): absent → []; a bare string is one
+ *  line; blank lines drop; more than the cap, or a line over its cap, is a
+ *  VISIBLE error — the brief is a summary, and a silently cut line would be
+ *  a fact the user never sees. Pure; throws OpError. */
+function briefLines(v, field) {
+  if (v === undefined || v === null) return [];
+  const list = typeof v === "string" ? [v] : v;
+  if (!Array.isArray(list) || list.some((l) => typeof l !== "string")) {
+    throw new OpError(`${field} must be an array of short plain lines`);
+  }
+  const lines = list.map((l) => l.trim()).filter((l) => l.length > 0);
+  if (lines.length > BRIEF_LINES_CAP) {
+    throw new OpError(`${field} has ${lines.length} lines; the cap is ${BRIEF_LINES_CAP} — the brief is a summary: fold lines together or drop the ones that no longer matter`);
+  }
+  for (const l of lines) {
+    if (l.length > BRIEF_LINE_CAP) {
+      throw new OpError(`a line in ${field} is too long (${l.length} chars; the cap is ${BRIEF_LINE_CAP}) — one short line each; detail belongs in a report or an evidence row`);
+    }
+  }
+  return lines;
 }
 
 function nextId(list, prefix) {
@@ -352,13 +391,209 @@ function applyOp(page, args, now, answeredIds = new Set()) {
       }
       throw new OpError('itemOp must be "add", "update", "close" or "drop"');
     }
+    case "brief": {
+      // SWIT-104: THE STANDING BRIEF — where things stand, for a reader who
+      // has been away for days. WHOLE-REPLACE: the agent rewrites it at every
+      // seam, so a field left out is a field that no longer stands. Passing
+      // only empty fields clears it.
+      const given = (v) => v !== undefined && v !== null;
+      if (!given(args.goal) && !BRIEF_LISTS.some((f) => given(args[f]))) {
+        throw new OpError(
+          `brief needs at least one of goal, ${BRIEF_LISTS.join(", ")} — and it is REPLACED whole, so pass everything that still stands`
+        );
+      }
+      let goal = null;
+      if (given(args.goal)) {
+        if (typeof args.goal !== "string") throw new OpError("goal must be one sentence (a string)");
+        const g = args.goal.trim();
+        if (g.length > BRIEF_GOAL_CAP) {
+          throw new OpError(`goal is too long (${g.length} chars; the cap is ${BRIEF_GOAL_CAP}) — one sentence on what this work is for`);
+        }
+        goal = g.length > 0 ? g : null;
+      }
+      const brief = { goal };
+      for (const f of BRIEF_LISTS) brief[f] = briefLines(args[f], f);
+      brief.updatedAt = at;
+      const had = typeof page.brief === "object" && page.brief !== null;
+      if (goal === null && BRIEF_LISTS.every((f) => brief[f].length === 0)) {
+        const { brief: _gone, ...rest } = page;
+        return { page: rest, message: had ? "Brief cleared." : "Brief cleared — there was none." };
+      }
+      return {
+        page: { ...page, brief },
+        message: `${had ? "Brief rewritten" : "Brief written"} — it is the first block on the page. Rewrite it whole at the next seam.`,
+      };
+    }
     case "show":
       // SWIT-102: `show` writes shows.json, never page.json — performOp routes
       // it to performShowOp before this function is reached.
       throw new OpError("show does not write the page — it is recorded in shows.json (performShowOp)");
+    case "read":
+      // SWIT-104: `read` writes nothing — performOp routes it to
+      // performReadOp before this function is reached.
+      throw new OpError("read does not write the page — it returns it (performReadOp)");
     default:
-      throw new OpError('op must be one of "theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "show"');
+      throw new OpError('op must be one of "theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "brief", "show", "read"');
   }
+}
+
+// ── Read (SWIT-104) — the page, as compact plain text ────────────────────────
+// `page` op `read` is how a RESUMED agent sees its own page: theme, the brief,
+// the open questions (with ids), the open items, the standing decisions, the
+// last three turns. It writes nothing. Bounded: every line is clipped and
+// every list is cut (newest first, with a `+ N more` line) at one of a few
+// progressively tighter levels until the whole text fits READ_CAP.
+
+const READ_TURNS = 3;
+const READ_LEVELS = [
+  { clip: 240, questions: 20, items: 30, decisions: 12 },
+  { clip: 140, questions: 12, items: 16, decisions: 8 },
+  { clip: 80, questions: 8, items: 10, decisions: 5 },
+  { clip: 50, questions: 5, items: 6, decisions: 3 },
+];
+/** The brief's lists as `read` names them to the AGENT (the page says
+ *  "Waiting on you" to the user — the same list). */
+const BRIEF_READ_LABELS = { established: "Established", dead: "Dead", lead: "Live lead", waiting: "Waiting on the user" };
+
+function clipLine(v, n) {
+  const t = String(v).replace(/\s+/g, " ").trim();
+  return t.length > n ? `${t.slice(0, Math.max(1, n - 1)).trimEnd()}…` : t;
+}
+
+/** Newest first by an ISO stamp; an unparseable one sorts last. */
+function newestFirstBy(list, stampOf) {
+  const ms = (x) => {
+    const t = Date.parse(stampOf(x));
+    return Number.isFinite(t) ? t : -Infinity;
+  };
+  return [...list].sort((a, b) => ms(b) - ms(a));
+}
+
+function renderPageRead(page, answers, lim) {
+  const out = [];
+  const more = (total, shown) => {
+    if (total > shown) out.push(`  (+ ${total - shown} more — the page lists them)`);
+  };
+  out.push(`THEME: ${page.theme ? clipLine(page.theme, lim.clip) : "(none — set it once with op theme)"}`);
+
+  out.push("");
+  const b = page.brief;
+  const briefLists = b ? BRIEF_LISTS.map((f) => [f, Array.isArray(b[f]) ? b[f].filter((l) => typeof l === "string" && l.trim().length > 0) : []]) : [];
+  const goal = b && typeof b.goal === "string" && b.goal.trim().length > 0 ? b.goal : null;
+  if (b && (goal !== null || briefLists.some(([, lines]) => lines.length > 0))) {
+    out.push(`WHERE THINGS STAND (the brief${typeof b.updatedAt === "string" && b.updatedAt ? `, rewritten ${b.updatedAt}` : ""}):`);
+    if (goal !== null) out.push(`  Goal: ${clipLine(goal, lim.clip)}`);
+    for (const [f, lines] of briefLists) {
+      if (lines.length === 0) continue;
+      out.push(`  ${BRIEF_READ_LABELS[f]}:`);
+      for (const l of lines.slice(0, BRIEF_LINES_CAP)) out.push(`    - ${clipLine(l, lim.clip)}`);
+    }
+  } else {
+    out.push("WHERE THINGS STAND: no brief yet — write one with op brief.");
+  }
+
+  const questions = page.questions.filter((q) => q && typeof q.id === "string" && typeof q.text === "string");
+  const resolved = (q) => typeof q.answeredAt === "string" && q.answeredAt.length > 0 && typeof q.answer === "string";
+  const answerOf = (q) => {
+    const a = answers[q.id];
+    return a && typeof a === "object" && typeof a.text === "string" && a.text.length > 0 ? a : null;
+  };
+  // An answer is the agent's to read once it was SENT (sentAt, not older
+  // than the answer — pageStore.isAnswerUnsent's rule); until then the user
+  // may still change it, so only the fact that it is coming is stated.
+  const sent = (a) => typeof a.sentAt === "string" && a.sentAt.length > 0 && !(a.sentAt < String(a.at || ""));
+  const open = questions.filter((q) => !answerOf(q) && !resolved(q));
+  const pending = questions.filter((q) => answerOf(q) && !sent(answerOf(q)));
+  out.push("");
+  out.push(`OPEN QUESTIONS (${open.length}):`);
+  for (const q of open.slice(0, lim.questions)) {
+    const options = Array.isArray(q.options) ? q.options.filter((o) => typeof o === "string" && o.length > 0) : [];
+    const kind = typeof q.kind === "string" ? q.kind : "decision";
+    const tail =
+      (options.length > 0 ? ` | options: ${clipLine(options.join(" / "), lim.clip)}` : "") +
+      (typeof q.default === "string" && q.default.length > 0 ? ` | default: ${clipLine(q.default, 60)}` : "");
+    out.push(`  ${q.id} [${kind}] ${clipLine(q.text, lim.clip)}${tail}`);
+  }
+  more(open.length, lim.questions);
+  if (open.length === 0) out.push("  (none)");
+  if (pending.length > 0) {
+    out.push(
+      `  ${pending.length} more ${pending.length === 1 ? "is" : "are"} answered on the page and not sent yet (${pending.map((q) => q.id).join(", ")}) — the answer arrives in the Decisions message; do not re-ask.`
+    );
+  }
+
+  const items = page.items.filter((i) => i && typeof i.id === "string" && typeof i.title === "string");
+  const openItems = items.filter((i) => i.state !== "done" && i.state !== "dropped").reverse();
+  out.push("");
+  out.push(`TO DO (${openItems.length} open):`);
+  for (const i of openItems.slice(0, lim.items)) {
+    const owner = i.owner === "user" ? "the user" : i.owner === "team" ? "team" : "you";
+    out.push(`  ${i.id} [${typeof i.state === "string" ? i.state : "todo"}, ${owner}] ${clipLine(i.title, lim.clip)}`);
+  }
+  more(openItems.length, lim.items);
+  if (openItems.length === 0) out.push("  (none)");
+
+  // The user's answer wins the same id (the merge's precedence).
+  const decisions = newestFirstBy(
+    questions
+      .map((q) => {
+        const a = answerOf(q);
+        if (a && sent(a)) return { q, answer: a.text, at: String(a.at || ""), by: "the user" };
+        if (!a && resolved(q)) return { q, answer: q.answer, at: q.answeredAt, by: "settled by you" };
+        return null;
+      })
+      .filter((d) => d !== null),
+    (d) => d.at
+  );
+  out.push("");
+  out.push(`STANDING DECISIONS (${decisions.length}):`);
+  for (const d of decisions.slice(0, lim.decisions)) {
+    out.push(`  decision:${d.q.id} ${clipLine(d.q.text, lim.clip)} → ${clipLine(d.answer, lim.clip)} (${d.by})`);
+  }
+  more(decisions.length, lim.decisions);
+  if (decisions.length === 0) out.push("  (none)");
+
+  const turns = page.turns.filter((t) => t && Array.isArray(t.lines)).slice(0, READ_TURNS);
+  out.push("");
+  out.push(`LAST TURNS (newest first, ${turns.length} of ${page.turns.length}):`);
+  for (const t of turns) {
+    const lines = t.lines.filter((l) => typeof l === "string" && l.trim().length > 0).slice(0, TURN_LINE_CAP);
+    out.push(`  ${typeof t.at === "string" ? t.at : ""}: ${lines.map((l) => clipLine(l, lim.clip)).join(" | ")}`);
+  }
+  if (turns.length === 0) out.push("  (none)");
+  return out.join("\n");
+}
+
+/** THE READ FORMATTER. `page` = parsePage's shape (arrays unvalidated — every
+ *  entry is guarded here); `answers` = answers.json as parsed JSON (the app's
+ *  file, READ-only). Pure. Always ≤ READ_CAP characters. */
+function formatPageRead(page, answers) {
+  const known = typeof answers === "object" && answers !== null && !Array.isArray(answers) ? answers : {};
+  let text = "";
+  for (const lim of READ_LEVELS) {
+    text = renderPageRead(page, known, lim);
+    if (text.length <= READ_CAP) return text;
+  }
+  const cut = "\n… (cut — the page holds more)";
+  return text.slice(0, READ_CAP - cut.length) + cut;
+}
+
+/** `page` op `read` — reads page.json + answers.json, writes nothing. */
+function performReadOp(threadDir) {
+  const readOr = (name) => {
+    try {
+      return fs.readFileSync(path.join(threadDir, name), "utf-8");
+    } catch {
+      return "";
+    }
+  };
+  let answers = {};
+  try {
+    answers = JSON.parse(readOr("answers.json"));
+  } catch {
+    // no answers yet, or junk — every question reads as open
+  }
+  return formatPageRead(parsePage(readOr("page.json")), answers);
 }
 
 // ── Shows (SWIT-102) — put an EXISTING doc or file in front of the user ──────
@@ -1699,14 +1934,50 @@ const PAGE_TOOL = {
     "document, mock.html as a page); surface:<project>/<page>?key=value; view:<id> (add " +
     "#h:<heading-slug> for a report heading). A ticket key or a URL opens nothing. The " +
     "result says when the address may not resolve — then nothing opens. The last 20 shows " +
-    "are kept; a new report is made with the view tool (kind report), not this op.",
+    "are kept; a new report is made with the view tool (kind report), not this op. " +
+    "KEEP THE BRIEF CURRENT — rewrite it at every seam (a finding lands, a decision is made, " +
+    "the direction changes); it is what the user reads after days away. op brief {goal, " +
+    "established, dead, lead, waiting} writes WHERE THINGS STAND, the first block on the " +
+    "page: goal is ONE sentence (≤ 300 chars) on what this work is for; established (what " +
+    "is now known), dead (what was tried and ruled out), lead (the live lead being chased) " +
+    "and waiting (what is waiting on the user) are each ≤ 6 short plain lines (≤ 200 chars). " +
+    "The brief is REPLACED WHOLE by every call — pass everything that still stands, not a " +
+    "delta; goal: \"\" alone clears it. It is a summary, never a log: the story is a turn, " +
+    "the detail a report. op read RETURNS THE PAGE as compact plain text — theme, the brief, " +
+    "the open questions with their ids, the open items, the standing decisions, the last " +
+    "three turns — and writes nothing. It is how you see your own page: call it FIRST when " +
+    "you are resumed, and before you rewrite the brief.",
   inputSchema: {
     type: "object",
     properties: {
       op: {
         type: "string",
-        enum: ["theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "show"],
+        enum: ["theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "brief", "show", "read"],
         description: "Which page operation to perform.",
+      },
+      goal: {
+        type: "string",
+        description: "brief: ONE sentence (≤ 300 chars) on what this work is for.",
+      },
+      established: {
+        type: "array",
+        items: { type: "string" },
+        description: "brief: what is now known — ≤ 6 short plain lines (≤ 200 chars each).",
+      },
+      dead: {
+        type: "array",
+        items: { type: "string" },
+        description: "brief: what was tried and ruled out — ≤ 6 short plain lines.",
+      },
+      lead: {
+        type: "array",
+        items: { type: "string" },
+        description: "brief: the live lead being chased — ≤ 6 short plain lines (usually one).",
+      },
+      waiting: {
+        type: "array",
+        items: { type: "string" },
+        description: "brief: what is waiting on the user — ≤ 6 short plain lines.",
       },
       addresses: {
         type: "array",
@@ -1782,6 +2053,8 @@ function pagePathFor(threadDir) {
 function performOp(threadDir, args, now) {
   // SWIT-102: `show` is the one page op that does not touch page.json.
   if (args && args.op === "show") return performShowOp(threadDir, args, now).message;
+  // SWIT-104: `read` writes nothing at all — it returns the page as text.
+  if (args && args.op === "read") return performReadOp(threadDir);
   const file = pagePathFor(threadDir);
   let raw = "";
   try {
@@ -1965,6 +2238,12 @@ module.exports = {
   parsePage,
   applyOp,
   performOp,
+  formatPageRead,
+  performReadOp,
+  BRIEF_GOAL_CAP,
+  BRIEF_LINE_CAP,
+  BRIEF_LINES_CAP,
+  READ_CAP,
   normalizeShowAddress,
   performShowOp,
   SHOW_CAP,

@@ -525,7 +525,10 @@ export function getScrollbackRootForContext(): string | null {
  *  MCP with no shell-line limits and refreshes every session; this line only
  *  tells the agent the page exists and to use the tool. Composed FIRST in
  *  the joined context so a long panel ref truncates its own tail, never this. */
-export function buildPageContractLine(decisions: StandingDecisions | null = null): string {
+export function buildPageContractLine(
+  decisions: StandingDecisions | null = null,
+  opts: { hasBrief?: boolean } = {}
+): string {
   const base =
     "This thread has a PAGE beside the terminal — the one surface the user reads. " +
     "After each turn of work, record what happened with the page tool and keep its " +
@@ -536,8 +539,23 @@ export function buildPageContractLine(decisions: StandingDecisions | null = null
     "undecided ones still open) when the user sends — do not re-ask; resolve settled " +
     "questions every turn. " +
     PANEL_REPORT_SENTENCE;
-  return sanitizeForTypedLine(base + standingDecisionsClause(decisions), SPAWN_CONTEXT_MAX);
+  // SWIT-104: the brief clause rides BEFORE the standing decisions — "read
+  // the page first" is the instruction the rest depends on.
+  const brief = opts.hasBrief === true ? ` ${BRIEF_READ_SENTENCE}` : "";
+  return sanitizeForTypedLine(base + brief + standingDecisionsClause(decisions), SPAWN_CONTEXT_MAX);
 }
+
+/** SWIT-104: THE PAGE ALREADY HOLDS A BRIEF. "Refresh my memory… where
+ *  everything is" came up five times in three weeks — a resumed agent starts
+ *  cold while its own page holds where things stand. On a launch whose page
+ *  has a brief, the line says so and says to read the page (`page` op `read`)
+ *  before anything else. Absent on a page with no brief — a sentence about
+ *  nothing is noise. Sanitizer-proof like PANEL_REPORT_SENTENCE (no `"`,
+ *  backtick, `$`, `%` or `\`); the tests assert it arrives verbatim and whole
+ *  with the panel sentence before it and the longest standing clause after. */
+export const BRIEF_READ_SENTENCE =
+  "This page already holds a BRIEF of where things stand — call the page tool (op read) " +
+  "FIRST, before anything else, and rewrite the brief whenever it goes stale.";
 
 /** SWIT-102: WHERE A REPORT GOES. On 2026-09-22 three threads were asked for
  *  "an artifact in the panel" and all three published to claude.ai — the

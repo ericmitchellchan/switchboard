@@ -8,7 +8,7 @@ import { describe, it, expect } from "vitest";
 // @ts-expect-error — no @types/node in the frontend tsconfig; vitest's node
 // runtime provides the real module, and the require result is cast below.
 import { createRequire } from "node:module";
-import { parsePageFile, mergePage } from "./pageStore";
+import { parsePageFile, mergePage, BRIEF_GOAL_CAP, BRIEF_LINE_CAP, BRIEF_LINES_CAP } from "./pageStore";
 import { parseViewSpec } from "./viewStore";
 import { parseInboxFile } from "./pageStore";
 import { parseBacklogInbox } from "./backlogStore";
@@ -386,7 +386,7 @@ describe("ROUND-TRIP: the server's writes parse through pageStore (the seam)", (
     }
     const props = (server.PAGE_TOOL.inputSchema as { properties: Record<string, { enum?: string[] }> }).properties;
     expect(props.kind.enum).toEqual(["decision", "convention", "info"]);
-    expect(props.op.enum).toEqual(["theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "show"]);
+    expect(props.op.enum).toEqual(["theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "brief", "show", "read"]);
     expect(props.default).toBeDefined();
     expect(props.reviewFirst).toBeDefined();
     expect(props.why).toBeDefined();
@@ -1459,5 +1459,295 @@ describe("the view tool claims the words a user says (SWIT-102): report, artifac
     // The rest of the description is still there, after the claim.
     expect(d).toContain("SHOW the user rendered data in the panel");
     expect(d).toContain("report: ONE document with live views embedded");
+  });
+});
+
+describe("the page tool — the standing brief + op read (SWIT-104)", () => {
+  const brief = server as unknown as {
+    formatPageRead: (page: Record<string, unknown>, answers: unknown) => string;
+    performReadOp: (threadDir: string) => string;
+    performOp: (threadDir: string, args: Record<string, unknown>, now: number) => string;
+    BRIEF_GOAL_CAP: number;
+    BRIEF_LINE_CAP: number;
+    BRIEF_LINES_CAP: number;
+    READ_CAP: number;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeFs = require("fs") as {
+    mkdtempSync: (p: string) => string;
+    writeFileSync: (p: string, d: string) => void;
+    readFileSync: (p: string, e: string) => string;
+    existsSync: (p: string) => boolean;
+    readdirSync: (p: string) => string[];
+    rmSync: (p: string, o: { recursive: boolean; force: boolean }) => void;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeOs = require("os") as { tmpdir: () => string };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodePath = require("path") as { join: (...p: string[]) => string };
+  const AT = new Date(NOW).toISOString();
+  const GAMMA = {
+    op: "brief",
+    goal: " A gamma measure of our own that a discretionary trader can lean on live. ",
+    established: ["our all-expiry sum is about 0.58 of the vendor total", " same sign 82% of nights "],
+    dead: ["level effects beyond price motion (ten registered tests)"],
+    lead: ["overnight hedging debt vs the Europe open"],
+    waiting: ["the book (front expiries vs all)", "the state variable"],
+  };
+
+  it("writes the brief whole, stamped, trimmed — and it ROUND-TRIPS through pageStore", () => {
+    const { page, message } = server.applyOp(empty(), GAMMA, NOW);
+    expect(page.brief).toEqual({
+      goal: "A gamma measure of our own that a discretionary trader can lean on live.",
+      established: ["our all-expiry sum is about 0.58 of the vendor total", "same sign 82% of nights"],
+      dead: ["level effects beyond price motion (ten registered tests)"],
+      lead: ["overnight hedging debt vs the Europe open"],
+      waiting: ["the book (front expiries vs all)", "the state variable"],
+      updatedAt: AT,
+    });
+    expect(message).toMatch(/^Brief written — it is the first block on the page\./);
+    const parsed = parsePageFile(JSON.stringify(page));
+    expect(parsed.brief).toEqual(page.brief);
+    const merged = mergePage(parsed, {}, []);
+    expect(merged.brief?.lead).toEqual(["overnight hedging debt vs the Europe open"]);
+    expect(merged.isEmpty).toBe(false); // a page holding only a brief is a page
+  });
+
+  it("is REPLACED, never appended: a field left out no longer stands; a bare string is one line", () => {
+    const first = server.applyOp(empty(), GAMMA, NOW).page;
+    const { page, message } = server.applyOp(first, { op: "brief", goal: "A new goal.", lead: "one live lead" }, NOW + 60_000);
+    expect(page.brief).toEqual({
+      goal: "A new goal.",
+      established: [],
+      dead: [],
+      lead: ["one live lead"],
+      waiting: [],
+      updatedAt: new Date(NOW + 60_000).toISOString(),
+    });
+    expect(message).toMatch(/^Brief rewritten/);
+    // Lists alone are a brief too (no goal).
+    const listsOnly = server.applyOp(empty(), { op: "brief", dead: ["x"] }, NOW).page;
+    expect((listsOnly.brief as { goal: unknown }).goal).toBeNull();
+    expect(parsePageFile(JSON.stringify(listsOnly)).brief?.dead).toEqual(["x"]);
+  });
+
+  it("is CLEARED by passing only empty fields — the key leaves the file", () => {
+    const first = server.applyOp(empty(), GAMMA, NOW).page;
+    const cleared = server.applyOp(first, { op: "brief", goal: "" }, NOW);
+    expect("brief" in cleared.page).toBe(false);
+    expect(cleared.message).toBe("Brief cleared.");
+    expect(parsePageFile(JSON.stringify(cleared.page)).brief).toBeNull();
+    expect(server.applyOp(empty(), { op: "brief", established: [], waiting: ["  "] }, NOW).message).toBe("Brief cleared — there was none.");
+  });
+
+  it("caps are VISIBLE errors: no field, a long goal, a long line, too many lines, a non-string line", () => {
+    expect(brief.BRIEF_GOAL_CAP).toBe(300);
+    expect(brief.BRIEF_LINE_CAP).toBe(200);
+    expect(brief.BRIEF_LINES_CAP).toBe(6);
+    expect(() => server.applyOp(empty(), { op: "brief" }, NOW)).toThrow(/at least one of goal, established, dead, lead, waiting/);
+    expect(() => server.applyOp(empty(), { op: "brief", goal: null, dead: null }, NOW)).toThrow(/REPLACED whole/);
+    expect(() => server.applyOp(empty(), { op: "brief", goal: "g".repeat(301) }, NOW)).toThrow(/goal is too long \(301 chars; the cap is 300\)/);
+    expect(() => server.applyOp(empty(), { op: "brief", goal: "g".repeat(300) }, NOW)).not.toThrow();
+    expect(() => server.applyOp(empty(), { op: "brief", goal: 7 }, NOW)).toThrow(/goal must be one sentence/);
+    expect(() => server.applyOp(empty(), { op: "brief", dead: ["l".repeat(201)] }, NOW)).toThrow(/a line in dead is too long \(201 chars; the cap is 200\)/);
+    expect(() => server.applyOp(empty(), { op: "brief", established: Array.from({ length: 7 }, (_, i) => `fact ${i}`) }, NOW)).toThrow(
+      /established has 7 lines; the cap is 6/
+    );
+    expect(() => server.applyOp(empty(), { op: "brief", established: Array.from({ length: 6 }, (_, i) => `fact ${i}`) }, NOW)).not.toThrow();
+    expect(() => server.applyOp(empty(), { op: "brief", waiting: ["ok", 4] }, NOW)).toThrow(/waiting must be an array of short plain lines/);
+    expect(() => server.applyOp(empty(), { op: "brief", lead: { a: 1 } }, NOW)).toThrow(/lead must be an array/);
+  });
+
+  it("the brief SURVIVES every other op (parsePage carries it), and a page without one serializes as before", () => {
+    let page = server.applyOp(empty(), GAMMA, NOW).page;
+    page = server.parsePage(JSON.stringify(page)); // what the next op reads back from disk
+    page = server.applyOp(page, { op: "turn", lines: ["Did a thing."] }, NOW).page;
+    page = server.applyOp(server.parsePage(JSON.stringify(page)), { op: "item", itemOp: "add", title: "t" }, NOW).page;
+    expect((page.brief as { goal: string }).goal).toBe("A gamma measure of our own that a discretionary trader can lean on live.");
+    expect("brief" in empty()).toBe(false);
+    expect("brief" in server.applyOp(empty(), { op: "theme", text: "t" }, NOW).page).toBe(false);
+    // A junk brief in the file is dropped at the read, not carried.
+    expect("brief" in server.parsePage(JSON.stringify({ brief: ["not", "an", "object"] }))).toBe(false);
+  });
+
+  const worked = () =>
+    run([
+      { op: "theme", text: "Build a gamma measure of our own" },
+      GAMMA,
+      { op: "turn", lines: ["First turn."] },
+      { op: "turn", lines: ["Second turn.", "Two lines."] },
+      { op: "turn", lines: ["Third turn."] },
+      { op: "turn", lines: ["Fourth turn — the newest."] },
+      { op: "ask", id: "q1", text: "Which options are the book?", options: ["front expiries", "all expiries"], default: "all expiries" },
+      { op: "ask", id: "q2", text: "State variable?", kind: "info" },
+      { op: "ask", id: "q3", text: "Keep the old keys?" },
+      { op: "ask", id: "q4", text: "Which vendor?" },
+      { op: "resolve", id: "q3", answer: "moot — the keys are gone" },
+      { op: "item", itemOp: "add", title: "Run the release model", state: "in_progress" },
+      { op: "item", itemOp: "add", title: "Pick the book", owner: "user", state: "waiting" },
+      { op: "item", itemOp: "add", title: "Old thing" },
+      { op: "item", itemOp: "close", id: "i3" },
+    ]);
+
+  it("read prints EVERY section: theme, the brief, open questions with ids, open items, standing decisions, the last three turns", () => {
+    const answers = {
+      q2: { text: "net over gross", at: "2026-08-31T11:00:00Z", sentAt: "2026-08-31T11:05:00Z", resolvedBy: "user" },
+      q4: { text: "the second one", at: "2026-08-31T12:00:00Z" }, // saved on the page, NOT sent
+    };
+    const text = brief.formatPageRead(worked(), answers);
+    expect(text).toBe(
+      [
+        "THEME: Build a gamma measure of our own",
+        "",
+        `WHERE THINGS STAND (the brief, rewritten ${AT}):`,
+        "  Goal: A gamma measure of our own that a discretionary trader can lean on live.",
+        "  Established:",
+        "    - our all-expiry sum is about 0.58 of the vendor total",
+        "    - same sign 82% of nights",
+        "  Dead:",
+        "    - level effects beyond price motion (ten registered tests)",
+        "  Live lead:",
+        "    - overnight hedging debt vs the Europe open",
+        "  Waiting on the user:",
+        "    - the book (front expiries vs all)",
+        "    - the state variable",
+        "",
+        "OPEN QUESTIONS (1):",
+        "  q1 [decision] Which options are the book? | options: front expiries / all expiries | default: all expiries",
+        "  1 more is answered on the page and not sent yet (q4) — the answer arrives in the Decisions message; do not re-ask.",
+        "",
+        "TO DO (2 open):",
+        "  i2 [waiting, the user] Pick the book",
+        "  i1 [in_progress, you] Run the release model",
+        "",
+        "STANDING DECISIONS (2):",
+        "  decision:q2 State variable? → net over gross (the user)",
+        "  decision:q3 Keep the old keys? → moot — the keys are gone (settled by you)",
+        "",
+        "LAST TURNS (newest first, 3 of 4):",
+        `  ${AT}: Fourth turn — the newest.`,
+        `  ${AT}: Third turn.`,
+        `  ${AT}: Second turn. | Two lines.`,
+      ].join("\n")
+    );
+    // An unsent answer's TEXT is never in the read — the user may still change it.
+    expect(text).not.toContain("the second one");
+  });
+
+  it("read on an empty page still names every section, and says how to start a brief", () => {
+    const text = brief.formatPageRead(empty(), {});
+    for (const heading of [
+      "THEME: (none",
+      "WHERE THINGS STAND: no brief yet — write one with op brief.",
+      "OPEN QUESTIONS (0):",
+      "TO DO (0 open):",
+      "STANDING DECISIONS (0):",
+      "LAST TURNS (newest first, 0 of 0):",
+    ]) {
+      expect(text).toContain(heading);
+    }
+    // Junk answers and a hand-corrupted page (nulls in the arrays) do not throw.
+    const corrupted = server.parsePage(
+      JSON.stringify({ questions: [null, { id: "q2", text: "t" }], items: [null], turns: [null, { lines: [7, "kept"] }], brief: { goal: 4, dead: ["x", 9] } })
+    );
+    const out = brief.formatPageRead(corrupted, "junk");
+    expect(out).toContain("  q2 [decision] t");
+    expect(out).toContain("    - x");
+    expect(out).toContain("kept");
+  });
+
+  it("read stays under READ_CAP on a page at every cap — sections all present, lists cut with a count", () => {
+    expect(brief.READ_CAP).toBe(6000);
+    const long = (tag: string, n: number) => `${tag} ${"word ".repeat(200)}`.slice(0, n).trim();
+    let page = empty();
+    page = server.applyOp(page, { op: "theme", text: long("theme", 500) }, NOW).page;
+    page = server.applyOp(
+      page,
+      {
+        op: "brief",
+        goal: long("goal", 300),
+        established: Array.from({ length: 6 }, (_, i) => long(`e${i}`, 200)),
+        dead: Array.from({ length: 6 }, (_, i) => long(`d${i}`, 200)),
+        lead: Array.from({ length: 6 }, (_, i) => long(`l${i}`, 200)),
+        waiting: Array.from({ length: 6 }, (_, i) => long(`w${i}`, 200)),
+      },
+      NOW
+    ).page;
+    for (let i = 0; i < server.QUESTION_CAP; i++) {
+      page = server.applyOp(page, { op: "ask", text: long(`question ${i}`, 500), options: ["a".repeat(60), "b".repeat(60), "c".repeat(60)] }, NOW).page;
+    }
+    for (let i = 0; i < 60; i++) page = server.applyOp(page, { op: "item", itemOp: "add", title: long(`item ${i}`, 500) }, NOW).page;
+    for (let i = 0; i < server.TURN_CAP; i++) {
+      page = server.applyOp(page, { op: "turn", lines: Array.from({ length: 6 }, (_, j) => long(`turn ${i} line ${j}`, 500)) }, NOW).page;
+    }
+    const text = brief.formatPageRead(page, {});
+    expect(text.length).toBeLessThanOrEqual(brief.READ_CAP);
+    for (const heading of [
+      "THEME: ",
+      "WHERE THINGS STAND (the brief",
+      "OPEN QUESTIONS (20):",
+      "TO DO (60 open):",
+      "STANDING DECISIONS (0):",
+      "LAST TURNS (newest first, 3 of 30):",
+    ]) {
+      expect(text).toContain(heading);
+    }
+    expect(text).toMatch(/\(\+ \d+ more — the page lists them\)/);
+    // Newest first inside a cut list: the newest item and question are the ones kept.
+    expect(text).toContain("  i60 [todo, you] item 59");
+    expect(text).toContain("  q20 [decision] question 19");
+    expect(text).not.toMatch(/\n {2}i1 \[/);
+    // A modest page is printed at the roomiest level — nothing clipped.
+    expect(brief.formatPageRead(worked(), {})).not.toContain("…");
+  });
+
+  it("performOp read returns the text and WRITES NOTHING — no page.json, no tmp file", () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-read-"));
+    try {
+      const fresh = brief.performOp(dir, { op: "read" }, NOW);
+      expect(fresh).toContain("WHERE THINGS STAND: no brief yet");
+      expect(nodeFs.readdirSync(dir)).toEqual([]);
+      brief.performOp(dir, GAMMA, NOW);
+      brief.performOp(dir, { op: "ask", id: "q1", text: "A?" }, NOW);
+      nodeFs.writeFileSync(
+        nodePath.join(dir, "answers.json"),
+        JSON.stringify({ q1: { text: "yes", at: "2026-08-31T11:00:00Z", sentAt: "2026-08-31T11:00:05Z" } })
+      );
+      const before = nodeFs.readFileSync(nodePath.join(dir, "page.json"), "utf8");
+      const text = brief.performOp(dir, { op: "read" }, NOW + 5000);
+      expect(text).toContain("  Live lead:\n    - overnight hedging debt vs the Europe open");
+      expect(text).toContain("  decision:q1 A? → yes (the user)");
+      expect(text).toBe(brief.performReadOp(dir));
+      expect(nodeFs.readFileSync(nodePath.join(dir, "page.json"), "utf8")).toBe(before);
+      expect(nodeFs.readdirSync(dir).sort()).toEqual(["answers.json", "page.json"]);
+      // The pure page half refuses it rather than pretending to write a page.
+      expect(() => server.applyOp(empty(), { op: "read" }, NOW)).toThrow(/returns it/);
+    } finally {
+      nodeFs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("the tool table states the brief contract and the read op", () => {
+    for (const rule of [
+      "KEEP THE BRIEF CURRENT — rewrite it at every seam (a finding lands, a decision is made, the direction changes); it is what the user reads after days away.",
+      "op brief {goal, established, dead, lead, waiting} writes WHERE THINGS STAND, the first block on the page",
+      "goal is ONE sentence (≤ 300 chars)",
+      "are each ≤ 6 short plain lines (≤ 200 chars)",
+      "The brief is REPLACED WHOLE by every call",
+      'goal: "" alone clears it',
+      "op read RETURNS THE PAGE as compact plain text",
+      "the open questions with their ids, the open items, the standing decisions, the last three turns",
+      "writes nothing",
+      "call it FIRST when you are resumed",
+    ]) {
+      expect(server.PAGE_TOOL.description).toContain(rule);
+    }
+    const props = (server.PAGE_TOOL.inputSchema as { properties: Record<string, { enum?: string[]; type?: string }> }).properties;
+    expect(props.op.enum).toContain("brief");
+    expect(props.op.enum).toContain("read");
+    expect(props.goal.type).toBe("string");
+    for (const list of ["established", "dead", "lead", "waiting"]) expect(props[list].type).toBe("array");
+    // The caps stated to the agent are the caps the app's parser applies.
+    expect([brief.BRIEF_GOAL_CAP, brief.BRIEF_LINE_CAP, brief.BRIEF_LINES_CAP]).toEqual([BRIEF_GOAL_CAP, BRIEF_LINE_CAP, BRIEF_LINES_CAP]);
   });
 });

@@ -2,7 +2,8 @@
 // as a MERGE of three per-thread files with ONE WRITER EACH:
 //
 //   page.json    ← the agent, through the MCP server (SWIT-49). Theme, turns,
-//                  evidence rows, questions, to-do items.
+//                  evidence rows, questions, to-do items, and (SWIT-104) the
+//                  standing BRIEF — where things stand, rewritten whole.
 //   answers.json ← the app (SWIT-51): Eric's answers, joined to questions by
 //                  id at render time — page.json is never touched. Each answer
 //                  ALSO renders as a `decision:<id>` evidence row (SWIT-58),
@@ -65,6 +66,12 @@ export const REVIEW_FIRST_CAP = 300;
 /** SWIT-77: an ask's `why` is ONE line on the recommendation — the server
  *  refuses more; a hand-written longer one is cut here. Mirrors WHY_CAP. */
 export const WHY_CAP = 240;
+/** SWIT-104: the standing brief — `goal` is one sentence, each list at most
+ *  BRIEF_LINES_CAP short lines. The server refuses more; a hand-written
+ *  longer one is cut here. Mirror the server's BRIEF_* caps. */
+export const BRIEF_GOAL_CAP = 300;
+export const BRIEF_LINE_CAP = 200;
+export const BRIEF_LINES_CAP = 6;
 
 // ── File shapes ──────────────────────────────────────────────────────────────
 
@@ -125,6 +132,34 @@ export function isOpenItem(item: Pick<PageItem, "state">): boolean {
   return item.state !== "done" && item.state !== "dropped";
 }
 
+/** SWIT-104: THE STANDING BRIEF — where things stand, for a reader who has
+ *  been away for days (Eric asked "refresh my memory… where everything is"
+ *  five times in three weeks). The agent REWRITES it whole at every seam
+ *  (page op `brief`); it is never appended to. `goal` is one sentence; the
+ *  four lists are short lines. */
+export type PageBrief = {
+  goal: string | null;
+  /** What is now known. */
+  established: string[];
+  /** What was tried and ruled out. */
+  dead: string[];
+  /** The live lead being chased. */
+  lead: string[];
+  /** What is waiting on the user. */
+  waiting: string[];
+  /** When the agent last rewrote it. */
+  updatedAt: string;
+};
+
+/** The brief's four lists, in page order, with the words the page prints. */
+export const BRIEF_LISTS = [
+  { key: "established", label: "Established" },
+  { key: "dead", label: "Dead" },
+  { key: "lead", label: "Live lead" },
+  { key: "waiting", label: "Waiting on you" },
+] as const;
+export type BriefListKey = (typeof BRIEF_LISTS)[number]["key"];
+
 /** page.json — the agent's half, newest-first arrays. */
 export type PageFile = {
   theme: string | null;
@@ -132,6 +167,8 @@ export type PageFile = {
   evidence: PageEvidence[];
   questions: PageQuestion[];
   items: PageItem[];
+  /** SWIT-104: null while the agent has written none (or cleared it). */
+  brief: PageBrief | null;
 };
 
 export const EMPTY_PAGE: PageFile = Object.freeze({
@@ -140,6 +177,7 @@ export const EMPTY_PAGE: PageFile = Object.freeze({
   evidence: [],
   questions: [],
   items: [],
+  brief: null,
 });
 
 /** answers.json — question id → Eric's answer. SWIT-77: `sentAt` = when the
@@ -279,7 +317,42 @@ export function parsePageFile(raw: string): PageFile {
     }
   }
 
-  return { theme: str(data.theme), turns, evidence, questions, items };
+  return { theme: str(data.theme), turns, evidence, questions, items, brief: parseBrief(data.brief) };
+}
+
+/** Tolerant parse of `page.brief` (SWIT-104). A malformed brief is ABSENT,
+ *  never a broken page: a non-object is null, a non-string line drops alone,
+ *  an over-long goal/line is cut, a list keeps its first BRIEF_LINES_CAP
+ *  lines — and a brief with nothing left in it is null (no empty block). */
+export function parseBrief(raw: unknown): PageBrief | null {
+  if (!isRecord(raw)) return null;
+  const lines = (v: unknown): string[] =>
+    Array.isArray(v)
+      ? v
+          .filter((l): l is string => typeof l === "string" && l.trim().length > 0)
+          .map((l) => l.trim().slice(0, BRIEF_LINE_CAP))
+          .slice(0, BRIEF_LINES_CAP)
+      : [];
+  const goal = str(typeof raw.goal === "string" ? raw.goal.trim() : null)?.slice(0, BRIEF_GOAL_CAP) ?? null;
+  const brief: PageBrief = {
+    goal,
+    established: lines(raw.established),
+    dead: lines(raw.dead),
+    lead: lines(raw.lead),
+    waiting: lines(raw.waiting),
+    updatedAt: str(raw.updatedAt) ?? "",
+  };
+  return goal === null && BRIEF_LISTS.every(({ key }) => brief[key].length === 0) ? null : brief;
+}
+
+/** The brief's NON-EMPTY lists in page order — what the block draws under
+ *  the goal (an empty list has no label). Pure. */
+export function briefSections(brief: PageBrief): { key: BriefListKey; label: string; lines: string[] }[] {
+  return BRIEF_LISTS.filter(({ key }) => brief[key].length > 0).map(({ key, label }) => ({
+    key,
+    label,
+    lines: brief[key],
+  }));
 }
 
 export function parseAnswersFile(raw: string): AnswersFile {
@@ -575,6 +648,9 @@ export function isQuestionOpen(q: Pick<PageQuestion, "id" | "resolved">, answers
 /** What PageView renders — the three files folded into R2's section order. */
 export type RenderedPage = {
   theme: string | null;
+  /** SWIT-104: where things stand — the first block under the summary; null
+   *  = no block. */
+  brief: PageBrief | null;
   /** OPEN questions — nobody has settled them (Home's Needs You lists these;
    *  a decided-but-unsent one is NOT here, it is in `unsentDecisions`). */
   openQuestions: PageQuestion[];
@@ -717,6 +793,7 @@ export function mergePage(
   ].sort(byNewest);
   const merged: RenderedPage = {
     theme: page.theme,
+    brief: page.brief,
     openQuestions,
     unsentDecisions,
     decisionQuestions,
@@ -735,6 +812,7 @@ export function mergePage(
     retractedEvidence: retracted as RetractedEvidence[],
     isEmpty:
       page.theme === null &&
+      page.brief === null &&
       page.turns.length === 0 &&
       page.evidence.length === 0 &&
       page.questions.length === 0 &&
