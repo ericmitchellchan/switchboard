@@ -820,7 +820,7 @@ const SHOW_ADDRESS_CAP = 300; // an address, not prose (reviewFirst's cap)
 const SHOW_PATH_SEGMENT_RE = /^[A-Za-z0-9._-]+$/; // evidenceModel's PATH_SEGMENT
 const SHOW_SURFACE_RE = /^surface:[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+(\?.*)?$/; // surfaceParams' SURFACE_ADDRESS
 const SHOW_FORMS =
-  "a knowledge-base doc path (relative to the knowledge-base root), a file path relative to this thread's working directory, surface:<project>/<page>[?k=v] or view:<id>[#h:<heading-slug>]";
+  "a knowledge-base doc path (relative to the knowledge-base root), a file path relative to this thread's working directory, surface:<project>/<page>[?k=v], view:<id>[#h:<heading-slug>] or a project's view:<project>/<id>[#h:<heading-slug>]";
 
 // src/lib/surfaceParams.ts's STRICT query rule, mirrored (review of 49ebb20,
 // #3): an address whose params the app's `parseSurfaceQuery` rejects opens
@@ -892,7 +892,7 @@ function assertOpenable(address, info) {
  *  `path` (relative, forward slashes) | `absolute` (outside cwd; the app opens
  *  it only when it sits inside the knowledge base). Throws OpError — visible —
  *  on anything that cannot open (a ticket key, a URL, prose, `..`). */
-function normalizeShowAddress(raw, cwd, viewIds) {
+function normalizeShowAddress(raw, cwd, viewIds, projectViewIds) {
   const a = text(raw, "address");
   if (a.length > SHOW_ADDRESS_CAP) {
     throw new OpError(`address is too long (${a.length} chars; the cap is ${SHOW_ADDRESS_CAP}) — it is ${SHOW_FORMS}, not prose`);
@@ -900,7 +900,29 @@ function normalizeShowAddress(raw, cwd, viewIds) {
   if (a.startsWith("view:")) {
     const rest = a.slice("view:".length);
     const hash = rest.indexOf("#");
-    const id = hash === -1 ? rest : rest.slice(0, hash);
+    const head = hash === -1 ? rest : rest.slice(0, hash);
+    // SWIT-107: `view:<project>/<id>` — a view the PROJECT owns (the form is
+    // evidenceModel.projectViewOfAddress's). Checked against the project's
+    // index when the registry is readable (`projectViewIds(project)` → ids,
+    // or null when it cannot be known).
+    const slash = head.indexOf("/");
+    if (slash !== -1) {
+      const project = head.slice(0, slash);
+      const pid = head.slice(slash + 1);
+      if (!VIEW_ID_RE.test(project) || !VIEW_ID_RE.test(pid)) {
+        throw new OpError(`${JSON.stringify(a)} is not a project view address — view:<project>/<id>, as the view tool's result named it`);
+      }
+      const known = typeof projectViewIds === "function" ? projectViewIds(project) : null;
+      if (Array.isArray(known) && !known.includes(pid)) {
+        throw new OpError(`no project view ${pid} in ${project} — a report shown with the view tool (scope project) names its address in the result`);
+      }
+      // eslint-disable-next-line no-control-regex
+      if (hash !== -1 && (!/^[a-z][a-z0-9-]*:.+$/s.test(rest.slice(hash + 1)) || /[\x00-\x1f\x7f]/.test(rest.slice(hash + 1)))) {
+        throw new OpError(`${JSON.stringify(a)} has a malformed anchor — a report heading is view:<project>/<id>#h:<heading-slug>`);
+      }
+      return { address: a, form: Array.isArray(known) ? "project-view" : "project-view-unchecked" };
+    }
+    const id = head;
     if (!VIEW_ID_RE.test(id)) throw new OpError(`${JSON.stringify(a)} is not a view address — view:<id> with the id the view tool gave you`);
     if (!viewIds.includes(id)) {
       throw new OpError(`no view with id ${id} in this thread — create it with the view tool (op show) first`);
@@ -982,7 +1004,17 @@ function performShowOp(threadDir, args, now, env) {
     (env && env.exists
       ? (p) => (env.exists(p) ? { kind: "file", size: 0, text: true } : { kind: "missing", size: 0, text: false })
       : inspectPath);
-  const { address, form } = normalizeShowAddress(args.address, cwd, listViewIds(path.join(threadDir, "views")));
+  // SWIT-107: the registry (when this server was handed one) — to check a
+  // project view address, and to say plainly whether a cwd file can open.
+  const registryPath = env && "registryPath" in env ? env.registryPath : process.env.SWITCHBOARD_REGISTRY;
+  const projects = readRegistryProjects(registryPath);
+  const projectViewIds = (key) => {
+    if (projects === null) return null;
+    const project = projects.find((p) => p.key === key);
+    if (!project) return [];
+    return [...projectViewOwners({ repos: project.repos }).keys()];
+  };
+  const { address, form } = normalizeShowAddress(args.address, cwd, listViewIds(path.join(threadDir, "views")), projectViewIds);
   let underCwd = false;
   if (form === "absolute") {
     const info = inspect(address);
@@ -1006,14 +1038,22 @@ function performShowOp(threadDir, args, now, env) {
   fs.renameSync(tmp, file);
   const opening = `${address} is opening in the panel beside the terminal.`;
   let message;
-  if (form === "view") {
+  if (form === "view" || form === "project-view") {
     message = opening;
+  } else if (form === "project-view-unchecked") {
+    message = `${address} opens in the panel beside the terminal if that project owns a view with that id (this server could not read the registry to check).`;
   } else if (form === "surface") {
     message =
       `${address} opens in the panel beside the terminal if it names a page Switchboard has registered ` +
       "(this server cannot see that list — an unregistered project or page opens nothing).";
   } else if (form === "absolute") {
     message = `Recorded — but ${address} is outside this thread's working directory, so it opens ONLY if it sits inside the knowledge base; otherwise nothing opens.`;
+  } else if (underCwd && projects !== null && projectPlaceFor(projects, cwd) !== null) {
+    // SWIT-107: the registry says which project holds this folder — exact.
+    message = opening;
+  } else if (underCwd && projects !== null) {
+    message =
+      `Recorded — but this thread's working directory is in no registry project, so ${address} opens ONLY if the folder is inside the knowledge base; otherwise nothing opens.`;
   } else if (underCwd) {
     message =
       `${address} opens in the panel beside the terminal when this thread's folder belongs to a registry project ` +
@@ -1555,7 +1595,10 @@ function readSetsFile(file) {
   }
 }
 
-function performViewOp(threadDir, args, now) {
+/** `view` op show/update. `env` = {cwd, threadId, registryPath} — injected by
+ *  the tests; the real server uses its cwd (claude's — the thread's),
+ *  SWITCHBOARD_THREAD_ID and SWITCHBOARD_REGISTRY. */
+function performViewOp(threadDir, args, now, env) {
   const viewsDir = path.join(threadDir, "views");
   const existing = listViewIds(viewsDir);
   if (args.set !== undefined && args.set !== null) {
@@ -1572,6 +1615,9 @@ function performViewOp(threadDir, args, now) {
       message: `Set ${set.id} (${set.label}) of ${set.ids.length} views is opening as ONE tab beside the terminal — the user steps through it.`,
     };
   }
+  if (args.scope !== undefined && args.scope !== null && !VIEW_SCOPES.includes(args.scope)) {
+    throw new OpError('scope must be "thread" or "project"');
+  }
   if (args.op === "update") {
     const id = typeof args.id === "string" ? args.id.trim() : "";
     if (!existing.includes(id)) {
@@ -1580,19 +1626,189 @@ function performViewOp(threadDir, args, now) {
   } else if (args.op !== "show") {
     throw new OpError('op must be "show" or "update"');
   }
-  const spec = buildViewSpec(args, existing, now);
+  // SWIT-107: WHO OWNS IT. A report defaults to the project; everything else
+  // to the thread; an explicit scope wins — except that `update` of a view
+  // this thread already put in the project keeps writing both copies.
+  const threadId = env && typeof env.threadId === "string" ? env.threadId : process.env.SWITCHBOARD_THREAD_ID || "";
+  const cwd = (env && env.cwd) || process.cwd();
+  const registryPath = env && "registryPath" in env ? env.registryPath : process.env.SWITCHBOARD_REGISTRY;
+  const explicit = args.scope === "project" || args.scope === "thread" ? args.scope : null;
+  let scope = explicit || (args.kind === "report" ? "project" : "thread");
+  const place = projectPlaceFor(readRegistryProjects(registryPath), cwd);
+  const owners = place ? projectViewOwners(place) : new Map();
+  if (args.op === "update" && place) {
+    const owner = owners.get(typeof args.id === "string" ? args.id.trim() : "");
+    if (owner && owner.threadId === threadId) scope = "project";
+  }
+  let note = "";
+  if (scope === "project" && place === null) {
+    if (explicit === "project") {
+      throw new OpError(
+        "this thread's working directory is in no registry project (or the registry is unreadable) — a project view needs a project to own it; show it with scope 'thread'"
+      );
+    }
+    scope = "thread";
+    note = " It is kept in this thread — its working directory is in no registry project, so no project can own it.";
+  }
+  const spec = buildViewSpec(args, scope === "project" ? [...existing, ...owners.keys()] : existing, now);
+  if (scope === "project") {
+    const owner = owners.get(spec.id);
+    if (owner && owner.threadId !== threadId) {
+      throw new OpError(
+        `view id ${spec.id} is already a project view of another thread (${owner.threadId || "unknown"}) in ${place.key} — pick another id, or omit id to mint one`
+      );
+    }
+    spec.scope = "project";
+    spec.project = place.key;
+    spec.base = place.base;
+    spec.threadId = threadId;
+  }
   fs.mkdirSync(viewsDir, { recursive: true });
   const file = path.join(viewsDir, `${spec.id}.json`);
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(spec, null, 2));
   fs.renameSync(tmp, file);
+  if (scope === "project") writeProjectView(place, spec);
+  const owned =
+    scope === "project"
+      ? ` The PROJECT ${place.key} owns it (${projectViewAddress(place.key, spec.id)} — the address for page evidence, a finding's report or page show), so it outlives this thread and is listed under ${place.key} › reports in the knowledge base.`
+      : "";
   return {
     spec,
     message:
-      args.op === "update"
+      (args.op === "update"
         ? `View ${spec.id} updated — the open tab re-renders within a couple of seconds.`
-        : `View ${spec.id} is opening in the panel beside the terminal. Update it later with op "update" and the same id.`,
+        : `View ${spec.id} is opening in the panel beside the terminal. Update it later with op "update" and the same id.`) +
+      owned +
+      note,
   };
+}
+
+// ── Project views (SWIT-107) — a view the PROJECT owns ───────────────────────
+// A report used to live inside the thread that made it: spec in the thread
+// dir, data relative to the thread's cwd — archive or lose the thread and the
+// report was unreachable. `scope: "project"` (a report's DEFAULT) ALSO writes
+// the spec into the project's repo at `.sb-views/_project/<id>.json` and keeps
+// `.sb-views/_project/index.json` (`{version:1, views:[{id, title, kind,
+// builtAt, threadId}]}`, newest first, PROJECT_VIEW_INDEX_CAP) — this server is
+// the one writer of both. The project is the registry project whose repo
+// holds this thread's working directory (longest match — the app's
+// explorer.projectPlaceForDir rule), read from SWITCHBOARD_REGISTRY; the
+// copy records `base` (the cwd relative to that repo root), so the app reads
+// the view's data — and a report's embedded blocks' data — relative to the
+// same directory the agent wrote it from. Ids are PROJECT-unique: an id
+// another thread already holds in the project is refused by name, and a
+// minted id counts the project's ids too. The THREAD copy is still written
+// (views/<id>.json), so the thread's Evidence rows and the view-intent poll
+// work unchanged; the PROJECT copy is the authoritative one (it is what
+// outlives the thread), and `update` writes both.
+
+const PROJECT_VIEW_INDEX_CAP = 200;
+const VIEW_SCOPES = ["thread", "project"];
+const PROJECT_VIEWS_REL = [".sb-views", "_project"];
+
+/** The registry's projects as {key, repos:[absolute, forward slashes]} —
+ *  explorer.rs's lenient parse (conventions.reposRoot + projects[].repos +
+ *  archived[].path). Null when the file is unreadable or has no reposRoot. */
+function readRegistryProjects(registryPath) {
+  if (typeof registryPath !== "string" || registryPath.length === 0) return null;
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(registryPath, "utf8"));
+  } catch {
+    return null;
+  }
+  const rootRaw = data && data.conventions && data.conventions.reposRoot;
+  if (typeof rootRaw !== "string" || rootRaw.trim().length === 0) return null;
+  const root = rootRaw.trim().replace(/\\/g, "/").replace(/\/+$/, "");
+  const out = [];
+  const projects = data.projects && typeof data.projects === "object" ? data.projects : {};
+  for (const [key, entry] of Object.entries(projects)) {
+    if (!entry || typeof entry !== "object" || !Array.isArray(entry.repos)) continue;
+    const repos = entry.repos.filter((r) => typeof r === "string" && r.trim().length > 0).map((r) => `${root}/${r.trim()}`);
+    if (repos.length > 0) out.push({ key, repos });
+  }
+  const archived = data.archived && typeof data.archived === "object" ? data.archived : {};
+  for (const [key, entry] of Object.entries(archived)) {
+    if (entry && typeof entry.path === "string" && entry.path.trim().length > 0) out.push({ key, repos: [`${root}/${entry.path.trim()}`] });
+  }
+  return out;
+}
+
+function foldPath(p) {
+  return String(p).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+/** Is `dir` the same directory as `root` or inside it? Segment-safe,
+ *  case-insensitive (Windows) — explorer.ts `isPathInside`. */
+function isDirInside(dir, root) {
+  const d = foldPath(dir);
+  const r = foldPath(root);
+  return r.length > 0 && (d === r || d.startsWith(`${r}/`));
+}
+
+/** WHERE this thread's working directory sits in the registry: the project
+ *  key, the repo root holding it, every repo of the project, and `base` — the
+ *  cwd relative to that repo root ("" at the root). Null = no registry, or no
+ *  project holds the folder. Pure over the parsed projects. */
+function projectPlaceFor(projects, cwd) {
+  if (!Array.isArray(projects) || typeof cwd !== "string" || cwd.length === 0) return null;
+  let best = null;
+  for (const project of projects) {
+    for (const repo of project.repos) {
+      if (!isDirInside(cwd, repo)) continue;
+      if (best === null || repo.length > best.repoRoot.length) best = { key: project.key, repoRoot: repo, repos: project.repos };
+    }
+  }
+  if (best === null) return null;
+  const rel = cwd.replace(/\\/g, "/").replace(/\/+$/, "").slice(best.repoRoot.replace(/\/+$/, "").length).replace(/^\/+/, "");
+  return { ...best, base: rel };
+}
+
+function projectViewsDir(repoRoot) {
+  return path.join(repoRoot, ...PROJECT_VIEWS_REL);
+}
+
+function readProjectIndex(repoRoot) {
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(projectViewsDir(repoRoot), "index.json"), "utf8"));
+    return Array.isArray(data && data.views) ? data.views.filter((v) => v && typeof v.id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Every project view id across the project's repos → {threadId, repoRoot}. */
+function projectViewOwners(place) {
+  const owners = new Map();
+  for (const repo of place.repos) {
+    for (const v of readProjectIndex(repo)) {
+      if (!owners.has(v.id)) owners.set(v.id, { threadId: typeof v.threadId === "string" ? v.threadId : "", repoRoot: repo });
+    }
+  }
+  return owners;
+}
+
+function writeJsonAtomic(file, value) {
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
+  fs.renameSync(tmp, file);
+}
+
+/** Write the PROJECT copy + its index entry (newest first, one per id). */
+function writeProjectView(place, spec) {
+  const dir = projectViewsDir(place.repoRoot);
+  fs.mkdirSync(dir, { recursive: true });
+  writeJsonAtomic(path.join(dir, `${spec.id}.json`), spec);
+  const entry = { id: spec.id, title: spec.title, kind: spec.kind, builtAt: spec.builtAt, threadId: spec.threadId };
+  const views = [entry, ...readProjectIndex(place.repoRoot).filter((v) => v.id !== spec.id)].slice(0, PROJECT_VIEW_INDEX_CAP);
+  writeJsonAtomic(path.join(dir, "index.json"), { version: 1, views });
+}
+
+/** A project view's address — `view:<project>/<id>` (evidenceModel.ts
+ *  projectViewAddress; the app's one definition of the form). */
+function projectViewAddress(project, id) {
+  return `view:${project}/${id}`;
 }
 
 const VIEW_TOOL = {
@@ -1670,7 +1886,14 @@ const VIEW_TOOL = {
     "code. op 'update' re-renders the open report (every block reloads " +
     "its data); the markdown itself is re-read while the tab is active. A report's headings " +
     "are addressable from page evidence as view:<id>#h:<heading-slug>. Prefer one report over " +
-    "several views when narrative belongs between the charts. THE REVIEW LOOP (a deck): a " +
+    "several views when narrative belongs between the charts. A REPORT BELONGS TO THE " +
+    "PROJECT by default (scope 'project'): it is also written into the project's repo " +
+    "(.sb-views/_project/<id>.json + index.json), outlives this thread, is listed under the " +
+    "project's reports in the knowledge base and is addressed view:<project>/<id> (the " +
+    "result names it) — use that address in evidence, a finding's report or page show. Its " +
+    "data paths stay relative to this working directory. Ids are unique across the project " +
+    "(omit id to mint one); update writes both copies. Pass scope 'project' to give any other " +
+    "view the same life, or scope 'thread' to keep a report in this thread only. THE REVIEW LOOP (a deck): a " +
     "table with a drill is a deck the user steps through with next/prev in the panel; give the " +
     "drill `levels` [{price, label?, style?:'solid'|'dashed'|'zone', price2?}] (<=12; a zone is " +
     "the band between price and price2) for horizontal levels, and `markerColumns` " +
@@ -1698,6 +1921,12 @@ const VIEW_TOOL = {
     type: "object",
     properties: {
       op: { type: "string", enum: ["show", "update"], description: "show = create/open; update = refresh an existing id." },
+      scope: {
+        type: "string",
+        enum: VIEW_SCOPES,
+        description:
+          "Who owns the view: 'project' (the default for kind report — written into the project's repo too, so it outlives this thread and is listed under the project's reports) or 'thread' (the default for every other kind).",
+      },
       set: {
         type: "object",
         description:
@@ -2250,7 +2479,8 @@ const PAGE_TOOL = {
     "path relative to the knowledge-base root (switchboard/features/x/requirements.md); a " +
     "file path relative to this thread's working directory (specs/design.md renders as a " +
     "document, mock.html as a page); surface:<project>/<page>?key=value; view:<id> (add " +
-    "#h:<heading-slug> for a report heading). A file that exists under your working " +
+    "#h:<heading-slug> for a report heading); view:<project>/<id> for a report the project " +
+    "owns (the view tool's result names it). A file that exists under your working " +
     "directory is always THAT file — a knowledge-base doc of the same path never shadows it. " +
     "A folder, a binary file or one over 512 KB is refused (the viewer renders text). " +
     "A ticket key or a URL opens nothing. The " +
@@ -2503,7 +2733,11 @@ function serve(threadDir) {
           const args = (params && params.arguments) || {};
           const message =
             name === "view"
-              ? performViewOp(threadDir, args, Date.now()).message
+              ? performViewOp(threadDir, args, Date.now(), {
+                  cwd: process.cwd(),
+                  threadId: process.env.SWITCHBOARD_THREAD_ID || "",
+                  registryPath: process.env.SWITCHBOARD_REGISTRY,
+                }).message
               : name === "backlog"
                 ? performBacklogOp(
                     {
@@ -2615,6 +2849,11 @@ module.exports = {
   buildViewSpec,
   buildViewSet,
   performViewOp,
+  readRegistryProjects,
+  projectPlaceFor,
+  projectViewAddress,
+  PROJECT_VIEW_INDEX_CAP,
+  VIEW_SCOPES,
   SET_CAP,
   SET_ITEM_CAP,
   resolvePostTarget,

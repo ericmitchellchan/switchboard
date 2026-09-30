@@ -142,6 +142,8 @@ import {
   adjacentDrillKey,
   deckPosition,
   notesDirOf,
+  parseViewOwnerKey,
+  viewOwnerKey,
 } from "../../lib/viewStore";
 import type { ActiveFilters, LinePoints, ViewMeta, ViewRow, ViewSpec } from "../../lib/viewStore";
 import {
@@ -160,7 +162,7 @@ import { barTone, columnMinMax, tableCellTone } from "../../lib/viewTone";
 // erased at build) — importing seriesColor here pulls no chart library into
 // the main chunk; the vite-build gate checks that.
 import { candleLevelLines, seriesColor } from "../../surfaces/charts/candles";
-import { viewPinTargetFor } from "../../lib/pins";
+import { PROJECT_VIEW_PIN_OWNER, viewPinTargetFor } from "../../lib/pins";
 import { getThreadById, threadRepoName, useThreadsView } from "../../lib/threadStore";
 import {
   artifactIdentity,
@@ -311,6 +313,23 @@ const TOOLTIP_STYLE: CSSProperties = {
 
 type ViewArtifact = Extract<Artifact, { kind: "view" }>;
 
+/** A view artifact with the SAME owner as `host` (SWIT-107 — a thread's or a
+ *  project's) — a drilled child, a deck sibling, the parent to go back to. */
+function viewArtifactLike(
+  host: ViewArtifact,
+  viewId: string,
+  extra: { block: number | null; drillKey: string | null }
+): ViewArtifact {
+  const rest = {
+    viewId,
+    ...(extra.block !== null ? { block: extra.block } : {}),
+    ...(extra.drillKey !== null ? { drill: { key: extra.drillKey } } : {}),
+  };
+  return host.project !== undefined
+    ? { kind: "view", project: host.project, ...rest }
+    : { kind: "view", threadId: host.threadId, ...rest };
+}
+
 /** What hovering an anchor means here — printed at the toolbar's right end,
  *  and (T7) the anchor's key + the row's fields for the highlight + tooltip. */
 type HoverHint = {
@@ -324,10 +343,12 @@ type HoverHint = {
 type PriceMode = "points" | "percent";
 
 export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; active: boolean }) {
-  const { threadId, viewId } = artifact;
+  const { viewId } = artifact;
+  // SWIT-107: a thread's view or a PROJECT's — one owner key for every read.
+  const owner = viewOwnerKey(artifact);
   const drillKey = artifact.drill?.key ?? null;
   const block = artifact.block ?? null;
-  const view = useView(threadId, viewId, active, drillKey, block);
+  const view = useView(owner, viewId, active, drillKey, block);
 
   // SWIT-73: a REPORT renders as a document (narrative + embedded views) in
   // its own lazy chunk. Only the BARE report artifact takes this branch — a
@@ -340,7 +361,7 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
           spec={view.spec}
           markdown={view.text}
           error={view.error}
-          threadId={threadId}
+          owner={owner}
           viewId={viewId}
           artifact={artifact}
           active={active}
@@ -356,7 +377,7 @@ export function ViewSurface({ artifact, active }: { artifact: ViewArtifact; acti
       meta={view.meta}
       loading={view.loading}
       rerun={view.rerun}
-      threadId={threadId}
+      owner={owner}
       viewId={viewId}
       artifact={artifact}
       active={active}
@@ -373,7 +394,9 @@ export type ViewChromeProps = {
   meta: ViewMeta | null;
   loading: boolean;
   rerun: () => void;
-  threadId: string;
+  /** SWIT-107: the view's OWNER KEY (viewStore.viewOwnerKey) — a thread id,
+   *  or `project:<key>/<viewId>` for a project view; "" for a kept view. */
+  owner: string;
   viewId: string;
   /** The HOST artifact — a standalone view's own record, or the REPORT's for
    *  an embedded block (the pins identity and drilled-child opens key off
@@ -412,7 +435,7 @@ export function ViewChrome({
   meta,
   loading,
   rerun,
-  threadId,
+  owner,
   viewId,
   artifact,
   active,
@@ -422,6 +445,14 @@ export function ViewChrome({
   frozen = false,
   frozenLabel,
 }: ViewChromeProps) {
+  // SWIT-107: what the owner means for the THREAD-shaped features — deck
+  // notes, the notes batch, the pins/keep project. A project view has no
+  // thread: its notes are off (write_view_notes is keyed by a thread's cwd)
+  // and its batch target reads "not live"; its pins file under the project.
+  const ownerInfo = useMemo(() => parseViewOwnerKey(owner), [owner]);
+  const threadId = ownerInfo?.kind === "thread" ? ownerInfo.threadId : "";
+  const ownerProject = ownerInfo?.kind === "project" ? ownerInfo.project : null;
+
   // ── Filters (T6): client-side slices, per view instance ───────────────────
   const [activeFilters, setActiveFilters] = useState<ActiveFilters>({});
   const filteredRows = useMemo(
@@ -457,7 +488,7 @@ export function ViewChrome({
   // child (inert — never polls, never loads — for a standalone or embedded
   // view). The parent's file order is the deck order (viewStore.deckKeys).
   const isDeckChild = drillKey !== null;
-  const parent = useView(threadId, viewId, active && isDeckChild, null, block);
+  const parent = useView(owner, viewId, active && isDeckChild, null, block);
   const deckSpec = isDeckChild && parent.spec && DECK_PARENT_KINDS.has(parent.spec.kind) ? parent.spec : null;
   const deckRows = deckSpec ? parent.rows : null;
   const deckColumn = deckSpec ? deckKeyColumn(deckSpec) : null;
@@ -466,7 +497,7 @@ export function ViewChrome({
     () => (deckRows && drillKey !== null ? deckPosition(deckRows, deckColumn, drillKey) : null),
     [deckRows, deckColumn, drillKey]
   );
-  const notesDir = deckSpec ? notesDirOf(deckSpec.source) : null;
+  const notesDir = deckSpec && ownerProject === null ? notesDirOf(deckSpec.source) : null;
   const notes = useViewNotes(threadId, notesDir, active && isDeckChild);
   const noteText = drillKey !== null ? noteFor(notes.file, drillKey) : "";
   const unsent = useMemo(() => (isDeckChild ? unsentNotes(notes.file, deck) : []), [isDeckChild, notes.file, deck]);
@@ -482,11 +513,13 @@ export function ViewChrome({
     return batchSendTarget(thread, threadsView.launched.has(threadId), status !== undefined && status !== "exited");
   }, [threadsView, threadId]);
 
-  // The project a view's pins + keeps file under: the thread's repo name.
+  // The project a view's pins + keeps file under: the thread's repo name —
+  // or, for a PROJECT view (SWIT-107), the project itself.
   const project = useMemo(() => {
+    if (ownerProject !== null) return ownerProject;
     const thread = getThreadById(threadId);
     return thread ? threadRepoName(thread.workingDir) : "unknown";
-  }, [threadId]);
+  }, [threadId, ownerProject]);
 
   // ── Anchors: local registry (canvas) + DOM provider (table/dist) ───────────
   const [rootEl, setRootEl] = useState<HTMLDivElement | null>(null);
@@ -534,7 +567,7 @@ export function ViewChrome({
   const target = useMemo<AnchoredPinTarget>(() => {
     // The ACTIVE filter (and the drill key) scope the doc: a pin dropped on
     // one date lives under that date and is not drawn on another (T6).
-    const { sidecarPath, docKey } = viewPinTargetFor(project, threadId, viewId, pinScope);
+    const { sidecarPath, docKey } = viewPinTargetFor(project, ownerProject !== null ? PROJECT_VIEW_PIN_OWNER : threadId, viewId, pinScope);
     return {
       artifact,
       sidecarPath,
@@ -544,7 +577,7 @@ export function ViewChrome({
       emptyHint:
         "no pins yet — toggle \u{1F4CC} pin, then click a row, bar, bin or mark. A view pin follows the THING and survives re-run as long as the data still holds it.",
     };
-  }, [artifact, project, threadId, viewId, pinScope]);
+  }, [artifact, project, threadId, ownerProject, viewId, pinScope]);
   // A frozen (kept) view has no thread and no real pin sidecar: the hook is
   // parked (its output is hidden below) so it never polls a bogus file.
   const pins = useAnchoredPins(target, provider, rootEl, pinMode, onPlaced, active && !frozen);
@@ -579,15 +612,10 @@ export function ViewChrome({
           flashNote("no thread to open it beside");
           return;
         }
-        openDrillInPanel(sessionId, artifact, {
-          kind: "view",
-          threadId,
-          viewId,
-          // SWIT-73: a child drilled from an EMBEDDED view carries the block —
-          // useView re-derives the effective parent from the report's markdown.
-          ...(block !== null ? { block } : {}),
-          drill: { key: hit.key },
-        });
+        // SWIT-73: a child drilled from an EMBEDDED view carries the block —
+        // useView re-derives the effective parent from the report's markdown.
+        // SWIT-107: the child keeps the host's OWNER (a thread or a project).
+        openDrillInPanel(sessionId, artifact, viewArtifactLike(artifact, viewId, { block, drillKey: hit.key }));
         return;
       }
       if (!canSend) {
@@ -596,7 +624,7 @@ export function ViewChrome({
       }
       sendToThread(sanitizeForTypedLine(drillFallbackSentence(spec.title, hit.label), REF_MAX));
     },
-    [spec, describeAnchor, flashNote, artifact, threadId, viewId, block, canSend, frozen]
+    [spec, describeAnchor, flashNote, artifact, viewId, block, canSend, frozen]
   );
   const onBodyClick = useCallback(
     (e: ReactMouseEvent) => {
@@ -654,20 +682,14 @@ export function ViewChrome({
         flashNote("no thread to open it beside");
         return;
       }
-      const sibling: ViewArtifact = {
-        kind: "view",
-        threadId,
-        viewId,
-        ...(block !== null ? { block } : {}),
-        drill: { key },
-      };
+      const sibling = viewArtifactLike(artifact, viewId, { block, drillKey: key });
       // In place when this child is the preview; a PINNED child steps by
       // opening the sibling as a fresh drill beside it (back → the table).
       if (!stepPreview(sessionId, sibling)) {
-        openDrillInPanel(sessionId, { kind: "view", threadId, viewId }, sibling);
+        openDrillInPanel(sessionId, viewArtifactLike(artifact, viewId, { block: null, drillKey: null }), sibling);
       }
     },
-    [deckRows, deckColumn, drillKey, threadId, viewId, block, flashNote]
+    [deckRows, deckColumn, drillKey, artifact, viewId, block, flashNote]
   );
   const onRootKeyDown = useCallback(
     (e: ReactKeyboardEvent) => {
@@ -1023,7 +1045,7 @@ export function ViewChrome({
               priceMode={priceMode}
               onActivate={openAnchor}
               onHover={onHoverAnchor}
-              threadId={threadId}
+              owner={owner}
               active={active}
             />
             {!frozen && pins.marks}
@@ -1125,9 +1147,9 @@ const ViewBody = memo(function ViewBody({
   priceMode,
   onActivate,
   onHover,
-  threadId,
+  owner,
   active,
-}: RendererProps & { priceMode: PriceMode; meta: ViewMeta | null; threadId: string; active: boolean }) {
+}: RendererProps & { priceMode: PriceMode; meta: ViewMeta | null; owner: string; active: boolean }) {
   switch (spec.kind) {
     case "timeline":
       return (
@@ -1157,7 +1179,7 @@ const ViewBody = memo(function ViewBody({
     case "line":
       return (
         <Suspense fallback={<ChartFallback />}>
-          <LineView spec={spec} rows={rows} threadId={threadId} active={active} />
+          <LineView spec={spec} rows={rows} owner={owner} active={active} />
         </Suspense>
       );
     case "dist":
@@ -1445,12 +1467,12 @@ const PANEL_TITLE_STYLE: CSSProperties = {
 function LineView({
   spec,
   rows,
-  threadId,
+  owner,
   active,
 }: {
   spec: ViewSpec;
   rows: ViewRow[];
-  threadId: string;
+  owner: string;
   active: boolean;
 }) {
   const points = useMemo(() => toLinePoints(rows, spec), [rows, spec]);
@@ -1468,7 +1490,7 @@ function LineView({
   const markers = useMemo(() => effectiveMarkers(rows, spec).map((m) => ({ ts: m.ts, label: m.label })), [rows, spec]);
   const regions = spec.regions;
   const levels = spec.levels;
-  const panelData = useViewPanels(threadId, spec, active);
+  const panelData = useViewPanels(owner, spec, active);
   const panelPoints = useMemo(
     () => panelData.map((p) => (p.rows ? toLinePoints(p.rows, spec) : null)),
     [panelData, spec]

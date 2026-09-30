@@ -34,7 +34,7 @@
 import type { Artifact } from "../types";
 import type { PageItem, RenderedPage } from "./pageStore";
 import { artifactIdentity, type OpenableArtifact } from "./panelStore";
-import { resolveDocTarget, viewAnchorOfAddress } from "./evidenceModel";
+import { projectViewOfAddress, resolveDocTarget, viewAnchorOfAddress } from "./evidenceModel";
 import { parseSurfaceAddress } from "./surfaceParams";
 
 export type NextThingContext = {
@@ -61,6 +61,9 @@ export type NextThingContext = {
  *  rows and `start here` link come here, so they resolve an address exactly
  *  as the turn-end hook and the agent's `show` do (review of 49ebb20, #7). */
 export function resolveOpenable(address: string, ctx: NextThingContext): OpenableArtifact | null {
+  // SWIT-107: a PROJECT's view (`view:<project>/<id>`) needs no thread.
+  const pview = projectViewOfAddress(address);
+  if (pview) return { kind: "view", project: pview.project, viewId: pview.viewId };
   return (
     parseSurfaceAddress(address) ??
     resolveDocTarget(address, ctx.kbDocs, ctx.projectKey, ctx.onKbMiss, ctx.pathPrefix ?? "")
@@ -80,6 +83,9 @@ export function resolveAddress(
 ): { artifact: Artifact; anchor: string | null } | null {
   const view = viewAnchorOfAddress(address);
   if (view) return { artifact: { kind: "view", threadId: ctx.threadId, viewId: view.viewId }, anchor: view.anchor };
+  // SWIT-107: `view:<project>/<id>[#anchor]` — the project's view, its anchor kept.
+  const pview = projectViewOfAddress(address);
+  if (pview) return { artifact: { kind: "view", project: pview.project, viewId: pview.viewId }, anchor: pview.anchor };
   const hit = resolveOpenable(address, ctx);
   return hit ? { artifact: hit, anchor: null } : null;
 }

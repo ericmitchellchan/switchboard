@@ -409,11 +409,182 @@ pub fn append_line_for_project(
     append_line_at(&project, rel_path, heading, line)
 }
 
+// ── Project views (SWIT-107) ─────────────────────────────────────────────────
+// A view a PROJECT owns lives in the project's repo:
+// `<repo>/.sb-views/_project/<id>.json` (the spec) beside
+// `<repo>/.sb-views/_project/index.json` (`{version:1, views:[…]}`), both
+// written by the MCP server — its one writer — when a view is shown with
+// `scope: "project"` (a report's default). The app READS them here, addressed
+// by registry KEY (never a client-supplied root) through this file's two-layer
+// guard: the fixed relative location / a validated view id, then canonical
+// containment inside the repo root. A spec's DATA is relative to the
+// directory the view was written from — the spec's own `base` (that
+// directory, relative to the repo root) — and is guarded the same way: `base`
+// and the data path are both component-validated, and the joined path must
+// canonicalize inside the repo root.
+
+/// Where project views live inside a repo — FIXED, never caller data.
+const PROJECT_VIEWS_DIR: [&str; 2] = [".sb-views", "_project"];
+/// The index file's fixed name.
+const PROJECT_VIEWS_INDEX: &str = "index.json";
+/// Cap on a project view's data file — mirrors lib.rs's VIEW_DATA_CAP (a
+/// thread view's cap); change one, change the other.
+const PROJECT_VIEW_DATA_CAP: u64 = 8 * 1024 * 1024;
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct ProjectViewIndex {
+    /// The repo's name in a multi-repo project, `""` in a single-repo one.
+    pub repo: String,
+    /// The index file's raw content (the frontend parses it tolerantly).
+    pub content: String,
+}
+
+fn valid_project_view_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Every repo root of a project, canonicalized, with its multi-repo name.
+fn project_repo_roots(project: &ProjectInfo) -> Vec<(String, PathBuf)> {
+    let multi = project.repos.len() > 1;
+    project
+        .repos
+        .iter()
+        .filter_map(|r| {
+            let root = fs::canonicalize(r).ok()?;
+            Some((if multi { repo_name(r).to_string() } else { String::new() }, root))
+        })
+        .collect()
+}
+
+/// A fixed file inside a repo's project-views dir, IF it exists and is a
+/// regular file inside the root (layer 2 closes a junctioned `.sb-views`).
+fn project_views_file(root: &Path, name: &str) -> Option<PathBuf> {
+    let mut p = root.to_path_buf();
+    for seg in PROJECT_VIEWS_DIR {
+        p.push(seg);
+    }
+    p.push(name);
+    let canon = canonicalize_within(root, &p).ok()?;
+    if fs::metadata(&canon).map(|m| m.is_file()).unwrap_or(false) {
+        Some(canon)
+    } else {
+        None
+    }
+}
+
+/// The project's view indexes, one per repo that has one. Missing = absent.
+fn project_view_indexes_at(project: &ProjectInfo) -> Vec<ProjectViewIndex> {
+    let mut out = Vec::new();
+    for (repo, root) in project_repo_roots(project) {
+        if let Some(file) = project_views_file(&root, PROJECT_VIEWS_INDEX) {
+            if let Ok(content) = fs::read_to_string(&file) {
+                out.push(ProjectViewIndex { repo, content });
+            }
+        }
+    }
+    out
+}
+
+/// A project view's spec: (its repo root, the raw JSON), the FIRST repo that
+/// holds the id (ids are project-unique by the server's rule). None = missing.
+fn project_view_at(project: &ProjectInfo, view_id: &str) -> Result<Option<(PathBuf, String)>, String> {
+    if !valid_project_view_id(view_id) {
+        return Err("invalid view id".to_string());
+    }
+    for (_, root) in project_repo_roots(project) {
+        if let Some(file) = project_views_file(&root, &format!("{}.json", view_id)) {
+            let content = fs::read_to_string(&file).map_err(|e| format!("cannot read view {}: {}", view_id, e))?;
+            return Ok(Some((root, content)));
+        }
+    }
+    Ok(None)
+}
+
+/// A project view's DATA: `rel_path` relative to the spec's `base` (the
+/// directory it was written from), inside the repo root. Both are validated
+/// component-wise (`validate_rel_path` — no `..`, no absolute/drive/UNC form,
+/// no `:`), and the joined path must canonicalize INSIDE the repo root.
+fn project_view_data_at(project: &ProjectInfo, view_id: &str, rel_path: &str) -> Result<String, String> {
+    if rel_path.trim().is_empty() || rel_path.len() > 512 {
+        return Err("invalid data path".to_string());
+    }
+    validate_rel_path(rel_path)?;
+    let (root, spec) = project_view_at(project, view_id)?.ok_or_else(|| format!("no project view {}", view_id))?;
+    let base = serde_json::from_str::<serde_json::Value>(&spec)
+        .ok()
+        .and_then(|v| v.get("base").and_then(|b| b.as_str()).map(|s| s.to_string()))
+        .unwrap_or_default();
+    if base.len() > 512 {
+        return Err("invalid view base".to_string());
+    }
+    validate_rel_path(&base)?;
+    let mut candidate = root.clone();
+    for seg in base.split(['/', '\\']).filter(|s| !s.is_empty()) {
+        candidate.push(seg);
+    }
+    for seg in rel_path.split(['/', '\\']).filter(|s| !s.is_empty()) {
+        candidate.push(seg);
+    }
+    let canon = canonicalize_within(&root, &candidate)?;
+    let meta = fs::metadata(&canon).map_err(|e| format!("cannot stat {:?}: {}", rel_path, e))?;
+    if !meta.is_file() {
+        return Err("data path is not a file".to_string());
+    }
+    if meta.len() > PROJECT_VIEW_DATA_CAP {
+        return Err(format!(
+            "data file is {} bytes; the cap is {} — aggregate or window the rows before showing them",
+            meta.len(),
+            PROJECT_VIEW_DATA_CAP
+        ));
+    }
+    fs::read_to_string(&canon).map_err(|e| format!("cannot read {:?}: {}", rel_path, e))
+}
+
 // ── Tauri commands ───────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn explorer_projects() -> Result<Vec<ProjectInfo>, String> {
     load_registry()
+}
+
+/// SWIT-107: a project's view indexes (one per repo holding one).
+#[tauri::command]
+pub async fn list_project_views(project_key: String) -> Result<Vec<ProjectViewIndex>, String> {
+    let projects = load_registry()?;
+    let project = find_project(&projects, &project_key)?;
+    Ok(project_view_indexes_at(&project))
+}
+
+/// SWIT-107: one project view's spec ("" when missing — the cannot-render
+/// card names the id, like a thread view's).
+#[tauri::command]
+pub async fn read_project_view(project_key: String, view_id: String) -> Result<String, String> {
+    let projects = load_registry()?;
+    let project = find_project(&projects, &project_key)?;
+    Ok(project_view_at(&project, &view_id)?.map(|(_, c)| c).unwrap_or_default())
+}
+
+/// SWIT-107: a project view's data file (or a report's markdown).
+#[tauri::command]
+pub async fn read_project_view_data(project_key: String, view_id: String, rel_path: String) -> Result<String, String> {
+    let projects = load_registry()?;
+    let project = find_project(&projects, &project_key)?;
+    project_view_data_at(&project, &view_id, &rel_path)
+}
+
+/// SWIT-107: the registry file the MCP server reads to find the project a
+/// thread's working directory belongs to (`scope: "project"` views). None
+/// when the KB root does not resolve — the server then keeps every view in
+/// its thread and says so.
+pub fn registry_path() -> Option<String> {
+    let root = crate::kb::resolve_kb_root().ok()?;
+    let p = root.join("registry.json");
+    if !p.is_file() {
+        return None;
+    }
+    // The canonical root is `\\?\C:\…` on Windows — hand Node the plain form.
+    let s = p.to_string_lossy().into_owned();
+    Some(s.strip_prefix(r"\\?\").map(|t| t.to_string()).unwrap_or(s))
 }
 
 #[tauri::command]
@@ -850,6 +1021,102 @@ mod explorer_tests {
         assert!(append_line_at(&project, "design/conventions.md", "## D", "   ").is_err());
         assert!(append_line_at(&project, "../outside.md", "## D", "x").is_err());
         assert_eq!(read_at(&project, "design/conventions.md").unwrap(), "# C\n");
+    }
+
+    // ── Project views (SWIT-107) ──
+    // Read by registry KEY; the spec location is fixed, the data path is
+    // relative to the spec's own `base`, and both guard layers hold.
+
+    #[test]
+    fn project_views_list_read_and_load_data_relative_to_base() {
+        let root = temp_repo("pviews");
+        write(&root, ".sb-views/_project/index.json", r#"{"version":1,"views":[{"id":"v3","title":"gamma","kind":"report","builtAt":"x","threadId":"t"}]}"#);
+        write(&root, ".sb-views/_project/v3.json", r#"{"id":"v3","kind":"report","base":"apps/desktop","source":{"type":"file","path":"analysis.md"}}"#);
+        write(&root, "apps/desktop/analysis.md", "# gamma");
+        write(&root, "apps/desktop/.sb-views/g.json", "[]");
+        let project = project_for(&root);
+        let idx = project_view_indexes_at(&project);
+        assert_eq!(idx.len(), 1);
+        assert_eq!(idx[0].repo, "");
+        assert!(idx[0].content.contains("\"v3\""));
+        let (_, spec) = project_view_at(&project, "v3").unwrap().unwrap();
+        assert!(spec.contains("\"base\""));
+        assert!(project_view_at(&project, "v9").unwrap().is_none());
+        assert_eq!(project_view_data_at(&project, "v3", "analysis.md").unwrap(), "# gamma");
+        assert_eq!(project_view_data_at(&project, "v3", ".sb-views/g.json").unwrap(), "[]");
+        // A repo with no index lists nothing (the ordinary state).
+        let bare = temp_repo("pviews-bare");
+        assert!(project_view_indexes_at(&project_for(&bare)).is_empty());
+    }
+
+    #[test]
+    fn project_view_guards_refuse_escapes_bad_ids_and_a_poisoned_base() {
+        let root = temp_repo("pviews-guard");
+        write(&root, ".sb-views/_project/v1.json", r#"{"id":"v1","base":""}"#);
+        write(&root, ".sb-views/_project/bad.json", r#"{"id":"bad","base":"../.."}"#);
+        write(&root, "a.json", "[]");
+        let project = project_for(&root);
+        let long = "x".repeat(65);
+        for id in ["", "../v1", "v1/..", "a b", "C:x", long.as_str()] {
+            assert!(project_view_at(&project, id).is_err(), "id {:?} must be refused", id);
+        }
+        for rel in ["../outside.json", "a/../../x", "C:/Windows/x", "/etc/passwd", r"\\server\share\x", "a.json:stream", ""] {
+            assert!(project_view_data_at(&project, "v1", rel).is_err(), "rel {:?} must be refused", rel);
+        }
+        // A `base` that climbs out is refused even though the file wrote it.
+        assert!(project_view_data_at(&project, "bad", "a.json").is_err());
+        // The spec is found only at its fixed location — a caller cannot name another file.
+        assert_eq!(project_view_data_at(&project, "v1", "a.json").unwrap(), "[]");
+        assert!(project_view_data_at(&project, "nope", "a.json").is_err());
+        // A directory is not data.
+        write(&root, "dir/x.json", "[]");
+        assert!(project_view_data_at(&project, "v1", "dir").is_err());
+    }
+
+    #[test]
+    fn project_view_data_over_the_cap_is_refused() {
+        let root = temp_repo("pviews-cap");
+        write(&root, ".sb-views/_project/v1.json", r#"{"id":"v1"}"#);
+        let big = "x".repeat((PROJECT_VIEW_DATA_CAP + 1) as usize);
+        write(&root, "big.json", &big);
+        let err = project_view_data_at(&project_for(&root), "v1", "big.json").unwrap_err();
+        assert!(err.contains("the cap is"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn a_multi_repo_project_lists_each_repos_index_under_its_name() {
+        let a = temp_repo("pviews-multi-a");
+        let b = temp_repo("pviews-multi-b");
+        write(&b, ".sb-views/_project/index.json", r#"{"version":1,"views":[]}"#);
+        write(&b, ".sb-views/_project/r1.json", r#"{"id":"r1","base":""}"#);
+        write(&b, "d.json", "[1]");
+        let project = ProjectInfo {
+            key: "multi".to_string(),
+            status: "active".to_string(),
+            repos: vec![a.to_string_lossy().into_owned(), b.to_string_lossy().into_owned()],
+            note: None,
+        };
+        let idx = project_view_indexes_at(&project);
+        assert_eq!(idx.len(), 1);
+        assert_eq!(idx[0].repo, b.file_name().unwrap().to_string_lossy());
+        assert_eq!(project_view_data_at(&project, "r1", "d.json").unwrap(), "[1]");
+    }
+
+    /// A junctioned `.sb-views` pointing outside the repo is not the repo's.
+    #[cfg(windows)]
+    #[test]
+    fn project_views_through_a_junction_are_refused() {
+        let root = temp_repo("pviews-junction");
+        let outside = temp_repo("pviews-junction-out");
+        write(&outside, "_project/v1.json", r#"{"id":"v1"}"#);
+        write(&outside, "_project/index.json", r#"{"version":1,"views":[]}"#);
+        if !make_junction(&root.join(".sb-views"), &outside) {
+            eprintln!("junction creation failed — skipping");
+            return;
+        }
+        let project = project_for(&root);
+        assert!(project_view_at(&project, "v1").unwrap().is_none());
+        assert!(project_view_indexes_at(&project).is_empty());
     }
 
     /// Create an NTFS junction (no privilege required). Returns false if the

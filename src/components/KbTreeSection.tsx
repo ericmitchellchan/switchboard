@@ -27,6 +27,14 @@
 // they never read as KB folders. A project with no KB docs still gets its
 // folder when its repo has one. Files open as `repo-file` artifacts: the same
 // viewer, pins mirror and markdown editing the Projects section gives them.
+//
+// PROJECT REPORTS (SWIT-107): a project whose repo holds a project-view index
+// (`.sb-views/_project/index.json`, written by the MCP server for a report —
+// scope project) gets a `reports` folder beside those repo folders (dim
+// `project` meta), newest first, from repoListing's cache (refreshed with
+// the registry and on every expand — no polling). A row opens the project's
+// view through `openArtifact` — beside the active thread, or full width with
+// Ctrl / with no thread — and needs no thread behind it.
 
 import { useEffect, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
@@ -49,6 +57,10 @@ import {
   repoKbProjects,
   useRepoListings,
   withRepoProjects,
+  fetchProjectViews,
+  getProjectViews,
+  reportProjects,
+  type ProjectViewEntry,
 } from "../lib/repoListing";
 import { EXPANDER_SIZE, ICON_SIZE, Icon, type IconName } from "./icons";
 import { RepoDirRows } from "./RepoDirRows";
@@ -69,7 +81,9 @@ export function KbTreeSection({ route }: { route: Route }) {
   }, []);
   const registry = getRegistryProjects();
   const repoProjects = repoKbProjects(registry.projects ?? [], (p) => getListing(p, ""));
-  const tree = withRepoProjects(buildKbTree(docs ?? []), repoProjects.keys());
+  // SWIT-107: projects that own at least one project view (a report).
+  const reports = reportProjects(registry.projects ?? [], getProjectViews);
+  const tree = withRepoProjects(buildKbTree(docs ?? []), [...repoProjects.keys(), ...reports.keys()]);
 
   // Active doc — the highlight must name what is ACTUALLY on screen (A3):
   //   · on the kb screen, that's the route's doc (full-width reading wins);
@@ -150,6 +164,54 @@ export function KbTreeSection({ route }: { route: Route }) {
     setRepoBump((n) => n + 1);
   };
 
+  /** A project folder's `reports` (SWIT-107) — the views the PROJECT owns.
+   *  Its expansion key is a pseudo name (`reports/`, trailing slash) so it
+   *  can never collide with a real repo directory called `reports`. */
+  const reportsFolder = (project: string, views: readonly ProjectViewEntry[]) => {
+    const key = listingKey(project, "reports/");
+    const open = repoExpandedCache.has(key);
+    const shown =
+      route.screen === "terminal" && panelArtifact?.kind === "view" && panelArtifact.project === project
+        ? panelArtifact.viewId
+        : route.screen === "project" && route.project === project && route.view !== undefined
+          ? route.view
+          : undefined;
+    return (
+      <div key={key}>
+        <TreeRow
+          label="reports"
+          expanded={open}
+          icon={folderIcon(open)}
+          depth={1}
+          active={false}
+          meta="project"
+          onClick={() => {
+            const next = new Set(repoExpandedCache);
+            if (next.has(key)) next.delete(key);
+            else {
+              next.add(key);
+              fetchProjectViews(project); // stale-while-revalidate, like a listing
+            }
+            repoExpandedCache = next;
+            setRepoBump((n) => n + 1);
+          }}
+        />
+        {open &&
+          views.map((v) => (
+            <TreeRow
+              key={v.id}
+              label={v.title}
+              icon={FILE_ICON}
+              depth={2}
+              active={shown === v.id}
+              meta={v.kind === "report" ? undefined : v.kind}
+              onClick={(e) => openArtifact({ kind: "view", project, viewId: v.id }, { modifier: e.ctrlKey || e.metaKey })}
+            />
+          ))}
+      </div>
+    );
+  };
+
   /** A project folder's repo directories, drawn after its KB children. */
   const repoFolders = (project: string, dirs: readonly string[]) =>
     dirs.map((d) => {
@@ -200,9 +262,12 @@ export function KbTreeSection({ route }: { route: Route }) {
           onSelect={select}
           onToggle={toggle}
           after={
-            node.type === "folder" && repoProjects.has(node.name)
-              ? repoFolders(node.name, repoProjects.get(node.name)!)
-              : undefined
+            node.type === "folder" && (repoProjects.has(node.name) || reports.has(node.name)) ? (
+              <>
+                {repoProjects.has(node.name) && repoFolders(node.name, repoProjects.get(node.name)!)}
+                {reports.has(node.name) && reportsFolder(node.name, reports.get(node.name)!)}
+              </>
+            ) : undefined
           }
         />
       ))}

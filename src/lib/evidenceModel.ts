@@ -232,6 +232,35 @@ export function viewAnchorOfAddress(address: string): { viewId: string; anchor: 
   return { viewId: id, anchor };
 }
 
+/** SWIT-107 — A PROJECT'S VIEW: `view:<project>/<viewId>[#anchor]`. The ONE
+ *  definition of the form (the MCP server's `show` mirrors it). A bare
+ *  `view:<id>` keeps meaning the THREAD's view — the slash is what names a
+ *  project owner, and neither word may hold one. Same anchor grammar as
+ *  `viewAnchorOfAddress`; a malformed part makes the whole address plain. */
+export function projectViewAddress(project: string, viewId: string): string {
+  return `view:${project}/${viewId}`;
+}
+
+export function projectViewOfAddress(
+  address: string
+): { project: string; viewId: string; anchor: string | null } | null {
+  const a = address.trim();
+  if (!a.startsWith("view:")) return null;
+  const rest = a.slice("view:".length);
+  const hash = rest.indexOf("#");
+  const head = hash === -1 ? rest : rest.slice(0, hash);
+  const slash = head.indexOf("/");
+  if (slash === -1) return null;
+  const project = head.slice(0, slash);
+  const viewId = head.slice(slash + 1);
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(project) || !/^[A-Za-z0-9_-]{1,64}$/.test(viewId)) return null;
+  if (hash === -1) return { project, viewId, anchor: null };
+  const anchor = rest.slice(hash + 1);
+  // eslint-disable-next-line no-control-regex
+  if (!/^[a-z][a-z0-9-]*:.+$/s.test(anchor) || /[\x00-\x1f\x7f]/.test(anchor)) return null;
+  return { project, viewId, anchor };
+}
+
 /** What the view poll LATCHES after a pass (SWIT-70 review fix, F2): only
  *  the ids whose spec actually read. A failed or torn read leaves the latched
  *  key UNEQUAL to the id list's key, so the next tick retries that spec

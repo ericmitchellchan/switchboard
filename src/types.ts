@@ -137,7 +137,11 @@ export type Route =
   // to the terminal when either is missing. T9 (SWIT-63): optional `params`
   // — the page STATE (surface artifact params), carried as `p.<key>` query
   // params so a deep link into `Trading · NQ 2026-06-05` survives an F5.
-  | { screen: "project"; project: string; page: string; params?: Record<string, string> };
+  | { screen: "project"; project: string; page: string; params?: Record<string, string>; view?: undefined }
+  // SWIT-107: a PROJECT VIEW full width — the "open full" of a report the
+  // project owns (`?screen=project&project=lodestar&view=v3`). Same screen,
+  // the other identity: a view instead of a page. Exactly one of the two.
+  | { screen: "project"; project: string; view: string; page?: undefined; params?: undefined };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Threads (T5) — an agent session that survives app/machine restarts.
@@ -220,7 +224,16 @@ export type Artifact =
   // file holds a REPORT, and the effective parent is fence block <n> of its
   // markdown (viewStore.inlineSpecAt). Always set together with `drill`;
   // derived at render time like the drill itself.
-  | { kind: "view"; threadId: string; viewId: string; block?: number; drill?: { key: string } }
+  //
+  // SWIT-107: a view has an OWNER — a thread (`threadId`, as always) or a
+  // registry PROJECT (`project`, the registry key). A project view's spec
+  // lives in the project's repo at `.sb-views/_project/<viewId>.json` (the
+  // MCP server writes it beside the thread copy for `scope: "project"`, the
+  // report default) and Rust reads it by project KEY with the explorer's
+  // guards — so a report outlives the thread that made it and opens with no
+  // thread at all. Exactly one of the two owner fields is present.
+  | { kind: "view"; threadId: string; project?: undefined; viewId: string; block?: number; drill?: { key: string } }
+  | { kind: "view"; project: string; threadId?: undefined; viewId: string; block?: number; drill?: { key: string } }
   // A QUESTION tab (SWIT-51, R3 rule 1) — LEGACY since SWIT-67 (nothing
   // creates it; kept for restored workspaces). Answering writes answers.json
   // and closes it; since SWIT-77 nothing is typed — the ✦ page sends every

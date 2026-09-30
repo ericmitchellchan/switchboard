@@ -14,7 +14,9 @@
 //   Live now         → launched threads + the latest turn's first line.
 //   Between threads  → the last hour of cross-thread posts.
 //   Listening        → announced dev servers, probed (never "healthy").
-//   Kept views       → the scratchpad listing (_scratch/*.view.json).
+//   Kept views       → the scratchpad listing (_scratch/*.view.json), and
+//                      (SWIT-107) the newest PROJECT reports — views a
+//                      registry project owns, from repoListing's cache.
 //
 // SKIN (SWIT-54 hierarchy pass; re-cut SWIT-91 — the ✦ page's Ky pass,
 // SWIT-90, reads like Ky's PlanPanel and Home did not): ONE left-aligned
@@ -59,7 +61,15 @@ import {
   unsentDecisionsLine,
 } from "../lib/pageStore";
 import type { AnswerNote, InboxPost, PageItem, PageQuestion, RenderedPage } from "../lib/pageStore";
-import { answerQuestion } from "../lib/panelStore";
+import { answerQuestion, openArtifact } from "../lib/panelStore";
+import {
+  getProjectViews,
+  getRegistryProjects,
+  newestProjectViews,
+  refreshRepoKb,
+  useRepoListings,
+  type ProjectViewEntry,
+} from "../lib/repoListing";
 import { readThreadFile, listScratchViews } from "../lib/ipc";
 import { navigate } from "../lib/route";
 import { useAllKnownServers, serverKey } from "../lib/devServer";
@@ -147,7 +157,9 @@ function Row({
   title,
   children,
 }: {
-  onClick: () => void;
+  /** The click event rides along so a row can read Ctrl/⌘ (SWIT-107's
+   *  report rows: full width instead of beside the thread). */
+  onClick: (e: React.MouseEvent) => void;
   title?: string;
   children: ReactNode;
 }) {
@@ -199,6 +211,12 @@ export function Home({
   const servers = useAllKnownServers();
   const [digests, setDigests] = useState<ThreadDigest[]>([]);
   const [kept, setKept] = useState<string[]>([]);
+  // SWIT-107: the newest project reports — repoListing's cache (the KB band's),
+  // refreshed with the registry on Home's own tick (throttled there to
+  // REFRESH_MIN_MS, so no new timer and no per-tick IPC).
+  useRepoListings();
+  const registry = getRegistryProjects();
+  const reports = newestProjectViews((registry.projects ?? []).map((p) => p.key), getProjectViews);
 
   // ONE poll for every block: page + answers + inbox per active thread, and
   // the scratchpad listing — while Home is on screen only (the standing
@@ -234,6 +252,7 @@ export function Home({
           }
           if (cancelled) return;
         }
+        refreshRepoKb();
         const keptViews = await listScratchViews().catch(() => [] as string[]);
         if (cancelled) return;
         setDigests(next);
@@ -277,7 +296,7 @@ export function Home({
   if (liveRows.length === 0) quiet.push("live now");
   if (recentPosts.length === 0) quiet.push("between threads");
   if (servers.length === 0) quiet.push("listening");
-  if (kept.length === 0) quiet.push("kept views");
+  if (kept.length === 0 && reports.length === 0) quiet.push("kept views");
 
   return (
     <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
@@ -314,7 +333,7 @@ export function Home({
           {liveRows.length > 0 && <LiveNow rows={liveRows} digests={digests} />}
           {recentPosts.length > 0 && <BetweenThreads recent={recentPosts} />}
           {servers.length > 0 && <Listening active={active} servers={servers} />}
-          {kept.length > 0 && <KeptViews kept={kept} />}
+          {(kept.length > 0 || reports.length > 0) && <KeptViews kept={kept} reports={reports} />}
           {quiet.length > 0 && (
             <div style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)", lineHeight: 1.5 }}>
               {quiet.join(" · ")} — all quiet
@@ -650,10 +669,24 @@ function BetweenThreads({ recent }: { recent: RecentPost[] }) {
 
 // ── Kept views ───────────────────────────────────────────────────────────────
 
-function KeptViews({ kept }: { kept: string[] }) {
+function KeptViews({ kept, reports }: { kept: string[]; reports: readonly ProjectViewEntry[] }) {
   return (
     <div>
-      <SectionHeader label="Kept views" meta={String(kept.length)} />
+      <SectionHeader label="Kept views" meta={String(kept.length + reports.length)} />
+      {/* SWIT-107: the newest reports a PROJECT owns — live, not frozen; a
+          row opens beside the active thread (Ctrl: full width). */}
+      {reports.map((r) => (
+        <Row
+          key={`report:${r.project}/${r.id}`}
+          title={`view:${r.project}/${r.id} — a ${r.kind} the project owns; it outlives the thread that made it`}
+          onClick={(e) => openArtifact({ kind: "view", project: r.project, viewId: r.id }, { modifier: e.ctrlKey || e.metaKey })}
+        >
+          <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", ...TITLE }}>
+            {r.title}
+          </span>
+          <span style={ROW_META}>{r.project}</span>
+        </Row>
+      ))}
       {kept.map((relPath) => {
         const parts = relPath.split("/");
         const project = parts[1] ?? "";

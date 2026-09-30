@@ -83,6 +83,7 @@ import {
   createPanelTerminal,
   describeArtifact,
   fullWidthRoute,
+  type OpenableArtifact,
   openInPanel,
   panelLayoutFor,
   panelStateFor,
@@ -651,11 +652,13 @@ export function ArtifactPanel({
   // `promote to tab` IS the full-width move, and it is a different thing: it
   // relocates the live view rather than opening a second look at content.)
   const openFull = () => {
-    if (artifact.kind !== "kb-doc" && artifact.kind !== "repo-file" && artifact.kind !== "surface") return;
+    // SWIT-107: a PROJECT view has a full-width screen too (a thread's has none).
+    const projectView = artifact.kind === "view" && artifact.project !== undefined ? artifact : null;
+    if (artifact.kind !== "kb-doc" && artifact.kind !== "repo-file" && artifact.kind !== "surface" && projectView === null) return;
     // Leaving for the full-width screen ends the full view (SWIT-54) — coming
     // back to the terminal finds the panel at its stored width and side.
     setPanelMaximized(sessionId, false);
-    navigate(fullWidthRoute(artifact));
+    navigate(fullWidthRoute(projectView ?? (artifact as OpenableArtifact)));
   };
 
   // T8 seam 2 (explicit, visible): TYPE a reference to this artifact into the
@@ -980,6 +983,21 @@ export function ArtifactPanel({
             </button>
           )}
           </>
+          )}
+          {/* SWIT-107: a PROJECT view never floats (the view rule above) but it
+              does have a full-width screen — the project route's `view`. */}
+          {artifact.kind === "view" && artifact.project !== undefined && (
+            <button
+              type="button"
+              onClick={openFull}
+              title={`Open ${title} full width`}
+              aria-label={`Open ${title} full width`}
+              style={{ ...ACTION_STYLE, display: "flex", alignItems: "center", padding: "0 3px" }}
+              onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-primary)")}
+              onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-dim)")}
+            >
+              <Icon name="open" size={12} />
+            </button>
           )}
           {/* FULL VIEW (SWIT-54) — maximize the PANEL over the workspace
               (table columns, wireframes and docs at full width, pins and

@@ -131,6 +131,29 @@ export async function readViewData(threadId: string, relPath: string): Promise<s
   return invoke("read_view_data", { threadId, relPath });
 }
 
+/** SWIT-107 — PROJECT VIEWS. One repo's `.sb-views/_project/index.json` as
+ *  written by the MCP server; `repo` is the repo's name for a multi-repo
+ *  project (`""` for a single-repo one). Missing indexes are simply absent. */
+export type ProjectViewIndexFile = { repo: string; content: string };
+
+/** Every repo of a registry project that holds a project-view index. The
+ *  roots come from the registry by KEY (explorer.rs), never from the caller. */
+export async function listProjectViews(projectKey: string): Promise<ProjectViewIndexFile[]> {
+  return invoke("list_project_views", { projectKey });
+}
+
+/** A project view's SPEC json ("" when missing — the cannot-render card). */
+export async function readProjectView(projectKey: string, viewId: string): Promise<string> {
+  return invoke("read_project_view", { projectKey, viewId });
+}
+
+/** A project view's DATA (or a report's markdown): `relPath` is relative to
+ *  the directory the view was written from (the spec's `base` inside its
+ *  repo), resolved by Rust with the explorer's two-layer guard. */
+export async function readProjectViewData(projectKey: string, viewId: string, relPath: string): Promise<string> {
+  return invoke("read_project_view_data", { projectKey, viewId, relPath });
+}
+
 /** Write a deck's `notes.json` (SWIT-75) into `<relDir>` under the thread's
  *  working dir — the dir must already exist (the deck the exporter wrote),
  *  the file name is fixed server-side, the body is shape-checked and capped

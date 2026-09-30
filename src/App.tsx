@@ -136,6 +136,7 @@ import { parsePageFile, parseAnswersFile, parseInboxFile, parseRetractedFile, me
 import { decideTurnSettle, offerNextThing, clearNextThingOffer } from "./lib/nextThing";
 import { getCachedDocList, refreshDocList, resolveWithFreshKbDocs } from "./lib/kb";
 import { requestReportAnchor } from "./lib/reportStore";
+import { viewOwnerKey } from "./lib/viewStore";
 import { parseSetsFile, setArtifactFor } from "./lib/artifactSets";
 import { repoFileOpens, showTargetFor, showsPass } from "./lib/showIntent";
 import { explorerProjects, explorerRead, registerExplorerActions, quickThreadTarget, sessionRepoOptions, useSessionRepos, projectKeyForDir, projectPlaceForDir } from "./lib/explorer";
@@ -1849,7 +1850,7 @@ export default function App() {
             log.info(`Show intent: thread=${threadId} show=${show.id} ${show.address} — opening in the preview slot, focused`);
             lastIntentOpenRef.current.set(threadId, Date.now());
             if (hit.artifact.kind === "view" && hit.anchor) {
-              requestReportAnchor(threadId, hit.artifact.viewId, hit.anchor);
+              requestReportAnchor(viewOwnerKey(hit.artifact), hit.artifact.viewId, hit.anchor);
             }
             openInPanel(sessionId, hit.artifact, { preview: true });
           }
@@ -2042,7 +2043,7 @@ export default function App() {
       if (!offerNextThing(threadId, next.offerKey)) return;
       log.info(`Next thing: thread=${threadId} — ${next.label} (opened behind the page)`);
       if (next.artifact.kind === "view" && next.anchor) {
-        requestReportAnchor(threadId, next.artifact.viewId, next.anchor);
+        requestReportAnchor(viewOwnerKey(next.artifact), next.artifact.viewId, next.anchor);
       }
       openInPanel(host, next.artifact, { preview: true, focus: false });
     } catch (err) {
@@ -4086,6 +4087,7 @@ function ProjectScreen({ menuHidden }: { menuHidden: boolean }) {
     <ProjectView
       project={effective.project}
       page={effective.page}
+      view={effective.view}
       params={effective.params}
       active={active}
       menuHidden={menuHidden}

@@ -26,6 +26,8 @@ import { parseBacklogInbox } from "./backlogStore";
 import { parseSetsFile } from "./artifactSets";
 import { parseShowsFile, showTargetFor, SHOW_CAP, SHOW_ADDRESS_CAP } from "./showIntent";
 import { parseSurfaceQuery } from "./surfaceParams";
+import { projectViewAddress } from "./evidenceModel";
+import { PROJECT_VIEW_INDEX_CAP } from "./repoListing";
 // Source text of the two loopback predicates, for the byte-identical check.
 import viewStoreSource from "./viewStore.ts?raw";
 import mcpServerSource from "../../src-tauri/resources/mcp/switchboard-mcp.cjs?raw";
@@ -2077,5 +2079,245 @@ describe("the page tool — op finding, the Findings ledger (SWIT-106)", () => {
     // Caps mirrored in pageStore.
     expect([...FINDING_VERDICTS]).toEqual(f.FINDING_VERDICTS);
     expect([FINDING_CAP, FINDING_CLAIM_CAP, FINDING_N_CAP, FINDING_REPORT_CAP]).toEqual([f.FINDING_CAP, f.FINDING_CLAIM_CAP, f.FINDING_N_CAP, f.FINDING_REPORT_CAP]);
+  });
+});
+
+describe("the view tool — project-level reports (SWIT-107)", () => {
+  const pv = server as unknown as {
+    performViewOp: (
+      threadDir: string,
+      args: Record<string, unknown>,
+      now: number,
+      env?: { cwd?: string; threadId?: string; registryPath?: string | null }
+    ) => { spec: Record<string, unknown>; message: string };
+    performShowOp: (
+      threadDir: string,
+      args: Record<string, unknown>,
+      now: number,
+      env?: { cwd?: string; exists?: (p: string) => boolean; registryPath?: string | null }
+    ) => { show: { id: string; address: string }; message: string };
+    readRegistryProjects: (p: string | null | undefined) => { key: string; repos: string[] }[] | null;
+    projectPlaceFor: (projects: { key: string; repos: string[] }[] | null, cwd: string) => { key: string; repoRoot: string; base: string } | null;
+    projectViewAddress: (project: string, id: string) => string;
+    PROJECT_VIEW_INDEX_CAP: number;
+    VIEW_SCOPES: string[];
+    VIEW_TOOL: { description: string; inputSchema: { properties: Record<string, { enum?: string[] }> } };
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeFs = require("fs") as {
+    mkdtempSync: (p: string) => string;
+    mkdirSync: (p: string, o?: { recursive: boolean }) => void;
+    writeFileSync: (p: string, d: string) => void;
+    readFileSync: (p: string, e: string) => string;
+    existsSync: (p: string) => boolean;
+    rmSync: (p: string, o: { recursive: boolean; force: boolean }) => void;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeOs = require("os") as { tmpdir: () => string };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodePath = require("path") as { join: (...p: string[]) => string };
+
+  /** A registry whose reposRoot holds `lodestar` (single repo) and `kyde`
+   *  (two repos), and two thread dirs. */
+  function fixture() {
+    const root = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-pviews-")).split("\\").join("/");
+    for (const d of ["repos/lodestar/apps/desktop", "repos/admin-panel", "repos/api", "t1", "t2", "kb"]) {
+      nodeFs.mkdirSync(`${root}/${d}`, { recursive: true });
+    }
+    const registryPath = `${root}/kb/registry.json`;
+    nodeFs.writeFileSync(
+      registryPath,
+      JSON.stringify({
+        conventions: { reposRoot: `${root}/repos/` },
+        projects: { lodestar: { repos: ["lodestar"] }, kyde: { repos: ["admin-panel", "api"] }, broken: "x" },
+      })
+    );
+    return { root, registryPath, cleanup: () => nodeFs.rmSync(root, { recursive: true, force: true }) };
+  }
+  const report = (over: Record<string, unknown> = {}) => ({
+    op: "show",
+    kind: "report",
+    title: "gamma review",
+    source: { type: "file", path: "analysis.md" },
+    ...over,
+  });
+  const readJson = (p: string) => JSON.parse(nodeFs.readFileSync(p, "utf8"));
+
+  it("the registry parse and the place: longest repo holding the cwd, `base` = the cwd under that repo", () => {
+    const f = fixture();
+    try {
+      const projects = pv.readRegistryProjects(f.registryPath)!;
+      expect(projects.map((p) => p.key)).toEqual(["lodestar", "kyde"]);
+      const place = pv.projectPlaceFor(projects, `${f.root}/repos/lodestar/apps/desktop`);
+      expect(place).toMatchObject({ key: "lodestar", repoRoot: `${f.root}/repos/lodestar`, base: "apps/desktop" });
+      expect(pv.projectPlaceFor(projects, `${f.root}/repos/LODESTAR/`)).toMatchObject({ key: "lodestar", base: "" });
+      expect(pv.projectPlaceFor(projects, `${f.root}/repos/api`)).toMatchObject({ key: "kyde", repoRoot: `${f.root}/repos/api` });
+      expect(pv.projectPlaceFor(projects, `${f.root}/repos/lodestar-old`)).toBeNull();
+      expect(pv.projectPlaceFor(null, `${f.root}/repos/lodestar`)).toBeNull();
+      expect(pv.readRegistryProjects(`${f.root}/nope.json`)).toBeNull();
+      expect(pv.readRegistryProjects(null)).toBeNull();
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("a REPORT defaults to project scope: the thread copy AND the project copy + index, with base and threadId", () => {
+    const f = fixture();
+    try {
+      const env = { cwd: `${f.root}/repos/lodestar/apps/desktop`, threadId: "t-one", registryPath: f.registryPath };
+      const out = pv.performViewOp(`${f.root}/t1`, report(), NOW, env);
+      expect(out.spec).toMatchObject({ id: "v1", scope: "project", project: "lodestar", base: "apps/desktop", threadId: "t-one" });
+      expect(out.message).toContain("The PROJECT lodestar owns it (view:lodestar/v1");
+      const threadCopy = readJson(`${f.root}/t1/views/v1.json`);
+      const projectCopy = readJson(`${f.root}/repos/lodestar/.sb-views/_project/v1.json`);
+      expect(projectCopy).toEqual(threadCopy);
+      // The app's tolerant parser reads the copy as the same report.
+      expect(parseViewSpec(JSON.stringify(projectCopy)).spec?.kind).toBe("report");
+      expect(readJson(`${f.root}/repos/lodestar/.sb-views/_project/index.json`)).toEqual({
+        version: 1,
+        views: [{ id: "v1", title: "gamma review", kind: "report", builtAt: "2026-08-31T10:00:00.000Z", threadId: "t-one" }],
+      });
+      // Any other kind stays in the thread unless asked.
+      const table = pv.performViewOp(`${f.root}/t1`, { op: "show", kind: "table", title: "rows", source: { type: "file", path: "r.json" } }, NOW, env);
+      expect(table.spec.scope).toBeUndefined();
+      expect(nodeFs.existsSync(`${f.root}/repos/lodestar/.sb-views/_project/${table.spec.id}.json`)).toBe(false);
+      // …and scope project gives it the same life; scope thread keeps a report in the thread.
+      const pinned = pv.performViewOp(`${f.root}/t1`, { op: "show", kind: "table", title: "rows", source: { type: "file", path: "r.json" }, scope: "project" }, NOW, env);
+      expect(pinned.spec.scope).toBe("project");
+      const local = pv.performViewOp(`${f.root}/t1`, report({ scope: "thread" }), NOW, env);
+      expect(local.spec.scope).toBeUndefined();
+      expect(nodeFs.existsSync(`${f.root}/repos/lodestar/.sb-views/_project/${local.spec.id}.json`)).toBe(false);
+      expect(() => pv.performViewOp(`${f.root}/t1`, report({ scope: "global" }), NOW, env)).toThrow(/scope must be "thread" or "project"/);
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("ids are PROJECT-unique: another thread's id is refused by name; a minted id counts the project's ids", () => {
+    const f = fixture();
+    try {
+      const envA = { cwd: `${f.root}/repos/lodestar`, threadId: "t-a", registryPath: f.registryPath };
+      const envB = { cwd: `${f.root}/repos/lodestar`, threadId: "t-b", registryPath: f.registryPath };
+      pv.performViewOp(`${f.root}/t1`, report({ id: "gamma" }), NOW, envA);
+      expect(() => pv.performViewOp(`${f.root}/t2`, report({ id: "gamma" }), NOW, envB)).toThrow(
+        /view id gamma is already a project view of another thread \(t-a\) in lodestar — pick another id, or omit id to mint one/
+      );
+      pv.performViewOp(`${f.root}/t1`, report(), NOW, envA); // v1 in the project, from t1
+      const minted = pv.performViewOp(`${f.root}/t2`, report(), NOW + 1, envB);
+      expect(minted.spec.id).toBe("v2"); // t2 has no views, but the project already holds v1
+      const index = readJson(`${f.root}/repos/lodestar/.sb-views/_project/index.json`);
+      expect(index.views.map((v: { id: string }) => v.id)).toEqual(["v2", "v1", "gamma"]);
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("update writes BOTH copies — the project one stays authoritative — and moves the index row to the front", () => {
+    const f = fixture();
+    try {
+      const env = { cwd: `${f.root}/repos/lodestar`, threadId: "t-a", registryPath: f.registryPath };
+      pv.performViewOp(`${f.root}/t1`, report({ id: "r1" }), NOW, env);
+      pv.performViewOp(`${f.root}/t1`, report({ id: "r2" }), NOW + 1, env);
+      // An update that names scope thread still writes both: a project view is not demoted by update.
+      pv.performViewOp(`${f.root}/t1`, report({ op: "update", id: "r1", title: "gamma v2", scope: "thread" }), NOW + 2, env);
+      expect(readJson(`${f.root}/repos/lodestar/.sb-views/_project/r1.json`).title).toBe("gamma v2");
+      expect(readJson(`${f.root}/t1/views/r1.json`).title).toBe("gamma v2");
+      const index = readJson(`${f.root}/repos/lodestar/.sb-views/_project/index.json`);
+      expect(index.views.map((v: { id: string; title: string }) => `${v.id}:${v.title}`)).toEqual(["r1:gamma v2", "r2:gamma review"]);
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("no project for the folder: an explicit project scope is refused; a report falls back to the thread and says so", () => {
+    const f = fixture();
+    try {
+      const env = { cwd: `${f.root}/elsewhere`, threadId: "t-a", registryPath: f.registryPath };
+      expect(() => pv.performViewOp(`${f.root}/t1`, report({ scope: "project" }), NOW, env)).toThrow(/in no registry project/);
+      const kept = pv.performViewOp(`${f.root}/t1`, report(), NOW, env);
+      expect(kept.spec.scope).toBeUndefined();
+      expect(kept.message).toContain("kept in this thread — its working directory is in no registry project");
+      // No registry at all — the same fallback.
+      const none = pv.performViewOp(`${f.root}/t1`, report(), NOW, { cwd: `${f.root}/repos/lodestar`, threadId: "t-a", registryPath: null });
+      expect(none.spec.scope).toBeUndefined();
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("the index is capped at PROJECT_VIEW_INDEX_CAP, newest first (mirrored in repoListing)", () => {
+    const f = fixture();
+    try {
+      const dir = `${f.root}/repos/lodestar/.sb-views/_project`;
+      nodeFs.mkdirSync(dir, { recursive: true });
+      const views = Array.from({ length: pv.PROJECT_VIEW_INDEX_CAP }, (_, i) => ({ id: `old${i}`, title: "t", kind: "report", builtAt: "", threadId: "t-a" }));
+      nodeFs.writeFileSync(`${dir}/index.json`, JSON.stringify({ version: 1, views }));
+      pv.performViewOp(`${f.root}/t1`, report({ id: "fresh" }), NOW, { cwd: `${f.root}/repos/lodestar`, threadId: "t-a", registryPath: f.registryPath });
+      const index = readJson(`${dir}/index.json`);
+      expect(index.views).toHaveLength(pv.PROJECT_VIEW_INDEX_CAP);
+      expect(index.views[0].id).toBe("fresh");
+      expect(pv.PROJECT_VIEW_INDEX_CAP).toBe(PROJECT_VIEW_INDEX_CAP);
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("`page show` takes view:<project>/<id> — checked against the project's index when the registry is readable", () => {
+    const f = fixture();
+    try {
+      const env = { cwd: `${f.root}/repos/lodestar`, threadId: "t-a", registryPath: f.registryPath };
+      pv.performViewOp(`${f.root}/t1`, report({ id: "gamma" }), NOW, env);
+      const ok = pv.performShowOp(`${f.root}/t2`, { op: "show", address: "view:lodestar/gamma#h:results" }, NOW, env);
+      expect(ok.show.address).toBe("view:lodestar/gamma#h:results");
+      expect(ok.message).toBe("view:lodestar/gamma#h:results is opening in the panel beside the terminal.");
+      expect(() => pv.performShowOp(`${f.root}/t2`, { op: "show", address: "view:lodestar/nope" }, NOW, env)).toThrow(/no project view nope in lodestar/);
+      expect(() => pv.performShowOp(`${f.root}/t2`, { op: "show", address: "view:lodestar/a b" }, NOW, env)).toThrow(/not a project view address/);
+      const unchecked = pv.performShowOp(`${f.root}/t2`, { op: "show", address: "view:lodestar/gamma" }, NOW, { ...env, registryPath: null });
+      expect(unchecked.message).toMatch(/opens in the panel beside the terminal if that project owns a view with that id/);
+      // The address the result names is the one the app's resolver reads.
+      expect(pv.projectViewAddress("lodestar", "gamma")).toBe(projectViewAddress("lodestar", "gamma"));
+      expect(showTargetFor("view:lodestar/gamma#h:results", { threadId: "t2", kbDocs: [], projectKey: null, kbRoot: null })).toEqual({
+        artifact: { kind: "view", project: "lodestar", viewId: "gamma" },
+        anchor: "h:results",
+      });
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("with the registry, a cwd file's `show` result is exact: opening, or plainly nothing outside a project", () => {
+    const f = fixture();
+    try {
+      nodeFs.writeFileSync(`${f.root}/repos/lodestar/README.md`, "# lodestar");
+      const inProject = pv.performShowOp(`${f.root}/t1`, { op: "show", address: "README.md" }, NOW, {
+        cwd: `${f.root}/repos/lodestar`,
+        registryPath: f.registryPath,
+      });
+      expect(inProject.message).toBe("README.md is opening in the panel beside the terminal.");
+      nodeFs.mkdirSync(`${f.root}/loose`, { recursive: true });
+      nodeFs.writeFileSync(`${f.root}/loose/notes.md`, "x");
+      const loose = pv.performShowOp(`${f.root}/t1`, { op: "show", address: "notes.md" }, NOW, {
+        cwd: `${f.root}/loose`,
+        registryPath: f.registryPath,
+      });
+      expect(loose.message).toMatch(/^Recorded — but this thread's working directory is in no registry project/);
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("the tool states the rule: report defaults to project, the address form, update writes both", () => {
+    expect(pv.VIEW_SCOPES).toEqual(["thread", "project"]);
+    expect(pv.VIEW_TOOL.inputSchema.properties.scope.enum).toEqual(["thread", "project"]);
+    for (const rule of [
+      "A REPORT BELONGS TO THE PROJECT by default (scope 'project')",
+      "(.sb-views/_project/<id>.json + index.json)",
+      "addressed view:<project>/<id>",
+      "update writes both copies",
+      "scope 'thread' to keep a report in this thread only",
+    ]) {
+      expect(pv.VIEW_TOOL.description).toContain(rule);
+    }
+    expect(server.PAGE_TOOL.description).toContain("view:<project>/<id> for a report the project owns");
   });
 });

@@ -9,11 +9,16 @@
 // name. The body is the SAME SurfaceHost the panel renders — one host, two
 // hosts' worth of chrome — painted on `--bg-primary` because that is the
 // full-width value (the panel paints the same host on `--bg-panel`).
+//
+// SWIT-107: the same screen shows a PROJECT VIEW full width (a report the
+// project owns — `project / reports / <id>`), the "open full" of that
+// artifact: the SAME ViewSurface the panel renders, no thread needed.
 
 import type { CSSProperties } from "react";
 import { BackButton } from "./BackButton";
 import { SurfaceHost } from "../surfaces/SurfaceHost";
 import { surfaceLabel } from "../surfaces/registry";
+import { ViewSurface } from "./views/ViewSurface";
 
 const ROOT_STYLE: CSSProperties = {
   flex: 1,
@@ -41,12 +46,16 @@ const HEAD_STYLE: CSSProperties = {
 export function ProjectView({
   project,
   page,
+  view,
   params,
   active,
   menuHidden,
 }: {
   project: string;
-  page: string;
+  /** Exactly one of `page` / `view` (the Route's two project identities). */
+  page?: string;
+  /** SWIT-107: a project VIEW id — the screen renders that view full width. */
+  view?: string;
   /** The page STATE the route names (T9 — `p.*` params). The host stays
    *  mounted across a params change (same key) and the page reads the new
    *  set through `useSurfaceParams()`. */
@@ -59,6 +68,24 @@ export function ProjectView({
    *  how to reach the other pages. */
   menuHidden: boolean;
 }) {
+  if (view !== undefined) {
+    return (
+      <div style={ROOT_STYLE}>
+        <div style={HEAD_STYLE}>
+          <BackButton />
+          <span style={{ color: "var(--text-secondary)", fontWeight: 600 }}>{project}</span>
+          <span>/</span>
+          <span>reports</span>
+          <span>/</span>
+          <span style={{ color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis" }}>{view}</span>
+        </div>
+        <div style={{ flex: 1, minHeight: 0, display: "flex", background: "var(--bg-primary)" }}>
+          <ViewSurface key={`${project}:${view}`} artifact={{ kind: "view", project, viewId: view }} active={active} />
+        </div>
+      </div>
+    );
+  }
+  if (page === undefined) return null;
   const label = surfaceLabel(project, page);
   return (
     <div style={ROOT_STYLE}>

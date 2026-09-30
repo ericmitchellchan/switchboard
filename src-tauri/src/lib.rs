@@ -1491,7 +1491,7 @@ async fn prepare_thread_launch(app: tauri::AppHandle, thread_id: String) -> Resu
         None if dev_copy.exists() => dev_copy,
         None => return Err("switchboard-mcp.cjs not found in resources".into()),
     };
-    let config = serde_json::json!({
+    let mut config = serde_json::json!({
         "mcpServers": {
             "switchboard": {
                 "command": "node",
@@ -1517,6 +1517,15 @@ async fn prepare_thread_launch(app: tauri::AppHandle, thread_id: String) -> Resu
             }
         }
     });
+    // SWIT-107: the registry, so `view` with `scope: "project"` (a report's
+    // default) can find the project — and the repo — the thread's working
+    // directory belongs to. Absent when the KB root does not resolve: the
+    // server then keeps every view in its thread and says so.
+    if let Some(registry) = explorer::registry_path() {
+        if let Some(env) = config.pointer_mut("/mcpServers/switchboard/env").and_then(|e| e.as_object_mut()) {
+            env.insert("SWITCHBOARD_REGISTRY".to_string(), serde_json::Value::String(registry));
+        }
+    }
     let config_path = thread_dir.join("mcp-config.json");
     std::fs::write(
         &config_path,
@@ -2525,6 +2534,9 @@ fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         explorer::explorer_list,
         explorer::explorer_read,
         explorer::explorer_write,
+        explorer::list_project_views,
+        explorer::read_project_view,
+        explorer::read_project_view_data,
         write_file,
         confirm_app_close,
         open_pip_window,

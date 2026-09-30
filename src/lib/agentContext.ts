@@ -287,6 +287,16 @@ export function artifactRef(artifact: Artifact, opts: RefOptions = {}): string {
       );
     }
     case "view": {
+      // SWIT-107: a PROJECT view's spec lives in the project's repo — named
+      // the way a repo file is (`<project>/<path>`), no root needed.
+      if (artifact.project !== undefined) {
+        return sanitizeForTypedLine(
+          `view ${artifact.project}/.sb-views/_project/${artifact.viewId}.json${
+            artifact.block !== undefined ? ` block ${artifact.block}` : ""
+          }${artifact.drill ? ` drill ${artifact.drill.key}` : ""}`,
+          REF_MAX
+        );
+      }
       // A view's SPEC is a file too (SWIT-50): reading it tells the agent
       // what is rendered and where the data came from.
       const root = normalizePath(opts.threadsRoot ?? "");

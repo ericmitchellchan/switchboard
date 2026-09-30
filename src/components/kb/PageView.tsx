@@ -140,8 +140,10 @@ import {
   mergeScannedEvidence,
   mergeViewEvidence,
   viewAnchorOfAddress,
+  projectViewOfAddress,
 } from "../../lib/evidenceModel";
 import { requestReportAnchor } from "../../lib/reportStore";
+import { viewOwnerKey } from "../../lib/viewStore";
 import type { EvidenceGroupId, ThreadViewRow } from "../../lib/evidenceModel";
 import { useScannedEvidence } from "../../lib/evidenceScan";
 import { getCachedDocList, noteKbMiss, refreshDocList, resolveWithFreshKbDocs, subscribeDocList } from "../../lib/kb";
@@ -531,6 +533,26 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
     // SWIT-73: `view:<id>#h:<slug>` names a heading INSIDE a report — the
     // anchor rides reportStore's one-shot; the open is the ordinary view
     // open. A malformed fragment made the whole address plain upstream.
+    // SWIT-107: `view:<project>/<id>[#h:<slug>]` — a report the PROJECT owns;
+    // it opens beside this thread (or full width with Ctrl) with no thread
+    // behind it, its heading riding the same one-shot under the project key.
+    const projectViewHit = projectViewOfAddress(key);
+    if (projectViewHit !== null) {
+      return (
+        <AddressButton
+          text={address}
+          title="open this project report beside the thread (Ctrl: full width)"
+          accent={accent}
+          color={color}
+          fontSize={fontSize}
+          onOpen={(modifier) => {
+            const artifact = { kind: "view" as const, project: projectViewHit.project, viewId: projectViewHit.viewId };
+            if (projectViewHit.anchor) requestReportAnchor(viewOwnerKey(artifact), artifact.viewId, projectViewHit.anchor);
+            openArtifact(artifact, { modifier });
+          }}
+        />
+      );
+    }
     const viewHit = viewAnchorOfAddress(key);
     if (viewHit !== null) {
       return (
@@ -622,7 +644,7 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
                     const host = getActiveTabSession();
                     if (!host) return;
                     if (nextThing.artifact.kind === "view" && nextThing.anchor) {
-                      requestReportAnchor(threadId, nextThing.artifact.viewId, nextThing.anchor);
+                      requestReportAnchor(viewOwnerKey(nextThing.artifact), nextThing.artifact.viewId, nextThing.anchor);
                     }
                   const artifact = nextThing.artifact;
                   if (artifact.kind !== "repo-file") {
