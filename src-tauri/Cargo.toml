@@ -50,4 +50,7 @@ windows-sys = { version = "0.59", features = [
   # time, and discovery needs one to prove a shell pid is still OURS and not a
   # recycled one (see discovery::process_start_time_ms).
   "Win32_System_Threading",
+  # CreateProcessW for the detached job supervisor (src/jobs.rs, SWIT-109) —
+  # its signature names SECURITY_ATTRIBUTES, which lives behind this feature.
+  "Win32_Security",
 ] }

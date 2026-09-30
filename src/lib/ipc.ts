@@ -298,6 +298,75 @@ export async function takeBacklogInbox(): Promise<string> {
   return invoke("take_backlog_inbox");
 }
 
+// ── Jobs (SWIT-109) — src-tauri/src/jobs.rs; the rules are lib/jobs.ts ──────
+
+/** TAKE the agents' `jobs-inbox.json` (rename away + read + delete). */
+export async function takeJobsInbox(): Promise<string> {
+  return invoke("take_jobs_inbox");
+}
+
+/** Start a job for a thread; every guard is Rust's. Rejects with a sentence. */
+export async function jobStart(threadId: string, name: string, command: string, cwd: string | null): Promise<string> {
+  return invoke("job_start", { threadId, name, command, cwd });
+}
+
+/** Stop the thread's running job of that name (the agent's `stop`). */
+export async function jobStop(threadId: string, name: string): Promise<void> {
+  return invoke("job_stop", { threadId, name });
+}
+
+/** Stop a job by id (the page's two-click stop). */
+export async function jobStopId(id: string): Promise<void> {
+  return invoke("job_stop_id", { id });
+}
+
+/** Every job with its probe (JSON array; lib/jobs.parseJobsSnapshot). */
+export async function jobsSnapshot(): Promise<string> {
+  return invoke("jobs_snapshot");
+}
+
+/** The last `lines` lines of a job's output (Rust clamps to 1..=400). */
+export async function jobLogTail(id: string, lines?: number): Promise<string[]> {
+  return invoke("job_log_tail", { id, lines: lines ?? null });
+}
+
+/** Post a job's ONE ended-line (false when already posted). */
+export async function jobNotify(id: string, text: string): Promise<boolean> {
+  return invoke("job_notify", { id, text });
+}
+
+/** Post one line from the jobs machinery to a thread's inbox. */
+export async function jobsPost(threadId: string, text: string): Promise<void> {
+  return invoke("jobs_post", { threadId, text });
+}
+
+// ── Watches (SWIT-110) — the same module; watches.json is the app's ─────────
+
+/** Every watch (JSON array; lib/jobs.parseWatches). */
+export async function watchesRead(): Promise<string> {
+  return invoke("watches_read");
+}
+
+/** Set (or, from the same thread, replace) a watch; every guard is Rust's. */
+export async function watchSet(threadId: string, name: string, command: string, cwd: string | null, everyMin: number): Promise<void> {
+  return invoke("watch_set", { threadId, name, command, cwd, everyMin });
+}
+
+/** Remove a watch: `threadId` = only that thread's own; null = the user. */
+export async function watchRemove(threadId: string | null, name: string): Promise<void> {
+  return invoke("watch_remove", { threadId, name });
+}
+
+/** Start one run of a watch now (rejects — and Rust records it failing — when it cannot start). */
+export async function watchRun(name: string): Promise<void> {
+  return invoke("watch_run", { name });
+}
+
+/** Record a finished run's reading (only the watch's current run, once). */
+export async function watchRecord(name: string, jobId: string, status: "pass" | "fail", lastLine: string): Promise<void> {
+  return invoke("watch_record", { name, jobId, status, lastLine });
+}
+
 /** Ground truth for revive: does claude's transcript for this conversation
  *  exist on disk (~/.claude/projects/<munged-cwd>/<sessionId>.jsonl)? Decides
  *  --resume vs --session-id; the chatStarted flag is a UI hint only. */

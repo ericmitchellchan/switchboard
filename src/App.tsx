@@ -20,7 +20,7 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, listThreadViews, readThreadFile, threadFilesStamp, writeThreadAnswer, appendConvention, writeThreadPost, saveTranscript, readBacklog, writeBacklog, takeBacklogInbox } from "./lib/ipc";
+import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, listThreadViews, readThreadFile, threadFilesStamp, writeThreadAnswer, appendConvention, writeThreadPost, saveTranscript, readBacklog, writeBacklog, takeBacklogInbox, takeJobsInbox, jobStart, jobStop, jobsSnapshot, jobNotify, jobsPost, watchesRead, watchSet, watchRemove, watchRun, watchRecord } from "./lib/ipc";
 import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, refreshAllTerminalViews, clearSessionDirty, isSessionDirty, serializeForPip, plainTextTerminal, getSessionWriteCount, setTerminalScreenVisible, pasteIntoTerminal } from "./lib/terminal";
 import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing, sendPipHost } from "./lib/pipBridge";
 import { bumpSessionGeneration, addSessionInputListener, getSessionGeneration } from "./lib/terminalRegistry";
@@ -157,7 +157,8 @@ import {
 } from "./lib/agentContext";
 import { runPromotionPass, promotionPassReason, PROMOTION_POLL_MS } from "./lib/threadPromotion";
 import { isOpenItem, isWaitingOnUser, type PageBrief } from "./lib/pageStore";
-import { parsePageFile, parseAnswersFile, parseInboxFile, parseRetractedFile, mergePage, conventionLine, postTimes, countUnreadTimes, nextPassEntry, loadInboxSeen, markInboxSeen, countQuestionStates, requestPageFocus, type ConventionEntry, type ThreadPassEntry } from "./lib/pageStore";
+import { parsePageFile, parseAnswersFile, parseInboxFile, parseRetractedFile, mergePage, conventionLine, postTimes, countUnreadTimes, nextPassEntry, loadInboxSeen, markInboxSeen, countQuestionStates, requestPageFocus, inboxTypedLine, type ConventionEntry, type ThreadPassEntry } from "./lib/pageStore";
+import { runJobsPass } from "./lib/jobs";
 import { decideTurnSettle, offerNextThing, clearNextThingOffer } from "./lib/nextThing";
 import { getCachedDocList, refreshDocList, resolveWithFreshKbDocs } from "./lib/kb";
 import { requestReportAnchor } from "./lib/reportStore";
@@ -1685,6 +1686,29 @@ export default function App() {
         // SWIT-64: the agent's backlog inbox rides the same pass — one take,
         // folded into backlog.json by the app (the file's only writer).
         await drainBacklogInbox();
+        // SWIT-109: the jobs inbox + the jobs snapshot ride the same pass —
+        // the agents' start/stop requests go to Rust (a refusal comes back as
+        // one inbox line), the snapshot is published for the ✦ page and Home,
+        // and a job that ended owes its thread ONE line (posted before this
+        // pass's thread loop, so the delivery below types it on this tick).
+        await runJobsPass(
+          {
+            takeInbox: takeJobsInbox,
+            start: jobStart,
+            stop: jobStop,
+            snapshot: jobsSnapshot,
+            notify: jobNotify,
+            post: jobsPost,
+            // SWIT-110: watches ride the same tick — due runs start here.
+            watch: watchSet,
+            unwatch: (threadId, name) => watchRemove(threadId, name),
+            readWatches: watchesRead,
+            runWatch: watchRun,
+            recordWatch: watchRecord,
+          },
+          Date.now(),
+          (msg) => log.warn(msg)
+        );
         // SWIT-108: every active thread, plus an ARCHIVED one that is in a
         // lane — archived is not gone (principle 4): its open questions and
         // unsent answers still count toward its lane's `· N` in the side menu.
@@ -1811,7 +1835,8 @@ export default function App() {
             if (delivered.has(post.id)) continue;
             delivered.add(post.id);
             if (!live || sessionId === null) continue; // page + chip carry it
-            const line = sanitizeForTypedLine(`[from thread "${post.from}"] ${post.text}`, 600);
+            // SWIT-109: the app's own lines (a job ended) say `[switchboard]`.
+            const line = sanitizeForTypedLine(inboxTypedLine(post), 600);
             if (line.length === 0) continue;
             log.info(`Inbox delivery: post=${post.id} -> thread=${t.id}`);
             // Queued behind any composed send in flight (SWIT-99): typed in
