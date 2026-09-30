@@ -4,7 +4,7 @@
 // pageStore's merge. A read that fails rejects — the caller keeps its last
 // digest for that thread and the rest render.
 
-import { readThreadFile } from "./ipc";
+import { readThreadFile, threadFilesStamp } from "./ipc";
 import { mergePage, parseAnswersFile, parseInboxFile, parsePageFile, parseRetractedFile } from "./pageStore";
 import type { InboxPost, RenderedPage } from "./pageStore";
 
@@ -24,4 +24,32 @@ export async function readThreadDigest(threadId: string): Promise<ThreadPageDige
     page: mergePage(parsePageFile(pageRaw), parseAnswersFile(answersRaw), posts, parseRetractedFile(retractedRaw)),
     posts,
   };
+}
+
+// ── Stamp-gated (review of ec319c7, #7) ──────────────────────────────────────
+// Home and the lane page poll every 5s; like App's pass they stat the thread's
+// files first (`thread_files_stamp`, the max mtime of its page / answers /
+// inbox / retracted / sets / shows) and read only when it moved. A failed
+// stat (-1) never matches, so the next tick reads.
+
+export type DigestCache = Map<string, { stamp: number; digest: ThreadPageDigest }>;
+
+/** Reuse the cached digest? Only when a real stamp EQUALS the one it was read
+ *  under. Pure. */
+export function digestCacheHit(cached: { stamp: number } | undefined, stamp: number): boolean {
+  return cached !== undefined && stamp !== -1 && cached.stamp === stamp;
+}
+
+export async function readThreadDigestGated(threadId: string, cache: DigestCache): Promise<ThreadPageDigest> {
+  let stamp = -1;
+  try {
+    stamp = await threadFilesStamp(threadId);
+  } catch {
+    // stat failed — read
+  }
+  const hit = cache.get(threadId);
+  if (hit && digestCacheHit(hit, stamp)) return hit.digest;
+  const digest = await readThreadDigest(threadId);
+  cache.set(threadId, { stamp, digest });
+  return digest;
 }

@@ -291,6 +291,15 @@ export function navigate(next: Route): void {
   });
 }
 
+/** REPLACE the current location — no history entry (SWIT-108 review #5: a
+ *  lane rename moves the page to the new name, and `back` must not land on
+ *  the old one). Records it as its screen's last sub-state like navigate. */
+export function replaceRoute(next: Route): void {
+  const s = navState;
+  if (sameRoute(s.route, next)) return;
+  setNavState({ route: next, history: s.history, lastByScreen: { ...s.lastByScreen, [next.screen]: next } });
+}
+
 /** Navigate to a top-level screen, restoring its last sub-state if we've been
  *  there (the side menu uses this so switching away + back doesn't lose the
  *  doc/project you were on). */

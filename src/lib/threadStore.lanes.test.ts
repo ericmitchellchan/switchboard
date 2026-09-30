@@ -18,6 +18,7 @@ import {
   setThreadLane,
   renameLaneInStore,
   setLaneArchived,
+  replaceLaneRecords,
   deleteThread,
   __resetThreadStoreForTests,
 } from "./threadStore";
@@ -73,6 +74,16 @@ describe("the lane on the lean record (sanitizeThread)", () => {
     expect(migrateSavedWorkspace({ version: 2, sessions: [] })?.lanes).toEqual([]);
   });
 
+  it("a brief's LANE STAMP parses: a lane, explicit null (written in no lane), or absent (pre-stamp, junk)", () => {
+    const b = (lane: unknown) => parsePageFile(JSON.stringify({ brief: { goal: "g", updatedAt: "x", lane } })).brief;
+    expect(b({ name: " Gamma  model ", project: "lodestar" })?.lane).toEqual({ name: "Gamma model", project: "lodestar" });
+    expect(b(null)?.lane).toBeNull();
+    expect(b(undefined)?.lane).toBeUndefined();
+    expect(b({ name: 'bad"', project: "lodestar" })?.lane).toBeUndefined();
+    expect(b({ name: "x" })?.lane).toBeUndefined();
+    expect(b("junk")?.lane).toBeUndefined();
+  });
+
   it("the page's `lane` (the agent's op) parses to a lane name or nothing", () => {
     expect(parsePageFile(JSON.stringify({ lane: " Gamma  model " })).lane).toBe("Gamma model");
     expect(parsePageFile(JSON.stringify({ lane: 'bad"' })).lane).toBeNull();
@@ -125,22 +136,39 @@ describe("the lane mutators", () => {
     expect(deriveLanes(getThreads(), getLaneRecords())[0].archivedAt).toBe(42);
     renameLaneInStore(GAMMA, "Gamma");
     expect(getThreads().filter((t) => t.lane === "Gamma").map((t) => t.id).sort()).toEqual(["t1", "t2"]);
-    expect(getLaneRecords()).toEqual([{ project: "lodestar", name: "Gamma", archivedAt: 42 }]);
+    // The record moves with it and remembers the former name (review #5).
+    expect(getLaneRecords()).toEqual([{ project: "lodestar", name: "Gamma", archivedAt: 42, aliases: ["Gamma model"] }]);
     setLaneArchived({ project: "lodestar", name: "gamma" }, false);
-    expect(getLaneRecords()).toEqual([]);
+    expect(getLaneRecords()).toEqual([{ project: "lodestar", name: "Gamma", aliases: ["Gamma model"] }]);
     // Threads never carried the archive.
     expect(getThreadById("t1")?.archivedAt).toBeUndefined();
   });
 
-  it("a thread JOINING an archived lane restores it; the last thread leaving takes the record with it", () => {
+  it("only a USER join restores an archived lane — an agent join leaves it archived (review #2); the last thread leaving takes the record", () => {
     setThreadLane("t1", GAMMA, "user");
     setLaneArchived(GAMMA, true, 42);
     setThreadLane("t3", GAMMA, "agent");
+    expect(getThreadById("t3")).toMatchObject({ lane: "Gamma model", laneSetBy: "agent" });
+    expect(getLaneRecords()).toEqual([{ ...GAMMA, archivedAt: 42 }]);
+    setThreadLane("t2", GAMMA, "user");
     expect(getLaneRecords()).toEqual([]);
     setLaneArchived(GAMMA, true, 43);
+    setThreadLane("t2", null, "user");
     setThreadLane("t1", null, "user");
     expect(getLaneRecords()).toHaveLength(1); // t3 is still in it
     deleteThread("t3");
+    expect(getLaneRecords()).toEqual([]);
+  });
+
+  it("the brief cache lands through replaceLaneRecords (sanitized), and is dropped with its lane", () => {
+    setThreadLane("t1", GAMMA, "user");
+    const cached = { brief: { goal: "g", established: [], dead: [], lead: [], waiting: [], updatedAt: "2026-09-29T00:00:00Z" }, threadId: "t1", threadTitle: "t" };
+    replaceLaneRecords([{ ...GAMMA, brief: cached }, { project: "lodestar", name: "Nobody", archivedAt: 1 }]);
+    expect(getLaneRecords()).toEqual([{ ...GAMMA, brief: cached }]);
+    expect(deriveLanes(getThreads(), getLaneRecords())[0].cachedBrief).toEqual(cached);
+    // It persists in the disk mirror and comes back.
+    expect(parseLanesFromDisk(serializeThreadsForDisk(getThreads(), getLaneRecords()))).toEqual([{ ...GAMMA, brief: cached }]);
+    setThreadLane("t1", null, "user");
     expect(getLaneRecords()).toEqual([]);
   });
 

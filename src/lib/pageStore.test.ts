@@ -918,11 +918,11 @@ describe("nextPassEntry (the stamp gate's cached branch, 0.9.x hygiene review fi
     // Thread B shows `↓ 2`; Eric opens B (seen), clicks back to A inside the
     // same tick; inbox.json's mtime has not moved. The next tick must say 0,
     // not republish the count the entry was read with.
-    expect(nextPassEntry(cached, 1_700_000, null)).toEqual({ reread: false, questions: 1, unsent: 2, unread: 2 });
+    expect(nextPassEntry(cached, 1_700_000, null)).toEqual({ reread: false, questions: 1, unsent: 2, unread: 2, items: 0, requests: 0 });
     const seenAfterOpeningB = T2 + 1_000;
-    expect(nextPassEntry(cached, 1_700_000, seenAfterOpeningB)).toEqual({ reread: false, questions: 1, unsent: 2, unread: 0 });
+    expect(nextPassEntry(cached, 1_700_000, seenAfterOpeningB)).toEqual({ reread: false, questions: 1, unsent: 2, unread: 0, items: 0, requests: 0 });
     // A post newer than the stamp still counts — the stamp is a moment, not a reset.
-    expect(nextPassEntry(cached, 1_700_000, T1 + 1)).toEqual({ reread: false, questions: 1, unsent: 2, unread: 1 });
+    expect(nextPassEntry(cached, 1_700_000, T1 + 1)).toEqual({ reread: false, questions: 1, unsent: 2, unread: 1, items: 0, requests: 0 });
   });
 });
 

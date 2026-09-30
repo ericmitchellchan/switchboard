@@ -591,10 +591,10 @@ note `rewritten <Age> by <thread>`), `Findings` (the **Findings block** grid, th
 title dim after the claim), `Reports` (flat rows: title · thread (none when deleted) · kind ·
 Age), `Decisions` (note `answered on their own thread's page`; rows = question + thread dim
 + an amber `Open` / `Not sent` pill, answered ones behind a **Fold**), `Threads` (dot · title
-· last activity, archived behind a **Fold**). No brief → no block, one 11px mono faint line.
+· last activity, archived behind a **Fold**). No brief → no block, one 11px mono faint line. A `+ Thread in this lane` that started nothing prints why as one 10.5px mono `--tone-rose` line beside the button.
 **Home's lane row** (the first block, `Lanes`): the Home row with two lines — name (reading
 face) + project (10px mono faint), and under it the latest finding else the brief's goal
-(11.5px `--text-muted`) — a live dot before the name while a thread runs, and at the right
+(11.5px `--text-muted`) — a dot before the name in the status colour of the lane's LIVELIEST running thread (waiting > running > error > done > idle; none while none runs), and at the right
 the WAITS pill: what the lane waits on in lower-case words (`2 questions · 1 unsent`), 10px
 mono 600 on `--tone-amber`, radius 11 — lower case because it is a count, not a status word,
 so it is not the one-width **Status pill** — then the last-activity age. **The side menu's

@@ -33,6 +33,8 @@ import type { CSSProperties, FocusEvent } from "react";
 import type { Thread } from "../types";
 import { getThreadActions, getThreads, isThreadArchived, noteTitleEditor, renameEditorHoldsFocus } from "../lib/threadStore";
 import { normalizeLaneName, projectLaneNames, suggestLaneNames, sameLaneName } from "../lib/lanes";
+// (the editor's `project` is lanes.laneEditProject's: a laned thread's FROZEN
+// laneProject, else its folder's — the caller resolves it)
 import { Icon, type IconName } from "./icons";
 
 export type ThreadMenuItem = {

@@ -303,7 +303,7 @@ function HistoryRow({
   const [editing, setEditing] = useState(false);
   // SWIT-108: `⋯ → lane…` — the same inline editor as the rail's.
   const [laneEditing, setLaneEditing] = useState(false);
-  const { project, laneBlocked } = useThreadProject(thread.workingDir);
+  const { project, laneBlocked } = useThreadProject(thread);
   const actions = getThreadActions();
 
   // Dead = no claude process behind the row (app restart, session exit, tab

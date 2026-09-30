@@ -1,3 +1,5 @@
+import type { PageBrief } from "./lib/pageStore";
+
 export type AgentStatus = "idle" | "running" | "waiting" | "done" | "error" | "exited";
 
 export interface SessionInfo {
@@ -340,14 +342,28 @@ export interface Thread {
   laneSetBy?: "user" | "agent";
 }
 
-/** A lane's own state that is not a fact about any one thread (SWIT-108):
- *  only its ARCHIVE. A lane is otherwise a roll-up of its threads — it
- *  appears when its first thread joins and goes when the last one leaves —
- *  so a record exists only while the lane is archived. Persisted beside the
- *  threads (threads.json's `lanes` + the workspace blob), one writer: the
- *  app. */
+/** A lane's own state that is not a fact about any one thread (SWIT-108). A
+ *  lane is otherwise a roll-up of its threads — it appears when its first
+ *  thread joins and goes when the last one leaves — so a record exists only
+ *  while it holds something: the ARCHIVE, the lane's FORMER NAMES (a rename
+ *  keeps them, so reports stamped with an old name and old routes still
+ *  find it), and a CACHE of the lane's current brief — the newest brief a
+ *  lane thread wrote FOR this lane, kept so it outlives the thread that
+ *  holds it (moved away, deleted). Nothing in it is typed by anyone.
+ *  Persisted beside the threads (threads.json's `lanes` + the workspace
+ *  blob), one writer: the app. */
 export interface LaneRecord {
   project: string;
   name: string;
-  archivedAt: number;
+  archivedAt?: number;
+  aliases?: string[];
+  brief?: LaneBriefCache;
+}
+
+/** The lane brief as last seen on a thread's page — the brief, and which
+ *  thread wrote it (its title kept for when the thread is gone). */
+export interface LaneBriefCache {
+  brief: PageBrief;
+  threadId: string;
+  threadTitle: string;
 }

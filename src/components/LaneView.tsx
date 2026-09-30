@@ -19,7 +19,7 @@
 // Its own poll while on screen only (Home's rule, the same 5s) — the page
 // files of the lane's threads, archived ones included (principle 4).
 
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import type { Thread } from "../types";
 import { BackButton } from "./BackButton";
@@ -35,7 +35,7 @@ import {
   sortThreadsForHistory,
 } from "../lib/threadStore";
 import { deriveLanes, findLane, laneReports, laneRollup, type Lane, type LaneRef } from "../lib/lanes";
-import { readThreadDigest } from "../lib/threadDigest";
+import { readThreadDigestGated, type DigestCache } from "../lib/threadDigest";
 import type { PageFinding, RenderedPage } from "../lib/pageStore";
 import { requestPageFocus } from "../lib/pageStore";
 import { verdictTone } from "../lib/statusPill";
@@ -77,6 +77,8 @@ export function LaneView({ project, lane: laneName, active }: { project: string;
   const lanes = useMemo(() => deriveLanes(view.threads, view.laneRecords), [view.threads, view.laneRecords]);
   const lane = findLane(lanes, { project, name: laneName });
   const [digests, setDigests] = useState<ReadonlyMap<string, RenderedPage>>(new Map());
+  // Review of ec319c7, #7: stamp-gated reads — a stat per thread per tick.
+  const digestCacheRef = useRef<DigestCache>(new Map());
   useRepoListings();
 
   // ONE poll for the page, on screen only: every lane thread's merged page
@@ -94,7 +96,7 @@ export function LaneView({ project, lane: laneName, active }: { project: string;
         const next = new Map<string, RenderedPage>();
         for (const t of lane.threads) {
           try {
-            next.set(t.id, (await readThreadDigest(t.id)).page);
+            next.set(t.id, (await readThreadDigestGated(t.id, digestCacheRef.current)).page);
           } catch {
             // this thread's slice degrades; the rest render
           }
@@ -137,7 +139,7 @@ export function LaneView({ project, lane: laneName, active }: { project: string;
       </Frame>
     );
   }
-  const rollup = laneRollup(lane.threads, digests, view.launched, now);
+  const rollup = laneRollup(lane, view.threads, digests, view.launched, now);
   const knownIds = new Set(view.threads.map((t) => t.id));
   const reports = laneReports(getProjectViews(lane.project) ?? [], lane, knownIds);
   const nothingWritten = rollup.brief === null && rollup.findings.length === 0 && reports.length === 0;
@@ -151,8 +153,11 @@ export function LaneView({ project, lane: laneName, active }: { project: string;
           isNew={false}
           title="Brief"
           note={
+            // The brief can outlive the thread that wrote it (the lane
+            // record's cache — review of ec319c7, #1): it still names it.
             <>
-              rewritten <Age at={rollup.brief.brief.updatedAt} /> by {rollup.brief.thread.title}
+              rewritten <Age at={rollup.brief.brief.updatedAt} /> by {rollup.brief.threadTitle || "a thread"}
+              {rollup.brief.thread === null ? " (a deleted thread)" : ""}
             </>
           }
         />
@@ -259,6 +264,9 @@ function Frame({ project, laneName, lane, children }: { project: string; laneNam
 /** Title · project · the one action. */
 function LaneHead({ lane }: { lane: Lane }) {
   const archived = lane.archivedAt !== null;
+  // Review of ec319c7, #6: a start that did not happen says why, one line.
+  const [refusal, setRefusal] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
       <h1 style={{ margin: 0, fontFamily: READING, fontSize: 17, fontWeight: 600, lineHeight: 1.25, color: "var(--text-primary)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -267,11 +275,26 @@ function LaneHead({ lane }: { lane: Lane }) {
       <span style={{ ...DIM, fontSize: 10.5 }}>{lane.project}</span>
       {archived && <StatusPill word="archived" tone="dim" />}
       <span style={{ flex: 1 }} />
+      {refusal && <span style={{ ...DIM, fontSize: 10.5, color: "var(--tone-rose)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={refusal}>{refusal}</span>}
       <button
         type="button"
-        onClick={() => getThreadActions()?.createThreadInLane({ project: lane.project, name: lane.name })}
+        disabled={starting}
+        onClick={() => {
+          const actions = getThreadActions();
+          if (!actions) {
+            setRefusal("the app is not ready — no thread was started");
+            return;
+          }
+          setRefusal(null);
+          setStarting(true);
+          actions
+            .createThreadInLane({ project: lane.project, name: lane.name })
+            .then((reason) => setRefusal(reason))
+            .catch((err) => setRefusal(`no thread was started — ${String(err)}`))
+            .finally(() => setStarting(false));
+        }}
         title="Start a thread in this lane's project — it reads the lane's brief, findings, reports and open questions first"
-        style={{ ...PRIMARY, flex: "none" }}
+        style={{ ...PRIMARY, flex: "none", opacity: starting ? 0.6 : 1 }}
       >
         + Thread in this lane
       </button>

@@ -3,7 +3,7 @@
 // roll-ups Home, the side menu and the lane page draw.
 
 import { describe, it, expect } from "vitest";
-import type { Thread } from "../types";
+import type { LaneRecord, Thread } from "../types";
 import {
   LANE_NAME_MAX,
   normalizeLaneName,
@@ -30,13 +30,24 @@ import {
   laneWaitsLabel,
   laneHomeLine,
   orderLaneRows,
-  laneMarkerCount,
+  laneWaitingFromCounts,
+  waitingTotal,
+  inVisibleLane,
+  laneEditProject,
+  liveliestStatus,
+  namesLane,
+  briefCountsFor,
+  pickLaneBrief,
+  nextLaneBriefCaches,
+  LANE_ALIAS_CAP,
+  type Lane,
   laneReports,
   LANE_ANSWERED_LIMIT,
   type LaneRow,
 } from "./lanes";
-import { mergePage, parsePageFile, type RenderedPage } from "./pageStore";
+import { mergePage, parsePageFile, type PageBrief, type RenderedPage } from "./pageStore";
 import type { ProjectViewEntry } from "./repoListing";
+import { digestCacheHit } from "./threadDigest";
 
 const NOW = Date.parse("2026-09-30T12:00:00Z");
 const HOUR = 3_600_000;
@@ -59,7 +70,7 @@ const inLane = (id: string, name: string, over: Partial<Thread> = {}) =>
 
 const page = (json: Record<string, unknown>, answers: Record<string, unknown> = {}): RenderedPage =>
   mergePage(parsePageFile(JSON.stringify(json)), answers as never, []);
-const brief = (goal: string, updatedAt: string) => ({ goal, established: ["e"], updatedAt });
+const brief = (goal: string, updatedAt: string): PageBrief => ({ goal, established: ["e"], dead: [], lead: [], waiting: [], updatedAt });
 
 describe("the lane name", () => {
   it("is a few words: folded, trimmed, NFC; refused with a reason when empty, too long or out of the charset", () => {
@@ -143,49 +154,90 @@ describe("rename (edge case 5)", () => {
   });
 });
 
-describe("archive records (requirement 1.6)", () => {
+describe("lane records (requirement 1.6; review of ec319c7, #1 and #5)", () => {
   const gamma = { project: "lodestar", name: "Gamma model" };
-  it("tolerant parse: junk drops alone, a repeat keeps its first, the name is normalized", () => {
+  const cache = (goal: string, updatedAt: string, threadId = "a") => ({ brief: brief(goal, updatedAt), threadId, threadTitle: `t ${threadId}` });
+  it("tolerant parse: junk drops alone (a bad alias, a bad brief), a repeat keeps its first, a record holding nothing is none", () => {
     expect(
       sanitizeLaneRecords([
-        { project: "lodestar", name: " Gamma  model ", archivedAt: 5 },
+        { project: "lodestar", name: " Gamma  model ", archivedAt: 5, aliases: ["Gamma", "gamma", 'bad"', "Gamma model"] },
         { project: "lodestar", name: "gamma model", archivedAt: 9 },
         { project: "", name: "x", archivedAt: 1 },
         { project: "p", name: 'bad"', archivedAt: 1 },
         { project: "p", name: "ok", archivedAt: 0 },
+        { project: "p", name: "junk brief", brief: { brief: "nope", threadId: "a" } },
+        { project: "p", name: "cached", brief: cache("g", "2026-09-29T00:00:00Z") },
         null,
       ])
-    ).toEqual([{ project: "lodestar", name: "Gamma model", archivedAt: 5 }]);
+    ).toEqual([
+      { project: "lodestar", name: "Gamma model", archivedAt: 5, aliases: ["Gamma"] },
+      { project: "p", name: "cached", brief: { ...cache("g", "2026-09-29T00:00:00Z"), brief: { goal: "g", established: ["e"], dead: [], lead: [], waiting: [], updatedAt: "2026-09-29T00:00:00Z" } } },
+    ]);
     expect(sanitizeLaneRecords("junk")).toEqual([]);
   });
-  it("archive / restore / rename move ONE record; a no-op is the same array; a lane with no thread left is pruned", () => {
+  it("archive / restore move ONE record; a no-op is the same array; restoring a record that holds nothing else drops it", () => {
     const none: never[] = [];
     const archived = setLaneArchivedIn(none, gamma, true, 7);
     expect(archived).toEqual([{ ...gamma, archivedAt: 7 }]);
     expect(setLaneArchivedIn(archived, { project: "lodestar", name: "GAMMA model" }, true, 9)).toBe(archived);
     expect(laneArchivedAt(archived, gamma)).toBe(7);
     expect(setLaneArchivedIn(archived, gamma, false, 9)).toEqual([]);
-    expect(renameLaneRecords(archived, gamma, "Gamma")).toEqual([{ project: "lodestar", name: "Gamma", archivedAt: 7 }]);
     expect(pruneLaneRecords(archived, [inLane("a", "gamma model")])).toBe(archived);
     expect(pruneLaneRecords(archived, [inLane("a", "Tennis")])).toEqual([]);
+  });
+  it("a RENAME keeps the former names (newest LANE_ALIAS_CAP), never the new name itself; the record goes with it", () => {
+    const archived = setLaneArchivedIn([], gamma, true, 7);
+    const once = renameLaneRecords(archived, gamma, "Gamma");
+    expect(once).toEqual([{ project: "lodestar", name: "Gamma", archivedAt: 7, aliases: ["Gamma model"] }]);
+    // Renaming back drops the name it returns to from the aliases.
+    expect(renameLaneRecords(once, { project: "lodestar", name: "Gamma" }, "gamma MODEL")).toEqual([
+      { project: "lodestar", name: "gamma MODEL", archivedAt: 7, aliases: ["Gamma"] },
+    ]);
+    // A lane with no record gets one holding just its former name.
+    expect(renameLaneRecords([], gamma, "G")).toEqual([{ project: "lodestar", name: "G", aliases: ["Gamma model"] }]);
+    let rec: readonly LaneRecord[] = [];
+    let name = "n0";
+    for (let i = 1; i <= LANE_ALIAS_CAP + 3; i++) {
+      rec = renameLaneRecords(rec, { project: "p", name }, `n${i}`);
+      name = `n${i}`;
+    }
+    expect(rec[0].aliases).toHaveLength(LANE_ALIAS_CAP);
+    expect(rec[0].aliases?.[LANE_ALIAS_CAP - 1]).toBe(`n${LANE_ALIAS_CAP + 2}`);
+  });
+  it("a former name still FINDS the lane (a route from before the rename); the current name wins first", () => {
+    const threads = [inLane("a", "Gamma"), inLane("b", "Gamma model")];
+    const lanes = deriveLanes(threads, [{ project: "lodestar", name: "Gamma", aliases: ["Gamma model", "Old"] }]);
+    expect(findLane(lanes, { project: "lodestar", name: "old" })?.name).toBe("Gamma");
+    expect(findLane(lanes, { project: "lodestar", name: "Gamma model" })?.name).toBe("Gamma model");
+    expect(namesLane(lanes[0], "OLD")).toBe(true);
   });
 });
 
 describe("the lanes themselves", () => {
-  it("a lane is its threads — archived ones included — with its archive state; ordered by project then name", () => {
+  it("a lane is its threads — archived ones included — with its record; ordered by project then name", () => {
     const threads = [inLane("a", "Tennis"), inLane("b", "gamma"), inLane("c", "Gamma", { archivedAt: NOW, lastActivityAt: NOW }), thread("d"), thread("e", { lane: "Z", laneProject: "kyde" })];
-    const lanes = deriveLanes(threads, [{ project: "lodestar", name: "Tennis", archivedAt: 3 }]);
-    expect(lanes.map((l) => `${l.project}/${l.name}:${l.threads.map((t) => t.id).join("")}:${l.archivedAt}`)).toEqual([
-      "kyde/Z:e:null",
-      "lodestar/Gamma:cb:null",
-      "lodestar/Tennis:a:3",
+    const lanes = deriveLanes(threads, [{ project: "lodestar", name: "Tennis", archivedAt: 3, aliases: ["T"] }]);
+    expect(lanes.map((l) => `${l.project}/${l.name}:${l.threads.map((t) => t.id).join("")}:${l.archivedAt}:${l.aliases.join()}`)).toEqual([
+      "kyde/Z:e:null:",
+      "lodestar/Gamma:cb:null:",
+      "lodestar/Tennis:a:3:T",
     ]);
     expect(findLane(lanes, { project: "lodestar", name: "GAMMA" })?.threads).toHaveLength(2);
     expect(findLane(lanes, { project: "lodestar", name: "Combos" })).toBeNull();
   });
-  it("the roll-up reads every active thread and an archived one ONLY when it is in a lane (principle 4)", () => {
-    const threads = [thread("a"), thread("b", { archivedAt: NOW }), inLane("c", "Gamma", { archivedAt: NOW }), inLane("d", "Gamma")];
-    expect(rollupThreads(threads).map((t) => t.id)).toEqual(["a", "c", "d"]);
+  it("the roll-ups read every active thread and an archived one ONLY when it is in a lane that is not archived (principle 4; nothing read is discarded)", () => {
+    const threads = [thread("a"), thread("b", { archivedAt: NOW }), inLane("c", "Gamma", { archivedAt: NOW }), inLane("d", "Gamma"), inLane("e", "Put away", { archivedAt: NOW }), inLane("f", "Put away")];
+    const records = [{ project: "lodestar", name: "Put away", archivedAt: 1 }];
+    expect(rollupThreads(threads, records).map((t) => t.id)).toEqual(["a", "c", "d", "f"]);
+    expect(inVisibleLane(threads[3], records)).toBe(true);
+    expect(inVisibleLane(threads[5], records)).toBe(false); // its lane is archived — it shows as a thread
+    expect(inVisibleLane(threads[0], records)).toBe(false);
+  });
+  it("`lane…` works in the thread's FROZEN lane project, else its folder's (review #4)", () => {
+    expect(laneEditProject(inLane("a", "Gamma"), "elsewhere")).toBe("lodestar");
+    expect(laneEditProject(inLane("a", "Gamma"), null)).toBe("lodestar");
+    expect(laneEditProject(thread("a"), "kyde")).toBe("kyde");
+    expect(laneEditProject(thread("a"), null)).toBeNull();
   });
   it("`+ Thread in this lane` starts in the most recent lane thread's folder when it is in a project repo, else the first repo", () => {
     const inside = (dir: string, repo: string) => dir.toLowerCase().startsWith(repo.toLowerCase());
@@ -203,40 +255,105 @@ describe("the lanes themselves", () => {
     expect(laneThreadDir([{ workingDir: "C:/elsewhere", lastActivityAt: NOW, createdAt: 0 }], repos, inside)).toBe("C:/p/lodestar");
     expect(laneThreadDir([], [], inside)).toBeNull();
   });
+  it("Home's dot is the liveliest status of the lane's live threads", () => {
+    expect(liveliestStatus(["idle", "running", "waiting"])).toBe("waiting");
+    expect(liveliestStatus(["done", "running"])).toBe("running");
+    expect(liveliestStatus([undefined])).toBe("idle");
+    expect(liveliestStatus([])).toBeNull();
+  });
 });
 
-describe("the lane roll-up (requirement 2; edge cases 1, 2, 4)", () => {
+/** A lane over some threads, record-free unless given. */
+function laneOf(threads: Thread[], over: Partial<Lane> = {}): Lane {
+  return { project: "lodestar", name: "Gamma", threads, archivedAt: null, aliases: [], cachedBrief: null, ...over };
+}
+const stamped = (goal: string, updatedAt: string, lane: { name: string; project: string } | null): PageBrief => ({ ...brief(goal, updatedAt), lane });
+
+describe("which brief is the lane's (review of ec319c7, #1; edge cases 1, 2, 3)", () => {
+  const a = inLane("a", "Gamma", { title: "gamma · design review" });
+  const b = inLane("b", "Gamma", { title: "gamma · deck export", archivedAt: NOW });
+  const c = inLane("c", "Gamma", { title: "gamma · layer 0" });
+  const G = { name: "Gamma", project: "lodestar" };
+
+  it("the newest brief written FOR the lane wins, and it names its thread (edge case 1) — archived threads count", () => {
+    const digests = new Map([
+      ["a", page({ brief: stamped("older goal", "2026-09-20T10:00:00Z", G) })],
+      ["b", page({ brief: stamped("newest goal", "2026-09-29T10:00:00Z", G) })],
+      ["c", page({})],
+    ]);
+    const r = laneRollup(laneOf([a, b, c]), [a, b, c], digests, new Set(), NOW);
+    expect(r.brief?.brief.goal).toBe("newest goal");
+    expect(r.brief?.thread?.id).toBe("b");
+    expect(r.brief?.fromCache).toBe(false);
+  });
+
+  it("a thread that JOINS with a brief written for its own corner never takes the lane over, however new (edge case 2)", () => {
+    const joiner = inLane("j", "Gamma");
+    const digests = new Map([
+      ["a", page({ brief: stamped("the lane's brief", "2026-09-20T10:00:00Z", G) })],
+      ["j", page({ brief: stamped("my own corner, NEWER", "2026-09-29T10:00:00Z", null) })],
+    ]);
+    expect(laneRollup(laneOf([a, joiner]), [a, joiner], digests, new Set(), NOW).brief?.brief.goal).toBe("the lane's brief");
+    // One written for ANOTHER lane does not count either.
+    const other = new Map([...digests, ["j", page({ brief: stamped("tennis", "2026-09-30T10:00:00Z", { name: "Tennis", project: "lodestar" }) })]]);
+    expect(laneRollup(laneOf([a, joiner]), [a, joiner], other, new Set(), NOW).brief?.brief.goal).toBe("the lane's brief");
+    // Rewriting it FOR the lane (after reading it) is what replaces it.
+    const rewritten = new Map([...digests, ["j", page({ brief: stamped("rewritten for the lane", "2026-09-30T10:00:00Z", G) })]]);
+    const r = laneRollup(laneOf([a, joiner]), [a, joiner], rewritten, new Set(), NOW);
+    expect(r.brief?.brief.goal).toBe("rewritten for the lane");
+    expect(r.brief?.thread?.id).toBe("j");
+    // A brief from before the stamp still counts for its thread's current lane — nothing existing vanishes.
+    const legacy = new Map([["a", page({ brief: brief("pre-stamp brief", "2026-09-20T10:00:00Z") })]]);
+    expect(laneRollup(laneOf([a]), [a], legacy, new Set(), NOW).brief?.brief.goal).toBe("pre-stamp brief");
+    expect(laneRollup(laneOf([c]), [c], new Map([["c", page({})]]), new Set(), NOW).brief).toBeNull();
+  });
+
+  it("a thread that MOVED AWAY keeps counting for the lane it wrote for (edge case 3), a former name too", () => {
+    const moved = inLane("m", "Tennis");
+    const digests = new Map([["m", page({ brief: stamped("written for gamma", "2026-09-28T10:00:00Z", { name: "Old gamma", project: "lodestar" }) })]]);
+    const lane = laneOf([a], { aliases: ["Old gamma"] });
+    const r = laneRollup(lane, [a, moved], digests, new Set(), NOW);
+    expect(r.brief?.brief.goal).toBe("written for gamma");
+    expect(r.brief?.thread?.id).toBe("m");
+    expect(briefCountsFor(stamped("x", "", G), moved, lane)).toBe(true);
+    expect(briefCountsFor(brief("x", ""), moved, lane)).toBe(false); // legacy: counts for its CURRENT lane (Tennis)
+  });
+
+  it("the CACHED brief keeps the lane's brief when its thread is gone — named, `from a deleted thread` when it is; a newer live one wins", () => {
+    const cachedBrief = { brief: stamped("kept goal", "2026-09-25T10:00:00Z", G), threadId: "gone", threadTitle: "gamma · layer 0 (old)" };
+    const lane = laneOf([a], { cachedBrief });
+    const empty = laneRollup(lane, [a], new Map([["a", page({})]]), new Set(), NOW);
+    expect(empty.brief).toMatchObject({ threadTitle: "gamma · layer 0 (old)", thread: null, fromCache: true });
+    expect(empty.brief?.brief.goal).toBe("kept goal");
+    const newer = laneRollup(lane, [a], new Map([["a", page({ brief: stamped("newer", "2026-09-29T10:00:00Z", G) })]]), new Set(), NOW);
+    expect(newer.brief).toMatchObject({ fromCache: false, threadTitle: a.title });
+    // A cache whose thread still exists names it by its CURRENT title.
+    const held = pickLaneBrief(laneOf([a], { cachedBrief: { ...cachedBrief, threadId: "a" } }), [a], () => null);
+    expect(held).toMatchObject({ thread: a, threadTitle: a.title, fromCache: true });
+  });
+
+  it("the cache update: a newer counting brief becomes the cache; an older or equal one leaves the SAME array", () => {
+    const threads = [a, c];
+    const lanes = deriveLanes(threads, []);
+    const briefs: Record<string, PageBrief> = { a: stamped("first", "2026-09-20T10:00:00Z", G) as PageBrief };
+    const once = nextLaneBriefCaches([], lanes, threads, (id) => briefs[id]);
+    expect(once).toEqual([{ project: "lodestar", name: "Gamma", brief: { brief: briefs.a, threadId: "a", threadTitle: a.title } }]);
+    expect(nextLaneBriefCaches(once, deriveLanes(threads, once), threads, (id) => briefs[id])).toBe(once);
+    briefs.c = stamped("newer", "2026-09-29T10:00:00Z", G) as PageBrief;
+    const twice = nextLaneBriefCaches(once, deriveLanes(threads, once), threads, (id) => briefs[id]);
+    expect(twice[0].brief?.threadId).toBe("c");
+    // The holder moves away and its brief is rewritten for its new lane: the cache keeps gamma's.
+    briefs.c = stamped("tennis now", "2026-09-30T10:00:00Z", { name: "Tennis", project: "lodestar" }) as PageBrief;
+    expect(nextLaneBriefCaches(twice, deriveLanes(threads, twice), threads, (id) => briefs[id])).toBe(twice);
+  });
+});
+
+describe("the lane roll-up (requirement 2; edge case 4; review #8)", () => {
   const a = inLane("a", "Gamma", { title: "gamma · design review" });
   const b = inLane("b", "Gamma", { title: "gamma · deck export", archivedAt: NOW });
   const c = inLane("c", "Gamma", { title: "gamma · layer 0" });
 
-  it("THE LANE BRIEF is the newest brief among its threads, and it names the thread (edge case 1)", () => {
-    const digests = new Map([
-      ["a", page({ brief: brief("older goal", "2026-09-20T10:00:00Z") })],
-      ["b", page({ brief: brief("newest goal", "2026-09-29T10:00:00Z") })],
-      ["c", page({})],
-    ]);
-    const r = laneRollup([a, b, c], digests, new Set(), NOW);
-    expect(r.brief?.brief.goal).toBe("newest goal");
-    expect(r.brief?.thread.id).toBe("b"); // archived is not gone (principle 4)
-  });
-
-  it("a thread that JOINS with an OLDER brief never becomes the lane brief (edge case 2)", () => {
-    const current = new Map([["a", page({ brief: brief("the lane's current brief", "2026-09-29T10:00:00Z") })]]);
-    const joiner = inLane("j", "Gamma");
-    const withJoiner = new Map([...current, ["j", page({ brief: brief("a narrow old brief", "2026-09-01T10:00:00Z") })]]);
-    expect(laneRollup([a], current, new Set(), NOW).brief?.brief.goal).toBe("the lane's current brief");
-    expect(laneRollup([a, joiner], withJoiner, new Set(), NOW).brief?.brief.goal).toBe("the lane's current brief");
-    // Rewriting it AFTER reading (a newer stamp) is what replaces it.
-    const rewritten = new Map([...withJoiner, ["j", page({ brief: brief("rewritten for the lane", "2026-09-30T10:00:00Z") })]]);
-    const r = laneRollup([a, joiner], rewritten, new Set(), NOW);
-    expect(r.brief?.brief.goal).toBe("rewritten for the lane");
-    expect(r.brief?.thread.id).toBe("j");
-    // No brief anywhere → null.
-    expect(laneRollup([c], new Map([["c", page({})]]), new Set(), NOW).brief).toBeNull();
-  });
-
-  it("findings from every thread newest first (a dropped finding is gone from its page); decisions open → unsent → answered", () => {
+  it("findings from every thread newest first; decisions open → unsent → answered; what waits", () => {
     const digests = new Map([
       [
         "a",
@@ -258,18 +375,32 @@ describe("the lane roll-up (requirement 2; edge cases 1, 2, 4)", () => {
         page({
           findings: [{ id: "f9", claim: "newest claim", verdict: "lead", n: "264 nights", updatedAt: "2026-09-28T00:00:00Z" }],
           questions: [{ id: "q1", text: "State variable?", askedAt: "2026-09-25T00:00:00Z" }],
+          items: [{ id: "i1", title: "a stale item on a put-away thread", owner: "user" }],
         }),
       ],
     ]);
-    const r = laneRollup([a, b, c], digests, new Set(), NOW);
+    const r = laneRollup(laneOf([a, b, c]), [a, b, c], digests, new Set(), NOW);
     expect(r.findings.map((f) => `${f.thread.id}:${f.finding.claim}`)).toEqual(["b:newest claim", "a:old claim"]);
     expect(r.openQuestions.map((q) => `${q.thread.id}:${q.question.text}`)).toEqual(["b:State variable?", "a:Which book?"]);
     expect(r.unsent).toEqual([{ thread: a, count: 1 }]);
     expect(r.answered.map((x) => x.settled.question.id)).toEqual(["q3"]);
+    // The archived thread's QUESTION counts (edge case 4); its ITEM does not (review #8).
     expect(r.waiting).toEqual({ questions: 2, unsent: 1, requests: 0, items: 1 });
     expect(isLaneWaiting(r.waiting)).toBe(true);
     expect(laneWaitsLabel(r.waiting)).toBe("2 questions · 1 unsent · 1 item for you");
     expect(laneHomeLine(r)).toBe("newest claim");
+  });
+
+  it("THE SAME waiting rule over the pass's counts (the side menu's `· N`) as over the digests (Home's pill)", () => {
+    const w = laneWaitingFromCounts([a, b, c], {
+      questions: { a: 1, b: 1 },
+      unsent: { a: 1 },
+      requests: { b: 3, c: 1 },
+      items: { a: 1, b: 5 },
+    });
+    expect(w).toEqual({ questions: 2, unsent: 1, requests: 1, items: 1 });
+    expect(waitingTotal(w)).toBe(5);
+    expect(waitingTotal(laneWaitingFromCounts([c], { questions: {}, unsent: {}, requests: {}, items: {} }))).toBe(0);
   });
 
   it("answered decisions are capped; Home's line falls back to the brief's goal, then nothing", () => {
@@ -280,7 +411,7 @@ describe("the lane roll-up (requirement 2; edge cases 1, 2, 4)", () => {
       answer: "a",
       answeredAt: `2026-09-${String(10 + i).padStart(2, "0")}T00:00:00Z`,
     }));
-    const r = laneRollup([a], new Map([["a", page({ questions: qs, brief: brief("the goal", "2026-09-29T00:00:00Z") })]]), new Set(), NOW);
+    const r = laneRollup(laneOf([a]), [a], new Map([["a", page({ questions: qs, brief: brief("the goal", "2026-09-29T00:00:00Z") })]]), new Set(), NOW);
     expect(r.answered).toHaveLength(LANE_ANSWERED_LIMIT);
     expect(r.answered[0].settled.question.id).toBe(`q${LANE_ANSWERED_LIMIT + 2}`);
     expect(laneHomeLine(r)).toBe("the goal");
@@ -291,14 +422,14 @@ describe("the lane roll-up (requirement 2; edge cases 1, 2, 4)", () => {
 
   it("last activity: live = now; else the newest of record stamps, turns, asks, the brief and findings; unread threads count their record", () => {
     const digests = new Map([["a", page({ brief: brief("g", "2026-09-29T00:00:00Z") })]]);
-    expect(laneRollup([a], digests, new Set(), NOW).lastActive).toBe(Date.parse("2026-09-29T00:00:00Z"));
-    expect(laneRollup([a], digests, new Set(["a"]), NOW).lastActive).toBe(NOW);
-    expect(laneRollup([c], new Map(), new Set(), NOW).lastActive).toBe(c.lastActivityAt);
+    expect(laneRollup(laneOf([a]), [a], digests, new Set(), NOW).lastActive).toBe(Date.parse("2026-09-29T00:00:00Z"));
+    expect(laneRollup(laneOf([a]), [a], digests, new Set(["a"]), NOW).lastActive).toBe(NOW);
+    expect(laneRollup(laneOf([c]), [c], new Map(), new Set(), NOW).lastActive).toBe(c.lastActivityAt);
   });
 
   it("Home's order: waiting on Eric first, then last activity; a lane whose only live thread was archived stays up while it has open decisions (edge case 4)", () => {
     const row = (name: string, waiting: number, lastActive: number): LaneRow => ({
-      lane: { project: "lodestar", name, threads: [], archivedAt: null },
+      lane: laneOf([], { name }),
       rollup: {
         brief: null,
         findings: [],
@@ -312,14 +443,9 @@ describe("the lane roll-up (requirement 2; edge cases 1, 2, 4)", () => {
     const ordered = orderLaneRows([row("quiet-new", 0, NOW), row("waits-old", 2, NOW - 90 * HOUR), row("quiet-old", 0, NOW - 99 * HOUR), row("waits-new", 1, NOW - HOUR)]);
     expect(ordered.map((r) => r.lane.name)).toEqual(["waits-new", "waits-old", "quiet-new", "quiet-old"]);
   });
-
-  it("the side menu's `· N`: open questions + unsent answers over the lane's threads", () => {
-    expect(laneMarkerCount({ threads: [a, b, c] }, { a: 2, c: 1, x: 9 }, { b: 1 })).toBe(4);
-    expect(laneMarkerCount({ threads: [c] }, {}, {})).toBe(0);
-  });
 });
 
-describe("the lane's reports (requirement 2.5; edge cases 3 and 6)", () => {
+describe("the lane's reports (requirement 2.5; edge cases 3 and 6; review #5)", () => {
   const view = (id: string, threadId: string, lane = ""): ProjectViewEntry => ({
     project: "lodestar",
     id,
@@ -330,15 +456,25 @@ describe("the lane's reports (requirement 2.5; edge cases 3 and 6)", () => {
     repo: "",
     lane,
   });
-  const lane = { name: "Gamma", threads: [inLane("a", "Gamma"), inLane("b", "Gamma", { archivedAt: NOW })] };
+  const lane = laneOf([inLane("a", "Gamma"), inLane("b", "Gamma", { archivedAt: NOW })]);
   it("the reports the lane's threads built — by the index row's thread — archived threads' included", () => {
     const views = [view("v1", "a"), view("v2", "b"), view("v3", "other"), view("v4", "")];
     const known = new Set(["a", "b", "other"]);
     expect(laneReports(views, lane, known).map((v) => v.id)).toEqual(["v1", "v2"]);
   });
-  it("a report whose thread was DELETED stays on the lane it was built in; a live thread's report follows the thread's CURRENT lane", () => {
+  it("a report whose thread was DELETED stays on the lane it was built in — under a FORMER name too; a live thread's report follows its CURRENT lane", () => {
     const known = new Set(["a", "b", "moved"]);
-    const views = [view("gone", "deleted-thread", "gamma"), view("elsewhere", "deleted-2", "Tennis"), view("moved", "moved", "Gamma")];
+    const views = [view("gone", "deleted-thread", "gamma"), view("renamed", "deleted-3", "Old gamma"), view("elsewhere", "deleted-2", "Tennis"), view("moved", "moved", "Gamma")];
     expect(laneReports(views, lane, known).map((v) => v.id)).toEqual(["gone"]);
+    expect(laneReports(views, { ...lane, aliases: ["Old gamma"] }, known).map((v) => v.id)).toEqual(["gone", "renamed"]);
+  });
+});
+
+describe("Home's and the lane page's reads are stamp-gated (review #7)", () => {
+  it("a cached digest is reused only under the SAME real stamp; a failed stat (-1) or none always reads", () => {
+    expect(digestCacheHit({ stamp: 17 }, 17)).toBe(true);
+    expect(digestCacheHit({ stamp: 17 }, 18)).toBe(false);
+    expect(digestCacheHit({ stamp: -1 }, -1)).toBe(false);
+    expect(digestCacheHit(undefined, 17)).toBe(false);
   });
 });

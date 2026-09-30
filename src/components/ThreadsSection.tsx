@@ -63,6 +63,7 @@ import { navigate } from "../lib/route";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
 import { getExplorerActions, useSessionRepos, quickThreadTarget, projectKeyForDir } from "../lib/explorer";
 import { getRegistryProjects, refreshRepoKb, useRepoListings } from "../lib/repoListing";
+import { laneEditProject } from "../lib/lanes";
 import { sessionDirFor } from "../lib/devServer";
 import { getActiveTabSession } from "../lib/panelStore";
 import { getHomeDir } from "../lib/ipc";
@@ -75,14 +76,18 @@ import { ThreadLaneEditor, ThreadRowMenu, ThreadTitleEditor, threadMenuItems } f
  *  the menu item stays choosable and the commit says so if it must. */
 export const NO_PROJECT_LANE_HINT = "This thread's folder is in no registry project — a lane belongs to a project";
 
-export function useThreadProject(workingDir: string): { project: string | null; laneBlocked: string | null } {
+export function useThreadProject(thread: Pick<Thread, "workingDir" | "lane" | "laneProject">): { project: string | null; laneBlocked: string | null } {
   useRepoListings();
   useEffect(() => {
     refreshRepoKb();
   }, []);
   const projects = getRegistryProjects().projects;
-  const project = projects ? projectKeyForDir(projects, workingDir) : null;
-  return { project, laneBlocked: projects && !project ? NO_PROJECT_LANE_HINT : null };
+  const resolved = projects ? projectKeyForDir(projects, thread.workingDir) : null;
+  // Review of ec319c7, #4: a thread IN a lane can always open `lane…` (so
+  // `no lane` works even when its folder no longer resolves), and the lanes
+  // it offers are its lane's frozen project's — never a re-resolved one.
+  const project = laneEditProject(thread, resolved);
+  return { project, laneBlocked: project === null && projects && !resolved ? NO_PROJECT_LANE_HINT : null };
 }
 
 /** Dead rows use the EXITED status colour — read from statusConfig, the
@@ -374,7 +379,7 @@ function ThreadRow({
   const [menuOpen, setMenuOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [laneEditing, setLaneEditing] = useState(false);
-  const { project, laneBlocked } = useThreadProject(thread.workingDir);
+  const { project, laneBlocked } = useThreadProject(thread);
   const actions = getThreadActions();
 
   useEffect(() => {

@@ -20,6 +20,7 @@ import {
   navigate,
   navigateToScreen,
   navigateBack,
+  replaceRoute,
   canNavigateBack,
   backTargetLabel,
   routeKey,
@@ -531,5 +532,19 @@ describe("lane route (SWIT-108)", () => {
     __resetNavForTests({ screen: "terminal" });
     navigateToScreen("lane");
     expect(getNavState().route).toEqual({ screen: "home" });
+  });
+});
+
+describe("replaceRoute (SWIT-108 review #5 — a lane rename moves the page without a history entry)", () => {
+  it("swaps the location; back goes where it went before the rename, never to the old name", () => {
+    __resetNavForTests({ screen: "home" });
+    navigate({ screen: "lane", project: "lodestar", lane: "Gamma" });
+    replaceRoute({ screen: "lane", project: "lodestar", lane: "Gamma model" });
+    expect(getNavState().route).toEqual({ screen: "lane", project: "lodestar", lane: "Gamma model" });
+    expect(getNavState().lastByScreen.lane).toEqual({ screen: "lane", project: "lodestar", lane: "Gamma model" });
+    expect(backTargetLabel()).toBe("home");
+    navigateBack();
+    expect(getNavState().route).toEqual({ screen: "home" });
+    expect(canNavigateBack()).toBe(false);
   });
 });

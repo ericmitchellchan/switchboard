@@ -2778,3 +2778,117 @@ describe("the page tool — lanes (SWIT-108)", () => {
     }
   });
 });
+
+// ─── SWIT-108 review of ec319c7: the brief's lane stamp and the cached lane brief ─
+
+describe("the page tool — the lane brief outlives its thread (SWIT-108 review #1, #5, #8)", () => {
+  type Env = { threadsRoot?: string; threadsJsonPath?: string; selfThreadId?: string; registryPath?: string | null; cwd?: string };
+  const srv = server as unknown as {
+    performOp: (threadDir: string, args: Record<string, unknown>, now: number, env?: Env | null) => string;
+    performReadOp: (threadDir: string, env?: Env | null) => string;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const fs = require("fs") as {
+    mkdtempSync: (p: string) => string;
+    mkdirSync: (p: string, o?: { recursive: boolean }) => void;
+    writeFileSync: (p: string, d: string) => void;
+    readFileSync: (p: string, e: string) => string;
+    rmSync: (p: string, o: { recursive: boolean; force: boolean }) => void;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const os = require("os") as { tmpdir: () => string };
+  const AT = (d: number) => new Date(NOW + d * 3_600_000).toISOString();
+  const G = { name: "Gamma model", project: "lodestar" };
+
+  function world(threads: Array<Record<string, unknown>>, lanes: unknown[] = []) {
+    const root = fs.mkdtempSync(`${os.tmpdir()}/swb-lanes2-`).split("\\").join("/");
+    fs.mkdirSync(`${root}/repos/lodestar/.sb-views/_project`, { recursive: true });
+    fs.mkdirSync(`${root}/kb`, { recursive: true });
+    const registryPath = `${root}/kb/registry.json`;
+    fs.writeFileSync(registryPath, JSON.stringify({ conventions: { reposRoot: `${root}/repos/` }, projects: { lodestar: { repos: ["lodestar"] } } }));
+    const threadsJsonPath = `${root}/threads.json`;
+    fs.writeFileSync(threadsJsonPath, JSON.stringify({ version: 1, threads, lanes }));
+    for (const t of threads) fs.mkdirSync(`${root}/threads/${t.id}`, { recursive: true });
+    const env = (self: string): Env => ({ threadsRoot: `${root}/threads`, threadsJsonPath, selfThreadId: self, registryPath, cwd: `${root}/repos/lodestar` });
+    const write = (id: string, value: unknown) => fs.writeFileSync(`${root}/threads/${id}/page.json`, JSON.stringify(value));
+    const pageOf = (id: string) => JSON.parse(fs.readFileSync(`${root}/threads/${id}/page.json`, "utf8"));
+    return { root, env, write, pageOf, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
+  }
+  const rec = (id: string, over: Record<string, unknown> = {}) => ({ id, title: `thread ${id}`, workingDir: "", chatSessionId: `c${id}`, lastActivityAt: 1, ...over });
+  const gamma = { lane: "Gamma model", laneProject: "lodestar" };
+  const brief = (goal: string, updatedAt: string, lane?: unknown) => ({ goal, established: [], dead: [], lead: [], waiting: [], updatedAt, ...(lane === undefined ? {} : { lane }) });
+
+  it("`brief` is STAMPED with the lane it is written for — the record's lane, the page's own lane before the app copies it, else null", () => {
+    const w = world([rec("in", gamma), rec("free"), rec("out", { laneSetBy: "user" })]);
+    try {
+      srv.performOp(`${w.root}/threads/in`, { op: "brief", goal: "g" }, NOW, w.env("in"));
+      expect(w.pageOf("in").brief.lane).toEqual(G);
+      expect(parsePageFile(JSON.stringify(w.pageOf("in"))).brief?.lane).toEqual(G);
+      srv.performOp(`${w.root}/threads/free`, { op: "brief", goal: "g" }, NOW, w.env("free"));
+      expect(w.pageOf("free").brief.lane).toBeNull();
+      // The agent asked for a lane (op lane) and the app has not copied it yet: the brief is for that lane.
+      srv.performOp(`${w.root}/threads/free`, { op: "lane", name: "Tennis" }, NOW, w.env("free"));
+      srv.performOp(`${w.root}/threads/free`, { op: "brief", goal: "g2" }, NOW, w.env("free"));
+      expect(w.pageOf("free").brief.lane).toEqual({ name: "Tennis", project: "lodestar" });
+      // No env (a test's direct call): the stamp says "no lane".
+      srv.performOp(`${w.root}/threads/out`, { op: "brief", goal: "g" }, NOW, null);
+      expect(w.pageOf("out").brief.lane).toBeNull();
+    } finally {
+      w.cleanup();
+    }
+  });
+
+  it("read: a sibling's brief written for its own corner never becomes the lane brief; a pre-stamp brief still counts", () => {
+    const w = world([rec("me", gamma), rec("joiner", { ...gamma, title: "joiner" }), rec("old", { ...gamma, title: "old timer" })]);
+    try {
+      w.write("me", {});
+      w.write("joiner", { brief: brief("my corner", AT(-1), null) });
+      w.write("old", { brief: brief("pre-stamp lane brief", AT(-9)) });
+      const text = srv.performReadOp(`${w.root}/threads/me`, w.env("me"));
+      expect(text).toContain('LANE BRIEF (the newest in the lane — thread "old timer"');
+      expect(text).toContain("  Goal: pre-stamp lane brief");
+      expect(text).not.toContain("my corner");
+    } finally {
+      w.cleanup();
+    }
+  });
+
+  it("read: the CACHED lane brief (threads.json `lanes`) keeps it when its thread is deleted, and beats an older live one; a former name still matches", () => {
+    const cached = { brief: brief("the kept lane brief", AT(-2), { name: "Old gamma", project: "lodestar" }), threadId: "deleted", threadTitle: "gamma · design review" };
+    const w = world([rec("me", gamma), rec("t2", { ...gamma, title: "t2" })], [{ project: "lodestar", name: "Gamma model", aliases: ["Old gamma"], brief: cached }]);
+    try {
+      w.write("me", {});
+      w.write("t2", { brief: brief("older live brief", AT(-5), G) });
+      fs.writeFileSync(
+        `${w.root}/repos/lodestar/.sb-views/_project/index.json`,
+        JSON.stringify({ version: 1, views: [{ id: "renamed", title: "Built under the old name", kind: "report", builtAt: AT(-1), threadId: "deleted", lane: "old GAMMA" }] })
+      );
+      const text = srv.performReadOp(`${w.root}/threads/me`, w.env("me"));
+      expect(text).toContain('LANE BRIEF (the newest in the lane — thread "gamma · design review" (a deleted thread)');
+      expect(text).toContain("  Goal: the kept lane brief");
+      expect(text).toContain("  view:lodestar/renamed Built under the old name");
+      // A NEWER live brief for the lane wins over the cache.
+      w.write("t2", { brief: brief("newer live brief", AT(0), G) });
+      expect(srv.performReadOp(`${w.root}/threads/me`, w.env("me"))).toContain("  Goal: newer live brief");
+    } finally {
+      w.cleanup();
+    }
+  });
+
+  it("read with more than LANE_READ_THREADS threads: the lane brief is the NEWEST overall (the cache), not the newest of the 24 read", () => {
+    const siblings = Array.from({ length: 30 }, (_, i) => rec(`s${i}`, { ...gamma, lastActivityAt: 100 + i }));
+    // The least recently active thread (not read) holds the newest brief — the app cached it.
+    const cached = { brief: brief("newest brief, on a quiet thread", AT(0), G), threadId: "s0", threadTitle: "thread s0" };
+    const w = world([rec("me", gamma), ...siblings], [{ project: "lodestar", name: "Gamma model", brief: cached }]);
+    try {
+      w.write("me", {});
+      for (const s of siblings) w.write(s.id as string, { brief: brief(`brief ${s.id}`, AT(-10), G) });
+      w.write("s0", { brief: cached.brief });
+      const text = srv.performReadOp(`${w.root}/threads/me`, w.env("me"));
+      expect(text).toContain("  Goal: newest brief, on a quiet thread");
+      expect(text).toContain('thread "thread s0"');
+    } finally {
+      w.cleanup();
+    }
+  });
+});

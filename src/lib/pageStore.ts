@@ -49,7 +49,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { readThreadFile } from "./ipc";
-import { normalizeLaneName } from "./lanes";
+import { normalizeLaneName } from "./laneName";
 
 // ── Caps (R2 edge cases: the page is not a chat) ─────────────────────────────
 // Enforced at WRITE time by the MCP server (SWIT-49, with a visible error to
@@ -161,6 +161,13 @@ export type PageBrief = {
   waiting: string[];
   /** When the agent last rewrote it. */
   updatedAt: string;
+  /** SWIT-108 review: the LANE this brief was written FOR — the thread's
+   *  lane when the server wrote it (`{name, project}`), `null` when the
+   *  thread was in no lane, ABSENT on a brief written before the stamp (it
+   *  counts for the thread's CURRENT lane — lanes.briefCountsFor). Only a
+   *  brief stamped for lane L counts toward L's brief, wherever its thread
+   *  is now. */
+  lane?: { name: string; project: string } | null;
 };
 
 /** The brief's four lists, in page order, with the words the page prints. */
@@ -433,6 +440,14 @@ export function parseBrief(raw: unknown): PageBrief | null {
     waiting: lines(raw.waiting),
     updatedAt: str(raw.updatedAt) ?? "",
   };
+  // SWIT-108 review: the lane stamp — explicit null = "written in no lane";
+  // a valid {name, project} = that lane; anything else (absent, junk) is the
+  // pre-stamp form and stays absent.
+  if (raw.lane === null) brief.lane = null;
+  else if (isRecord(raw.lane) && typeof raw.lane.project === "string" && raw.lane.project.length > 0) {
+    const n = normalizeLaneName(raw.lane.name);
+    if (n.ok) brief.lane = { name: n.name, project: raw.lane.project };
+  }
   return goal === null && BRIEF_LISTS.every(({ key }) => brief[key].length === 0) ? null : brief;
 }
 
@@ -1180,11 +1195,16 @@ export type ThreadPassEntry = {
   /** The inbox's post times at the read (postTimes) — inbox.json is stamped,
    *  the seen stamp is not, so unread is re-derived from these every tick. */
   postsAt: readonly number[];
+  /** SWIT-108 review: to-do items waiting on the user (`userItems`) and
+   *  requests from other threads at the read — what a LANE waits on besides
+   *  its questions (lanes.laneWaitingFromCounts). Absent = 0. */
+  items?: number;
+  requests?: number;
 };
 
 export type PassDecision =
   | { reread: true }
-  | { reread: false; questions: number; unsent: number; unread: number };
+  | { reread: false; questions: number; unsent: number; unread: number; items: number; requests: number };
 
 /** The cached branch's decision for one thread on one tick: reuse the entry
  *  only when the stamp just stat'ed EQUALS the one it was read under (-1 on
@@ -1202,6 +1222,8 @@ export function nextPassEntry(
     questions: cached.questions,
     unsent: cached.unsent,
     unread: countUnreadTimes(cached.postsAt, seenAt),
+    items: cached.items ?? 0,
+    requests: cached.requests ?? 0,
   };
 }
 

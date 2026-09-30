@@ -991,6 +991,11 @@ export type ThreadsView = {
    *  — `pageStore.questionMarkerTitle`), published by the same pass. An
    *  unsent batch must be visible from the rail, not only on the page. */
   unsentDecisions: Readonly<Record<string, number>>;
+  /** SWIT-108 review: requests from other threads and to-do items waiting on
+   *  the user, per thread — what else a LANE waits on (the side menu's lane
+   *  `· N` reads the same rule Home's pill does: lanes.laneWaitingFromCounts). */
+  pendingRequests: Readonly<Record<string, number>>;
+  waitingItems: Readonly<Record<string, number>>;
   /** A thread whose title should be in INLINE RENAME the moment its row
    *  renders (SWIT-56: the header `+` creates first and asks for the name
    *  second). Consumed — cleared — by the row that honours it; ALSO cleared
@@ -1014,6 +1019,8 @@ let menuSessions: readonly MenuSession[] = [];
 let unreadPosts: Record<string, number> = {};
 let openQuestions: Record<string, number> = {};
 let unsentDecisions: Record<string, number> = {};
+let pendingRequests: Record<string, number> = {};
+let waitingItems: Record<string, number> = {};
 let renameRequest: string | null = null;
 
 const listeners = new Set<() => void>();
@@ -1055,6 +1062,8 @@ export function getThreadsView(): ThreadsView {
       unreadPosts,
       openQuestions,
       unsentDecisions,
+      pendingRequests,
+      waitingItems,
       renameRequest,
       laneRecords,
     };
@@ -1273,9 +1282,11 @@ export function getLaneRecords(): readonly LaneRecord[] {
 /** Put a thread in a lane (`lane`) or take it out (null), recording WHO did
  *  it. Taking a thread out BY THE USER leaves `laneSetBy: "user"` behind, so
  *  the agent's page cannot put it back (lanes.laneFromPage); an agent never
- *  clears one. A thread JOINING an archived lane restores that lane — a lane
- *  with work arriving in it is not "put away" (decided, SWIT-108). A lane
- *  whose last thread left takes its archive record with it. */
+ *  clears one. A thread the USER puts in an archived lane restores that lane
+ *  (a lane he is adding work to is not "put away"); an AGENT joining one
+ *  places the thread and leaves the lane archived — only Eric un-archives
+ *  (review of ec319c7, #2). A lane whose last thread left takes its record
+ *  with it. */
 export function setThreadLane(threadId: string, lane: LaneRef | null, by: "user" | "agent"): void {
   if (!getThreadById(threadId)) return;
   threads = threads.map((x) => {
@@ -1284,7 +1295,7 @@ export function setThreadLane(threadId: string, lane: LaneRef | null, by: "user"
     if (lane) return { ...rest, lane: lane.name, laneProject: lane.project, laneSetBy: by };
     return by === "user" ? { ...rest, laneSetBy: "user" as const } : rest;
   });
-  if (lane) laneRecords = setLaneArchivedIn(laneRecords, lane, false, Date.now());
+  if (lane && by === "user") laneRecords = setLaneArchivedIn(laneRecords, lane, false, Date.now());
   laneRecords = pruneLaneRecords(laneRecords, threads);
   bump();
 }
@@ -1296,6 +1307,15 @@ export function renameLaneInStore(lane: LaneRef, to: string): void {
   if (!threads.some((t) => isInLane(t, lane))) return;
   threads = threads.map((t) => (isInLane(t, lane) ? { ...t, lane: to } : t));
   laneRecords = renameLaneRecords(laneRecords, lane, to);
+  bump();
+}
+
+/** Replace the lane records wholesale — App's 5s pass hands the brief-cache
+ *  update here (lanes.nextLaneBriefCaches decided it). No-op on the same
+ *  array. */
+export function replaceLaneRecords(next: readonly LaneRecord[]): void {
+  if (next === laneRecords) return;
+  laneRecords = pruneLaneRecords(sanitizeLaneRecords(next), threads);
   bump();
 }
 
@@ -1494,9 +1514,16 @@ export function publishThreadUnread(counts: Record<string, number>): void {
  *  SWIT-77 review fix): the rail row's dim `· N` marker and its worded
  *  tooltip. Published together by App's 5s page pass beside the unread
  *  counts — both come from the same two files on the same tick. */
-export function publishThreadQuestions(open: Record<string, number>, unsent: Record<string, number>): void {
+export function publishThreadQuestions(
+  open: Record<string, number>,
+  unsent: Record<string, number>,
+  requests: Record<string, number> = {},
+  items: Record<string, number> = {}
+): void {
   openQuestions = open;
   unsentDecisions = unsent;
+  pendingRequests = requests;
+  waitingItems = items;
   bump();
 }
 
@@ -1554,8 +1581,9 @@ export type ThreadActions = {
    *  project), or null when it was applied. */
   setThreadLane: (threadId: string, name: string | null) => string | null;
   /** The lane page's `+ Thread in this lane`: the createThreadNow path in
-   *  the lane's project repo, with the lane set BEFORE the launch. */
-  createThreadInLane: (lane: LaneRef) => void;
+   *  the lane's project repo, with the lane set BEFORE the launch. Resolves
+   *  to why nothing was started (the lane page prints it), or null. */
+  createThreadInLane: (lane: LaneRef) => Promise<string | null>;
   /** The lane page's rename — every thread follows; a name another lane in
    *  the project has is refused. Returns the reason, or null. */
   renameLane: (lane: LaneRef, to: string) => string | null;
@@ -1609,6 +1637,8 @@ export function __resetThreadStoreForTests(): void {
   unreadPosts = {};
   openQuestions = {};
   unsentDecisions = {};
+  pendingRequests = {};
+  waitingItems = {};
   renameRequest = null;
   cachedView = null;
   threadActions = null;

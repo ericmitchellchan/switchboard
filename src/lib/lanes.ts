@@ -5,63 +5,33 @@
 // reachable only through the thread that made it.
 //
 // A LANE IS A ROLL-UP, NEVER A STORE (requirements principle 1): nothing is
-// typed into a lane. Its brief is the NEWEST brief among its threads, its
-// findings / decisions / reports are what its threads wrote, and it exists
+// typed into a lane. Its brief is the NEWEST brief written FOR it by one of
+// its threads (the server stamps each brief with the lane it was written for),
+// its findings / decisions / reports are what its threads wrote, and it exists
 // exactly while at least one thread (archived ones included — principle 4)
-// carries its name. The one lane-level fact that is not about a thread is
-// its ARCHIVE (hidden from Home and the side menu), kept as a LaneRecord
-// beside the threads (threads.json's `lanes`, the app its one writer).
+// carries its name. The lane-level facts that are not about one thread live
+// in a LaneRecord beside the threads (threads.json's `lanes`, the app its one
+// writer): the ARCHIVE, the FORMER NAMES after a rename, and a CACHE of the
+// lane's brief — what keeps the brief when the thread that holds it moves
+// away or is deleted (review of ec319c7, #1).
 //
-// Everything here is PURE and tested: the name rule, the user-wins copy of
-// the agent's `page` op `lane`, rename collisions, the archive records, and
-// the roll-ups Home, the side menu and the lane page draw. Components only
-// draw; App applies. The MCP server (switchboard-mcp.cjs) mirrors the name
-// rule and its own read-side roll-up — change one, change the other.
+// Everything here is PURE and tested: the name rule (laneName.ts), the
+// user-wins copy of the agent's `page` op `lane`, rename collisions, the
+// records, which brief counts for which lane, and the roll-ups Home, the side
+// menu and the lane page draw. Components only draw; App applies. The MCP
+// server (switchboard-mcp.cjs) mirrors the name rule, the brief rule and its
+// own read-side roll-up — change one, change the other.
 
-import type { LaneRecord, Thread } from "../types";
+import type { AgentStatus, LaneBriefCache, LaneRecord, Thread } from "../types";
 import type { PageBrief, PageFinding, PageQuestion, RenderedPage, SettledQuestion } from "./pageStore";
+import { parseBrief } from "./pageStore";
 import type { ProjectViewEntry } from "./repoListing";
 import { threadLastActive } from "./homeModel";
+import { laneNameKey, normalizeLaneName, sameLaneName } from "./laneName";
 
-// ── The name ─────────────────────────────────────────────────────────────────
-
-/** A lane name is a few words (`Gamma model`, `Kalshi MLB`). Mirrored in the
- *  MCP server's LANE_NAME_CAP. Counted in code points. */
-export const LANE_NAME_MAX = 48;
-
-/** Letters and digits first, then words and a little punctuation. None of
- *  the characters the typed-line sanitizer strips (`" \ $ % \``) — the name
- *  rides on the launch line (agentContext's lane clause) and must arrive
- *  there unchanged. Mirrored in the MCP server's LANE_NAME_RE. */
-const LANE_NAME_RE = /^[\p{L}\p{N}][\p{L}\p{N} _.,&+'()/:#-]*$/u;
-
-export type LaneNameResult = { ok: true; name: string } | { ok: false; reason: string };
-
-/** THE name rule: NFC, whitespace folded, trimmed; 1..LANE_NAME_MAX code
- *  points; the charset above. A refusal says why, in words the editor can
- *  put in its `title`. Pure. */
-export function normalizeLaneName(raw: unknown): LaneNameResult {
-  if (typeof raw !== "string") return { ok: false, reason: "a lane name is text" };
-  const name = raw.normalize("NFC").replace(/\s+/g, " ").trim();
-  if (name.length === 0) return { ok: false, reason: "a lane needs a name" };
-  if (Array.from(name).length > LANE_NAME_MAX) {
-    return { ok: false, reason: `a lane name is at most ${LANE_NAME_MAX} characters` };
-  }
-  if (!LANE_NAME_RE.test(name)) {
-    return { ok: false, reason: "a lane name starts with a letter or digit and holds letters, digits, spaces and - _ . , & + ' ( ) / : #" };
-  }
-  return { ok: true, name };
-}
-
-/** The comparison key: two spellings that differ only in case or spacing
- *  are ONE lane (`Gamma model` = `gamma  model`). Pure. */
-export function laneNameKey(name: string): string {
-  return name.normalize("NFC").replace(/\s+/g, " ").trim().toLowerCase();
-}
-
-export function sameLaneName(a: string, b: string): boolean {
-  return laneNameKey(a) === laneNameKey(b);
-}
+export { LANE_NAME_MAX, laneNameKey, normalizeLaneName, sameLaneName } from "./laneName";
+import type { LaneNameResult } from "./laneName";
+export type { LaneNameResult };
 
 // ── A thread's lane ──────────────────────────────────────────────────────────
 
@@ -74,6 +44,10 @@ export function laneId(lane: LaneRef): string {
 }
 
 type LaneFields = Pick<Thread, "lane" | "laneProject">;
+
+function isArchivedThread(t: Pick<Thread, "archivedAt">): boolean {
+  return typeof t.archivedAt === "number" && t.archivedAt > 0;
+}
 
 /** The lane a thread is in, or null. Both fields must be present (the
  *  sanitize gate keeps them paired). */
@@ -114,14 +88,22 @@ export function canonicalLaneName(threads: readonly Thread[], project: string, n
 }
 
 /** The lane names in a project that START with (or contain) what the editor
- *  holds — the suggestion list under the `lane…` box, current lane first
- *  excluded by the caller. Empty query = every lane. Pure. */
+ *  holds — the suggestion list under the `lane…` box. Empty query = every
+ *  lane. Pure. */
 export function suggestLaneNames(names: readonly string[], query: string): string[] {
   const q = laneNameKey(query);
   if (q.length === 0) return [...names];
   const starts = names.filter((n) => laneNameKey(n).startsWith(q));
   const contains = names.filter((n) => !laneNameKey(n).startsWith(q) && laneNameKey(n).includes(q));
   return [...starts, ...contains];
+}
+
+/** The project a thread's `lane…` works in (review of ec319c7, #4): the
+ *  project its CURRENT lane belongs to — frozen when the lane was set, so a
+ *  re-committed name never moves the thread to a same-named lane of another
+ *  project — else the project its folder resolves to. Pure. */
+export function laneEditProject(thread: LaneFields, resolved: string | null): string | null {
+  return threadLane(thread)?.project ?? resolved;
 }
 
 // ── Eric's choice wins (requirement 1.4, acceptance 7) ───────────────────────
@@ -176,14 +158,31 @@ export function planLaneRename(
   return n;
 }
 
-// ── Archive records (requirement 1.6) ────────────────────────────────────────
+// ── Lane records (requirement 1.6; review of ec319c7, #1 and #5) ─────────────
 
-/** Records kept at most — a lane is archived rarely; the cap only bounds a
- *  hand-edited file. */
+/** Records kept at most — only bounds a hand-edited file. */
 export const LANE_RECORD_CAP = 200;
+/** Former names a lane remembers (the newest kept). */
+export const LANE_ALIAS_CAP = 8;
+
+function isEmptyRecord(r: LaneRecord): boolean {
+  return !(typeof r.archivedAt === "number" && r.archivedAt > 0) && !(r.aliases && r.aliases.length > 0) && !r.brief;
+}
+
+/** Tolerant parse of one cached lane brief (its brief through pageStore's
+ *  own parser); null when any part is unusable. */
+function sanitizeBriefCache(raw: unknown): LaneBriefCache | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const brief = parseBrief(r.brief);
+  if (!brief || typeof r.threadId !== "string" || r.threadId.length === 0) return null;
+  return { brief, threadId: r.threadId, threadTitle: typeof r.threadTitle === "string" ? r.threadTitle.slice(0, 200) : "" };
+}
 
 /** Tolerant parse of the persisted lane records: a malformed entry drops
- *  alone, a repeat of a lane keeps its first, capped. Not an array → none. */
+ *  alone, a repeat of a lane keeps its first, the parts that are junk drop
+ *  alone (a bad alias, a bad brief), a record left holding nothing is no
+ *  record; capped. Not an array → none. */
 export function sanitizeLaneRecords(raw: unknown): LaneRecord[] {
   if (!Array.isArray(raw)) return [];
   const out: LaneRecord[] = [];
@@ -195,19 +194,53 @@ export function sanitizeLaneRecords(raw: unknown): LaneRecord[] {
     if (typeof rec.project !== "string" || rec.project.length === 0) continue;
     const n = normalizeLaneName(rec.name);
     if (!n.ok) continue;
-    if (typeof rec.archivedAt !== "number" || !(rec.archivedAt > 0)) continue;
     const id = laneId({ project: rec.project, name: n.name });
     if (seen.has(id)) continue;
+    const next: LaneRecord = { project: rec.project, name: n.name };
+    if (typeof rec.archivedAt === "number" && rec.archivedAt > 0) next.archivedAt = rec.archivedAt;
+    if (Array.isArray(rec.aliases)) {
+      const aliases: string[] = [];
+      for (const a of rec.aliases) {
+        const an = normalizeLaneName(a);
+        if (an.ok && !sameLaneName(an.name, n.name) && !aliases.some((x) => sameLaneName(x, an.name))) aliases.push(an.name);
+      }
+      if (aliases.length > 0) next.aliases = aliases.slice(-LANE_ALIAS_CAP);
+    }
+    const brief = sanitizeBriefCache(rec.brief);
+    if (brief) next.brief = brief;
+    if (isEmptyRecord(next)) continue;
     seen.add(id);
-    out.push({ project: rec.project, name: n.name, archivedAt: rec.archivedAt });
+    out.push(next);
   }
   return out;
 }
 
+/** The lane's record, or null. */
+export function laneRecordFor(records: readonly LaneRecord[], lane: LaneRef): LaneRecord | null {
+  const id = laneId(lane);
+  return records.find((r) => laneId(r) === id) ?? null;
+}
+
 /** When the lane was archived, or null (it is not). */
 export function laneArchivedAt(records: readonly LaneRecord[], lane: LaneRef): number | null {
+  const a = laneRecordFor(records, lane)?.archivedAt;
+  return typeof a === "number" && a > 0 ? a : null;
+}
+
+/** Replace one lane's record through `edit` (created when missing, dropped
+ *  when it ends up holding nothing). The SAME array when nothing changed. */
+function editRecord(
+  records: readonly LaneRecord[],
+  lane: LaneRef,
+  edit: (r: LaneRecord) => LaneRecord
+): readonly LaneRecord[] {
   const id = laneId(lane);
-  return records.find((r) => laneId(r) === id)?.archivedAt ?? null;
+  const index = records.findIndex((r) => laneId(r) === id);
+  const before = index >= 0 ? records[index] : { project: lane.project, name: lane.name };
+  const after = edit(before);
+  if (JSON.stringify(after) === JSON.stringify(before)) return records;
+  const rest = records.filter((_, i) => i !== index);
+  return isEmptyRecord(after) ? rest : index >= 0 ? records.map((r, i) => (i === index ? after : r)) : [...records, after];
 }
 
 /** Archive or restore a lane. A no-op returns the SAME array. Pure. */
@@ -217,23 +250,30 @@ export function setLaneArchivedIn(
   archived: boolean,
   now: number
 ): readonly LaneRecord[] {
-  const id = laneId(lane);
-  const has = records.some((r) => laneId(r) === id);
-  if (archived === has) return records;
-  return archived
-    ? [...records, { project: lane.project, name: lane.name, archivedAt: now }]
-    : records.filter((r) => laneId(r) !== id);
+  if ((laneArchivedAt(records, lane) !== null) === archived) return records;
+  return editRecord(records, lane, (r) => {
+    const { archivedAt: _gone, ...rest } = r;
+    return archived ? { ...rest, archivedAt: now } : rest;
+  });
 }
 
-/** A rename carries the lane's archive record with it. Pure. */
+/** A rename carries the lane's record with it and REMEMBERS the old name
+ *  (review of ec319c7, #5): a report stamped with it, a brief written for it
+ *  and a route naming it still find the lane. The newest LANE_ALIAS_CAP
+ *  names are kept; the new name is never its own alias. Pure. */
 export function renameLaneRecords(records: readonly LaneRecord[], lane: LaneRef, to: string): readonly LaneRecord[] {
   const id = laneId(lane);
-  if (!records.some((r) => laneId(r) === id)) return records;
-  return records.map((r) => (laneId(r) === id ? { ...r, name: to } : r));
+  const index = records.findIndex((r) => laneId(r) === id);
+  const before: LaneRecord = index >= 0 ? records[index] : { project: lane.project, name: lane.name };
+  const aliases = [...(before.aliases ?? []), before.name].filter((a, i, all) => !sameLaneName(a, to) && all.findIndex((x) => sameLaneName(x, a)) === i);
+  const after: LaneRecord = { ...before, name: to, ...(aliases.length > 0 ? { aliases: aliases.slice(-LANE_ALIAS_CAP) } : {}) };
+  if (aliases.length === 0) delete after.aliases;
+  const rest = records.filter((_, i) => i !== index);
+  return isEmptyRecord(after) ? rest : [...rest, after];
 }
 
 /** Records whose lane no thread carries any more are dropped — clearing the
- *  lane from every thread is how a lane goes away, archive state included.
+ *  lane from every thread is how a lane goes away, its record included.
  *  Returns the SAME array when nothing goes. Pure. */
 export function pruneLaneRecords(records: readonly LaneRecord[], threads: readonly Thread[]): readonly LaneRecord[] {
   const live = new Set<string>();
@@ -254,11 +294,15 @@ export type Lane = {
   threads: Thread[];
   /** Null while the lane is not archived. */
   archivedAt: number | null;
+  /** The lane's former names (a rename keeps them). */
+  aliases: string[];
+  /** The last lane brief the app saw — kept when its thread goes. */
+  cachedBrief: LaneBriefCache | null;
 };
 
 /** The lanes the threads make (principle 1: a lane is its threads), with
- *  their archive state; ordered by project, then name. One spelling per
- *  lane — the most recently active thread's. Pure. */
+ *  their records; ordered by project, then name. One spelling per lane — the
+ *  most recently active thread's. Pure. */
 export function deriveLanes(threads: readonly Thread[], records: readonly LaneRecord[]): Lane[] {
   const byId = new Map<string, Lane>();
   const ordered = [...threads].sort((a, b) => (b.lastActivityAt || b.createdAt || 0) - (a.lastActivityAt || a.createdAt || 0));
@@ -268,7 +312,15 @@ export function deriveLanes(threads: readonly Thread[], records: readonly LaneRe
     const id = laneId(ref);
     let lane = byId.get(id);
     if (!lane) {
-      lane = { project: ref.project, name: ref.name, threads: [], archivedAt: laneArchivedAt(records, ref) };
+      const rec = laneRecordFor(records, ref);
+      lane = {
+        project: ref.project,
+        name: ref.name,
+        threads: [],
+        archivedAt: laneArchivedAt(records, ref),
+        aliases: rec?.aliases ?? [],
+        cachedBrief: rec?.brief ?? null,
+      };
       byId.set(id, lane);
     }
     lane.threads.push(t);
@@ -278,18 +330,33 @@ export function deriveLanes(threads: readonly Thread[], records: readonly LaneRe
   );
 }
 
-/** The lane named by a route, or null (renamed away, emptied). */
-export function findLane(lanes: readonly Lane[], ref: LaneRef): Lane | null {
-  const id = laneId(ref);
-  return lanes.find((l) => laneId(l) === id) ?? null;
+/** Does `name` name this lane — its name, or (a rename ago) a former one? */
+export function namesLane(lane: Pick<Lane, "name" | "aliases">, name: string): boolean {
+  return sameLaneName(lane.name, name) || lane.aliases.some((a) => sameLaneName(a, name));
 }
 
-/** The threads whose page files the roll-ups read: every active thread,
- *  and an ARCHIVED one only when it is in a lane (principle 4 — archived is
- *  not gone; its findings, reports and decisions still count). App's 5s
- *  pass and Home's poll both read this set. Pure. */
-export function rollupThreads(threads: readonly Thread[]): Thread[] {
-  return threads.filter((t) => !(typeof t.archivedAt === "number" && t.archivedAt > 0) || threadLane(t) !== null);
+/** The lane a route names, or null (emptied). A FORMER name finds the lane
+ *  it became (review of ec319c7, #5) — an exact current name wins first. */
+export function findLane(lanes: readonly Lane[], ref: LaneRef): Lane | null {
+  const inProject = lanes.filter((l) => l.project === ref.project);
+  return inProject.find((l) => sameLaneName(l.name, ref.name)) ?? inProject.find((l) => namesLane(l, ref.name)) ?? null;
+}
+
+/** Is the thread in a lane that is NOT archived? On Home such a thread shows
+ *  through its lane; a thread whose lane was archived shows as a thread
+ *  again (review of ec319c7, #3 — an archived lane must not swallow a live
+ *  thread's question). Pure. */
+export function inVisibleLane(thread: LaneFields, records: readonly LaneRecord[]): boolean {
+  const lane = threadLane(thread);
+  return lane !== null && laneArchivedAt(records, lane) === null;
+}
+
+/** The threads whose page files the roll-ups read: every active thread, and
+ *  an ARCHIVED one only when it is in a lane that is not archived itself
+ *  (principle 4 — archived is not gone — and review of ec319c7, #7: nothing
+ *  read is thrown away). App's 5s pass, Home's poll share it. Pure. */
+export function rollupThreads(threads: readonly Thread[], records: readonly LaneRecord[] = []): Thread[] {
+  return threads.filter((t) => !isArchivedThread(t) || inVisibleLane(t, records));
 }
 
 /** Where `+ Thread in this lane` puts the new thread (requirement 4.1): the
@@ -308,19 +375,93 @@ export function laneThreadDir(
   return projectRepos[0] ?? null;
 }
 
+// ── Which brief is the lane's (review of ec319c7, #1) ────────────────────────
+
+function stamp(iso: string | null | undefined): number {
+  const t = Date.parse(iso ?? "");
+  return Number.isFinite(t) ? t : -Infinity;
+}
+
+/** Does this brief count toward `lane`? A brief STAMPED for a lane counts for
+ *  that lane only (its name or a former one), wherever its thread is now — so
+ *  a thread that joins with a brief written for its own corner (stamped for
+ *  no lane, or another) never takes the lane over, and a thread that moved
+ *  away keeps counting for the lane it wrote for. A brief from before the
+ *  stamp (absent) counts for its thread's CURRENT lane, as it always did.
+ *  Pure. */
+export function briefCountsFor(
+  brief: Pick<PageBrief, "lane">,
+  thread: LaneFields,
+  lane: Pick<Lane, "project" | "name" | "aliases">
+): boolean {
+  if (brief.lane === undefined) {
+    const own = threadLane(thread);
+    return own !== null && own.project === lane.project && namesLane(lane, own.name);
+  }
+  if (brief.lane === null) return false;
+  return brief.lane.project === lane.project && namesLane(lane, brief.lane.name);
+}
+
+/** The lane brief as a surface draws it: the brief, its thread when it still
+ *  exists (null = deleted), the title to print, and whether it came from the
+ *  cache (the thread no longer holds it). */
+export type LaneBriefView = { brief: PageBrief; thread: Thread | null; threadTitle: string; fromCache: boolean };
+
+/** THE LANE BRIEF: the newest (by the brief's own stamp) of every brief that
+ *  counts for the lane among the threads read, and the cached one — so a
+ *  newer rewrite wins (edge case 1), an older joiner never does (edge case
+ *  2), and the brief outlives a thread that moved or was deleted. A tie goes
+ *  to the live page. Pure. */
+export function pickLaneBrief(
+  lane: Pick<Lane, "project" | "name" | "aliases" | "cachedBrief">,
+  threads: readonly Thread[],
+  briefOf: (threadId: string) => PageBrief | null | undefined
+): LaneBriefView | null {
+  let best: LaneBriefView | null = null;
+  for (const t of threads) {
+    const b = briefOf(t.id);
+    if (!b || !briefCountsFor(b, t, lane)) continue;
+    if (best === null || stamp(b.updatedAt) > stamp(best.brief.updatedAt)) best = { brief: b, thread: t, threadTitle: t.title, fromCache: false };
+  }
+  const cached = lane.cachedBrief;
+  if (cached && (best === null || stamp(cached.brief.updatedAt) > stamp(best.brief.updatedAt))) {
+    const thread = threads.find((t) => t.id === cached.threadId) ?? null;
+    best = { brief: cached.brief, thread, threadTitle: thread?.title ?? cached.threadTitle, fromCache: true };
+  }
+  return best;
+}
+
+/** The cache update App's 5s pass makes: for each lane, the newest counting
+ *  brief it read, when it is NEWER than the cached one (or there is none),
+ *  becomes the cache. Returns the SAME array when nothing moved. Pure. */
+export function nextLaneBriefCaches(
+  records: readonly LaneRecord[],
+  lanes: readonly Lane[],
+  threads: readonly Thread[],
+  briefOf: (threadId: string) => PageBrief | null | undefined
+): readonly LaneRecord[] {
+  let next = records;
+  for (const lane of lanes) {
+    const live = pickLaneBrief({ ...lane, cachedBrief: null }, threads, briefOf);
+    if (!live || !live.thread) continue;
+    const cached = lane.cachedBrief;
+    if (cached && stamp(cached.brief.updatedAt) >= stamp(live.brief.updatedAt)) continue;
+    const cache: LaneBriefCache = { brief: live.brief, threadId: live.thread.id, threadTitle: live.thread.title };
+    next = editRecord(next, lane, (r) => ({ ...r, brief: cache }));
+  }
+  return next;
+}
+
 // ── The roll-up (requirement 2, 3.1) ─────────────────────────────────────────
 
-/** One lane thread with its merged page (pageStore.mergePage). */
-export type LaneDigest = { thread: Thread; page: RenderedPage };
-
 export type LaneWaiting = {
-  /** Open questions across the lane's threads. */
+  /** Open questions across the lane's threads (archived ones too). */
   questions: number;
-  /** Decided on a page, not sent to the agent yet. */
+  /** Decided on a page, not sent to the agent yet (archived ones too). */
   unsent: number;
-  /** Requests other threads posted to a lane thread. */
+  /** Requests other threads posted — NOT-archived threads only. */
   requests: number;
-  /** To-do items waiting on the user. */
+  /** To-do items waiting on the user — NOT-archived threads only. */
   items: number;
 };
 
@@ -328,11 +469,7 @@ export type LaneWaiting = {
 export const LANE_ANSWERED_LIMIT = 6;
 
 export type LaneRollup = {
-  /** THE LANE BRIEF — the most recently written brief among the lane's
-   *  threads, and which thread wrote it (edge case 1: the newer rewrite
-   *  wins; edge case 2: a brief OLDER than the current one never becomes
-   *  the lane brief — it is not the newest). Null = no thread has one. */
-  brief: { brief: PageBrief; thread: Thread } | null;
+  brief: LaneBriefView | null;
   /** Every finding of every lane thread, newest first (a dropped finding is
    *  gone from its page, so it is not here). */
   findings: { thread: Thread; finding: PageFinding }[];
@@ -347,15 +484,10 @@ export type LaneRollup = {
   lastActive: number;
 };
 
-function stamp(iso: string | null | undefined): number {
-  const t = Date.parse(iso ?? "");
-  return Number.isFinite(t) ? t : -Infinity;
-}
-
 /** The newest sign of life for one lane thread: homeModel's (record stamps,
  *  latest turn, open questions) plus its brief and findings; `now` when it
  *  is live. Pure. */
-export function laneThreadLastActive(d: LaneDigest, live: boolean, now: number): number {
+export function laneThreadLastActive(d: { thread: Thread; page: RenderedPage }, live: boolean, now: number): number {
   if (live) return now;
   let last = threadLastActive(d.thread, d.page);
   for (const s of [d.page.brief?.updatedAt, ...d.page.findings.map((f) => f.updatedAt)]) {
@@ -365,18 +497,47 @@ export function laneThreadLastActive(d: LaneDigest, live: boolean, now: number):
   return last;
 }
 
-/** THE LANE ROLL-UP, over its threads' merged pages. Threads with no digest
- *  (unread yet) contribute their record stamps to `lastActive` only.
+/** THE WAITING RULE, one for Home's pill and the side menu's `· N` (review of
+ *  ec319c7, #8): open questions and unsent answers count from EVERY lane
+ *  thread (a question does not go away because its thread was archived —
+ *  edge case 4), requests and items only from threads that are NOT archived
+ *  (a stale item on a put-away thread must not pin the lane to the top).
+ *  Over per-thread counts — the pass's maps or a digest's lengths. Pure. */
+export function laneWaitingFromCounts(
+  laneThreads: readonly Pick<Thread, "id" | "archivedAt">[],
+  counts: {
+    questions: Readonly<Record<string, number>>;
+    unsent: Readonly<Record<string, number>>;
+    requests: Readonly<Record<string, number>>;
+    items: Readonly<Record<string, number>>;
+  }
+): LaneWaiting {
+  const w: LaneWaiting = { questions: 0, unsent: 0, requests: 0, items: 0 };
+  for (const t of laneThreads) {
+    w.questions += counts.questions[t.id] ?? 0;
+    w.unsent += counts.unsent[t.id] ?? 0;
+    if (isArchivedThread(t)) continue;
+    w.requests += counts.requests[t.id] ?? 0;
+    w.items += counts.items[t.id] ?? 0;
+  }
+  return w;
+}
+
+/** THE LANE ROLL-UP, over the merged pages read. `allThreads` are the
+ *  threads whose briefs may count (a thread that moved away still counts for
+ *  the lane it wrote for); the rest reads the lane's own threads. Threads
+ *  with no digest contribute their record stamps to `lastActive` only.
  *  Pure. */
 export function laneRollup(
-  laneThreads: readonly Thread[],
+  lane: Lane,
+  allThreads: readonly Thread[],
   digests: ReadonlyMap<string, RenderedPage>,
   live: ReadonlySet<string>,
   now: number
 ): LaneRollup {
-  const ds: LaneDigest[] = [];
+  const ds: { thread: Thread; page: RenderedPage }[] = [];
   let lastActive = 0;
-  for (const thread of laneThreads) {
+  for (const thread of lane.threads) {
     const page = digests.get(thread.id);
     if (page) {
       const d = { thread, page };
@@ -386,13 +547,7 @@ export function laneRollup(
       lastActive = Math.max(lastActive, live.has(thread.id) ? now : thread.lastActivityAt || thread.createdAt || 0);
     }
   }
-  let brief: LaneRollup["brief"] = null;
-  for (const d of ds) {
-    if (!d.page.brief) continue;
-    if (brief === null || stamp(d.page.brief.updatedAt) > stamp(brief.brief.updatedAt)) {
-      brief = { brief: d.page.brief, thread: d.thread };
-    }
-  }
+  const brief = pickLaneBrief(lane, allThreads, (id) => digests.get(id)?.brief);
   const findings = ds
     .flatMap((d) => d.page.findings.map((finding) => ({ thread: d.thread, finding })))
     .sort((a, b) => stamp(b.finding.updatedAt) - stamp(a.finding.updatedAt));
@@ -406,24 +561,29 @@ export function laneRollup(
     .flatMap((d) => d.page.settledQuestions.map((settled) => ({ thread: d.thread, settled })))
     .sort((a, b) => stamp(b.settled.at) - stamp(a.settled.at))
     .slice(0, LANE_ANSWERED_LIMIT);
-  const waiting: LaneWaiting = {
-    questions: openQuestions.length,
-    unsent: unsent.reduce((n, u) => n + u.count, 0),
-    requests: ds.reduce((n, d) => n + d.page.requests.length, 0),
-    items: ds.reduce((n, d) => n + d.page.userItems.length, 0),
-  };
+  const per = (f: (p: RenderedPage) => number) => Object.fromEntries(ds.map((d) => [d.thread.id, f(d.page)]));
+  const waiting = laneWaitingFromCounts(lane.threads, {
+    questions: per((p) => p.openQuestions.length),
+    unsent: per((p) => p.unsentDecisions.length),
+    requests: per((p) => p.requests.length),
+    items: per((p) => p.userItems.length),
+  });
   return { brief, findings, openQuestions, unsent, answered, waiting, lastActive };
 }
 
-/** Does the lane wait on Eric? Any open question, unsent answer, request or
- *  item of his. Pure. */
+/** Does the lane wait on Eric? Pure. */
 export function isLaneWaiting(w: LaneWaiting): boolean {
-  return w.questions + w.unsent + w.requests + w.items > 0;
+  return waitingTotal(w) > 0;
 }
 
-/** What the lane waits on, in words (Home's pill): `3 questions`,
- *  `2 unsent`, `1 request`, `1 item for you`, joined with ` · `; null when
- *  nothing waits. Pure. */
+/** The side menu's `· N`. */
+export function waitingTotal(w: LaneWaiting): number {
+  return w.questions + w.unsent + w.requests + w.items;
+}
+
+/** What the lane waits on, in words (Home's pill, the band's tooltip):
+ *  `3 questions`, `2 unsent`, `1 request`, `1 item for you`, joined with
+ *  ` · `; null when nothing waits. Pure. */
 export function laneWaitsLabel(w: LaneWaiting): string | null {
   const parts: string[] = [];
   const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
@@ -442,13 +602,19 @@ export function laneHomeLine(r: Pick<LaneRollup, "findings" | "brief">): string 
   return r.brief?.brief.goal ?? null;
 }
 
+/** The lane's liveliest thread status for Home's dot (review of ec319c7,
+ *  #3): waiting on Eric beats running beats an error beats done beats idle;
+ *  null when no thread of it is live. Pure. */
+export function liveliestStatus(statuses: readonly (AgentStatus | undefined)[]): AgentStatus | null {
+  const order: AgentStatus[] = ["waiting", "running", "error", "done", "idle"];
+  for (const s of order) if (statuses.includes(s)) return s;
+  return statuses.length > 0 ? "idle" : null;
+}
+
 export type LaneRow = { lane: Lane; rollup: LaneRollup };
 
 /** Home's lane order (requirement 3.1, edge case 4): lanes waiting on Eric
- *  first, then by last activity, newest first; then by name. A lane whose
- *  only live thread was archived stays up while it has open decisions and
- *  otherwise sinks with its last activity — the same rule, no special case.
- *  Pure; returns a new array. */
+ *  first, then by last activity, newest first; then by name. Pure. */
 export function orderLaneRows(rows: readonly LaneRow[]): LaneRow[] {
   return [...rows].sort((a, b) => {
     const wa = isLaneWaiting(a.rollup.waiting) ? 1 : 0;
@@ -459,33 +625,21 @@ export function orderLaneRows(rows: readonly LaneRow[]): LaneRow[] {
   });
 }
 
-/** The side menu's `· N` for a lane (requirement 3.3): the lane threads' open
- *  questions + unsent answers, from the SAME counts App's 5s pass publishes
- *  for the thread rows (threadStore's openQuestions / unsentDecisions). 0 =
- *  no marker. Pure. */
-export function laneMarkerCount(
-  lane: Pick<Lane, "threads">,
-  openQuestions: Readonly<Record<string, number>>,
-  unsentDecisions: Readonly<Record<string, number>>
-): number {
-  return lane.threads.reduce((n, t) => n + (openQuestions[t.id] ?? 0) + (unsentDecisions[t.id] ?? 0), 0);
-}
-
 /** The lane's REPORTS (requirement 2.5, edge case 6): the project's reports
  *  (SWIT-107's index rows, newest first) built by one of the lane's threads —
  *  by the index row's `threadId` — plus a report whose thread no longer
- *  exists (deleted) but whose row was stamped with this lane when it was
- *  built. A report whose thread still exists follows THAT thread's lane
- *  (edge case 3: a thread that moves takes its reports along). Pure. */
+ *  exists but whose row was stamped with this lane (its name or a former
+ *  one) when it was built. A report whose thread still exists follows THAT
+ *  thread's lane (edge case 3). Pure. */
 export function laneReports(
   views: readonly ProjectViewEntry[],
-  lane: Pick<Lane, "name" | "threads">,
+  lane: Pick<Lane, "name" | "aliases" | "threads">,
   knownThreadIds: ReadonlySet<string>
 ): ProjectViewEntry[] {
   const mine = new Set(lane.threads.map((t) => t.id));
   return views.filter(
     (v) =>
       mine.has(v.threadId) ||
-      (!knownThreadIds.has(v.threadId) && typeof v.lane === "string" && v.lane.length > 0 && sameLaneName(v.lane, lane.name))
+      (!knownThreadIds.has(v.threadId) && typeof v.lane === "string" && v.lane.length > 0 && namesLane(lane, v.lane))
   );
 }

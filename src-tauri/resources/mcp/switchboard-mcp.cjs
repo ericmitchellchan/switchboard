@@ -594,6 +594,10 @@ function applyOp(page, args, now, answeredIds = new Set(), dismissedIds = new Se
       const brief = { goal };
       for (const f of BRIEF_LISTS) brief[f] = briefLines(args[f], f);
       brief.updatedAt = at;
+      // SWIT-108 review #1: the lane it is written FOR — only through
+      // performOp, which reads the app's threads.json (`laneCtx.stamp`); a
+      // direct applyOp (the tests) writes the pre-stamp form.
+      if (laneCtx && laneCtx.stamp !== undefined) brief.lane = laneCtx.stamp;
       const had = typeof page.brief === "object" && page.brief !== null;
       if (goal === null && BRIEF_LISTS.every((f) => brief[f].length === 0)) {
         const { brief: _gone, ...rest } = page;
@@ -973,7 +977,7 @@ function renderLaneRead(lane, lim) {
     out.push("LANE BRIEF: this page's brief (above) is the newest in the lane, so it IS the lane's brief — keep it written for the whole lane.");
   } else {
     out.push(
-      `LANE BRIEF (the newest in the lane — thread ${title(b.threadTitle)}${b.brief.updatedAt ? `, rewritten ${b.brief.updatedAt}` : ""}; at your first seam rewrite it WHOLE with op brief, for the lane):`
+      `LANE BRIEF (the newest in the lane — thread ${title(b.threadTitle)}${b.deleted ? " (a deleted thread)" : ""}${b.brief.updatedAt ? `, rewritten ${b.brief.updatedAt}` : ""}; at your first seam rewrite it WHOLE with op brief, for the lane):`
     );
     if (lim.brief === 0) {
       out.push("  (cut — the room went to this page; the lane page shows it)");
@@ -1035,6 +1039,10 @@ function readLaneRollup(env) {
     const lane = self ? recordLane(self) : null;
     if (!lane) return null;
     const key = laneNameKey(lane.name);
+    // The lane's own record (threads.json's `lanes`, the app's): its former
+    // names and its CACHED brief (review of ec319c7, #1, #5).
+    const record = readLaneRecord(env.threadsJsonPath, lane);
+    const aliasKeys = new Set([key, ...record.aliases.map(laneNameKey)]);
     const allIds = new Set(threads.filter((t) => t && typeof t.id === "string").map((t) => t.id));
     const members = threads.filter((t) => {
       const l = recordLane(t);
@@ -1068,15 +1076,33 @@ function readLaneRollup(env) {
       const t = Date.parse(s);
       return Number.isFinite(t) ? t : -Infinity;
     };
-    // THE LANE BRIEF: the newest brief among the lane's threads, by the
-    // brief's own stamp — a thread that joins with an OLDER brief never
-    // replaces a newer lane brief (requirements, edge case 2).
+    // THE LANE BRIEF: the newest brief written FOR this lane (its stamp —
+    // a brief from before the stamp counts for its thread's current lane,
+    // and every thread read here is in it), by the brief's own time, among
+    // the threads read AND the lane record's cached brief — so a brief
+    // outlives a thread that moved away or was deleted, a thread that joins
+    // with a brief written for its own corner never takes over (edge case
+    // 2), and a lane of more than LANE_READ_THREADS still reads its newest
+    // brief (the app keeps the cache newest over ALL its threads).
+    const countsHere = (b) =>
+      b.lane === undefined ||
+      (b.lane !== null && typeof b.lane === "object" && b.lane.project === lane.project && aliasKeys.has(laneNameKey(b.lane.name)));
     let brief = null;
     for (const r of read) {
-      if (!validBrief(r.page.brief)) continue;
+      if (!validBrief(r.page.brief) || !countsHere(r.page.brief)) continue;
       if (brief === null || ms(r.page.brief.updatedAt) > ms(brief.brief.updatedAt)) {
         brief = { brief: r.page.brief, threadTitle: r.thread.title, self: r.thread.id === self.id };
       }
+    }
+    const cached = record.brief;
+    if (cached && validBrief(cached.brief) && (brief === null || ms(cached.brief.updatedAt) > ms(brief.brief.updatedAt))) {
+      const holder = threads.find((t) => t && t.id === cached.threadId);
+      brief = {
+        brief: cached.brief,
+        threadTitle: holder && typeof holder.title === "string" ? holder.title : cached.threadTitle || "a thread",
+        self: cached.threadId === self.id,
+        deleted: !holder,
+      };
     }
     const siblings = read.filter((r) => r.thread.id !== self.id);
     const findings = newestFirstBy(
@@ -1118,7 +1144,7 @@ function readLaneRollup(env) {
         for (const v of readProjectIndex(repo)) {
           if (seen.has(v.id)) continue;
           const tid = typeof v.threadId === "string" ? v.threadId : "";
-          const inLane = memberIds.has(tid) || (!allIds.has(tid) && typeof v.lane === "string" && laneNameKey(v.lane) === key);
+          const inLane = memberIds.has(tid) || (!allIds.has(tid) && typeof v.lane === "string" && aliasKeys.has(laneNameKey(v.lane)));
           if (!inLane) continue;
           seen.add(v.id);
           rows.push({ id: v.id, title: typeof v.title === "string" ? v.title : v.id, builtAt: typeof v.builtAt === "string" ? v.builtAt : "" });
@@ -1137,6 +1163,28 @@ function readLaneRollup(env) {
     };
   } catch {
     return null;
+  }
+}
+
+/** The lane's record in threads.json's `lanes` (the app's; READ-only here):
+ *  its former names and cached brief. Missing → none. */
+function readLaneRecord(threadsJsonPath, lane) {
+  const none = { aliases: [], brief: null };
+  try {
+    const data = JSON.parse(fs.readFileSync(threadsJsonPath, "utf-8"));
+    const list = Array.isArray(data && data.lanes) ? data.lanes : [];
+    const key = laneNameKey(lane.name);
+    const rec = list.find((r) => r && r.project === lane.project && typeof r.name === "string" && laneNameKey(r.name) === key);
+    if (!rec) return none;
+    return {
+      aliases: Array.isArray(rec.aliases) ? rec.aliases.filter((a) => typeof a === "string" && a.length > 0) : [],
+      brief:
+        rec.brief && typeof rec.brief === "object" && rec.brief.brief && typeof rec.brief.brief === "object" && typeof rec.brief.threadId === "string"
+          ? { brief: rec.brief.brief, threadId: rec.brief.threadId, threadTitle: typeof rec.brief.threadTitle === "string" ? rec.brief.threadTitle : "" }
+          : null,
+    };
+  } catch {
+    return none;
   }
 }
 
@@ -1160,8 +1208,23 @@ function laneContextFor(env) {
   const userCleared = !!self && current === null && self.laneSetBy === "user";
   const projects = env ? readRegistryProjects(env.registryPath) : null;
   const dir = self && typeof self.workingDir === "string" && self.workingDir.length > 0 ? self.workingDir : env && env.cwd;
-  const projectKnown = projects ? projectPlaceFor(projects, dir) !== null : null;
-  return { current, userCleared, projectKnown };
+  const place = projects ? projectPlaceFor(projects, dir) : null;
+  const projectKnown = projects ? place !== null : null;
+  return { current, userCleared, projectKnown, projectKey: place ? place.key : null };
+}
+
+/** THE BRIEF'S LANE STAMP (review of ec319c7, #1): the lane this thread is in
+ *  as the brief is written — its record's lane (threads.json, the app's), or,
+ *  in the seconds before the app copies an agent's own `lane` op, the page's
+ *  lane when the thread has a project and the user did not take it out of
+ *  one; else null ("written in no lane"). Only a brief stamped for lane L
+ *  counts toward L's brief (src/lib/lanes.ts briefCountsFor). Pure. */
+function briefLaneStamp(ctx, page) {
+  if (ctx && ctx.current) return { name: ctx.current.name, project: ctx.current.project };
+  if (ctx && !ctx.userCleared && ctx.projectKey && page && typeof page.lane === "string" && page.lane.length > 0) {
+    return { name: page.lane, project: ctx.projectKey };
+  }
+  return null;
 }
 
 /** One of the app's files beside page.json, as parsed JSON — READ-only (the
@@ -3121,7 +3184,8 @@ function performOp(threadDir, args, now, env = null) {
   const dismissedIds = dismissedQuestionIds(current, readAppJson(threadDir, "retracted.json", null));
   // SWIT-108: `lane` needs what the app's threads.json and the registry say
   // (read-only) — the thread's current lane, and whether it has a project.
-  const laneCtx = args && args.op === "lane" ? laneContextFor(env) : null;
+  let laneCtx = args && (args.op === "lane" || args.op === "brief") ? laneContextFor(env) : null;
+  if (laneCtx && args.op === "brief") laneCtx = { ...laneCtx, stamp: briefLaneStamp(laneCtx, current) };
   const { page, message } = applyOp(current, args, now, answeredIds, dismissedIds, laneCtx);
   fs.mkdirSync(threadDir, { recursive: true });
   const tmp = `${file}.tmp`;

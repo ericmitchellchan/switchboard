@@ -2,19 +2,20 @@
 // for Open question 1): a `LANES` band ABOVE `THREADS`, in bare shell mode
 // too (lanes are part of the bare set). Each project with at least one lane,
 // its lanes indented beneath it, and a dim `· N` when a lane waits on Eric —
-// N = its threads' open questions + unsent answers, the SAME counts the
-// thread rows' marker reads (lanes.laneMarkerCount over App's 5s pass). A
-// row opens the lane's page. Archived lanes are off the band and listed
-// under one `N archived · show` fold at its foot, restorable from their page.
-// No `+`: a lane appears when its first thread joins it (requirement 1.5).
-// Nothing renders while no thread is in a lane.
+// N and its worded tooltip from THE SAME rule Home's lane pill reads
+// (lanes.laneWaitingFromCounts over App's 5s-pass counts: questions and
+// unsent answers from every lane thread, requests and items of his from the
+// threads that are not archived — review of ec319c7, #8). A row opens the
+// lane's page. Archived lanes are off the band and listed under one `N
+// archived · show` fold at its foot (their count still shows), restorable
+// from their page. No `+`: a lane appears when its first thread joins it
+// (requirement 1.5). Nothing renders while no thread is in a lane.
 
 import { useState } from "react";
 import type { CSSProperties } from "react";
 import type { Route } from "../types";
 import { useThreadsView } from "../lib/threadStore";
-import { deriveLanes, laneMarkerCount, sameLaneName, type Lane } from "../lib/lanes";
-import { questionMarkerTitle } from "../lib/pageStore";
+import { deriveLanes, laneWaitingFromCounts, laneWaitsLabel, namesLane, waitingTotal, type Lane, type LaneWaiting } from "../lib/lanes";
 import { navigate } from "../lib/route";
 import { Fold } from "./kb/PageBlock";
 
@@ -50,8 +51,14 @@ export function LanesSection({ route }: { route: Route }) {
   const shown = lanes.filter((l) => l.archivedAt === null);
   const archived = lanes.filter((l) => l.archivedAt !== null);
   const projects = [...new Set(shown.map((l) => l.project))];
-  const isOn = (l: Lane) => route.screen === "lane" && route.project === l.project && sameLaneName(route.lane, l.name);
-  const count = (l: Lane) => laneMarkerCount(l, view.openQuestions, view.unsentDecisions);
+  const isOn = (l: Lane) => route.screen === "lane" && route.project === l.project && namesLane(l, route.lane);
+  const waiting = (l: Lane) =>
+    laneWaitingFromCounts(l.threads, {
+      questions: view.openQuestions,
+      unsent: view.unsentDecisions,
+      requests: view.pendingRequests,
+      items: view.waitingItems,
+    });
   return (
     <div>
       <div style={{ padding: "10px 12px 4px" }}>
@@ -75,7 +82,7 @@ export function LanesSection({ route }: { route: Route }) {
           {shown
             .filter((l) => l.project === project)
             .map((l) => (
-              <LaneRow key={`${l.project}/${l.name}`} lane={l} active={isOn(l)} waiting={count(l)} unsent={laneUnsent(l, view.unsentDecisions)} />
+              <LaneRow key={`${l.project}/${l.name}`} lane={l} active={isOn(l)} waiting={waiting(l)} />
             ))}
         </div>
       ))}
@@ -83,7 +90,7 @@ export function LanesSection({ route }: { route: Route }) {
         <div style={{ padding: "0 12px" }}>
           <Fold label="archived" count={archived.length}>
             {archived.map((l) => (
-              <LaneRow key={`${l.project}/${l.name}`} lane={l} active={isOn(l)} waiting={0} unsent={0} archived />
+              <LaneRow key={`${l.project}/${l.name}`} lane={l} active={isOn(l)} waiting={waiting(l)} archived />
             ))}
           </Fold>
         </div>
@@ -92,26 +99,20 @@ export function LanesSection({ route }: { route: Route }) {
   );
 }
 
-function laneUnsent(lane: Lane, unsent: Readonly<Record<string, number>>): number {
-  return lane.threads.reduce((n, t) => n + (unsent[t.id] ?? 0), 0);
-}
-
 function LaneRow({
   lane,
   active,
   waiting,
-  unsent,
   archived = false,
 }: {
   lane: Lane;
   active: boolean;
-  /** Open questions + unsent answers across the lane's threads. */
-  waiting: number;
-  unsent: number;
+  waiting: LaneWaiting;
   archived?: boolean;
 }) {
   const [hover, setHover] = useState(false);
-  const title = questionMarkerTitle(waiting - unsent, unsent);
+  const total = waitingTotal(waiting);
+  const words = laneWaitsLabel(waiting);
   return (
     <button
       type="button"
@@ -128,9 +129,9 @@ function LaneRow({
       }}
     >
       <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{lane.name}</span>
-      {waiting > 0 && title !== null && (
-        <span title={title} style={{ flex: "none", fontSize: 9.5, color: "var(--text-dim)", whiteSpace: "nowrap" }}>
-          · {waiting}
+      {total > 0 && (
+        <span title={words ?? undefined} style={{ flex: "none", fontSize: 9.5, color: "var(--text-dim)", whiteSpace: "nowrap" }}>
+          · {total}
         </span>
       )}
     </button>
