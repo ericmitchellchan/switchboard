@@ -16,6 +16,10 @@ import {
   TURN_LINE_CAP,
   EVIDENCE_CAP,
   QUESTION_CAP,
+  QUESTION_KEEP_CAP,
+  neighbourAfterDismiss,
+  dismissSuccessNote,
+  noteReplacesForm as noteReplacesFormForDismiss,
   DONE_FOLD,
   countUnreadPosts,
   postTimes,
@@ -137,7 +141,25 @@ describe("parsePageFile (tolerant)", () => {
     expect(p.turns).toHaveLength(TURN_CAP);
     expect(p.turns[0].lines).toHaveLength(TURN_LINE_CAP);
     expect(p.evidence).toHaveLength(EVIDENCE_CAP);
-    expect(p.questions).toHaveLength(QUESTION_CAP);
+    // Review of c178f2f, #3: questions are NOT cut at the open cap — all 40
+    // survive (the file holds only what the server let in, ≤ QUESTION_KEEP_CAP).
+    expect(p.questions).toHaveLength(40);
+    expect(QUESTION_CAP).toBe(20);
+    const huge = parsePageFile(JSON.stringify({ questions: Array.from({ length: QUESTION_KEEP_CAP + 30 }, (_, i) => ({ id: `q${i}`, text: "t" })) }));
+    expect(huge.questions).toHaveLength(QUESTION_KEEP_CAP);
+  });
+
+  it("an OPEN question behind twenty answered/dismissed ones stays on the page (review of c178f2f, #3)", () => {
+    // Newest first, as the server writes: 25 newer questions the user
+    // answered, then the one still open.
+    const questions = [
+      ...Array.from({ length: 25 }, (_, i) => ({ id: `n${i}`, text: `newer ${i}`, askedAt: "2026-09-30T10:00:00Z" })),
+      { id: "old", text: "still open", askedAt: "2026-09-01T10:00:00Z" },
+    ];
+    const answers: Record<string, { text: string; at: string; resolvedBy: "user" }> = {};
+    for (let i = 0; i < 25; i++) answers[`n${i}`] = { text: "yes", at: "2026-09-30T11:00:00Z", resolvedBy: "user" };
+    const merged = mergePage(parsePageFile(JSON.stringify({ questions })), parseAnswersFile(JSON.stringify(answers)), []);
+    expect(merged.openQuestions.map((q) => q.id)).toEqual(["old"]);
   });
 });
 
@@ -901,5 +923,22 @@ describe("nextPassEntry (the stamp gate's cached branch, 0.9.x hygiene review fi
     expect(nextPassEntry(cached, 1_700_000, seenAfterOpeningB)).toEqual({ reread: false, questions: 1, unsent: 2, unread: 0 });
     // A post newer than the stamp still counts — the stamp is a moment, not a reset.
     expect(nextPassEntry(cached, 1_700_000, T1 + 1)).toEqual({ reread: false, questions: 1, unsent: 2, unread: 1 });
+  });
+});
+
+describe("review of c178f2f — the keyboard `not needed` hand-off and Home's dismissal note", () => {
+  it("#5 — focus goes to the NEXT card still on the page, else the previous, else null (Send) — by id, whether or not the dismissed card has left yet", () => {
+    const atClick = ["q1", "q2", "q3"];
+    expect(neighbourAfterDismiss(atClick, "q2", ["q1", "q2", "q3"])).toBe("q3"); // the card has not left yet
+    expect(neighbourAfterDismiss(atClick, "q2", ["q1", "q3"])).toBe("q3"); // it has — no off-by-one
+    expect(neighbourAfterDismiss(atClick, "q3", ["q1", "q2", "q3"])).toBe("q2"); // the last card → the one before
+    expect(neighbourAfterDismiss(atClick, "q2", ["q1"])).toBe("q1"); // the next one went too
+    expect(neighbourAfterDismiss(["q1"], "q1", ["q1"])).toBeNull(); // the only card → Send
+    expect(neighbourAfterDismiss(atClick, "zz", atClick)).toBeNull();
+  });
+
+  it("nit — Home's `not needed` saved note replaces the card's form (a success)", () => {
+    expect(dismissSuccessNote()).toEqual({ kind: "success", text: "not needed · off the page" });
+    expect(noteReplacesFormForDismiss(dismissSuccessNote())).toBe(true);
   });
 });

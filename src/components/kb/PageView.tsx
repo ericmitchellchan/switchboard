@@ -125,6 +125,7 @@ import {
   pageFocusNonce,
   takePageFocus,
   peekPageFocus,
+  neighbourAfterDismiss,
 } from "../../lib/pageStore";
 import { nextThingFor, openableAddressIn, resolveOpenable } from "../../lib/nextThing";
 import type { AnswerNote, DismissedQuestion, InboxPost, PageAnswer, PageBrief, PageItem, PageQuestion, RenderedPage, SettledQuestion } from "../../lib/pageStore";
@@ -1081,17 +1082,40 @@ function DecisionsBlock({
    *  once); a failed write is one line beside Send and the card stays. A
    *  keyboard dismissal hands focus to a neighbouring card's `not needed`
    *  (else Send) first, so it does not land on `body` when the card goes. */
+  //
+  // Review of c178f2f, #5: the hand-off used to run straight after the write
+  // resolved — but the host clears `retracting` in the same tick, React has
+  // not committed it yet, so every neighbour was still `disabled` and
+  // `.focus()` on it did nothing: focus fell to <body> when the card went.
+  // Now the dismissal only RECORDS where focus should go; the effect below
+  // moves it once `retracting` is null in the COMMITTED tree (the neighbours
+  // enabled again). The target rule is `neighbourAfterDismiss` (pageStore).
+  const pendingFocusRef = useRef<{ idsAtClick: string[]; dismissedId: string } | null>(null);
+  const dismissButtons = () => Array.from(rootRef.current?.querySelectorAll<HTMLButtonElement>("[data-dismiss]") ?? []);
+  useEffect(() => {
+    if (retracting !== null) return;
+    const pending = pendingFocusRef.current;
+    if (pending === null) return;
+    pendingFocusRef.current = null;
+    const buttons = dismissButtons();
+    const target = neighbourAfterDismiss(pending.idsAtClick, pending.dismissedId, buttons.map((b) => b.dataset.dismiss ?? ""));
+    const el = target !== null ? buttons.find((b) => b.dataset.dismiss === target) : rootRef.current?.querySelector<HTMLButtonElement>("[data-send]");
+    el?.focus();
+  }, [retracting]);
   const dismiss = async (q: PageQuestion, button: HTMLButtonElement) => {
     if (frozen || retracting !== null) return;
     setNote(null);
+    // Recorded BEFORE the write: the effect is gated on `retracting` going
+    // back to null, which happens only after this write settles — whichever
+    // of React's commit and this continuation runs first.
+    pendingFocusRef.current =
+      document.activeElement === button
+        ? { idsAtClick: dismissButtons().map((b) => b.dataset.dismiss ?? ""), dismissedId: q.id }
+        : null;
     try {
       await onDismiss(q.id);
-      if (document.activeElement === button) {
-        const others = Array.from(rootRef.current?.querySelectorAll<HTMLButtonElement>("[data-dismiss]") ?? []);
-        const at = others.indexOf(button);
-        (others[at + 1] ?? others[at - 1] ?? rootRef.current?.querySelector<HTMLButtonElement>("[data-send]"))?.focus();
-      }
     } catch (err) {
+      pendingFocusRef.current = null; // a failed dismissal moves nothing
       setNote(dismissErrorNote(err));
     }
   };
@@ -1233,7 +1257,7 @@ function DecisionsBlock({
                   <button
                     type="button"
                     className="page-textlink"
-                    data-dismiss=""
+                    data-dismiss={q.id}
                     disabled={frozen || retracting !== null}
                     onMouseDown={keepFocus}
                     onClick={(e) => void dismiss(q, e.currentTarget)}

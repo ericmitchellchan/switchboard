@@ -40,7 +40,16 @@ const path = require("path");
 const TURN_CAP = 30;
 const TURN_LINE_CAP = 6;
 const EVIDENCE_CAP = 60;
-const QUESTION_CAP = 20;
+const QUESTION_CAP = 20; // OPEN questions — `ask` refuses a 21st (answered / dismissed ones do not count)
+/** Review of c178f2f, #3: every question the page HOLDS — open, answered,
+ *  settled, dismissed — up to this many. The app's parser keeps exactly as
+ *  many (pageStore.QUESTION_KEEP_CAP), so nothing this server writes is ever
+ *  dropped on the way in; before, the parser kept the newest 20 of ANY state,
+ *  and with dismissals loosening the open cap an open question past the 20th
+ *  vanished from the page, the rail and Home while `page read` listed it. A
+ *  NEW question on a page already at this cap is refused (never an
+ *  eviction: a decided question is a standing decision). */
+const QUESTION_KEEP_CAP = 200;
 const TEXT_CAP = 500; // any single text field — a page line is a sentence, not a document
 const OPTION_CAP = 60; // an ask option is a short choice, not a paragraph (SWIT-69; a longer one is trimmed — SWIT-105)
 /** SWIT-105: a dismissed question's address in the app's retracted.json —
@@ -73,8 +82,12 @@ const BRIEF_LINE_CAP = 200;
 const BRIEF_LINES_CAP = 6;
 /** The brief's four lists, in the order the page draws them. */
 const BRIEF_LISTS = ["established", "dead", "lead", "waiting"];
-/** SWIT-104: `page read` answers with at most this many characters. */
-const READ_CAP = 6000;
+/** SWIT-104: `page read` answers with at most this many characters. Raised
+ *  from 6000 (review of daaad36, #1): the BRIEF is never clipped in `read`
+ *  (an obedient agent reads, then replaces the brief WHOLE — a clipped read
+ *  would truncate it for good), and the brief at its caps is ~5.5k on its
+ *  own; 8000 leaves every section header its room at the tightest level. */
+const READ_CAP = 8000;
 /** SWIT-106: THE FINDINGS LEDGER — claim · verdict · n · report. The verdict
  *  words are the one-platform mock's (lead · open · fact · dead). Caps
  *  mirrored in pageStore.ts (FINDING_*). */
@@ -136,12 +149,28 @@ function text(v, field) {
 /** SWIT-105: an `ask` option (or its `default`) over OPTION_CAP is cut at a
  *  word boundary and ends in `…` — never longer than the cap, never a halved
  *  surrogate pair. A short one passes through untouched. Pure. */
+/** Review of c178f2f, #6: the cut works on GRAPHEMES (Intl.Segmenter — in
+ *  every Node this server runs on), never code units, so a flag's second
+ *  regional indicator, a ZWJ sequence's tail or a combining mark is never
+ *  orphaned from its base. The cap is still OPTION_CAP code units (what the
+ *  page measures); the `…` takes the last one. */
+const GRAPHEMES = typeof Intl === "object" && typeof Intl.Segmenter === "function" ? new Intl.Segmenter(undefined, { granularity: "grapheme" }) : null;
+function graphemesOf(t) {
+  return GRAPHEMES ? Array.from(GRAPHEMES.segment(t), (g) => g.segment) : Array.from(t);
+}
+
 function trimOption(opt) {
   if (opt.length <= OPTION_CAP) return opt;
-  let head = opt.slice(0, OPTION_CAP - 1).replace(/[\uD800-\uDBFF]$/, "");
-  // A cut that lands on a whole word (the next character is a space) keeps
+  const parts = graphemesOf(opt);
+  let head = "";
+  let n = 0;
+  while (n < parts.length && head.length + parts[n].length <= OPTION_CAP - 1) {
+    head += parts[n];
+    n += 1;
+  }
+  // A cut that lands on a whole word (the next grapheme is a space) keeps
   // it; otherwise back up to the last space, when there is one past halfway.
-  if (opt[head.length] !== " ") {
+  if (parts[n] !== " ") {
     const space = head.lastIndexOf(" ");
     if (space >= OPTION_CAP / 2) head = head.slice(0, space);
   }
@@ -270,8 +299,11 @@ function applyOp(page, args, now, answeredIds = new Set(), dismissedIds = new Se
       // SWIT-106: a finding is a ledger row with a verdict now, not an
       // evidence row — rows an older thread wrote in this form still render.
       if (address.startsWith(FINDING_ADDRESS_PREFIX)) {
+        // Review of 4f016e1, #4: live threads still carry rows in this form —
+        // say how to clear the old one once the finding is in the ledger.
         throw new OpError(
-          "a finding is not an evidence row — record it with op finding {claim, verdict, n?, report?} (the page's Findings ledger)"
+          `a finding is not an evidence row — record it with op finding {claim, verdict, n?, report?} (the page's Findings ledger), ` +
+            `then remove the old row with op drop_evidence {addresses: [${JSON.stringify(address)}]} so the claim is not listed twice`
         );
       }
       const label = text(args.label, "label");
@@ -325,17 +357,19 @@ function applyOp(page, args, now, answeredIds = new Set(), dismissedIds = new Se
       // cost a whole round trip for a choice that read fine cut — and the
       // result names what was cut.
       const trimmed = [];
-      const options = Array.isArray(args.options)
+      // The options as the agent WROTE them, before any cut — a `default`
+      // names one of these (review of c178f2f, #6).
+      const fullOptions = Array.isArray(args.options)
         ? args.options
             .filter((o) => typeof o === "string" && o.trim().length > 0)
             .slice(0, 6)
-            .map((o) => {
-              const opt = text(o, "an option");
-              const short = trimOption(opt);
-              if (short !== opt) trimmed.push(short);
-              return short;
-            })
+            .map((o) => text(o, "an option"))
         : [];
+      const options = fullOptions.map((opt) => {
+        const short = trimOption(opt);
+        if (short !== opt) trimmed.push(short);
+        return short;
+      });
       if (trimmed.length > 0 && new Set(options).size !== options.length) {
         throw new OpError(`two options read the same once trimmed to ${OPTION_CAP} chars (${trimmed.map((o) => `"${o}"`).join(", ")}) — shorten them so they differ`);
       }
@@ -357,10 +391,15 @@ function applyOp(page, args, now, answeredIds = new Set(), dismissedIds = new Se
         if (typeof args.default !== "string" || args.default.trim().length === 0) {
           throw new OpError("default must be one of the options (a non-empty string)");
         }
-        // SWIT-105: matched AFTER trimming — the default names an option by
-        // its full text, and the option it names may have been cut.
-        dflt = trimOption(args.default.trim());
-        if (!options.includes(dflt)) {
+        // SWIT-105 / review of c178f2f, #6: the default is matched against the
+        // UNTRIMMED options first (two long options can share their first ~57
+        // chars, and trimming the default before matching accepted one that
+        // named a different option), then mapped to that option's trimmed
+        // form; naming the trimmed form itself also works.
+        const want = args.default.trim();
+        const at = fullOptions.indexOf(want);
+        dflt = at !== -1 ? options[at] : options.includes(want) ? want : null;
+        if (dflt === null) {
           throw new OpError(`default must be one of the options (${options.length === 0 ? "none were given" : options.map((o) => `"${o}"`).join(", ")})`);
         }
       }
@@ -401,6 +440,11 @@ function applyOp(page, args, now, answeredIds = new Set(), dismissedIds = new Se
       const open = page.questions.filter(isOpen).length;
       if (open >= QUESTION_CAP) {
         throw new OpError(`${QUESTION_CAP} questions are already OPEN on the page — wait for answers before asking more`);
+      }
+      if (page.questions.length >= QUESTION_KEEP_CAP) {
+        throw new OpError(
+          `the page already holds ${QUESTION_KEEP_CAP} questions, the most it keeps — its decisions stand; re-ask an existing id instead of a new one`
+        );
       }
       const questions = [asked, ...page.questions];
       return {
@@ -613,16 +657,23 @@ function applyOp(page, args, now, answeredIds = new Set(), dismissedIds = new Se
 // ── Read (SWIT-104) — the page, as compact plain text ────────────────────────
 // `page` op `read` is how a RESUMED agent sees its own page: theme, the brief,
 // the open questions (with ids), the open items, the standing decisions, the
-// last three turns. It writes nothing. Bounded: every line is clipped and
-// every list is cut (newest first, with a `+ N more` line) at one of a few
-// progressively tighter levels until the whole text fits READ_CAP.
+// findings, the last three turns. It writes nothing. Bounded: every line
+// OUTSIDE THE BRIEF is clipped and every list is cut (newest first, with a
+// `+ N more` line) at one of a few progressively tighter levels until the
+// whole text fits READ_CAP — the TURNS go first, then the decisions, the
+// questions and the findings (review of daaad36, #1). THE BRIEF IS NEVER
+// CLIPPED: the tool tells the agent to read first and replace the brief
+// WHOLE, so a clipped brief in `read` would be written back clipped forever.
 
 const READ_TURNS = 3;
 const READ_LEVELS = [
-  { clip: 240, questions: 20, items: 30, decisions: 12, findings: 20 },
-  { clip: 140, questions: 12, items: 16, decisions: 8, findings: 12 },
-  { clip: 80, questions: 8, items: 10, decisions: 5, findings: 8 },
-  { clip: 50, questions: 5, items: 6, decisions: 3, findings: 5 },
+  { clip: 240, turns: 3, decisions: 12, questions: 20, findings: 20, items: 30, ids: true },
+  { clip: 140, turns: 1, decisions: 8, questions: 12, findings: 12, items: 16, ids: true },
+  { clip: 80, turns: 0, decisions: 4, questions: 8, findings: 8, items: 10, ids: true },
+  { clip: 50, turns: 0, decisions: 0, questions: 4, findings: 4, items: 6, ids: true },
+  // The floor: headers and counts only — the brief and every section's
+  // header always fit READ_CAP at this level (asserted at every cap).
+  { clip: 50, turns: 0, decisions: 0, questions: 0, findings: 0, items: 0, ids: false },
 ];
 /** The brief's lists as `read` names them to the AGENT (the page says
  *  "Waiting on you" to the user — the same list). */
@@ -655,11 +706,15 @@ function renderPageRead(page, answers, dismissedIds, lim) {
   const goal = b && typeof b.goal === "string" && b.goal.trim().length > 0 ? b.goal : null;
   if (b && (goal !== null || briefLists.some(([, lines]) => lines.length > 0))) {
     out.push(`WHERE THINGS STAND (the brief${typeof b.updatedAt === "string" && b.updatedAt ? `, rewritten ${b.updatedAt}` : ""}):`);
-    if (goal !== null) out.push(`  Goal: ${clipLine(goal, lim.clip)}`);
+    // Never clipped (see the header) — the stored text, verbatim (a line
+    // break inside one, which the write path never stores, is flattened so
+    // the listing stays one line per entry).
+    const verbatim = (v) => String(v).replace(/[\r\n]+/g, " ").trim();
+    if (goal !== null) out.push(`  Goal: ${verbatim(goal)}`);
     for (const [f, lines] of briefLists) {
       if (lines.length === 0) continue;
       out.push(`  ${BRIEF_READ_LABELS[f]}:`);
-      for (const l of lines.slice(0, BRIEF_LINES_CAP)) out.push(`    - ${clipLine(l, lim.clip)}`);
+      for (const l of lines.slice(0, BRIEF_LINES_CAP)) out.push(`    - ${verbatim(l)}`);
     }
   } else {
     out.push("WHERE THINGS STAND: no brief yet — write one with op brief.");
@@ -692,14 +747,15 @@ function renderPageRead(page, answers, dismissedIds, lim) {
   }
   more(open.length, lim.questions);
   if (open.length === 0) out.push("  (none)");
+  const idList = (qs) => (lim.ids ? ` (${qs.map((q) => q.id).join(", ")})` : "");
   if (pending.length > 0) {
     out.push(
-      `  ${pending.length} more ${pending.length === 1 ? "is" : "are"} answered on the page and not sent yet (${pending.map((q) => q.id).join(", ")}) — the answer arrives in the Decisions message; do not re-ask.`
+      `  ${pending.length} more ${pending.length === 1 ? "is" : "are"} answered on the page and not sent yet${idList(pending)} — the answer arrives in the Decisions message; do not re-ask.`
     );
   }
   if (dismissed.length > 0) {
     out.push(
-      `  ${dismissed.length} ${dismissed.length === 1 ? "was" : "were"} dismissed by the user as not needed (${dismissed.map((q) => q.id).join(", ")}) — do not wait on ${dismissed.length === 1 ? "it" : "them"}; re-ask (same id) only if the answer has come to matter.`
+      `  ${dismissed.length} ${dismissed.length === 1 ? "was" : "were"} dismissed by the user as not needed${idList(dismissed)} — do not wait on ${dismissed.length === 1 ? "it" : "them"}; re-ask (same id) only if the answer has come to matter.`
     );
   }
 
@@ -752,14 +808,14 @@ function renderPageRead(page, answers, dismissedIds, lim) {
   more(findings.length, lim.findings);
   if (findings.length === 0) out.push("  (none)");
 
-  const turns = page.turns.filter((t) => t && Array.isArray(t.lines)).slice(0, READ_TURNS);
+  const turns = page.turns.filter((t) => t && Array.isArray(t.lines)).slice(0, Math.min(READ_TURNS, lim.turns));
   out.push("");
   out.push(`LAST TURNS (newest first, ${turns.length} of ${page.turns.length}):`);
   for (const t of turns) {
     const lines = t.lines.filter((l) => typeof l === "string" && l.trim().length > 0).slice(0, TURN_LINE_CAP);
     out.push(`  ${typeof t.at === "string" ? t.at : ""}: ${lines.map((l) => clipLine(l, lim.clip)).join(" | ")}`);
   }
-  if (turns.length === 0) out.push("  (none)");
+  if (turns.length === 0) out.push(page.turns.length > 0 ? "  (cut — the page lists them)" : "  (none)");
   return out.join("\n");
 }
 
@@ -2494,9 +2550,11 @@ const PAGE_TOOL = {
     "and waiting (what is waiting on the user) are each ≤ 6 short plain lines (≤ 200 chars). " +
     "The brief is REPLACED WHOLE by every call — pass everything that still stands, not a " +
     "delta; goal: \"\" alone clears it. It is a summary, never a log: the story is a turn, " +
-    "the detail a report. op read RETURNS THE PAGE as compact plain text — theme, the brief, " +
-    "the open questions with their ids, the open items, the standing decisions, the last " +
-    "three turns — and writes nothing. It is how you see your own page: call it FIRST when " +
+    "the detail a report. op read RETURNS THE PAGE as compact plain text (≤ 8000 chars) — " +
+    "theme, the brief (always whole, never clipped), the open questions with their ids, the " +
+    "ids of questions the user dismissed as not needed, the open items, the standing " +
+    "decisions, the findings, the last three turns — and writes nothing; on a full page the " +
+    "turns are cut first, then the lists. It is how you see your own page: call it FIRST when " +
     "you are resumed, and before you rewrite the brief. RECORD WHAT THE WORK ESTABLISHED as " +
     "op finding {claim, verdict, n?, report?} — the page's Findings ledger, the record that " +
     "outlives the thread: claim is ONE sentence (≤ 240 chars); verdict is lead (worth " +
@@ -2880,4 +2938,5 @@ module.exports = {
   TURN_LINE_CAP,
   EVIDENCE_CAP,
   QUESTION_CAP,
+  QUESTION_KEEP_CAP,
 };

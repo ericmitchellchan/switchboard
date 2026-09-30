@@ -9,6 +9,7 @@ import {
   olderQuestionsLabel,
   recentFindings,
   HOME_FINDINGS_LIMIT,
+  needsYouMeta,
 } from "./homeModel";
 import { mergePage, parsePageFile } from "./pageStore";
 
@@ -83,5 +84,13 @@ describe("homeModel — Home's Findings block (SWIT-106)", () => {
     const many = [{ thread: a, page: withFindings(Array.from({ length: 12 }, (_, i) => ({ id: `f${i}`, verdict: "open", updatedAt: new Date(NOW - i * 1000).toISOString() }))) }];
     expect(recentFindings(many).map((r) => r.finding.id)).toEqual(["f0", "f1", "f2", "f3", "f4", "f5", "f6", "f7"]);
     expect(recentFindings([])).toEqual([]);
+  });
+});
+
+describe("Needs you's header count (review of c178f2f, nit)", () => {
+  it("counts the listed rows; with only older questions it names the fold's count, never `0` over it", () => {
+    expect(needsYouMeta(3, 2)).toBe("3");
+    expect(needsYouMeta(0, 2)).toBe("2 older");
+    expect(needsYouMeta(0, 0)).toBe("0");
   });
 });

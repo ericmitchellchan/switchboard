@@ -38,7 +38,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { PulsingDot } from "./PulsingDot";
-import { MONO, READING, SECTION_TITLE, DENSE_ROW, FIELD } from "./kit";
+import { MONO, READING, SECTION_TITLE, DENSE_ROW, FIELD, TEXT_LINK } from "./kit";
 import { STATUS_CONFIGS } from "../lib/statusConfig";
 import {
   useThreadsView,
@@ -59,6 +59,9 @@ import {
   answerErrorNote,
   noteReplacesForm,
   unsentDecisionsLine,
+  questionAddress,
+  dismissErrorNote,
+  dismissSuccessNote,
 } from "../lib/pageStore";
 import type { AnswerNote, InboxPost, PageItem, PageQuestion, RenderedPage } from "../lib/pageStore";
 import { answerQuestion, openArtifact } from "../lib/panelStore";
@@ -70,7 +73,7 @@ import {
   useRepoListings,
   type ProjectViewEntry,
 } from "../lib/repoListing";
-import { readThreadFile, listScratchViews } from "../lib/ipc";
+import { readThreadFile, listScratchViews, retractThreadEvidence } from "../lib/ipc";
 import { navigate } from "../lib/route";
 import { useAllKnownServers, serverKey } from "../lib/devServer";
 import type { DevServerHit } from "../lib/devServer";
@@ -79,7 +82,7 @@ import type { BacklogItem } from "../lib/backlogStore";
 import { BacklogListing } from "./BacklogPanel";
 import { OptionRow } from "./kb/OptionRow";
 import { Fold, StatusPill } from "./kb/PageBlock";
-import { olderThreadIds, olderQuestionsLabel, recentFindings } from "../lib/homeModel";
+import { needsYouMeta, olderThreadIds, olderQuestionsLabel, recentFindings } from "../lib/homeModel";
 import { verdictTone } from "../lib/statusPill";
 
 /** The page's H2 + trailing meta (10px mono faint, pushed right). */
@@ -400,7 +403,7 @@ function NeedsYou({ digests, launched }: { digests: ThreadDigest[]; launched: Re
   }
   return (
     <div>
-      <SectionHeader label="Needs you" meta={String(entries.length)} />
+      <SectionHeader label="Needs you" meta={needsYouMeta(entries.length, olderCards.length)} />
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>{entries}</div>
       {olderCards.length > 0 && (
         <Fold label={olderQuestionsLabel(olderCards.length)} count={olderCards.length}>
@@ -423,6 +426,24 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
   const [chosen, setChosen] = useState<string | null>(null);
   const [note, setNote] = useState<AnswerNote | null>(null);
   const [fieldFocus, setFieldFocus] = useState(false);
+  // Review of c178f2f, nit: `not needed` on Home too — the SAME write the
+  // page makes (retracted.json, `question:<id>`, through the app's retract
+  // command) and the same rule: the card leaves when the poll shows the
+  // dismissal, a failed write is one line and the card stays.
+  const [dismissing, setDismissing] = useState(false);
+  const dismiss = useCallback(async () => {
+    if (busy || dismissing) return;
+    setDismissing(true);
+    setNote(null);
+    try {
+      await retractThreadEvidence(digest.thread.id, questionAddress(question.id));
+      setNote(dismissSuccessNote());
+    } catch (err) {
+      setNote(dismissErrorNote(err));
+    } finally {
+      setDismissing(false);
+    }
+  }, [busy, dismissing, digest.thread.id, question.id]);
   const submit = useCallback(
     async (text: string) => {
       const clean = text.trim();
@@ -453,6 +474,17 @@ function QuestionCard({ digest, question }: { digest: ThreadDigest; question: Pa
         <span style={{ ...ROW_META, marginLeft: 0 }}>
           {digest.thread.title} · {threadRepoName(digest.thread.workingDir)}
         </span>
+        {!noteReplacesForm(note) && (
+          <button
+            type="button"
+            onClick={() => void dismiss()}
+            disabled={busy || dismissing}
+            title="Take this question off the page — you do not need it answered. The agent can ask again if it comes to matter."
+            style={{ ...TEXT_LINK, flex: "none", marginTop: 0, opacity: dismissing ? 0.4 : 1, cursor: busy || dismissing ? "default" : "pointer" }}
+          >
+            not needed
+          </button>
+        )}
       </div>
       {noteReplacesForm(note) ? (
         <div style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.5 }}>{note?.text}</div>

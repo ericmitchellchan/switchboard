@@ -171,8 +171,17 @@ export function themeThreadTitle(theme: string): string {
  *  default either, and a promoted thread was never `New thread`. Null too
  *  when there is no theme, or the theme yields nothing new. Pure; the caller
  *  applies it once, through the rename primitives. */
-export function autoThreadTitle(currentTitle: string, theme: string | null | undefined): string | null {
+export function autoThreadTitle(
+  currentTitle: string,
+  theme: string | null | undefined,
+  opts: { editorOpen?: boolean } = {}
+): string | null {
   if (currentTitle !== NEW_THREAD_TITLE) return null;
+  // Review of c178f2f, #7b: a title box OPEN on this thread (the rail's
+  // inline editor, the breadcrumb's) holds `New thread` as typed-in state;
+  // naming the thread under it would be undone by that box's Enter or blur,
+  // which commits `New thread` back. The user is naming it right now — wait.
+  if (opts.editorOpen === true) return null;
   if (typeof theme !== "string") return null;
   const title = themeThreadTitle(theme);
   return title.length > 0 && title !== NEW_THREAD_TITLE ? title : null;
@@ -1159,13 +1168,16 @@ export function unbindThread(threadId: string): void {
  *  this. An empty/whitespace title falls back to the record's DERIVED default
  *  rather than persisting a blank row. Rides the existing persistence (the
  *  workspace blob + the disk mirror), so it survives a restart. */
-export function renameThread(threadId: string, title: string): void {
+export function renameThread(threadId: string, title: string, opts: { keepRenameRequest?: boolean } = {}): void {
   const t = getThreadById(threadId);
   if (!t) return;
   const next = title.trim() || derivedThreadTitle(t);
   // A rename answers the request whether or not the title moved — the box
   // that asked for it has done its job (an untouched `New thread` included).
-  const hadRequest = renameRequest === threadId;
+  // Review of c178f2f, #7a: the AUTO-NAME from a page theme is not that box —
+  // it keeps a pending rename-on-create request, so the box still opens
+  // (now holding the theme's title, which the user can keep or change).
+  const hadRequest = renameRequest === threadId && opts.keepRenameRequest !== true;
   if (hadRequest) renameRequest = null;
   if (next === t.title) {
     if (hadRequest) bump();
@@ -1445,7 +1457,29 @@ export function getThreadActions(): ThreadActions | null {
 }
 
 /** Test-only: reset the store to a blank state. */
+// ── Open title editors (review of c178f2f, #7b) ──────────────────────────────
+// Every inline title box registers while it is mounted — keyed by THREAD id
+// (the rail's / history's ThreadTitleEditor) or by SESSION id (the
+// breadcrumb's tab-name box) — so the auto-name from a page theme can stand
+// down while one is open. Runtime-only; a count per key (two boxes on one
+// thread, e.g. the rail and the history screen, each unregister alone).
+const openTitleEditors = new Map<string, number>();
+
+/** A title box on `key` (thread or session id) mounted (`open`) or went away. */
+export function noteTitleEditor(key: string, open: boolean): void {
+  if (key.length === 0) return;
+  const n = (openTitleEditors.get(key) ?? 0) + (open ? 1 : -1);
+  if (n > 0) openTitleEditors.set(key, n);
+  else openTitleEditors.delete(key);
+}
+
+/** Is a title box open on any of these keys (a thread id, its session id)? */
+export function isTitleEditorOpen(...keys: (string | null | undefined)[]): boolean {
+  return keys.some((k) => typeof k === "string" && k.length > 0 && openTitleEditors.has(k));
+}
+
 export function __resetThreadStoreForTests(): void {
+  openTitleEditors.clear();
   threads = [];
   launched.clear();
   booting.clear();

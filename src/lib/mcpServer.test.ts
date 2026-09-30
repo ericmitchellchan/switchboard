@@ -28,6 +28,7 @@ import { parseShowsFile, showTargetFor, SHOW_CAP, SHOW_ADDRESS_CAP } from "./sho
 import { parseSurfaceQuery } from "./surfaceParams";
 import { projectViewAddress } from "./evidenceModel";
 import { PROJECT_VIEW_INDEX_CAP } from "./repoListing";
+import { QUESTION_KEEP_CAP } from "./pageStore";
 // Source text of the two loopback predicates, for the byte-identical check.
 import viewStoreSource from "./viewStore.ts?raw";
 import mcpServerSource from "../../src-tauri/resources/mcp/switchboard-mcp.cjs?raw";
@@ -1663,7 +1664,7 @@ describe("a dismissed question (SWIT-105) — the app's retracted.json, read-onl
 
 describe("the page tool — the standing brief + op read (SWIT-104)", () => {
   const brief = server as unknown as {
-    formatPageRead: (page: Record<string, unknown>, answers: unknown) => string;
+    formatPageRead: (page: Record<string, unknown>, answers: unknown, retracted?: unknown) => string;
     performReadOp: (threadDir: string) => string;
     performOp: (threadDir: string, args: Record<string, unknown>, now: number) => string;
     BRIEF_GOAL_CAP: number;
@@ -1860,7 +1861,7 @@ describe("the page tool — the standing brief + op read (SWIT-104)", () => {
   });
 
   it("read stays under READ_CAP on a page at every cap — sections all present, lists cut with a count", () => {
-    expect(brief.READ_CAP).toBe(6000);
+    expect(brief.READ_CAP).toBe(8000);
     const long = (tag: string, n: number) => `${tag} ${"word ".repeat(200)}`.slice(0, n).trim();
     let page = empty();
     page = server.applyOp(page, { op: "theme", text: long("theme", 500) }, NOW).page;
@@ -1896,7 +1897,7 @@ describe("the page tool — the standing brief + op read (SWIT-104)", () => {
       "TO DO (60 open):",
       "STANDING DECISIONS (0):",
       "FINDINGS (60):",
-      "LAST TURNS (newest first, 3 of 30):",
+      "LAST TURNS (newest first, ",
     ]) {
       expect(text).toContain(heading);
     }
@@ -1907,6 +1908,62 @@ describe("the page tool — the standing brief + op read (SWIT-104)", () => {
     expect(text).not.toMatch(/\n {2}i1 \[/);
     // A modest page is printed at the roomiest level — nothing clipped.
     expect(brief.formatPageRead(worked(), {})).not.toContain("…");
+  });
+
+  it("the BRIEF is never clipped: at every cap, beside every other section at its cap, it reads back byte-for-byte (review of daaad36, #1)", () => {
+    const long = (tag: string, n: number) => `${tag} ${"wörd ".repeat(200)}`.slice(0, n).trim();
+    const goal = long("goal", 300);
+    const lists = {
+      established: Array.from({ length: 6 }, (_, i) => long(`established ${i}`, 200)),
+      dead: Array.from({ length: 6 }, (_, i) => long(`dead ${i}`, 200)),
+      lead: Array.from({ length: 6 }, (_, i) => long(`lead ${i}`, 200)),
+      waiting: Array.from({ length: 6 }, (_, i) => long(`waiting ${i}`, 200)),
+    };
+    let page = empty();
+    page = server.applyOp(page, { op: "theme", text: long("theme", 500) }, NOW).page;
+    page = server.applyOp(page, { op: "brief", goal, ...lists }, NOW).page;
+    // Every other section at its cap: 20 open questions + 40 answered and
+    // sent + 20 dismissed (every id list long), 60 items, 30 full turns, 60
+    // findings with long reports.
+    const answers: Record<string, { text: string; at: string; sentAt: string }> = {};
+    const dismissed: { address: string; at: string }[] = [];
+    for (let i = 0; i < 80; i++) {
+      const id = `question-with-a-long-id-${i}`;
+      const answered = new Set<string>(Object.keys(answers));
+      const gone = new Set<string>(dismissed.map((d) => d.address.slice("question:".length)));
+      page = (server.applyOp as unknown as (
+        p: Record<string, unknown>,
+        a: Record<string, unknown>,
+        n: number,
+        answered: Set<string>,
+        dismissed: Set<string>
+      ) => { page: Record<string, unknown> })(page, { op: "ask", id, text: long(`question ${i}`, 500), options: ["a".repeat(60), "b".repeat(60)] }, NOW + i, answered, gone).page;
+      if (i < 40) answers[id] = { text: long(`answer ${i}`, 500), at: "2026-08-31T11:00:00Z", sentAt: "2026-08-31T11:00:05Z" };
+      else if (i < 60) dismissed.push({ address: `question:${id}`, at: "2026-09-30T00:00:00Z" });
+    }
+    for (let i = 0; i < 60; i++) page = server.applyOp(page, { op: "item", itemOp: "add", title: long(`item ${i}`, 500) }, NOW).page;
+    for (let i = 0; i < server.TURN_CAP; i++) {
+      page = server.applyOp(page, { op: "turn", lines: Array.from({ length: 6 }, (_, j) => long(`turn ${i} line ${j}`, 500)) }, NOW).page;
+    }
+    for (let i = 0; i < 60; i++) {
+      page = server.applyOp(page, { op: "finding", claim: long(`finding ${i}`, 240), verdict: "open", n: "n".repeat(40), report: `docs/${"r".repeat(280)}.md` }, NOW + i).page;
+    }
+    const text = brief.formatPageRead(page, answers, { version: 1, evidence: dismissed });
+    expect(text.length).toBeLessThanOrEqual(brief.READ_CAP);
+    expect(text).toContain(`  Goal: ${goal}\n`);
+    for (const [label, lines] of [
+      ["Established", lists.established],
+      ["Dead", lists.dead],
+      ["Live lead", lists.lead],
+      ["Waiting on the user", lists.waiting],
+    ] as const) {
+      expect(text).toContain(`  ${label}:\n${lines.map((l) => `    - ${l}`).join("\n")}\n`);
+    }
+    // …and the sections the brief shares the cap with are all still there.
+    for (const heading of ["OPEN QUESTIONS (20):", "TO DO (60 open):", "STANDING DECISIONS (40):", "FINDINGS (60):", "LAST TURNS (newest first, "]) {
+      expect(text).toContain(heading);
+    }
+    expect(text).not.toContain("… (cut — the page holds more)");
   });
 
   it("performOp read returns the text and WRITES NOTHING — no page.json, no tmp file", () => {
@@ -1944,7 +2001,10 @@ describe("the page tool — the standing brief + op read (SWIT-104)", () => {
       "The brief is REPLACED WHOLE by every call",
       'goal: "" alone clears it',
       "op read RETURNS THE PAGE as compact plain text",
-      "the open questions with their ids, the open items, the standing decisions, the last three turns",
+      "the open questions with their ids, the ids of questions the user dismissed as not needed, the open items, the standing decisions, the findings, the last three turns",
+      "(≤ 8000 chars)",
+      "the brief (always whole, never clipped)",
+      "on a full page the turns are cut first, then the lists",
       "writes nothing",
       "call it FIRST when you are resumed",
     ]) {
@@ -1962,7 +2022,7 @@ describe("the page tool — the standing brief + op read (SWIT-104)", () => {
 
 describe("the page tool — op finding, the Findings ledger (SWIT-106)", () => {
   const f = server as unknown as {
-    formatPageRead: (page: Record<string, unknown>, answers: unknown) => string;
+    formatPageRead: (page: Record<string, unknown>, answers: unknown, retracted?: unknown) => string;
     FINDING_VERDICTS: string[];
     FINDING_CAP: number;
     FINDING_CLAIM_CAP: number;
@@ -2319,5 +2379,90 @@ describe("the view tool — project-level reports (SWIT-107)", () => {
       expect(pv.VIEW_TOOL.description).toContain(rule);
     }
     expect(server.PAGE_TOOL.description).toContain("view:<project>/<id> for a report the project owns");
+  });
+});
+
+describe("review of daaad36 / c178f2f / 4f016e1 — the server half", () => {
+  const srv = server as unknown as {
+    applyOp: (
+      page: Record<string, unknown>,
+      args: Record<string, unknown>,
+      now: number,
+      answeredIds?: Set<string>,
+      dismissedIds?: Set<string>
+    ) => { page: Record<string, unknown>; message: string };
+    QUESTION_KEEP_CAP: number;
+    OPTION_CAP: number;
+  };
+  const optionsOf = (page: Record<string, unknown>) => (page.questions as { options: string[]; default: string | null }[])[0];
+
+  it("#3 — a page HOLDS at most QUESTION_KEEP_CAP questions (the parser keeps exactly as many); a new ask past it is refused, nothing evicted", () => {
+    expect(srv.QUESTION_KEEP_CAP).toBe(QUESTION_KEEP_CAP);
+    let page = empty();
+    const answered = new Set<string>();
+    for (let i = 0; i < srv.QUESTION_KEEP_CAP; i++) {
+      page = srv.applyOp(page, { op: "ask", id: `q${i}`, text: `q ${i}` }, NOW, answered).page;
+      answered.add(`q${i}`); // answered at once, so the OPEN cap never bites
+    }
+    expect(() => srv.applyOp(page, { op: "ask", id: "one-more", text: "?" }, NOW, answered)).toThrow(
+      /already holds 200 questions, the most it keeps — its decisions stand/
+    );
+    // Every one the server wrote survives the app's parse — open or not.
+    expect(parsePageFile(JSON.stringify(page)).questions).toHaveLength(srv.QUESTION_KEEP_CAP);
+    // Re-asking an existing (open) id still works at the cap — it replaces, it does not add.
+    const reopened = srv.applyOp(page, { op: "ask", id: "q0", text: "again" }, NOW, new Set());
+    expect((reopened.page.questions as unknown[]).length).toBe(srv.QUESTION_KEEP_CAP);
+  });
+
+  it("#4 — refusing a finding: evidence row names op finding AND the drop_evidence that clears the old row", () => {
+    expect(() => srv.applyOp(empty(), { op: "evidence", address: "finding:f3", label: "x" }, NOW)).toThrow(
+      /record it with op finding \{claim, verdict, n\?, report\?\}.*then remove the old row with op drop_evidence \{addresses: \["finding:f3"\]\}/
+    );
+  });
+
+  it("#6 — an option is cut on GRAPHEME boundaries: a flag, a ZWJ family and a combining mark stay whole", () => {
+    const pad = "x".repeat(srv.OPTION_CAP - 3);
+    for (const tail of ["🇯🇵🇯🇵", "👨‍👩‍👧‍👦 family", "é́ accents"]) {
+      const opt = `${pad}${tail} and more words to force the cut`;
+      const cut = optionsOf(srv.applyOp(empty(), { op: "ask", text: "q", options: [opt, "b"] }, NOW).page).options[0];
+      expect(cut.endsWith("…")).toBe(true);
+      expect(cut.length).toBeLessThanOrEqual(srv.OPTION_CAP);
+      const body = cut.slice(0, -1);
+      // Whatever survives is a PREFIX of whole graphemes of the original.
+      const Segmenter = (Intl as unknown as { Segmenter: new (l: undefined, o: { granularity: "grapheme" }) => { segment: (t: string) => Iterable<{ segment: string }> } }).Segmenter;
+      const graphemes = Array.from(new Segmenter(undefined, { granularity: "grapheme" }).segment(opt), (g) => g.segment);
+      let joined = "";
+      let whole = false;
+      for (const g of graphemes) {
+        if (joined === body) {
+          whole = true;
+          break;
+        }
+        joined += g;
+      }
+      expect(whole || joined === body).toBe(true);
+      // No orphans: no lone surrogate, no dangling ZWJ, no regional indicator half (a combining mark rides with its base — the prefix check above).
+      expect(body).not.toMatch(/[\uD800-\uDBFF]$/);
+      expect(body.endsWith("\u200D")).toBe(false);
+      expect((body.match(/[\u{1F1E6}-\u{1F1FF}]/gu) ?? []).length % 2).toBe(0);
+    }
+  });
+
+  it("#6 — `default` is matched against the UNTRIMMED options first, so two long options sharing a head are not confused", () => {
+    const head = "Ship the gamma exporter with the prior-close levels ";
+    const a = `${head}as drill levels and drop the constant columns`;
+    const b = "Keep the constant columns and the series as they are now";
+    // A default that is NOT an option but trims to the same text as `a` —
+    // accepted before (the default was trimmed, then matched), refused now.
+    const c = `${head}as drill levels and keep the constant columns`;
+    expect(() => srv.applyOp(empty(), { op: "ask", text: "which?", options: [a, b], default: c }, NOW)).toThrow(
+      /default must be one of the options/
+    );
+    // The untrimmed option maps to its trimmed form…
+    const q = optionsOf(srv.applyOp(empty(), { op: "ask", text: "which?", options: [a, b], default: a }, NOW).page);
+    expect(q.options[0].endsWith("…")).toBe(true);
+    expect(q.default).toBe(q.options[0]);
+    // …and the trimmed form itself still names its option.
+    expect(optionsOf(srv.applyOp(empty(), { op: "ask", text: "which?", options: [a, b], default: q.options[0] }, NOW).page).default).toBe(q.options[0]);
   });
 });

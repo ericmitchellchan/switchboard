@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { Thread } from "../types";
 import {
+  noteTitleEditor,
+  isTitleEditorOpen,
   newThread,
   launchCommand,
   waitForShellReady,
@@ -1454,5 +1456,46 @@ describe("a thread names itself from its page theme (SWIT-105)", () => {
     // tell apart — stated here; App applies the rule at most once per thread
     // per app session, so it does not fight the user within one.
     __resetThreadStoreForTests();
+  });
+});
+
+describe("a thread names itself — the edges (review of c178f2f, #7)", () => {
+  beforeEach(() => __resetThreadStoreForTests());
+
+  it("(b) stands down while a title box is open on the thread (its Enter/blur would commit `New thread` back)", () => {
+    expect(autoThreadTitle("New thread", "Gamma exporter levels", { editorOpen: true })).toBeNull();
+    expect(autoThreadTitle("New thread", "Gamma exporter levels", { editorOpen: false })).toBe("Gamma exporter levels");
+  });
+
+  it("the open-editor registry: keyed by thread OR session id, counted, cleared on reset", () => {
+    expect(isTitleEditorOpen("t1", "s1")).toBe(false);
+    noteTitleEditor("t1", true);
+    noteTitleEditor("t1", true); // the rail and the history screen at once
+    expect(isTitleEditorOpen("t1", null)).toBe(true);
+    noteTitleEditor("t1", false);
+    expect(isTitleEditorOpen("t1")).toBe(true);
+    noteTitleEditor("t1", false);
+    expect(isTitleEditorOpen("t1")).toBe(false);
+    noteTitleEditor("s1", true); // the breadcrumb's box, keyed by the tab's session
+    expect(isTitleEditorOpen("t1", "s1")).toBe(true);
+    noteTitleEditor("", true); // no key, no entry
+    expect(isTitleEditorOpen("")).toBe(false);
+    __resetThreadStoreForTests();
+    expect(isTitleEditorOpen("s1")).toBe(false);
+  });
+
+  it("(a) the auto-name keeps a pending rename-on-create request; a user's rename answers it", () => {
+    const t = createThreadRecord({ title: "New thread", workingDir: "C:\\repos\\orbit" });
+    requestThreadRename(t.id);
+    renameThread(t.id, "Gamma exporter levels", { keepRenameRequest: true });
+    expect(getThreadById(t.id)?.title).toBe("Gamma exporter levels");
+    expect(getThreadsView().renameRequest).toBe(t.id); // the box still opens, holding the theme's title
+    renameThread(t.id, "my own name");
+    expect(getThreadsView().renameRequest).toBeNull();
+  });
+
+  it("a promoted `repo · date` thread is never auto-named (only `New thread` is)", () => {
+    const t = createThreadRecord({ title: "x", workingDir: "C:\\repos\\orbit" });
+    expect(autoThreadTitle(derivedThreadTitle(t), "Gamma exporter levels")).toBeNull();
   });
 });

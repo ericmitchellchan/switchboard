@@ -59,6 +59,15 @@ export const TURN_CAP = 30;
 export const TURN_LINE_CAP = 6;
 export const EVIDENCE_CAP = 60;
 export const QUESTION_CAP = 20;
+/** Review of c178f2f, #3: every question the page HOLDS is kept up to this
+ *  many — open, answered, settled, dismissed alike, file order (newest
+ *  first). It mirrors the server's QUESTION_KEEP_CAP, the most a page can
+ *  hold (a new ask past it is refused, nothing is evicted), so no question
+ *  the server wrote is dropped here. QUESTION_CAP (20) is the server's OPEN
+ *  cap and no longer cuts the parse: it used to keep the newest 20 of ANY
+ *  state, and an older open question vanished from the page, the rail and
+ *  Home while `page read` listed it. */
+export const QUESTION_KEEP_CAP = 200;
 /** Done items beyond this fold behind a count. */
 export const DONE_FOLD = 10;
 /** A turn's reviewFirst is an ADDRESS, not prose — the server refuses more
@@ -323,7 +332,7 @@ export function parsePageFile(raw: string): PageFile {
             ? { answer: resolvedAnswer, at: resolvedAt, by: q.resolvedBy === "user" ? "user" : "agent" }
             : null,
       });
-      if (questions.length >= QUESTION_CAP) break;
+      if (questions.length >= QUESTION_KEEP_CAP) break;
     }
   }
 
@@ -570,7 +579,9 @@ export function isAnswerUnsent(answer: PageAnswer | undefined): boolean {
 /** The open / unsent split of a page's questions — what App's 5s pass counts
  *  per thread and the rail marker + Home's Needs you read (SWIT-77 review
  *  fix: an unsent batch used to be invisible outside the page). `open` =
- *  `isQuestionOpen`; `unsent` = answered in answers.json and not yet sent
+ *  `isQuestionOpen` (a question dismissed in retracted.json — SWIT-105 —
+ *  is not open: three files feed this, page.json, answers.json and
+ *  retracted.json); `unsent` = answered in answers.json and not yet sent
  *  (`isAnswerUnsent`). Pure. */
 export function countQuestionStates(
   questions: readonly OpenQuestionFields[],
@@ -1005,6 +1016,12 @@ export function sendErrorNote(err: unknown): AnswerNote {
   };
 }
 
+/** Review of c178f2f, nit: Home's `not needed` SAVED — the card says so in
+ *  place of its form until the poll takes it off Home. */
+export function dismissSuccessNote(): AnswerNote {
+  return { kind: "success", text: "not needed · off the page" };
+}
+
 /** SWIT-105: a `not needed` did not save — the question stays on the page
  *  (it leaves only when the merged files say so), the reason beside Send. */
 export function dismissErrorNote(err: unknown): AnswerNote {
@@ -1143,7 +1160,7 @@ export type ThreadPassEntry = {
    *  dismissals) retracted.json, all three stamped. */
   questions: number;
   /** Decided-but-unsent answers at the read (answers.json, stamped) — the
-   *  same pass, the same two files (`countQuestionStates`). */
+   *  same pass, the same three files — page, answers, retracted (`countQuestionStates`). */
   unsent: number;
   /** The inbox's post times at the read (postTimes) — inbox.json is stamped,
    *  the seen stamp is not, so unread is re-derived from these every tick. */
@@ -1314,4 +1331,30 @@ export function __resetPageFocusForTests(): void {
   pendingFocus = new Map();
   focusNonce = 0;
   focusListeners.clear();
+}
+
+/** Where focus goes after a KEYBOARD `not needed` (review of c178f2f, #5):
+ *  the card after the dismissed one, else the one before it — whichever is
+ *  still on the page NOW — else null (the caller focuses Send): never
+ *  <body>. By question id, not by position, so it holds whether or not the
+ *  dismissed card has already left the list when the hand-off runs.
+ *  `idsAtClick` = the cards' ids when `not needed` was pressed, `idsNow` =
+ *  the ids rendered when focus moves. Pure. */
+export function neighbourAfterDismiss(
+  idsAtClick: readonly string[],
+  dismissedId: string,
+  idsNow: readonly string[]
+): string | null {
+  const at = idsAtClick.indexOf(dismissedId);
+  if (at === -1) return null;
+  const alive = (id: string | undefined) => (id !== undefined && id !== dismissedId && idsNow.includes(id) ? id : null);
+  for (let i = at + 1; i < idsAtClick.length; i++) {
+    const id = alive(idsAtClick[i]);
+    if (id !== null) return id;
+  }
+  for (let i = at - 1; i >= 0; i--) {
+    const id = alive(idsAtClick[i]);
+    if (id !== null) return id;
+  }
+  return null;
 }

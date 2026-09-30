@@ -56,6 +56,7 @@ import {
   defaultThreadTitle,
   explicitThreadTitle,
   autoThreadTitle,
+  isTitleEditorOpen,
   requestThreadRename,
   quickCreateWorkingDir,
   publishSessionStatuses,
@@ -1457,11 +1458,17 @@ export default function App() {
       if (autoTitledRef.current.has(threadId)) return;
       const before = getThreadById(threadId);
       if (!before) return;
-      const title = autoThreadTitle(before.title, theme);
+      // Review of c178f2f, #7: stand down while a title box is open on this
+      // thread or its tab (its Enter/blur would commit `New thread` back —
+      // the next page change tries again), and never clear a pending
+      // rename-on-create request (the box still opens, holding this title).
+      const title = autoThreadTitle(before.title, theme, {
+        editorOpen: isTitleEditorOpen(threadId, before.sessionId),
+      });
       if (title === null) return;
       autoTitledRef.current.add(threadId);
       log.info(`Thread id=${threadId} named from its page theme: ${title}`);
-      renameThread(threadId, title);
+      renameThread(threadId, title, { keepRenameRequest: true });
       void saveThreadsToDisk();
       const after = getThreadById(threadId);
       if (after?.sessionId) {
@@ -1486,7 +1493,8 @@ export default function App() {
         // SWIT-69: open-question counts ride the same pass — the rail row's
         // dim `· N` marker (the filled `?` chip is retired; words, not glyphs).
         // SWIT-77 review fix: decided-but-UNSENT answers are counted on the
-        // same read of the same two files, so an unsent batch shows from the
+        // same read of the same three files (page.json, answers.json and —
+        // SWIT-105 — retracted.json's dismissals), so an unsent batch shows from the
         // rail and from Home, not only on the page.
         const questions: Record<string, number> = {};
         const unsent: Record<string, number> = {};

@@ -89,3 +89,11 @@ export function recentFindings<T extends { id: string }>(
 export function olderQuestionsLabel(n: number): string {
   return n === 1 ? "older question" : "older questions";
 }
+
+/** Needs you's header count (review of c178f2f, nit): the rows listed; when
+ *  only OLDER questions exist the header read `Needs you 0` over a fold of
+ *  them — it now says what the fold holds (`2 older`). Pure. */
+export function needsYouMeta(listed: number, older: number): string {
+  if (listed > 0) return String(listed);
+  return older > 0 ? `${older} older` : "0";
+}
