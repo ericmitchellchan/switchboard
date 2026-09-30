@@ -11,6 +11,7 @@ import {
   registerSessionHooks,
   unregisterSessionHooks,
   reviveSession,
+  registerDisposeCleanup,
 } from "../lib/terminalRegistry";
 import {
   enqueueFit,
@@ -28,8 +29,19 @@ import { detectTasks, detectResolutions } from "../lib/taskDetector";
 import { noteDevServerOutput, registerSessionDir } from "../lib/devServer";
 import { log } from "../lib/logger";
 import { clearComposerState, useComposerVisible } from "../lib/composer";
+import { configureResumeHealIO, forgetResumeHeal, noteResumeHealOutput } from "../lib/resumeHealRunner";
+import { resizeSession } from "../lib/ipc";
 import { SearchBar } from "./SearchBar";
 import { Composer } from "./Composer";
+
+// The resume heal (SWIT-100) reads the live xterm and resizes the PTY through
+// these; injected so its clock stays testable without xterm. Dispose clears
+// its per-session state like every other registry-owned cleanup.
+configureResumeHealIO({
+  getTerminal: (sessionId) => getTerminal(sessionId)?.terminal,
+  resizePty: resizeSession,
+});
+registerDisposeCleanup(forgetResumeHeal);
 
 // Per-session streaming UTF-8 decoders (handles multi-byte chars split across chunks)
 const sessionDecoders = new Map<string, TextDecoder>();
@@ -61,6 +73,8 @@ export function cleanupSessionListeners(sessionId: string) {
   // so the registry's dispose cleanup never runs — a session left BUSY here
   // would freeze its new shell's grid until the fresh detector said otherwise.
   noteSessionStatus(sessionId, "idle");
+  // Same reason: the resume heal is about the claude that WAS here.
+  forgetResumeHeal(sessionId);
   // In-place restart reuses the session id: clear the exited latch so the
   // lifecycle state stays truthful for the new PTY. Harmless on the close
   // path — disposeTerminal follows unconditionally there.
@@ -98,6 +112,8 @@ function wireSession(sessionId: string) {
   // forgotten by a future caller that renders a terminal somewhere new.
   const onStatus = (id: string, status: AgentStatus) => {
     noteSessionStatus(id, status);
+    // The PTY ended: there is no claude frame left to heal (SWIT-100).
+    if (status === "exited") forgetResumeHeal(id);
     getCbs()?.onStatusChange(id, status);
   };
 
@@ -128,6 +144,9 @@ function wireSession(sessionId: string) {
       // that land mid-stream defer to output settle (fitQueue). Runs for
       // every chunk, mounted or hidden — registry-dispatched.
       noteSessionOutput(sessionId);
+      // Resume heal (SWIT-100): the settle clock for a `claude --resume`
+      // session. A Map miss for every other session.
+      noteResumeHealOutput(sessionId);
       // Task detection over the raw UTF-8 text (streaming decoder handles
       // multi-byte chars split across chunks). The term.write + dirty-marking
       // are registry-owned and already happened.

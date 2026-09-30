@@ -17,8 +17,8 @@
 // decided card folds to one line (`N · question → answer · not sent yet ·
 // change` — the amber word is SWIT-78's, Ky's CC-705). Under
 // the list: a preview box printing the exact wire text, the footer count,
-// and ONE `Send decisions ▸` that composes `decisionsMessage` through
-// composeWrite → submitToThread (the 0.10.0 live-thread seam, gated by
+// and ONE `Send decisions ▸` that sends `decisionsMessage` through
+// submitToThread (the 0.10.0 live-thread seam — the host composes it, gated by
 // batchSendTarget — `thread not live` when it is not) and, on success,
 // stamps the answers sent (markThreadAnswersSent — and if Rust stamped FEWER
 // than were sent, the line says `sent, but N of M not marked sent` and
@@ -124,7 +124,6 @@ import type { AnswerNote, InboxPost, PageAnswer, PageItem, PageQuestion, Rendere
 import { parseSurfaceAddress } from "../../lib/surfaceParams";
 import { answerQuestion, openArtifact, openInPanel, getActiveTabSession, submitToThread } from "../../lib/panelStore";
 import type { OpenableArtifact } from "../../lib/panelStore";
-import { composeWrite } from "../../lib/composer";
 import { batchSendTarget, BATCH_NOT_LIVE } from "../../lib/viewNotes";
 import { derivedThreadTitle, useThreadsView } from "../../lib/threadStore";
 import {
@@ -899,12 +898,14 @@ function DecisionsBlock({
       if (ids.length === 0) return;
       // The gate again at send time (the button can lag a store tick).
       if (target.sessionId === null) throw new Error(target.reason);
-      // composeWrite: multi-line → ONE bracketed paste + ONE CR, so the
-      // batch arrives as one message. The batch's `convention` answers ride
+      // The host composes it (composer's wire format): multi-line → ONE
+      // bracketed paste, then ONE Enter as its own write, so the batch
+      // arrives as one message. The batch's `convention` answers ride
       // along: App appends them to conventions.md once the write succeeded
       // (the decision is final when it goes — review fix F6).
-      const bytes = composeWrite(decisionsMessage(visible, saved));
-      await submitToThread(threadId, bytes, { conventions: conventionEntries(visible, saved) });
+      await submitToThread(threadId, decisionsMessage(visible, saved), {
+        conventions: conventionEntries(visible, saved),
+      });
       let marked: number;
       try {
         marked = await markThreadAnswersSent(threadId, ids);

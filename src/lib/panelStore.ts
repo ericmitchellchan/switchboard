@@ -2562,20 +2562,21 @@ export type PanelActions = {
   /** TYPE text into the focused terminal. The implementation MUST NOT append
    *  a trailing \r — the Enter that sends it is the user's keystroke. */
   sendToThread: (text: string) => void;
-  /** SUBMIT a composed message (SWIT-75 — the deck's `send N notes`): the
-   *  bytes come from `composer.composeWrite`, so the CR is INSIDE the wire
-   *  format (one bracketed paste, one submit — the composer's rule) and
-   *  the message is sent the way Eric asked for the batch to be sent.
+  /** SUBMIT a message (SWIT-75 — the deck's `send N notes`): the host puts
+   *  the MESSAGE TEXT through the composer's wire format
+   *  (`composer.composeSend` → `deliverComposed`: one bracketed paste, a
+   *  settle wait, then the ONE Enter as its own write — SWIT-99), so the
+   *  message is sent the way Eric asked for the batch to be sent.
    *  The TARGET is `threadId`'s bound session — the deck's own thread,
    *  never the active tab (`viewNotes.batchSendTarget`: launched + live,
    *  else a rejection naming why and nothing is written — a batch typed
-   *  into a dead claude's shell runs as commands). Resolves when the PTY
-   *  write succeeded, rejects otherwise — the caller marks notes sent only
+   *  into a dead claude's shell runs as commands). Resolves when both PTY
+   *  writes succeeded, rejects otherwise — the caller marks notes sent only
    *  on success. Optional so a host that registers no submit path (tests)
    *  keeps `sendToThread` alone. `opts.conventions` (SWIT-77 review fix):
    *  the batch's `convention` answers, appended to conventions.md by App
    *  AFTER the write succeeded — the decision is final when it goes. */
-  submitToThread?: (threadId: string, bytes: string, opts?: SubmitOptions) => Promise<void>;
+  submitToThread?: (threadId: string, message: string, opts?: SubmitOptions) => Promise<void>;
   /** POP OUT (increment F, Decision 2): hand this artifact to the floating PiP
    *  window. App owns the window lifecycle; the store owns only the record of
    *  WHICH artifact is out there, so the panel can say so instead of drawing a
@@ -2626,15 +2627,15 @@ export function sendToThread(text: string): void {
   panelActions?.sendToThread(text);
 }
 
-/** SUBMIT composed bytes into `threadId`'s live session (SWIT-75). Rejects
+/** SUBMIT a message into `threadId`'s live session (SWIT-75). Rejects
  *  when nothing is registered, the host has no submit path, or the thread
  *  is not live (App applies `viewNotes.batchSendTarget`) — the affordance is
  *  gated on `useSendToThreadAvailable` + that same rule, and a rejection
  *  here is the "not sent" outcome the caller shows. */
-export function submitToThread(threadId: string, bytes: string, opts?: SubmitOptions): Promise<void> {
+export function submitToThread(threadId: string, message: string, opts?: SubmitOptions): Promise<void> {
   const submit = panelActions?.submitToThread;
   if (!submit) return Promise.reject(new Error("no thread to send to"));
-  return submit(threadId, bytes, opts);
+  return submit(threadId, message, opts);
 }
 
 /** Is there anything to type into? Requires both the App-side handler and an
