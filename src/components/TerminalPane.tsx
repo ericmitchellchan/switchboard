@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback, memo } from "react";
 import type { Terminal } from "@xterm/xterm";
 import type { Session, AgentStatus } from "../types";
-import { getTerminal, showTerminal, hideTerminal } from "../lib/terminal";
+import { getTerminal, showTerminal, hideTerminal, landTerminalView } from "../lib/terminal";
 import {
   newOwnerToken,
   acquireTerminal,
@@ -12,36 +12,53 @@ import {
   unregisterSessionHooks,
   reviveSession,
   registerDisposeCleanup,
+  ensureViewportReach,
+  followTerminalHost,
+  noteTerminalHostScroll,
 } from "../lib/terminalRegistry";
-import {
-  enqueueFit,
-  cancelPendingFit,
-  noteSessionOutput,
-  noteSessionStatus,
-} from "../lib/fitQueue";
+import { forgetRepaint, noteRepaintAgent, noteRepaintWheel, requestRepaint } from "../lib/repaintRunner";
+import { routeWheelToHost } from "../lib/hostPark";
 import {
   initDetector,
   processBufferLines,
   markExited,
   clearWaiting,
+  syncDetectorPosition,
 } from "../lib/statusDetector";
 import { detectTasks, detectResolutions } from "../lib/taskDetector";
 import { noteDevServerOutput, registerSessionDir } from "../lib/devServer";
 import { log } from "../lib/logger";
 import { clearComposerState, useComposerVisible } from "../lib/composer";
-import { configureResumeHealIO, forgetResumeHeal, noteResumeHealOutput } from "../lib/resumeHealRunner";
+import {
+  configureResumeHealIO,
+  forgetPtyBounce,
+  forgetResumeHeal,
+  noteResumeHealOutput,
+} from "../lib/resumeHealRunner";
 import { resizeSession } from "../lib/ipc";
 import { SearchBar } from "./SearchBar";
 import { Composer } from "./Composer";
 
 // The resume heal (SWIT-100) reads the live xterm and resizes the PTY through
-// these; injected so its clock stays testable without xterm. Dispose clears
-// its per-session state like every other registry-owned cleanup.
+// these; injected so its clock stays testable without xterm. The same IO
+// carries the rows-only bounce the narrow-frame nudge shares (SWIT-103) —
+// with the grid pinned, `resizeSession` here is the ONLY way a PTY is ever
+// resized. Dispose clears the per-session state like every other
+// registry-owned cleanup.
 configureResumeHealIO({
   getTerminal: (sessionId) => getTerminal(sessionId)?.terminal,
   resizePty: resizeSession,
 });
 registerDisposeCleanup(forgetResumeHeal);
+registerDisposeCleanup(forgetPtyBounce);
+
+/** Debounce for the one thing a pane resize still asks for: a scroll-range
+ *  re-sync (or a clean rewrite that was waiting for the terminal to be on
+ *  screen). Coalesces the burst a divider drag or a settling layout fires. */
+const REPAINT_DEBOUNCE_MS = 150;
+
+/** A wheel tick this long after the previous one starts a new gesture. */
+const WHEEL_GESTURE_GAP_MS = 1000;
 
 // Per-session streaming UTF-8 decoders (handles multi-byte chars split across chunks)
 const sessionDecoders = new Map<string, TextDecoder>();
@@ -70,11 +87,12 @@ const sessionCallbacks = new Map<
 export function cleanupSessionListeners(sessionId: string) {
   unregisterSessionHooks(sessionId);
   // An in-place restart reuses the session id without disposing the terminal,
-  // so the registry's dispose cleanup never runs — a session left BUSY here
-  // would freeze its new shell's grid until the fresh detector said otherwise.
-  noteSessionStatus(sessionId, "idle");
-  // Same reason: the resume heal is about the claude that WAS here.
+  // so the registry's dispose cleanup never runs. The turn-end settle's state
+  // (dirty bytes, a deferred rewrite) and the resume heal are both about the
+  // program that WAS here; the fresh shell starts clean.
+  forgetRepaint(sessionId);
   forgetResumeHeal(sessionId);
+  forgetPtyBounce(sessionId);
   // In-place restart reuses the session id: clear the exited latch so the
   // lifecycle state stays truthful for the new PTY. Harmless on the close
   // path — disposeTerminal follows unconditionally there.
@@ -104,16 +122,17 @@ function wireSession(sessionId: string) {
   // Callback accessors that read from the module-level map
   const getCbs = () => sessionCallbacks.get(sessionId);
 
-  // THE BUSY SIGNAL for the resize policy. Wrapping onStatusChange here rather
-  // than calling noteSessionStatus at App's handler is deliberate: this is the
-  // single funnel every statusDetector emit path goes through (buffer scan, raw
-  // output, markExited, clearWaiting), it runs for HIDDEN panes too (the
-  // registry dispatches these hooks regardless of mount), and it cannot be
-  // forgotten by a future caller that renders a terminal somewhere new.
+  // The single funnel every statusDetector emit path goes through (buffer
+  // scan, raw output, markExited, clearWaiting); it runs for HIDDEN panes too
+  // (the registry dispatches these hooks regardless of mount).
   const onStatus = (id: string, status: AgentStatus) => {
-    noteSessionStatus(id, status);
     // The PTY ended: there is no claude frame left to heal (SWIT-100).
     if (status === "exited") forgetResumeHeal(id);
+    // A session leaves "idle" only once the detector has seen Claude
+    // Code-specific output — a plain shell never does. That is what makes it
+    // an AGENT session for the turn-end rewrite and the narrow-frame nudge
+    // (SWIT-103): a shell or a log tail gets neither.
+    else if (status !== "idle") noteRepaintAgent(id);
     getCbs()?.onStatusChange(id, status);
   };
 
@@ -140,12 +159,10 @@ function wireSession(sessionId: string) {
       processBufferLines(sessionId, lines, cursorAbsY, onStatus);
     },
     onOutput: (bytes) => {
-      // Streaming signal for the resize policy: stamp last-output-at so fits
-      // that land mid-stream defer to output settle (fitQueue). Runs for
-      // every chunk, mounted or hidden — registry-dispatched.
-      noteSessionOutput(sessionId);
       // Resume heal (SWIT-100): the settle clock for a `claude --resume`
-      // session. A Map miss for every other session.
+      // session. A Map miss for every other session. (The turn-end settle —
+      // repaintRunner — is fed by the registry's write site directly, right
+      // after this hook returns.)
       noteResumeHealOutput(sessionId);
       // Task detection over the raw UTF-8 text (streaming decoder handles
       // multi-byte chars split across chunks). The term.write + dirty-marking
@@ -176,6 +193,14 @@ function wireSession(sessionId: string) {
         markExited(sessionId, onStatus);
         cbs.onExited(sessionId);
       }
+    },
+    onBufferRewritten: (terminal: Terminal) => {
+      // The turn-end clean rewrite re-laid the buffer (SWIT-103). Nothing
+      // happened as far as status goes — the registry withheld onWriteParsed
+      // for the parse — but the row the detector anchors its delta on may
+      // have moved.
+      const buf = terminal.buffer.active;
+      syncDetectorPosition(sessionId, buf.baseY + buf.cursorY);
     },
   });
 }
@@ -226,9 +251,27 @@ export const TerminalPane = memo(function TerminalPane({
   // re-inits detection on its next render.
   wireSession(session.id);
 
+  // The one thing a pane resize or a re-show still asks of the terminal: a
+  // scroll-range re-sync, or the clean rewrite that was waiting for it to be
+  // on screen (repaintRunner). Debounced so a divider drag or a settling
+  // layout is one request. NEVER a fit: the grid is pinned (terminalGrid.ts).
+  const repaintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleRepaint = useCallback(
+    (cause: string) => {
+      if (repaintTimerRef.current) clearTimeout(repaintTimerRef.current);
+      repaintTimerRef.current = setTimeout(() => {
+        repaintTimerRef.current = null;
+        if (stolenRef.current) return;
+        requestRepaint(session.id, cause);
+      }, REPAINT_DEBOUNCE_MS);
+    },
+    [session.id]
+  );
+
   // Mount: acquire the session's live terminal from the keep-alive registry
   // (adopting its DOM subtree if it already exists — buffer already rendered
-  // and current, nothing to replay) or create it there on first mount.
+  // and current, nothing to replay) or create it there, at the pinned grid, on
+  // first mount.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -238,47 +281,93 @@ export const TerminalPane = memo(function TerminalPane({
     stolenRef.current = false;
     setStolen(false);
 
-    const { instance, adopted } = acquireTerminal(sessionId, container, owner, {
-      cols: session.cols,
-      rows: session.rows,
+    const { adopted } = acquireTerminal(sessionId, container, owner, {
       restoredFromId: session.restoredFromId,
     });
 
     bindMountHandlers(sessionId, owner, {
       onStolen: () => {
         // Another mount adopted the terminal — our pane just emptied. Go
-        // inert: no more fits from this mount (they'd race the winner's), and
-        // show the hand-off notice.
+        // inert (nothing of ours may touch the winner's view) and show the
+        // hand-off notice.
         stolenRef.current = true;
-        cancelPendingFit(sessionId);
         setStolen(true);
       },
     });
 
     log.info(`Mount terminal id=${sessionId} owner=${owner} adopted=${adopted}`);
 
-    // Hide until first fit completes to prevent flash at wrong size/position
+    // Hidden for the two frames the browser needs to lay the subtree out, so
+    // the first thing shown is the landed view (WebGL's first frame is blank,
+    // and a pane shorter than the grid opens at the top before it is parked).
     container.style.opacity = "0";
-
-    // For an adopted terminal, capture the pre-fit scroll position so the
-    // fit pipeline can put the reader back (bottom-pinned stays pinned).
-    const buf = instance.terminal.buffer.active;
-    const savedScroll = adopted ? { viewportY: buf.viewportY, baseY: buf.baseY } : null;
-
-    // Double-RAF so the browser fully computes layout before measuring.
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
+    let raf2 = 0;
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        container.style.opacity = "1";
         if (stolenRef.current) return;
-        enqueueFit(sessionId, adopted ? "show" : "attach", {
-          isFirstAttach: !adopted,
-          savedScroll,
-          onReveal: () => { container.style.opacity = "1"; },
-        }, 0);
+        // An ADOPT keeps the reader's place in xterm's history (the instance
+        // survived, so did its viewport); a fresh terminal starts at the
+        // bottom. Either way: repaint, re-sync the scroll range, park the
+        // pane on the content. No fit, no resize.
+        landTerminalView(sessionId, adopted ? "adopt" : "attach", { toBottom: !adopted });
       });
     });
 
+    // ── The wheel, over a fixed grid ────────────────────────────────────────
+    // (1) Wheel activity = the reader is reading. It gates the destructive
+    // rewrite (never inside a scroll gesture) and, once per GESTURE, checks
+    // that xterm's scroll range actually reaches the bottom row before the
+    // tick lands on it. Capture-phase and passive: xterm's own wheel handling
+    // is untouched.
+    let lastWheelAt = 0;
+    const onWheel = (ev: WheelEvent) => {
+      const now = Date.now();
+      const gestureStart = now - lastWheelAt > WHEEL_GESTURE_GAP_MS;
+      lastWheelAt = now;
+      noteRepaintWheel(sessionId);
+      if (gestureStart) ensureViewportReach(sessionId, ev.deltaY < 0 ? "wheel-up" : "wheel-down");
+    };
+    container.addEventListener("wheel", onWheel, { passive: true, capture: true });
+    // (2) ONE scroll across two scrollers. A pane shorter than the 40-row
+    // grid scrolls the host over it, and xterm eats every wheel tick for its
+    // own history — so without routing the wheel never reached the grid's
+    // bottom rows. `routeWheelToHost` is the rule (Ky CC-689). Capture and
+    // NON-passive, so a tick the host takes never also scrolls xterm.
+    const routeWheel = (ev: WheelEvent) => {
+      const inst = getTerminal(sessionId);
+      if (!inst) return;
+      const buf = inst.terminal.buffer.active;
+      const next = routeWheelToHost({
+        deltaY: ev.deltaY,
+        slack: container.scrollHeight - container.clientHeight,
+        scrollTop: container.scrollTop,
+        xtermAtBottom: buf.viewportY >= buf.baseY,
+      });
+      if (next === null) return;
+      container.scrollTop = next;
+      // Told NOW, not at the scroll event: a follow pass already queued for
+      // this frame must see that the reader just moved the pane.
+      noteTerminalHostScroll(sessionId);
+      ev.preventDefault();
+      ev.stopPropagation();
+    };
+    container.addEventListener("wheel", routeWheel, { passive: false, capture: true });
+    // (3) Whether the pane still holds the content's bottom — the registry
+    // only follows new output while it does.
+    const onHostScroll = () => noteTerminalHostScroll(sessionId);
+    container.addEventListener("scroll", onHostScroll, { passive: true });
+
     return () => {
-      cancelPendingFit(sessionId);
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+      if (repaintTimerRef.current) {
+        clearTimeout(repaintTimerRef.current);
+        repaintTimerRef.current = null;
+      }
+      container.removeEventListener("wheel", onWheel, { capture: true });
+      container.removeEventListener("wheel", routeWheel, { capture: true });
+      container.removeEventListener("scroll", onHostScroll);
       unbindMountHandlers(sessionId, owner);
       // Keep-alive: the instance moves to the hidden root and keeps consuming
       // PTY output — reattach is adoption, never replay. Real teardown happens
@@ -291,8 +380,10 @@ export const TerminalPane = memo(function TerminalPane({
 
   // Visibility effect: show/hide terminal when the visible prop changes
   // (single-pane mode keeps every tab mounted and toggles CSS display).
-  // When becoming visible, re-enable WebGL and fit to (potentially new)
-  // container size. When becoming hidden, disable WebGL to free GPU context.
+  // Becoming visible: re-enable WebGL and LAND the view — repaint, re-sync
+  // the scroll range (everything written while hidden was measured against a
+  // zero-height viewport), go to the bottom, park the pane. Becoming hidden:
+  // drop WebGL to free the GPU context. The grid is never touched.
   useEffect(() => {
     const sessionId = session.id;
     if (stolenRef.current) return;
@@ -300,13 +391,11 @@ export const TerminalPane = memo(function TerminalPane({
       const wasHidden = showTerminal(sessionId);
       if (wasHidden) {
         log.debug(`Terminal becoming visible id=${sessionId}`);
-        // Hide during fit pipeline to prevent scroll jump flash
-        const container = containerRef.current;
-        if (container) container.style.opacity = "0";
-        enqueueFit(sessionId, "show", {
-          shouldFocus: isFocused,
-          onReveal: () => { if (container) container.style.opacity = "1"; },
-        }, 0);
+        landTerminalView(sessionId, "show", { toBottom: true, focus: isFocused });
+        // A clean rewrite that was deferred because the terminal was hidden
+        // ("not-laid-out") runs now that it is on screen — a beat later, like
+        // a pane resize, so the tab is drawn before the parse hides it.
+        scheduleRepaint("show");
       } else if (isFocused) {
         // Already visible, just needs focus (e.g. split pane focus change)
         const instance = getTerminal(sessionId);
@@ -315,76 +404,42 @@ export const TerminalPane = memo(function TerminalPane({
     } else {
       hideTerminal(sessionId);
     }
-  }, [visible, session.id, isFocused]);
+  }, [visible, session.id, isFocused, scheduleRepaint]);
 
-  // Handle window/container resize via unified fit pipeline (150ms debounce),
-  // plus a ~400ms TRAILING settle pass: both timers re-arm on every resize
-  // event, so after a divider drag ends the debounced fit lands first and the
-  // settle pass follows with a full viewport refresh — the PTY app (claude)
-  // only repaints its live frame on SIGWINCH, so rows above it would keep the
-  // drag's stale wrap without that refresh.
-  // Skip resize when hidden — the "show" fit handles re-measuring when visible.
+  // The pane changed size (window resize, divider drag, the panel opening,
+  // the composer appearing). The terminal does NOT: the grid is pinned, so
+  // there is nothing to fit and the PTY hears nothing. Two things follow a
+  // size change, neither of them a resize: the pane keeps the content's bottom
+  // in view if it was holding it, and xterm's scroll range is re-synced.
+  // Skipped while hidden — the show path lands the view.
   useEffect(() => {
     if (!visible) return;
-
-    let mounted = true;
-    let settleTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const handleResize = () => {
-      if (!mounted || stolenRef.current) return;
-      const inst = getTerminal(session.id);
-      if (!inst?.terminal.element?.parentElement) return;
-      const buf = inst.terminal.buffer.active;
-      enqueueFit(session.id, "resize", {
-        savedScroll: { viewportY: buf.viewportY, baseY: buf.baseY },
-      }, 150);
-      if (settleTimer) clearTimeout(settleTimer);
-      settleTimer = setTimeout(() => {
-        settleTimer = null;
-        if (!mounted || stolenRef.current) return;
-        const settleInst = getTerminal(session.id);
-        if (!settleInst?.terminal.element?.parentElement) return;
-        const settleBuf = settleInst.terminal.buffer.active;
-        enqueueFit(session.id, "resize", {
-          savedScroll: { viewportY: settleBuf.viewportY, baseY: settleBuf.baseY },
-          fullRefresh: true,
-        }, 0);
-      }, 400);
-    };
-
-    window.addEventListener("resize", handleResize);
-
     const container = containerRef.current;
-    let ro: ResizeObserver | null = null;
-    if (container) {
-      // Track last known size to avoid spurious resize events.
-      // xterm.js internal layout changes can trigger ResizeObserver even when
-      // the container dimensions haven't changed, causing unnecessary fits
-      // that reset the scroll position and make the terminal content jump.
-      let lastW = container.clientWidth;
-      let lastH = container.clientHeight;
-      ro = new ResizeObserver(() => {
-        const w = container.clientWidth;
-        const h = container.clientHeight;
-        if (w === lastW && h === lastH) return; // no actual size change
-        // Logged so a recurrence of text-render corruption can be correlated
-        // with container resizes (the trigger for the fit → PTY resize path).
-        log.debug(`ResizeObserver size change id=${session.id} ${lastW}x${lastH} -> ${w}x${h}`);
-        lastW = w;
-        lastH = h;
-        handleResize();
-      });
-      ro.observe(container);
-    }
+    if (!container) return;
+
+    // Track the last known size: xterm's own internal layout can fire the
+    // observer with the container's dimensions unchanged.
+    let lastW = container.clientWidth;
+    let lastH = container.clientHeight;
+    const ro = new ResizeObserver(() => {
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      if (w === lastW && h === lastH) return; // no actual size change
+      // Logged so a rendering report can be correlated with pane resizes —
+      // which, since SWIT-103, are followed by no terminal or PTY resize.
+      log.debug(`Pane size change id=${session.id} ${lastW}x${lastH} -> ${w}x${h}`);
+      lastW = w;
+      lastH = h;
+      if (stolenRef.current) return;
+      followTerminalHost(session.id, true);
+      scheduleRepaint("ro");
+    });
+    ro.observe(container);
 
     return () => {
-      mounted = false;
-      if (settleTimer) clearTimeout(settleTimer);
-      cancelPendingFit(session.id);
-      window.removeEventListener("resize", handleResize);
-      if (ro) ro.disconnect();
+      ro.disconnect();
     };
-  }, [session.id, visible]);
+  }, [session.id, visible, scheduleRepaint]);
 
   // Close search refocuses terminal
   const handleCloseSearch = useCallback(() => {
@@ -420,16 +475,16 @@ export const TerminalPane = memo(function TerminalPane({
       )}
       <div
         ref={containerRef}
-        // `terminal-host` carries the HORIZONTAL scrollbar rule (global.css):
-        // thin, one step brighter, drawn only while the grid is wider than the
-        // pane — the affordance that reaches what grow-only leaves past the
-        // right edge (resizePolicy.ts header, "horizontal scroll instead").
+        // `terminal-host` carries the scrollbar rule (global.css): thin, one
+        // step brighter, drawn only on an axis where the pane is smaller than
+        // the pinned grid — the affordance that reaches the columns past the
+        // right edge and the rows below the fold.
         className="terminal-host"
         // Click-to-focus for the WHOLE pane, not just the xterm element.
         // xterm installs its own focus handler on its element — but this
-        // container is wider/taller than that element whenever `overflowX`
-        // kicks in or the rows don't fill the height, so clicking the empty
-        // gutter hit this div and focus stayed wherever it already was (the
+        // container is larger than that element whenever the pane is bigger
+        // than the pinned grid (slack to the right or below), so clicking the
+        // slack hit this div and focus stayed wherever it already was (the
         // composer). Typing and Ctrl+V then both went to the composer even
         // though the terminal is plainly what was clicked (owner 2026-08-02).
         // mousedown, not click: focus must land BEFORE the paste/keystroke.
@@ -449,18 +504,21 @@ export const TerminalPane = memo(function TerminalPane({
           width: "100%",
           // Flex child, not height:100% — the composer is a SIBLING below, and
           // a percentage height would ignore it and overflow the pane. Shrink
-          // and grow both land on the ResizeObserver above, which is the whole
-          // point: showing the composer is a height change like any other.
+          // and grow both land on the ResizeObserver above; showing the
+          // composer is a height change like any other, and like any other it
+          // moves the pane over the grid and resizes nothing.
           flex: 1,
           minHeight: 0,
           backgroundColor: "var(--bg-primary)",
-          // Grow-only width (see resizePolicy.ts): when the pane is narrower
-          // than the terminal's columns, scroll horizontally rather than
-          // re-wrap/break already-rendered content. Vertical stays clipped —
-          // xterm scrolls itself. `auto`, not `scroll`: the bar exists only
-          // while there is overflow, so a fitting grid pays no height for it.
-          overflowX: "auto",
-          overflowY: "hidden",
+          // THE GRID IS A FIXED TEXTURE (terminalGrid.ts, SWIT-103): 100×40
+          // whatever the pane measures. A pane smaller than the grid scrolls
+          // over it on BOTH axes — horizontally for width, vertically to
+          // reach the bottom rows when the pane is shorter than 40 rows
+          // (xterm's own wheel still scrolls history inside the terminal;
+          // `routeWheel` above joins the two). A bigger pane leaves slack,
+          // painted in the terminal's own background. `auto`, not `scroll`:
+          // a bar exists only on an axis with overflow.
+          overflow: "auto",
           transition: "opacity 0.05s",
           contain: "layout paint",
         }}

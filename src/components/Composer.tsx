@@ -35,14 +35,14 @@
 //
 // ATTACHMENTS. Chips sit in a row ABOVE the textarea that exists only while
 // there is at least one chip — never a permanent empty bar. Its appearance is
-// a height change like the box growing: the pane's ResizeObserver → fitQueue
-// → grow-only policy handle it, and the busy gate defers the refit while the
-// agent is RUNNING. Nothing here resizes anything.
+// a height change like the box growing: the pane gets shorter over the pinned
+// terminal grid (SWIT-103) and keeps the content's bottom in view. Nothing
+// here — or anywhere — resizes the terminal for it.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { writeToSession } from "../lib/ipc";
-import { getTerminal } from "../lib/terminal";
+import { getTerminal, landTerminalAtPrompt } from "../lib/terminal";
 import { findThreadBySessionId, markChatStarted, getThreadActions } from "../lib/threadStore";
 import { saveThreadsToDisk } from "../lib/workspace";
 import { log } from "../lib/logger";
@@ -210,6 +210,11 @@ export function Composer({ sessionId }: { sessionId: string }) {
             setComposerDraft(sessionId, "");
           }
           for (const p of paths) removeComposerAttachment(sessionId, p);
+          // A composer send bypasses xterm's scroll-on-input, so take the
+          // reader to the prompt ourselves — xterm's history and, on a pane
+          // shorter than the pinned grid, the pane too (SWIT-103) — so the
+          // echoed message is in view.
+          landTerminalAtPrompt(sessionId);
           // Focus comes back HERE, not after the settle: seconds later the
           // user may be in another field, and pulling focus out of it would
           // commit whatever that field saves on blur.

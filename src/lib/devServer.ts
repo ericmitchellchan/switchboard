@@ -49,7 +49,7 @@
 // the banner already states outright.
 //
 // WIRING: `noteDevServerOutput` hangs off the SAME `onOutput` hook
-// `noteSessionOutput` and `detectTasks` use (TerminalPane.wireSession) — the
+// `noteResumeHealOutput` and `detectTasks` use (TerminalPane.wireSession) — the
 // keep-alive registry dispatches it for every chunk of every session, mounted
 // or not. There is deliberately no second listener chain.
 

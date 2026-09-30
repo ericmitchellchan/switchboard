@@ -6,6 +6,7 @@ import {
   processBufferLines,
   clearWaiting,
   markExited,
+  syncDetectorPosition,
   _testOnly,
 } from "./statusDetector";
 const SID = "test-session";
@@ -800,6 +801,31 @@ describe("position-based delta detection", () => {
     // Terminal cleared — cursorY dropped below previous
     processBufferLines(SID, ["(y/n)"], 0, cb);
     expect(cb).toHaveBeenCalledWith(SID, "waiting");
+  });
+
+  it("a buffer rewrite re-anchors the position: the next chunk is a delta, not a cleared terminal", () => {
+    const cb = vi.fn();
+    activateAgent(cb);
+    processBufferLines(SID, ["Do you want to proceed? (y/n)", "answered", "● working"], 50, cb);
+    vi.advanceTimersByTime(DWELL_RUNNING);
+    clearWaiting(SID, cb);
+    cb.mockClear();
+
+    // The clean rewrite re-laid the buffer 8 rows shorter above the cursor.
+    syncDetectorPosition(SID, 42);
+
+    // One new line. Without the re-anchor 43 < 50 would read as a reset and
+    // re-scan the whole tail — the stale (y/n) included — as new output.
+    vi.advanceTimersByTime(5000);
+    processBufferLines(SID, ["Do you want to proceed? (y/n)", "answered", "● working", "● more"], 43, cb);
+    expect(cb).not.toHaveBeenCalledWith(SID, "waiting");
+  });
+
+  it("re-anchoring an untouched detector is a no-op (first read still processes everything)", () => {
+    const cb = vi.fn();
+    syncDetectorPosition(SID, 12);
+    processBufferLines(SID, ["(1s, 100 tokens)"], 12, cb);
+    expect(cb).toHaveBeenCalledWith(SID, "running");
   });
 
   it("cursor blink on running terminal resets idle timer correctly", () => {

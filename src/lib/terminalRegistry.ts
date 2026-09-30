@@ -23,18 +23,25 @@
 //
 // Handler wiring: because the Terminal outlives any mount, the term-level
 // subscriptions (onData → PTY write, onResize → PTY resize, onWriteParsed,
-// onBufferChange, the clipboard key handler) and the per-session Tauri
-// output/exited listeners are registry-owned and created ONCE per instance.
-// PTY forwarding is unconditional; React-side extras (status detection, task
-// detection, exit callbacks) dispatch through per-SESSION hooks that
-// TerminalPane registers — session-scoped rather than mount-scoped on purpose:
-// Switchboard shows status dots for background tabs whose panes may be
-// unmounted (split mode), so detection must keep running while hidden.
+// onScroll, onBufferChange, the clipboard key handler) and the per-session
+// Tauri output/exited listeners are registry-owned and created ONCE per
+// instance. PTY forwarding is unconditional; React-side extras (status
+// detection, task detection, exit callbacks) dispatch through per-SESSION
+// hooks that TerminalPane registers — session-scoped rather than mount-scoped
+// on purpose: Switchboard shows status dots for background tabs whose panes
+// may be unmounted (split mode), so detection must keep running while hidden.
 // Per-MOUNT handlers (onStolen) are owner-token guarded: last mount wins, the
-// loser is severed so its late cleanup/fits are no-ops.
+// loser is severed so its late cleanup is a no-op.
+//
+// THE GRID IS PINNED (SWIT-103, terminalGrid.ts): every terminal is created
+// at TERMINAL_COLS × TERMINAL_ROWS and nothing here ever fits it to a pane.
+// What a layout change needs instead lives in this file too, because it all
+// reaches into the entry's DOM: the scroll-range re-sync (viewportReach.ts —
+// Ky's replacement for our old cols-1 resize bounce), where the pane sits
+// over the fixed grid (hostPark.ts), and the IO the turn-end settle runs
+// through (repaintRunner.ts).
 
 import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
@@ -48,7 +55,30 @@ import {
   onSessionExited,
 } from "./ipc";
 import { log } from "./logger";
+import {
+  followScrollTop,
+  isFollowing,
+  isTypedInput,
+  parkTarget,
+  type HostGeometry,
+} from "./hostPark";
+import {
+  configureRepaintIO,
+  forgetRepaint,
+  isRepaintRewriting,
+  noteRepaintOutput,
+  noteRepaintScroll,
+  type RepaintTerminal,
+} from "./repaintRunner";
+import { bouncePtyRows, lastPtyBounceAt } from "./resumeHealRunner";
 import { readRestoreGeometry, restoreSettleSequence } from "./scrollbackRestore";
+import { TERMINAL_COLS, TERMINAL_ROWS } from "./terminalGrid";
+import {
+  readViewportReach,
+  remeasureViewport,
+  type RenderDimensionsLike,
+  type ViewportLike,
+} from "./viewportReach";
 import {
   FIRST_SPAWN_GEN,
   acceptsGeneration,
@@ -88,7 +118,6 @@ const THEME = {
 
 export interface TerminalInstance {
   terminal: Terminal;
-  fitAddon: FitAddon;
   webglAddon: WebglAddon | null;
   searchAddon: SearchAddon;
   serializeAddon: SerializeAddon;
@@ -110,6 +139,11 @@ export type SessionHooks = {
   onOutput?: (bytes: Uint8Array) => void;
   /** The PTY exited (fires after the exit tail is written). */
   onExited?: () => void;
+  /** The turn-end clean rewrite re-laid the buffer (same text, the row count
+   *  above the cursor may have moved). onWriteParsed was WITHHELD for the
+   *  whole parse — it re-emits the transcript, not a turn — so anything that
+   *  tracks a buffer position re-anchors here. */
+  onBufferRewritten?: (terminal: Terminal) => void;
 };
 
 /** Per-mount handlers, owner-token guarded. */
@@ -130,6 +164,14 @@ type Entry = TerminalInstance & {
   pendingRestore: Uint8Array[] | null;
   stop: () => void;
   disposed: boolean;
+  /** The pane is FOLLOWING the content's bottom over the fixed grid: new
+   *  output keeps it in view. False once the reader scrolled the pane up to
+   *  look at the top of the screen; true again when they come back, type, or
+   *  the pane is shown afresh (hostPark.ts). */
+  hostFollowing: boolean;
+  /** A follow pass is queued for the next frame (one per frame, however many
+   *  writes parsed in it). */
+  followQueued: boolean;
 };
 
 const registry = new Map<string, Entry>();
@@ -205,16 +247,6 @@ const sessionWriteCounts = new Map<string, number>();
 
 export function getSessionWriteCount(sessionId: string): number {
   return sessionWriteCounts.get(sessionId) ?? 0;
-}
-
-// Sessions whose onResize events should NOT be forwarded to the PTY — fences
-// the forceViewportRefresh cols-1 bounce (display-only scroll-area recalc)
-// from SIGWINCHing the shell. See terminal.ts#forceViewportRefresh.
-const resizePropagationSuppressed = new Set<string>();
-
-export function setResizePropagationSuppressed(sessionId: string, on: boolean): void {
-  if (on) resizePropagationSuppressed.add(sessionId);
-  else resizePropagationSuppressed.delete(sessionId);
 }
 
 // Additive per-session INPUT listeners (T5 seam): the registry's onData →
@@ -342,23 +374,308 @@ export function disableWebGL(sessionId: string): void {
   entry.webglAddon = null;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// THE SCROLL RANGE (viewportReach.ts) — what replaces the cols-1 bounce.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** xterm's Viewport, reached through the core. Private API, so every use is
+ *  optional-chained and the caller treats absence as "nothing to sync". */
+function coreViewport(term: Terminal): ViewportLike | undefined {
+  return (term as unknown as { _core?: { viewport?: ViewportLike } })._core?.viewport;
+}
+
+/** A renderer's dimensions, with the css cell box the host geometry reads. */
+type LiveDimensions = RenderDimensionsLike & {
+  css: { cell?: { width: number; height: number } };
+};
+
+/** The CURRENT renderer's dimensions — the object the Viewport must read.
+ *  Private API; the getter throws with no renderer, so absence and a throw
+ *  both read as "nothing to re-point". */
+function liveRenderDimensions(term: Terminal): LiveDimensions | undefined {
+  try {
+    return (
+      term as unknown as { _core?: { _renderService?: { dimensions?: LiveDimensions } } }
+    )._core?._renderService?.dimensions;
+  } catch {
+    return undefined;
+  }
+}
+
+function bufferShape(term: Terminal): { baseY: number; viewportY: number; length: number } {
+  const b = term.buffer.active;
+  return { baseY: b.baseY, viewportY: b.viewportY, length: b.length };
+}
+
+function dprNow(): number {
+  return typeof window === "undefined" ? -1 : window.devicePixelRatio;
+}
+
+/** Re-sync xterm's scroll area after the terminal came back on screen — out
+ *  of the keep-alive root, a hidden tab, a hidden screen, or a sleeping
+ *  window.
+ *
+ *  While hidden, PTY output kept advancing the buffer, and every advance had
+ *  xterm record a viewport height of ZERO and size its scroll area one screen
+ *  short. Nothing re-measures on re-show, so an idle terminal keeps the
+ *  hidden-era range and the wheel scrolls against a range that no longer
+ *  matches the buffer ("scrolling is stuck / snaps back"). We used to poke
+ *  this with a cols-1 → cols resize; a cols change re-wraps the whole buffer,
+ *  the one thing a pinned grid never does. `syncScrollArea(true)` is the whole
+ *  fix and it is non-destructive: it recomputes the scroll area AND the
+ *  scrollTop through xterm's own caches, from buffer state — no cols change,
+ *  no reflow, no SIGWINCH.
+ *
+ *  It also re-points the Viewport at the LIVE renderer's dimensions first:
+ *  every show loads a fresh WebGL renderer, and the Viewport would otherwise
+ *  go on reading the one dropped at hide (wrong by a display-scaling change). */
+export function resyncTerminalViewport(sessionId: string, cause: string): void {
+  const entry = registry.get(sessionId);
+  if (!entry || entry.disposed) return;
+  let frames = 0;
+  const attempt = (): void => {
+    // Disposed, or replaced, while we waited on layout.
+    const live = registry.get(sessionId);
+    if (!live || live !== entry || live.disposed) return;
+    // A host still mid-layout measures 0, and syncing there would record
+    // ANOTHER zero-height viewport — the same staleness we are here to clear.
+    // Bounded wait: a pane that never lays out (mounted into a hidden tab)
+    // gets its own resync when it is shown.
+    if (live.container.offsetHeight <= 0 || live.container.offsetWidth <= 0) {
+      if (frames++ < 10) {
+        requestAnimationFrame(attempt);
+        return;
+      }
+      log.debug(`viewport resync id=${sessionId} cause=${cause} applied=false why=not-laid-out`);
+      return;
+    }
+    const viewport = coreViewport(live.terminal);
+    if (!viewport?.syncScrollArea) {
+      log.warn(`viewport resync id=${sessionId} cause=${cause} applied=false why=no-viewport`);
+      return;
+    }
+    const outcome = remeasureViewport(viewport, liveRenderDimensions(live.terminal));
+    const reach = readViewportReach(viewport, bufferShape(live.terminal));
+    const line =
+      `viewport resync id=${sessionId} cause=${cause} repointed=${outcome.repointed} cellChanged=${outcome.cellChanged}` +
+      ` dpr=${dprNow()} viewportY=${live.terminal.buffer.active.viewportY} baseY=${live.terminal.buffer.active.baseY}` +
+      (reach ? ` maxRow=${reach.plan.maxRow} shortRows=${reach.plan.shortRows}` : "");
+    // The routine case (a fresh renderer, same numbers) is debug; a cell that
+    // really changed, or a range still short after the sync, is the forensic.
+    if (outcome.cellChanged || (reach && reach.plan.short)) log.info(line);
+    else log.debug(line);
+  };
+  requestAnimationFrame(attempt);
+}
+
+/** The DOM scroller's range must reach the buffer's bottom row. Called where
+ *  the reader is about to need the bottom — the start of a wheel gesture — it
+ *  measures, and when the range is short forces a full re-measure and logs
+ *  the geometry, so the log says WHY the range was short and whether the
+ *  re-measure held. Returns true when a short range was found. */
+export function ensureViewportReach(sessionId: string, cause: string): boolean {
+  const entry = registry.get(sessionId);
+  if (!entry || entry.disposed) return false;
+  try {
+    const viewport = coreViewport(entry.terminal);
+    if (!viewport) return false;
+    const before = readViewportReach(viewport, bufferShape(entry.terminal));
+    if (!before || !before.plan.short) return false;
+    const outcome = remeasureViewport(viewport, liveRenderDimensions(entry.terminal));
+    const after = readViewportReach(viewport, bufferShape(entry.terminal));
+    log.info(
+      `viewport short id=${sessionId} cause=${cause} healed=${after !== null && !after.plan.short}` +
+        ` repointed=${outcome.repointed} cellChanged=${outcome.cellChanged} dpr=${dprNow()}` +
+        ` ${JSON.stringify(before.detail)} afterMaxRow=${after?.plan.maxRow ?? -1}`
+    );
+    return true;
+  } catch (e) {
+    // A log-only path in effect: nothing here may throw into a wheel handler.
+    log.warn(`viewport reach check failed id=${sessionId}: ${e}`);
+    return false;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WHERE THE PANE SITS OVER THE FIXED GRID (hostPark.ts holds the rules).
+// The host is the pane element the terminal's container is mounted in; it
+// scrolls on both axes (TerminalPane). Nothing here touches the grid.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The pane element showing this terminal, or null while it is parked. */
+function hostOf(entry: Entry): HTMLElement | null {
+  if (entry.lifecycle.attachedTo === null) return null;
+  const host = entry.container.parentElement;
+  return host && host !== hiddenRoot ? host : null;
+}
+
+/** On screen for real — not display:none (a hidden tab, a hidden screen, the
+ *  keep-alive root) and not zero-size. */
+function isLaidOut(entry: Entry): boolean {
+  const host = hostOf(entry);
+  if (!host || host.offsetParent === null) return false;
+  const rect = host.getBoundingClientRect();
+  return rect.width >= 8 && rect.height >= 8;
+}
+
+/** Where the pane should sit to show the content's bottom, with the row
+ *  height the follow rules need — or null when there is nothing to park. The
+ *  slack is read FIRST and alone: a pane that fits the grid (the common case)
+ *  and a hidden one both stop there, before the buffer is walked. */
+function hostTarget(entry: Entry, host: HTMLElement): { target: number; rowHeight: number } | null {
+  const scrollHeight = host.scrollHeight;
+  const clientHeight = host.clientHeight;
+  if (!(scrollHeight - clientHeight > 1)) return null;
+  const screen = readRestoreGeometry(entry.terminal);
+  const g: HostGeometry = {
+    scrollHeight,
+    clientHeight,
+    rowHeight: liveRenderDimensions(entry.terminal)?.css.cell?.height ?? 0,
+    cursorY: screen.cursorY,
+    lastContentRow: screen.lastContentRow,
+  };
+  const target = parkTarget(g);
+  return target === null ? null : { target, rowHeight: g.rowHeight };
+}
+
+/** Put the content's bottom in view and start following it — an EXPLICIT
+ *  park: the pane was just shown, or the user typed / sent. A no-op for a
+ *  pane that fits the grid. */
+export function parkTerminalHost(sessionId: string): void {
+  const entry = registry.get(sessionId);
+  if (!entry || entry.disposed) return;
+  entry.hostFollowing = true;
+  const host = hostOf(entry);
+  if (!host) return;
+  const t = hostTarget(entry, host);
+  if (t && Math.abs(host.scrollTop - t.target) >= 1) host.scrollTop = t.target;
+}
+
+/** New output landed, or the pane changed size: keep the content's bottom in
+ *  view IF the pane is following it and the reader is at the live screen (a
+ *  reader up in xterm's history is looking at old rows; the pane stays put).
+ *  `settled` = output is quiet (the turn-end settle, a pane resize) — only
+ *  then may the pane move UP to content that collapsed (hostPark). */
+export function followTerminalHost(sessionId: string, settled: boolean): void {
+  const entry = registry.get(sessionId);
+  if (!entry || entry.disposed || !entry.hostFollowing) return;
+  const host = hostOf(entry);
+  if (!host) return;
+  const buf = entry.terminal.buffer.active;
+  if (buf.viewportY < buf.baseY) return;
+  const t = hostTarget(entry, host);
+  if (!t) return;
+  const next = followScrollTop(t.target, host.scrollTop, t.rowHeight, settled);
+  if (Math.abs(host.scrollTop - next) >= 1) host.scrollTop = next;
+}
+
+/** The pane scrolled (TerminalPane's scroll listener — the user's wheel or
+ *  scrollbar, or one of the parks above): is it still holding the content's
+ *  bottom? A pane with nothing to scroll is always following. */
+export function noteTerminalHostScroll(sessionId: string): void {
+  const entry = registry.get(sessionId);
+  if (!entry || entry.disposed) return;
+  const host = hostOf(entry);
+  if (!host) return;
+  const t = hostTarget(entry, host);
+  entry.hostFollowing = t === null ? true : isFollowing(t.target, host.scrollTop, t.rowHeight);
+}
+
+/** One follow pass per frame, however many writes parsed in it. */
+function queueFollow(sessionId: string, entry: Entry): void {
+  if (entry.followQueued || !entry.hostFollowing || entry.lifecycle.attachedTo === null) return;
+  entry.followQueued = true;
+  requestAnimationFrame(() => {
+    entry.followQueued = false;
+    if (entry.disposed || isRepaintRewriting(sessionId)) return;
+    followTerminalHost(sessionId, false);
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE TURN-END SETTLE's hands (repaintRunner.ts holds the clock and the
+// sequencing; this is the live terminal it works on).
+// ─────────────────────────────────────────────────────────────────────────────
+
+function repaintHandle(entry: Entry): RepaintTerminal {
+  const term = entry.terminal;
+  return {
+    instance: term,
+    get cols() {
+      return term.cols;
+    },
+    get rows() {
+      return term.rows;
+    },
+    buffer: term.buffer,
+    laidOut: () => isLaidOut(entry),
+    hasSelection: () => term.hasSelection(),
+    hasFocus: () => !!term.element && term.element.contains(document.activeElement),
+    focus: () => term.focus(),
+    // The WHOLE buffer WITH its modes (unlike the scrollback save, which
+    // drops them): the program is still running, and the reset below clears
+    // bracketed paste, application cursor keys, mouse tracking and focus
+    // reporting out from under it. Measured against xterm 5.5 + this addon
+    // in headless Chrome (SWIT-103): serialize → reset → write comes back
+    // with the same rows, the same baseY, the same cursor cell and the modes
+    // re-armed; a hidden cursor (claude hides it) survives the reset by
+    // itself, so nothing is appended for it.
+    serialize: () => entry.serializeAddon.serialize(),
+    setHidden: (hidden) => {
+      if (term.element) term.element.style.visibility = hidden ? "hidden" : "";
+    },
+    reset: () => term.reset(),
+    resize: (cols, rows) => term.resize(cols, rows),
+    write: (data, done) => term.write(data, done),
+    refresh: () => term.refresh(0, term.rows - 1),
+    scrollToBottom: () => term.scrollToBottom(),
+    scrollLines: (amount) => term.scrollLines(amount),
+  };
+}
+
+configureRepaintIO({
+  getTerminal: (sessionId) => {
+    const entry = registry.get(sessionId);
+    return entry && !entry.disposed ? repaintHandle(entry) : undefined;
+  },
+  resyncViewport: resyncTerminalViewport,
+  bouncePty: bouncePtyRows,
+  lastBounceAt: lastPtyBounceAt,
+  // Output went quiet: the content's bottom is a fact now, so a following
+  // pane may come UP to content that collapsed (a `clear`).
+  onSettle: (sessionId) => followTerminalHost(sessionId, true),
+  onRewritten: (sessionId) => {
+    const entry = registry.get(sessionId);
+    if (!entry || entry.disposed) return;
+    sessionHooks.get(sessionId)?.onBufferRewritten?.(entry.terminal);
+  },
+});
+
 /** Process one PTY chunk: render it, mark for the periodic scrollback save,
- *  and dispatch the session's React-side extras (task detection). */
+ *  count it toward the turn-end settle, and dispatch the session's React-side
+ *  extras (task detection). THE one live-output write site — restored
+ *  scrollback and the exit notice are written directly and are not output. */
 function writeChunk(entry: Entry, sessionId: string, bytes: Uint8Array): void {
   entry.terminal.write(bytes);
   dirtySessionIds.add(sessionId);
   sessionWriteCounts.set(sessionId, (sessionWriteCounts.get(sessionId) ?? 0) + 1);
   sessionHooks.get(sessionId)?.onOutput?.(bytes);
+  // AFTER the hooks, on purpose: the resume heal arms its settle timer in
+  // that hook and this arms the turn-end settle's, both the same length, so
+  // the heal reads the screen first — before a rewrite this settle may start
+  // has reset the buffer under it.
+  noteRepaintOutput(sessionId, bytes.length);
 }
 
 /** Adopt the session's live terminal into `host` (moving its DOM subtree), or
  *  create one there on first mount. `adopted` = the buffer is already rendered
- *  and current — the mount has nothing to replay or wait on. */
+ *  and current — the mount has nothing to replay or wait on. The grid is NOT
+ *  an option: every terminal is TERMINAL_COLS × TERMINAL_ROWS. */
 export function acquireTerminal(
   sessionId: string,
   host: HTMLElement,
   owner: number,
-  opts?: { cols?: number; rows?: number; restoredFromId?: string }
+  opts?: { restoredFromId?: string }
 ): { instance: TerminalInstance; adopted: boolean } {
   const existing = registry.get(sessionId);
   if (existing && !existing.disposed) {
@@ -376,13 +693,22 @@ export function acquireTerminal(
     host.appendChild(existing.container);
     enableWebGL(sessionId);
     // Hidden writes advanced the buffer but the renderer skipped them —
-    // repaint the viewport now that it's visible again.
+    // repaint the viewport now that it's visible again. refresh() redraws
+    // ROWS only; the scroll area it scrolls within is stale from the hidden
+    // era, so re-sync that too. With the grid pinned no refit follows an
+    // adopt, so this is the only thing that touches the viewport.
     existing.terminal.refresh(0, existing.terminal.rows - 1);
-    log.debug(`Terminal adopted id=${sessionId} owner=${owner}`);
+    existing.hostFollowing = true; // a fresh pane starts on the content
+    resyncTerminalViewport(sessionId, "adopt");
+    log.debug(
+      `Terminal adopted id=${sessionId} owner=${owner} grid=${existing.terminal.cols}x${existing.terminal.rows} baseY=${existing.terminal.buffer.active.baseY}`
+    );
     return { instance: existing, adopted: true };
   }
 
-  log.debug(`Creating terminal for session id=${sessionId} cols=${opts?.cols} rows=${opts?.rows} owner=${owner}`);
+  log.debug(
+    `Creating terminal for session id=${sessionId} grid=${TERMINAL_COLS}x${TERMINAL_ROWS} owner=${owner}`
+  );
 
   const container = document.createElement("div");
   container.style.width = "100%";
@@ -400,11 +726,13 @@ export function acquireTerminal(
     allowProposedApi: true,
     convertEol: true,
     screenReaderMode: false,
-    ...(opts?.cols ? { cols: opts.cols } : {}),
-    ...(opts?.rows ? { rows: opts.rows } : {}),
+    // THE PINNED GRID, from the first frame and for the instance's whole life
+    // (terminalGrid.ts). The PTY was spawned at the same grid (ipc.ts), so
+    // the program inside sees one size, ever. No fit addon is loaded: the
+    // pane's measured size never reaches the grid.
+    cols: TERMINAL_COLS,
+    rows: TERMINAL_ROWS,
   });
-  const fitAddon = new FitAddon();
-  terminal.loadAddon(fitAddon);
   const searchAddon = new SearchAddon();
   terminal.loadAddon(searchAddon);
   const serializeAddon = new SerializeAddon();
@@ -417,7 +745,6 @@ export function acquireTerminal(
 
   const entry: Entry = {
     terminal,
-    fitAddon,
     webglAddon: null,
     searchAddon,
     serializeAddon,
@@ -428,12 +755,11 @@ export function acquireTerminal(
     pendingRestore: opts?.restoredFromId ? [] : null,
     stop: () => {},
     disposed: false,
+    hostFollowing: true,
+    followQueued: false,
   };
   registry.set(sessionId, entry);
   enableWebGL(sessionId);
-
-  // NOTE: no fit() here — TerminalPane owns all fit timing via the fitQueue
-  // double-RAF so the container layout has fully settled before measuring.
 
   // Registry-owned term subscriptions — created once for the instance's whole
   // life. PTY forwarding is unconditional; React-side extras dispatch through
@@ -443,17 +769,33 @@ export function acquireTerminal(
     const inputListeners = sessionInputListeners.get(sessionId);
     if (inputListeners) for (const fn of inputListeners) fn(data);
     writeToSession(sessionId, data).catch(console.error);
+    // Typing takes the reader to the prompt: xterm scrolls its own history
+    // there on input, and on a pane shorter than the grid the PANE has to
+    // come too or the keystrokes land below the fold.
+    if (isTypedInput(data)) parkTerminalHost(sessionId);
   });
   terminal.onResize(({ cols, rows }) => {
-    // Skip the forceViewportRefresh cols-1 bounce — it's a display-only
-    // scroll-area recalc, not a real terminal size change. Forwarding it
-    // would SIGWINCH the shell and make TUI apps redraw (stranding duplicate
-    // frames in scrollback).
-    if (resizePropagationSuppressed.has(sessionId)) return;
+    // The xterm → PTY mirror, so the two can never disagree. It does not fire
+    // in normal running: the grid is pinned and no layout path resizes it. The
+    // one caller of terminal.resize left is the turn-end rewrite's way back
+    // onto the pin (repaintPlan) — hence the loud line if this ever runs.
+    log.warn(
+      `Terminal grid changed id=${sessionId} -> ${cols}x${rows} (pinned ${TERMINAL_COLS}x${TERMINAL_ROWS}); syncing the PTY`
+    );
     resizeSession(sessionId, cols, rows).catch(console.error);
   });
   terminal.onWriteParsed(() => {
+    // The turn-end rewrite re-emits the transcript into a reset terminal:
+    // that is not output, and the status detector must not read a new turn
+    // out of it (it re-anchors through onBufferRewritten when the parse ends).
+    if (isRepaintRewriting(sessionId)) return;
     sessionHooks.get(sessionId)?.onWriteParsed?.(terminal);
+    queueFollow(sessionId, entry);
+  });
+  terminal.onScroll(() => {
+    // A terminal-side scroll (output, scrollToBottom, typed input): a rewrite
+    // deferred under a scrolled-up reader flushes once they are back.
+    noteRepaintScroll(sessionId);
   });
   terminal.buffer.onBufferChange(() => {
     // Without a refresh + texture atlas clear, WebGL can render stale glyphs
@@ -674,7 +1016,7 @@ function disposeEntry(sessionId: string, entry: Entry): void {
   entry.container.remove();
   dirtySessionIds.delete(sessionId);
   sessionWriteCounts.delete(sessionId);
-  resizePropagationSuppressed.delete(sessionId);
+  forgetRepaint(sessionId);
   sessionInputListeners.delete(sessionId);
   sessionGenerations.delete(sessionId); // session closed — id never reused
   for (const fn of disposeCleanups) fn(sessionId);

@@ -14,8 +14,11 @@ import {
 } from "./resumeHeal";
 import {
   __resetResumeHealForTests,
+  bouncePtyRows,
   configureResumeHealIO,
+  forgetPtyBounce,
   forgetResumeHeal,
+  lastPtyBounceAt,
   markSessionResumed,
   noteResumeHealOutput,
   type ResumeHealTerminal,
@@ -245,5 +248,54 @@ describe("resumeHealRunner", () => {
     forgetResumeHeal("s1");
     await settleNow();
     expect(resizes).toEqual([]);
+  });
+
+  // SWIT-103: the bounce is shared with the narrow-frame nudge (repaintRunner)
+  // — with the grid pinned it is the only PTY resize there is.
+  describe("the shared rows-only bounce", () => {
+    it("bounces any session on request: rows-1, a beat, rows", async () => {
+      expect(bouncePtyRows("s2", "narrow-nudge")).toBe(true);
+      await bounceDone();
+      expect(resizes).toEqual([
+        [100, 39],
+        [100, 40],
+      ]);
+    });
+
+    it("drops a second request while one is in flight — one repaint, not four resizes", async () => {
+      expect(bouncePtyRows("s2", "resume-heal")).toBe(true);
+      expect(bouncePtyRows("s2", "narrow-nudge")).toBe(false);
+      await bounceDone();
+      expect(resizes).toHaveLength(2);
+      // …and takes the next one once it has landed.
+      expect(bouncePtyRows("s2", "narrow-nudge")).toBe(true);
+      await bounceDone();
+      expect(resizes).toHaveLength(4);
+    });
+
+    it("sessions do not block each other", async () => {
+      expect(bouncePtyRows("s2", "narrow-nudge")).toBe(true);
+      expect(bouncePtyRows("s3", "narrow-nudge")).toBe(true);
+      await bounceDone();
+      expect(resizes).toHaveLength(4);
+    });
+
+    it("records when it last bounced, for either caller, until forgotten", async () => {
+      expect(lastPtyBounceAt("s1")).toBe(0);
+      markSessionResumed("s1");
+      lines = [LAUNCH, ...IDLE_FRAME];
+      noteResumeHealOutput("s1");
+      await settleNow();
+      expect(lastPtyBounceAt("s1")).toBe(T0 + RESUME_HEAL_SETTLE_MS);
+      await bounceDone();
+      forgetPtyBounce("s1");
+      expect(lastPtyBounceAt("s1")).toBe(0);
+    });
+
+    it("sends nothing without a live terminal", async () => {
+      configureResumeHealIO({ getTerminal: () => undefined, resizePty: async () => {} });
+      expect(bouncePtyRows("gone", "narrow-nudge")).toBe(false);
+      expect(lastPtyBounceAt("gone")).toBe(0);
+    });
   });
 });
