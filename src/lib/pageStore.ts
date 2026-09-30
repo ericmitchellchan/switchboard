@@ -49,6 +49,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { readThreadFile } from "./ipc";
+import { normalizeLaneName } from "./lanes";
 
 // ── Caps (R2 edge cases: the page is not a chat) ─────────────────────────────
 // Enforced at WRITE time by the MCP server (SWIT-49, with a visible error to
@@ -205,6 +206,11 @@ export type PageFile = {
   brief: PageBrief | null;
   /** SWIT-106: the findings ledger, in file order (newest filed first). */
   findings: PageFinding[];
+  /** SWIT-108: the lane the AGENT put this thread in (`page` op `lane`),
+   *  normalized by lanes.normalizeLaneName; null = none, or not a lane name.
+   *  A SUGGESTION to the app: it is copied onto the thread record only when
+   *  the record has no lane (lanes.laneFromPage — the user's choice wins). */
+  lane: string | null;
 };
 
 export const EMPTY_PAGE: PageFile = Object.freeze({
@@ -215,6 +221,7 @@ export const EMPTY_PAGE: PageFile = Object.freeze({
   items: [],
   brief: null,
   findings: [],
+  lane: null,
 });
 
 /** answers.json — question id → Eric's answer. SWIT-77: `sentAt` = when the
@@ -362,7 +369,15 @@ export function parsePageFile(raw: string): PageFile {
     items,
     brief: parseBrief(data.brief),
     findings: parseFindings(data.findings),
+    lane: parsePageLane(data.lane),
   };
+}
+
+/** SWIT-108: `page.lane` — a lane name or nothing (a malformed one is no
+ *  lane, never a broken page). */
+function parsePageLane(raw: unknown): string | null {
+  const n = normalizeLaneName(raw);
+  return n.ok ? n.name : null;
 }
 
 function isFindingVerdict(v: unknown): v is FindingVerdict {

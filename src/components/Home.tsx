@@ -2,6 +2,14 @@
 // default route. Ky's lesson, adopted: Home has no content of its own —
 // every block is a view over some other record:
 //
+//   Lanes            → (SWIT-108) FIRST: every lane that is not archived —
+//                      name · what it waits on · its latest finding, else
+//                      its brief's goal · last activity; lanes waiting on
+//                      Eric first, then by last activity (lanes.orderLaneRows).
+//                      A thread IN a lane shows on Home THROUGH its lane: its
+//                      questions, requests and items fold into the lane row's
+//                      pill, it leaves Live now, and its findings name the
+//                      lane. Threads with no lane list exactly as before.
 //   Needs you        → every OPEN question + user-owned item + request across
 //                      threads (the per-thread page files, one 5s poll while
 //                      Home is on screen), plus ONE row per thread with
@@ -45,15 +53,22 @@ import {
   getThreadActions,
   threadRepoName,
   sortThreadsForHistory,
-  activeThreads,
 } from "../lib/threadStore";
+import {
+  deriveLanes,
+  isLaneWaiting,
+  laneHomeLine,
+  laneRollup,
+  laneWaitsLabel,
+  orderLaneRows,
+  rollupThreads,
+  threadLane,
+  type LaneRow,
+} from "../lib/lanes";
+import { readThreadDigest } from "../lib/threadDigest";
+import { ago } from "../lib/statusPill";
 import type { Thread } from "../types";
 import {
-  parsePageFile,
-  parseAnswersFile,
-  parseInboxFile,
-  parseRetractedFile,
-  mergePage,
   orderedOptions,
   answerSuccessNote,
   answerErrorNote,
@@ -73,7 +88,7 @@ import {
   useRepoListings,
   type ProjectViewEntry,
 } from "../lib/repoListing";
-import { readThreadFile, listScratchViews, retractThreadEvidence } from "../lib/ipc";
+import { listScratchViews, retractThreadEvidence } from "../lib/ipc";
 import { navigate } from "../lib/route";
 import { useAllKnownServers, serverKey } from "../lib/devServer";
 import type { DevServerHit } from "../lib/devServer";
@@ -232,24 +247,15 @@ export function Home({
       if (busy) return;
       busy = true;
       try {
-        const threads = activeThreads(view.threads);
+        // SWIT-108: the active threads, plus the ARCHIVED ones in a lane —
+        // their findings and decisions still count toward the lane.
+        const threads = rollupThreads(view.threads);
         const next: ThreadDigest[] = [];
         for (const thread of threads) {
           try {
-            const [pageRaw, answersRaw, inboxRaw, retractedRaw] = await Promise.all([
-              readThreadFile(thread.id, "page.json"),
-              readThreadFile(thread.id, "answers.json"),
-              readThreadFile(thread.id, "inbox.json"),
-              // SWIT-105: a question dismissed on the page (`not needed`) is
-              // not open here either — the dismissals live in this file.
-              readThreadFile(thread.id, "retracted.json"),
-            ]);
-            const posts = parseInboxFile(inboxRaw);
-            next.push({
-              thread,
-              page: mergePage(parsePageFile(pageRaw), parseAnswersFile(answersRaw), posts, parseRetractedFile(retractedRaw)),
-              posts,
-            });
+            // SWIT-105: the dismissals (retracted.json) ride the same read.
+            const { page, posts } = await readThreadDigest(thread.id);
+            next.push({ thread, page, posts });
           } catch {
             // this thread's slice degrades; the rest render
           }
@@ -274,9 +280,27 @@ export function Home({
     // which is exactly when the thread list actually changed.
   }, [active, view.threads]);
 
+  // SWIT-108: THE LANES. A lane is its threads (lanes.deriveLanes); the row
+  // is a roll-up over the digests this same poll read. Archived lanes are
+  // off Home. A thread in ANY lane (an archived lane's included) shows on
+  // Home only through its lane — the thread-level blocks below read the
+  // unlaned digests alone; Findings keeps every visible lane's rows, named
+  // by lane.
+  const lanes = deriveLanes(view.threads, view.laneRecords);
+  const pageByThread = new Map(digests.map((d) => [d.thread.id, d.page] as const));
+  const now = Date.now();
+  const laneRows = orderLaneRows(
+    lanes
+      .filter((l) => l.archivedAt === null)
+      .map((lane) => ({ lane, rollup: laneRollup(lane.threads, pageByThread, view.launched, now) }))
+  );
+  const archivedLaneIds = new Set(lanes.filter((l) => l.archivedAt !== null).flatMap((l) => l.threads.map((t) => t.id)));
+  const unlaned = digests.filter((d) => threadLane(d.thread) === null);
+  const findingDigests = digests.filter((d) => !archivedLaneIds.has(d.thread.id));
+
   // Which sections have anything to say — an empty one folds into the quiet
   // line instead of rendering (page order preserved in both places).
-  const needsCount = digests.reduce(
+  const needsCount = unlaned.reduce(
     (n, d) =>
       n +
       d.page.openQuestions.length +
@@ -287,12 +311,15 @@ export function Home({
   );
   const openBacklog = openItems(backlog.items);
   const liveRows = sortThreadsForHistory(
-    view.threads.filter((t) => view.launched.has(t.id)),
+    view.threads.filter((t) => view.launched.has(t.id) && threadLane(t) === null),
     view.launched
   );
-  const recentPosts = collectRecentPosts(digests);
-  const findings = recentFindings(digests);
+  // Posts to an ARCHIVED lane thread (read for its lane) stay off Home, as
+  // they did before lanes.
+  const recentPosts = collectRecentPosts(digests.filter((d) => !(typeof d.thread.archivedAt === "number" && d.thread.archivedAt > 0)));
+  const findings = recentFindings(findingDigests);
   const quiet: string[] = [];
+  if (laneRows.length === 0) quiet.push("lanes");
   if (needsCount === 0) quiet.push("needs you");
   if (findings.length === 0) quiet.push("findings");
   if (openBacklog.length === 0) quiet.push("backlog");
@@ -328,12 +355,13 @@ export function Home({
             gap: 18,
           }}
         >
-          {needsCount > 0 && <NeedsYou digests={digests} launched={view.launched} />}
+          {laneRows.length > 0 && <Lanes rows={laneRows} launched={view.launched} />}
+          {needsCount > 0 && <NeedsYou digests={unlaned} launched={view.launched} />}
           {findings.length > 0 && <Findings rows={findings} />}
           {openBacklog.length > 0 && (
             <BacklogBlock items={openBacklog} projectOptions={backlogProjects} />
           )}
-          {liveRows.length > 0 && <LiveNow rows={liveRows} digests={digests} />}
+          {liveRows.length > 0 && <LiveNow rows={liveRows} digests={unlaned} />}
           {recentPosts.length > 0 && <BetweenThreads recent={recentPosts} />}
           {servers.length > 0 && <Listening active={active} servers={servers} />}
           {(kept.length > 0 || reports.length > 0) && <KeptViews kept={kept} reports={reports} />}
@@ -606,17 +634,89 @@ function Findings({ rows }: { rows: ReturnType<typeof recentFindings<Thread>> })
   return (
     <div>
       <SectionHeader label="Findings" meta={String(rows.length)} />
-      {rows.map(({ thread, finding }) => (
-        <Row key={`${thread.id}-${finding.id}`} title={finding.claim} onClick={() => getThreadActions()?.openThread(thread.id)}>
-          <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            <span style={TITLE}>{finding.claim}</span>
-            <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)" }}> {thread.title}</span>
-          </span>
-          <span style={{ flex: "none", width: 58, display: "flex", alignSelf: "center" }}>
-            <StatusPill word={finding.verdict} tone={verdictTone(finding.verdict)} />
-          </span>
-        </Row>
-      ))}
+      {rows.map(({ thread, finding }) => {
+        // SWIT-108: a laned thread's finding names its LANE and opens the
+        // lane's page; an unlaned one names and opens its thread, as before.
+        const lane = threadLane(thread);
+        return (
+          <Row
+            key={`${thread.id}-${finding.id}`}
+            title={finding.claim}
+            onClick={() =>
+              lane ? navigate({ screen: "lane", project: lane.project, lane: lane.name }) : getThreadActions()?.openThread(thread.id)
+            }
+          >
+            <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <span style={TITLE}>{finding.claim}</span>
+              <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)" }}> {lane ? lane.name : thread.title}</span>
+            </span>
+            <span style={{ flex: "none", width: 58, display: "flex", alignSelf: "center" }}>
+              <StatusPill word={finding.verdict} tone={verdictTone(finding.verdict)} />
+            </span>
+          </Row>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Lanes (SWIT-108) ─────────────────────────────────────────────────────────
+
+/** The lane's pill: what it waits on, in words, amber — the one colour, and
+ *  it means Eric. Lower case: it is a count, not a status word. */
+const WAITS_PILL: CSSProperties = {
+  flex: "none",
+  borderRadius: 11,
+  padding: "1px 8px",
+  fontFamily: MONO,
+  fontSize: 10,
+  fontWeight: 600,
+  background: "var(--tone-amber)",
+  color: "var(--bg-primary)",
+  whiteSpace: "nowrap",
+};
+
+/** Home's first block: one row per lane that is not archived — name and
+ *  project, what it waits on, its latest finding (else the brief's goal),
+ *  its last activity; a live dot when one of its threads is running. The row
+ *  opens the lane's page. */
+function Lanes({ rows, launched }: { rows: LaneRow[]; launched: ReadonlySet<string> }) {
+  return (
+    <div>
+      <SectionHeader label="Lanes" meta={String(rows.length)} />
+      {rows.map(({ lane, rollup }) => {
+        const waits = laneWaitsLabel(rollup.waiting);
+        const line = laneHomeLine(rollup);
+        const live = lane.threads.some((t) => launched.has(t.id));
+        return (
+          <Row
+            key={`${lane.project}/${lane.name}`}
+            title={`${lane.name} — ${lane.threads.length} thread${lane.threads.length === 1 ? "" : "s"} in ${lane.project}`}
+            onClick={() => navigate({ screen: "lane", project: lane.project, lane: lane.name })}
+          >
+            <span style={{ minWidth: 0, flex: 1, display: "flex", flexDirection: "column", gap: 1 }}>
+              <span style={{ display: "flex", alignItems: "baseline", gap: 6, minWidth: 0 }}>
+                {live && (
+                  <span style={{ flex: "none", alignSelf: "center", display: "flex" }}>
+                    <PulsingDot color={STATUS_CONFIGS.running.color} pulse={false} size={6} />
+                  </span>
+                )}
+                <span style={{ ...TITLE, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{lane.name}</span>
+                <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)", flex: "none" }}>{lane.project}</span>
+              </span>
+              {line && (
+                <span style={{ fontSize: 11.5, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {line}
+                </span>
+              )}
+            </span>
+            {waits && isLaneWaiting(rollup.waiting) && <span style={WAITS_PILL}>{waits}</span>}
+            <span style={{ ...ROW_META, marginLeft: 0, minWidth: 28, textAlign: "right" }}>
+              {rollup.lastActive > 0 ? ago(new Date(rollup.lastActive).toISOString()) : ""}
+            </span>
+          </Row>
+        );
+      })}
     </div>
   );
 }

@@ -18,6 +18,9 @@
 // Bands 1–2 share one scroll area; band 3 scrolls inside its own cap so an
 // expanded tree cannot push the destinations off screen.
 //
+// LANES (SWIT-108) sit between bands 1 and 2 — LanesSection, in both shell
+// modes; it draws nothing until a thread is in a lane.
+//
 // SHELL MODE (SWIT-55): in BARE mode (the default) the Research band and the
 // Explorer band do not render — the menu is `Home · Trading · Knowledge base
 // ▸` then THREADS. `?shell=full` / config `shell_mode` brings them back. The
@@ -32,6 +35,7 @@ import { openArtifact, useActiveTabArtifact } from "../lib/panelStore";
 import { useShellMode } from "../lib/shellMode";
 import { projectsWithResearch, researchPages } from "../surfaces/registry";
 import { ThreadsSection } from "./ThreadsSection";
+import { LanesSection } from "./LanesSection";
 import type { RepoConfig } from "../types";
 import { KbTreeSection } from "./KbTreeSection";
 import { ExplorerTreeSection } from "./ExplorerTreeSection";
@@ -179,6 +183,10 @@ export function SideMenu({ route, repos }: { route: Route; repos: readonly RepoC
         </div>
 
         <div style={{ height: 1, background: "var(--border)", margin: "8px 0 2px" }} />
+
+        {/* ── SWIT-108: LANES above THREADS, in bare mode too (lanes are part
+            of the bare set) — nothing renders while no thread is in a lane. */}
+        <LanesSection route={route} />
 
         {/* ── Band 2: threads ── header + rows, all ThreadsSection's (SWIT-56) */}
         <ThreadsSection repos={repos} />

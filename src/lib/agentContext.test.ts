@@ -24,6 +24,7 @@ import {
   artifactRef,
   assembleLaunchContext,
   buildBacklogItemLine,
+  buildLaneSentence,
   buildSpawnContextParts,
   buildPageContractLine,
   buildSendReference,
@@ -841,5 +842,50 @@ describe("assembleLaunchContext — SPAWN_CONTEXT_MAX caps the JOINED line, and 
     const opts = { kbRoot: KB_ROOT, backlogItem: { id: "i1", text: "x" } };
     const parts = buildSpawnContextParts(DOC, 2, opts);
     expect(buildSpawnContext(DOC, 2, opts)).toBe(`${parts.panel} ${parts.backlog}`);
+  });
+});
+
+// ─── SWIT-108: the lane clause ───────────────────────────────────────────────
+
+describe("the lane clause on the launch line (SWIT-108)", () => {
+  const LANE = { name: "Gamma model", hasBrief: true };
+
+  it("names the lane, says to page read FIRST (the read carries the lane), and to rewrite the LANE's brief whole", () => {
+    const sentence = buildLaneSentence(LANE);
+    expect(sentence).toContain("This thread is in the lane 'Gamma model' — call the page tool (op read) FIRST");
+    expect(sentence).toContain("never ask the user for context the lane already holds");
+    expect(sentence).toContain("rewrite it WHOLE (op brief) for the whole lane, not only your corner of it");
+    // No brief anywhere in the lane: the first thread is told to write one (requirement 2.3).
+    expect(buildLaneSentence({ name: "Combos", hasBrief: false })).toContain(
+      "No thread in the lane has written a brief yet: at your first seam write one (op brief) for the whole lane."
+    );
+    expect(buildLaneSentence({ name: "  ", hasBrief: true })).toBe("");
+  });
+
+  it("replaces the page-only brief clause (one instruction about the same act) and survives the sanitizer verbatim", () => {
+    const line = buildPageContractLine(null, { hasBrief: true, lane: LANE });
+    expect(line).toContain(buildLaneSentence(LANE));
+    expect(line).not.toContain(BRIEF_READ_SENTENCE);
+    expect(sanitizeForTypedLine(buildLaneSentence(LANE), SPAWN_CONTEXT_MAX)).toBe(buildLaneSentence(LANE));
+    const launch = launchCommand({ chatSessionId: "abc", resume: false, appendSystemPrompt: line });
+    expect(launch).toContain(buildLaneSentence(LANE));
+    expect((launch.match(/"/g) ?? []).length).toBe(2);
+    // No lane → the line is exactly what it was.
+    expect(buildPageContractLine(null, { hasBrief: true, lane: null })).toBe(buildPageContractLine(null, { hasBrief: true }));
+  });
+
+  it("WORST CASE — the longest lane name, the longest decisions, a long panel, the longest backlog item: the contract, the lane clause and the backlog sentence survive WHOLE", () => {
+    const lane = { name: "x".repeat(48), hasBrief: true };
+    const item = { id: "b".repeat(64), text: "é".repeat(600) };
+    const labels = { count: 999, labels: ["x".repeat(200), "y".repeat(200), "z".repeat(200)] };
+    const doc: Artifact = { kind: "kb-doc", path: `switchboard/${"deep-folder/".repeat(22)}requirements.md` };
+    const parts = buildSpawnContextParts(doc, 12, { kbRoot: KB_ROOT, backlogItem: item });
+    const line = assembleLaunchContext({ ...parts, contract: true, hasBrief: true, decisions: labels, lane }) as string;
+    expect(Array.from(line).length).toBeLessThanOrEqual(SPAWN_CONTEXT_MAX);
+    expect(line.startsWith(buildPageContractLine(null, { lane }))).toBe(true);
+    expect(line).toContain(buildLaneSentence(lane));
+    expect(line.endsWith(buildBacklogItemLine(item))).toBe(true);
+    // The budget, stated: the contract + the lane clause leave most of the 2000.
+    expect(buildPageContractLine(null, { lane }).length).toBeLessThan(1250);
   });
 });

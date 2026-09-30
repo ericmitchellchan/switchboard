@@ -426,7 +426,7 @@ describe("ROUND-TRIP: the server's writes parse through pageStore (the seam)", (
     }
     const props = (server.PAGE_TOOL.inputSchema as { properties: Record<string, { enum?: string[] }> }).properties;
     expect(props.kind.enum).toEqual(["decision", "convention", "info"]);
-    expect(props.op.enum).toEqual(["theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "brief", "finding", "show", "read"]);
+    expect(props.op.enum).toEqual(["theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "brief", "finding", "lane", "show", "read"]);
     expect(props.default).toBeDefined();
     expect(props.reviewFirst).toBeDefined();
     expect(props.why).toBeDefined();
@@ -2510,5 +2510,271 @@ describe("review of daaad36 / c178f2f / 4f016e1 — the server half", () => {
     expect(q.default).toBe(q.options[0]);
     // …and the trimmed form itself still names its option.
     expect(optionsOf(srv.applyOp(empty(), { op: "ask", text: "which?", options: [a, b], default: q.options[0] }, NOW).page).default).toBe(q.options[0]);
+  });
+});
+
+// ─── SWIT-108: LANES — the `lane` op and the lane roll-up in `read` ──────────
+
+describe("the page tool — lanes (SWIT-108)", () => {
+  type Env = { threadsRoot?: string; threadsJsonPath?: string; selfThreadId?: string; registryPath?: string | null; cwd?: string };
+  const lanes = server as unknown as {
+    performOp: (threadDir: string, args: Record<string, unknown>, now: number, env?: Env | null) => string;
+    performReadOp: (threadDir: string, env?: Env | null) => string;
+    readLaneRollup: (env: Env | null) => { name: string; brief: { self: boolean; threadTitle: string } | null } | null;
+    performViewOp: (threadDir: string, args: Record<string, unknown>, now: number, env?: Record<string, unknown>) => { spec: Record<string, unknown> };
+    normalizeLaneName: (raw: unknown) => string;
+    LANE_NAME_CAP: number;
+    READ_CAP: number;
+    QUESTION_CAP: number;
+    TURN_CAP: number;
+    PAGE_TOOL: { description: string; inputSchema: { properties: Record<string, { enum?: string[] }> } };
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const fs = require("fs") as {
+    mkdtempSync: (p: string) => string;
+    mkdirSync: (p: string, o?: { recursive: boolean }) => void;
+    writeFileSync: (p: string, d: string) => void;
+    readFileSync: (p: string, e: string) => string;
+    rmSync: (p: string, o: { recursive: boolean; force: boolean }) => void;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const os = require("os") as { tmpdir: () => string };
+  const AT = (d: number) => new Date(NOW + d * 3_600_000).toISOString();
+
+  /** A registry (lodestar = one repo), a threads.json, a thread dir per id. */
+  function world(threads: Array<Record<string, unknown>>) {
+    const root = fs.mkdtempSync(`${os.tmpdir()}/swb-lanes-`).split("\\").join("/");
+    fs.mkdirSync(`${root}/repos/lodestar/.sb-views/_project`, { recursive: true });
+    fs.mkdirSync(`${root}/repos/elsewhere`, { recursive: true });
+    fs.mkdirSync(`${root}/kb`, { recursive: true });
+    const registryPath = `${root}/kb/registry.json`;
+    fs.writeFileSync(registryPath, JSON.stringify({ conventions: { reposRoot: `${root}/repos/` }, projects: { lodestar: { repos: ["lodestar"] } } }));
+    const threadsJsonPath = `${root}/threads.json`;
+    fs.writeFileSync(threadsJsonPath, JSON.stringify({ version: 1, threads }));
+    for (const t of threads) fs.mkdirSync(`${root}/threads/${t.id}`, { recursive: true });
+    const env = (self: string, cwd = `${root}/repos/lodestar`): Env => ({ threadsRoot: `${root}/threads`, threadsJsonPath, selfThreadId: self, registryPath, cwd });
+    const write = (id: string, name: string, value: unknown) => fs.writeFileSync(`${root}/threads/${id}/${name}`, JSON.stringify(value));
+    return { root, env, write, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
+  }
+  const rec = (id: string, over: Record<string, unknown> = {}) => ({ id, title: `thread ${id}`, workingDir: "", chatSessionId: `c${id}`, lastActivityAt: 1, ...over });
+  const gamma = { lane: "Gamma model", laneProject: "lodestar" };
+
+  it("the op enum and the description state the lane op and its rules", () => {
+    expect(lanes.PAGE_TOOL.inputSchema.properties.op.enum).toContain("lane");
+    expect(lanes.PAGE_TOOL.inputSchema.properties.name).toBeDefined();
+    for (const rule of [
+      "op lane {name} puts THIS thread in a lane when it has none",
+      "only the user moves a thread between lanes",
+      "In a lane, op read also returns the lane",
+      "YOUR brief is the lane's brief: rewrite it WHOLE for the whole lane",
+    ]) {
+      expect(lanes.PAGE_TOOL.description).toContain(rule);
+    }
+  });
+
+  it("`lane` writes page.lane for a thread with NO lane; the app parses it; the page keeps it through other ops", () => {
+    const w = world([rec("t1")]);
+    try {
+      const dir = `${w.root}/threads/t1`;
+      const msg = lanes.performOp(dir, { op: "lane", name: "  Gamma   model " }, NOW, w.env("t1"));
+      expect(msg).toMatch(/^Lane recorded — this thread joins the lane "Gamma model"/);
+      lanes.performOp(dir, { op: "theme", text: "gamma" }, NOW, w.env("t1"));
+      const raw = fs.readFileSync(`${dir}/page.json`, "utf8");
+      expect(JSON.parse(raw).lane).toBe("Gamma model");
+      expect(parsePageFile(raw).lane).toBe("Gamma model");
+      expect(lanes.normalizeLaneName("a b")).toBe("a b");
+      expect(lanes.LANE_NAME_CAP).toBe(48);
+    } finally {
+      w.cleanup();
+    }
+  });
+
+  it("Eric's choice wins: a thread already in a lane (his or an earlier agent's) or one he took OUT is refused; the same lane is a no-op", () => {
+    const w = world([
+      rec("mine", { lane: "Tennis", laneProject: "lodestar", laneSetBy: "user" }),
+      rec("agents", { lane: "Tennis", laneProject: "lodestar", laneSetBy: "agent" }),
+      rec("out", { laneSetBy: "user" }),
+    ]);
+    try {
+      expect(() => lanes.performOp(`${w.root}/threads/mine`, { op: "lane", name: "Gamma model" }, NOW, w.env("mine"))).toThrow(
+        /already in the lane "Tennis" \(the user put it there\) — only the user moves a thread between lanes/
+      );
+      expect(() => lanes.performOp(`${w.root}/threads/agents`, { op: "lane", name: "Gamma model" }, NOW, w.env("agents"))).toThrow(/only the user moves/);
+      expect(lanes.performOp(`${w.root}/threads/mine`, { op: "lane", name: "tennis" }, NOW, w.env("mine"))).toBe('This thread is already in the lane "Tennis".');
+      expect(() => lanes.performOp(`${w.root}/threads/out`, { op: "lane", name: "Gamma model" }, NOW, w.env("out"))).toThrow(/the user took this thread out of its lane/);
+    } finally {
+      w.cleanup();
+    }
+  });
+
+  it("a thread with no registry project cannot join a lane; a bad name is a visible error", () => {
+    const w = world([rec("t1")]);
+    try {
+      expect(() => lanes.performOp(`${w.root}/threads/t1`, { op: "lane", name: "Gamma" }, NOW, w.env("t1", `${w.root}/repos/elsewhere`))).toThrow(
+        /in no registry project — a lane belongs to a project/
+      );
+      expect(() => lanes.performOp(`${w.root}/threads/t1`, { op: "lane", name: 'bad"name' }, NOW, w.env("t1"))).toThrow(/name must start with a letter/);
+      expect(() => lanes.performOp(`${w.root}/threads/t1`, { op: "lane", name: "x".repeat(49) }, NOW, w.env("t1"))).toThrow(/cap is 48/);
+      expect(() => lanes.performOp(`${w.root}/threads/t1`, { op: "lane" }, NOW, w.env("t1"))).toThrow(/name must be the lane name/);
+    } finally {
+      w.cleanup();
+    }
+  });
+
+  it("`read` in a lane appends the LANE: the newest brief (named by thread), the others' findings, the lane's reports, the others' OPEN questions", () => {
+    const w = world([
+      rec("t1", { ...gamma, title: "gamma · design review" }),
+      rec("t2", { ...gamma, title: "gamma · deck export", lastActivityAt: 5 }),
+      rec("t3", { ...gamma, title: "gamma · layer 0", archivedAt: 9 }),
+      rec("t4", { lane: "Tennis", laneProject: "lodestar", title: "tennis" }),
+    ]);
+    try {
+      w.write("t1", "page.json", {
+        theme: "design review",
+        brief: { goal: "my old narrow brief", established: [], dead: [], lead: [], waiting: [], updatedAt: AT(-48) },
+        findings: [{ id: "f1", claim: "MY OWN claim", verdict: "lead", updatedAt: AT(0) }],
+      });
+      w.write("t2", "page.json", {
+        brief: { goal: "The lane goal, newest.", established: ["0.58 of vendor"], dead: [], lead: ["debt vs Europe open"], waiting: [], updatedAt: AT(-2) },
+        findings: [{ id: "f1", claim: "Debt predicts the Europe open", verdict: "lead", n: "264 nights", report: "view:lodestar/deck", updatedAt: AT(-1) }],
+        questions: [
+          { id: "q1", text: "Which options are the book?", askedAt: AT(-3) },
+          { id: "q2", text: "Answered already?", askedAt: AT(-4) },
+          { id: "q3", text: "Dismissed?", askedAt: AT(-5) },
+          { id: "q4", text: "Resolved by the agent?", askedAt: AT(-6), answer: "moot", answeredAt: AT(-5) },
+        ],
+      });
+      w.write("t2", "answers.json", { q2: { text: "front", at: AT(-1) } });
+      w.write("t2", "retracted.json", { version: 1, evidence: [{ address: "question:q3", at: AT(-1) }] });
+      w.write("t3", "page.json", { findings: [{ id: "f1", claim: "Level effects are dead", verdict: "dead", updatedAt: AT(-30) }] });
+      w.write("t4", "page.json", { findings: [{ id: "f1", claim: "a TENNIS claim", verdict: "open", updatedAt: AT(0) }] });
+      fs.writeFileSync(
+        `${w.root}/repos/lodestar/.sb-views/_project/index.json`,
+        JSON.stringify({
+          version: 1,
+          views: [
+            { id: "deck", title: "Gamma model deck", kind: "report", builtAt: AT(-1), threadId: "t2" },
+            { id: "tennis-tape", title: "Tennis tape", kind: "report", builtAt: AT(0), threadId: "t4" },
+            { id: "orphan", title: "Book by strike", kind: "report", builtAt: AT(-10), threadId: "deleted", lane: "gamma MODEL" },
+            { id: "orphan2", title: "Other orphan", kind: "report", builtAt: AT(-10), threadId: "deleted2", lane: "Tennis" },
+          ],
+        })
+      );
+      const text = lanes.performReadOp(`${w.root}/threads/t1`, w.env("t1"));
+      expect(text.length).toBeLessThanOrEqual(lanes.READ_CAP);
+      // Its own page first, whole.
+      expect(text.startsWith("THEME: design review")).toBe(true);
+      expect(text).toContain("  Goal: my old narrow brief");
+      const lane = text.slice(text.indexOf("LANE: "));
+      expect(lane).toContain("LANE: Gamma model (project lodestar) — this thread and 2 others.");
+      expect(lane).toContain('other threads: "gamma · deck export", "gamma · layer 0" (archived)');
+      // Edge case 2: t1's OLDER brief is not the lane brief; t2's newer one is, named.
+      expect(lane).toContain(
+        `LANE BRIEF (the newest in the lane — thread "gamma · deck export", rewritten ${AT(-2)}; at your first seam rewrite it WHOLE with op brief, for the lane):`
+      );
+      expect(lane).toContain("  Goal: The lane goal, newest.");
+      expect(lane).toContain("    - debt vs Europe open");
+      expect(lane).toContain("LANE FINDINGS (2, from the other threads, newest first):");
+      expect(lane).toContain('  [lead] Debt predicts the Europe open | n: 264 nights | report: view:lodestar/deck — "gamma · deck export"');
+      expect(lane).toContain('  [dead] Level effects are dead — "gamma · layer 0"'); // archived is not gone
+      expect(lane).not.toContain("MY OWN claim"); // already in this page's own section
+      expect(lane).not.toContain("TENNIS");
+      expect(lane).toContain("LANE REPORTS (2,");
+      expect(lane).toContain("  view:lodestar/deck Gamma model deck");
+      expect(lane).toContain("  view:lodestar/orphan Book by strike"); // edge case 6: its thread is gone
+      expect(lane).not.toContain("tennis-tape");
+      expect(lane).not.toContain("orphan2");
+      expect(lane).toContain("OTHER THREADS' OPEN QUESTIONS (1 — answered on their own thread's page; do not re-ask them here):");
+      expect(lane).toContain('  "gamma · deck export" q1: Which options are the book?');
+      expect(lane).not.toMatch(/Answered already|Dismissed\?|Resolved by the agent/);
+      // The same read from t2: its OWN brief is the lane's.
+      expect(lanes.performReadOp(`${w.root}/threads/t2`, w.env("t2"))).toContain("LANE BRIEF: this page's brief (above) is the newest in the lane");
+      // Not in a lane, or no env: exactly the page.
+      expect(lanes.performReadOp(`${w.root}/threads/t1`, null)).not.toContain("LANE:");
+      expect(lanes.performOp(`${w.root}/threads/t1`, { op: "read" }, NOW, null)).toBe(lanes.performReadOp(`${w.root}/threads/t1`, null));
+      expect(lanes.performReadOp(`${w.root}/threads/t4`, w.env("t4"))).toContain("LANE: Tennis (project lodestar) — this thread and 0 others.");
+    } finally {
+      w.cleanup();
+    }
+  });
+
+  it("no brief anywhere in the lane: the read says to write the first one, for the whole lane", () => {
+    const w = world([rec("t1", gamma), rec("t2", gamma)]);
+    try {
+      const text = lanes.performReadOp(`${w.root}/threads/t1`, w.env("t1"));
+      expect(text).toContain("LANE BRIEF: none yet — no thread in the lane has written one. Write it (op brief) for the WHOLE lane at your first seam.");
+      expect(lanes.readLaneRollup(w.env("t1"))?.brief).toBeNull();
+      expect(lanes.readLaneRollup(w.env("nobody"))).toBeNull();
+    } finally {
+      w.cleanup();
+    }
+  });
+
+  it("the read stays inside READ_CAP with a page AND a lane at every cap — this page's brief byte-for-byte, the lane giving ground", () => {
+    const long = (tag: string, n: number) => `${tag} ${"wörd ".repeat(200)}`.slice(0, n).trim();
+    const fullBrief = (tag: string) => ({
+      goal: long(`${tag} goal`, 300),
+      established: Array.from({ length: 6 }, (_, i) => long(`${tag} est ${i}`, 200)),
+      dead: Array.from({ length: 6 }, (_, i) => long(`${tag} dead ${i}`, 200)),
+      lead: Array.from({ length: 6 }, (_, i) => long(`${tag} lead ${i}`, 200)),
+      waiting: Array.from({ length: 6 }, (_, i) => long(`${tag} wait ${i}`, 200)),
+    });
+    const siblings = Array.from({ length: 30 }, (_, i) => rec(`s${i}`, { ...gamma, title: long(`sibling ${i}`, 120), lastActivityAt: i }));
+    const w = world([rec("me", gamma), ...siblings]);
+    try {
+      let page = empty();
+      page = server.applyOp(page, { op: "theme", text: long("theme", 500) }, NOW).page;
+      page = server.applyOp(page, { op: "brief", ...fullBrief("mine") }, NOW).page;
+      for (let i = 0; i < lanes.QUESTION_CAP; i++) page = server.applyOp(page, { op: "ask", text: long(`question ${i}`, 500) }, NOW).page;
+      for (let i = 0; i < 60; i++) page = server.applyOp(page, { op: "item", itemOp: "add", title: long(`item ${i}`, 500) }, NOW).page;
+      for (let i = 0; i < lanes.TURN_CAP; i++) page = server.applyOp(page, { op: "turn", lines: [long(`turn ${i}`, 500)] }, NOW).page;
+      for (let i = 0; i < 60; i++) {
+        page = server.applyOp(page, { op: "finding", claim: long(`finding ${i}`, 240), verdict: "open", report: `docs/${"r".repeat(280)}.md` }, NOW + i).page;
+      }
+      w.write("me", "page.json", page);
+      for (const s of siblings) {
+        let p = server.applyOp(empty(), { op: "brief", ...fullBrief(s.id) }, NOW + 1000).page;
+        for (let i = 0; i < 20; i++) p = server.applyOp(p, { op: "ask", text: long(`${s.id} q ${i}`, 500) }, NOW).page;
+        for (let i = 0; i < 10; i++) p = server.applyOp(p, { op: "finding", claim: long(`${s.id} f ${i}`, 240), verdict: "lead" }, NOW + i).page;
+        w.write(s.id as string, "page.json", p);
+      }
+      const text = lanes.performReadOp(`${w.root}/threads/me`, w.env("me"));
+      expect(text.length).toBeLessThanOrEqual(lanes.READ_CAP);
+      const mine = fullBrief("mine");
+      expect(text).toContain(`  Goal: ${mine.goal}\n`);
+      expect(text).toContain(`  Established:\n${mine.established.map((l) => `    - ${l}`).join("\n")}\n`);
+      expect(text).toContain(`  Waiting on the user:\n${mine.waiting.map((l) => `    - ${l}`).join("\n")}\n`);
+      // Every lane header is still there, with its count.
+      for (const heading of [
+        "LANE: Gamma model (project lodestar) — this thread and 30 others.",
+        "LANE BRIEF (the newest in the lane",
+        "LANE FINDINGS (",
+        "LANE REPORTS (0,",
+        "OTHER THREADS' OPEN QUESTIONS (",
+      ]) {
+        expect(text).toContain(heading);
+      }
+      // Bounded: at most LANE_READ_THREADS threads are read (this one + 23 others).
+      expect(text).toContain("LANE FINDINGS (230,");
+    } finally {
+      w.cleanup();
+    }
+  });
+
+  it("a project report's index row carries the building thread's lane (so it outlives a deleted thread on its lane)", () => {
+    const w = world([rec("t1", gamma)]);
+    try {
+      const env = { cwd: `${w.root}/repos/lodestar`, threadId: "t1", registryPath: `${w.root}/kb/registry.json`, threadsJsonPath: `${w.root}/threads.json` };
+      lanes.performViewOp(`${w.root}/threads/t1`, { op: "show", kind: "report", title: "deck", source: { type: "file", path: "a.md" } }, NOW, env);
+      const index = JSON.parse(fs.readFileSync(`${w.root}/repos/lodestar/.sb-views/_project/index.json`, "utf8"));
+      expect(index.views[0]).toMatchObject({ id: "v1", threadId: "t1", lane: "Gamma model" });
+      // No threads file handed over → no lane key (the pre-lanes row).
+      const bare = { cwd: env.cwd, threadId: "t1", registryPath: env.registryPath };
+      lanes.performViewOp(`${w.root}/threads/t1`, { op: "show", kind: "report", title: "deck 2", source: { type: "file", path: "a.md" } }, NOW, bare);
+      const again = JSON.parse(fs.readFileSync(`${w.root}/repos/lodestar/.sb-views/_project/index.json`, "utf8"));
+      expect("lane" in again.views[0]).toBe(false);
+    } finally {
+      w.cleanup();
+    }
   });
 });

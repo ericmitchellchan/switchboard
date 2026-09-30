@@ -16,7 +16,10 @@
 // never of backlog.json, which the app alone rewrites after draining the
 // inbox (the app writes answers.json / inbox.json / retracted.json — this
 // process only READS answers.json and, since SWIT-105, retracted.json's
-// `question:<id>` dismissals; the rendered page is
+// `question:<id>` dismissals — and, since SWIT-108, for `page read` in a
+// lane thread, threads.json plus the lane's other threads' page / answers /
+// retracted files and the project's report index, all READ-only; the
+// rendered page is
 // a merge — see src/lib/pageStore.ts, whose parser this file's shapes MUST
 // round-trip through; the vitest suite asserts exactly that). Thread identity
 // arrives by ENV (SWITCHBOARD_THREAD_DIR), so tools carry no thread-id param
@@ -99,6 +102,15 @@ const FINDING_REPORT_CAP = 300; // an address, like reviewFirst / show
 /** The retired evidence form an older thread used for a finding — still
  *  rendered, never written again (op finding is the way). */
 const FINDING_ADDRESS_PREFIX = "finding:";
+/** SWIT-108: LANES — a named body of work inside one registry project. The
+ *  name rule mirrors src/lib/lanes.ts (LANE_NAME_MAX / LANE_NAME_RE) — change
+ *  one, change the other. The charset avoids everything the typed-line
+ *  sanitizer strips, because the name rides on the launch line. */
+const LANE_NAME_CAP = 48;
+const LANE_NAME_RE = /^[\p{L}\p{N}][\p{L}\p{N} _.,&+'()\/:#-]*$/u;
+/** `page read`'s lane roll-up reads at most this many of the lane's threads
+ *  (this one + the most recently active others) — bounded work per read. */
+const LANE_READ_THREADS = 24;
 
 // ── Pure core ────────────────────────────────────────────────────────────────
 
@@ -130,7 +142,39 @@ function parsePage(raw) {
   // SWIT-106: the findings ledger, the same way — present only while it
   // holds something.
   if (Array.isArray(data.findings) && data.findings.length > 0) page.findings = data.findings;
+  // SWIT-108: the lane the agent asked for (op lane) — carried the same way.
+  if (typeof data.lane === "string" && data.lane.length > 0) page.lane = data.lane;
   return page;
+}
+
+/** SWIT-108: THE LANE NAME RULE (lanes.normalizeLaneName's mirror): NFC,
+ *  whitespace folded, trimmed, 1..LANE_NAME_CAP code points, the charset.
+ *  Throws a visible OpError. Pure. */
+function normalizeLaneName(raw) {
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    throw new OpError('name must be the lane name — a few words, e.g. "Gamma model"');
+  }
+  const name = raw.normalize("NFC").replace(/\s+/g, " ").trim();
+  if (Array.from(name).length > LANE_NAME_CAP) {
+    throw new OpError(`name is too long (the cap is ${LANE_NAME_CAP} characters) — a lane name is a few words`);
+  }
+  if (!LANE_NAME_RE.test(name)) {
+    throw new OpError("name must start with a letter or digit and hold letters, digits, spaces and - _ . , & + ' ( ) / : # only");
+  }
+  return name;
+}
+
+/** Two spellings that differ only in case or spacing are one lane. */
+function laneNameKey(name) {
+  return String(name).normalize("NFC").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/** A thread record's lane (threads.json, the APP's file — read-only here):
+ *  {name, project, setBy}, or null. Both fields must be there. */
+function recordLane(t) {
+  return t && typeof t.lane === "string" && t.lane.length > 0 && typeof t.laneProject === "string" && t.laneProject.length > 0
+    ? { name: t.lane, project: t.laneProject, setBy: t.laneSetBy === "agent" ? "agent" : "user" }
+    : null;
 }
 
 class OpError extends Error {}
@@ -247,7 +291,7 @@ function nextId(list, prefix) {
  *  answers.json — READ-only, so one-writer-per-file holds), so the question
  *  cap counts OPEN questions rather than every question ever asked (review:
  *  a lifetime cap would refuse forever with advice that cannot unblock it). */
-function applyOp(page, args, now, answeredIds = new Set(), dismissedIds = new Set()) {
+function applyOp(page, args, now, answeredIds = new Set(), dismissedIds = new Set(), laneCtx = null) {
   const at = new Date(now).toISOString();
   const op = args && args.op;
   // SWIT-77: a question is SETTLED by the user's answer (answers.json, the
@@ -641,6 +685,37 @@ function applyOp(page, args, now, answeredIds = new Set(), dismissedIds = new Se
         message: `Finding ${row.id} recorded (${verdict}) in the page's Findings ledger. Update it by id as the verdict moves; never file it twice.`,
       };
     }
+    case "lane": {
+      // SWIT-108 — THE AGENT'S ROUTE INTO A LANE. It writes `page.lane` (this
+      // server's file); the APP copies it onto the thread record only when
+      // the record has no lane (src/lib/lanes.ts laneFromPage — Eric's choice
+      // wins). `laneCtx` is what threads.json (the app's file, read-only
+      // here) and the registry say: the lane the thread is already in and
+      // who set it, whether the user took it out of one, and whether its
+      // folder belongs to a registry project (null = no registry to ask).
+      const name = normalizeLaneName(args.name);
+      const ctx = laneCtx || {};
+      if (ctx.current) {
+        if (laneNameKey(ctx.current.name) === laneNameKey(name)) {
+          return { page, message: `This thread is already in the lane "${ctx.current.name}".` };
+        }
+        throw new OpError(
+          `this thread is already in the lane "${ctx.current.name}"${ctx.current.setBy === "user" ? " (the user put it there)" : ""} — only the user moves a thread between lanes; ask them if it belongs elsewhere`
+        );
+      }
+      if (ctx.userCleared) {
+        throw new OpError("the user took this thread out of its lane — only the user puts it in one again; ask them");
+      }
+      if (ctx.projectKnown === false) {
+        throw new OpError("this thread's working directory is in no registry project — a lane belongs to a project, so this thread cannot join one");
+      }
+      return {
+        page: { ...page, lane: name },
+        message:
+          `Lane recorded — this thread joins the lane "${name}" of its project within a few seconds (Switchboard puts it there; a lane the user chose always wins). ` +
+          "From then on op read returns the lane's roll-up too — its brief, findings, newest reports and the other threads' open questions — and your brief is the LANE's brief: write it for the whole lane.",
+      };
+    }
     case "show":
       // SWIT-102: `show` writes shows.json, never page.json — performOp routes
       // it to performShowOp before this function is reached.
@@ -650,7 +725,7 @@ function applyOp(page, args, now, answeredIds = new Set(), dismissedIds = new Se
       // performReadOp before this function is reached.
       throw new OpError("read does not write the page — it returns it (performReadOp)");
     default:
-      throw new OpError('op must be one of "theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "brief", "finding", "show", "read"');
+      throw new OpError('op must be one of "theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "brief", "finding", "lane", "show", "read"');
   }
 }
 
@@ -823,16 +898,270 @@ function renderPageRead(page, answers, dismissedIds, lim) {
  *  entry is guarded here); `answers` = answers.json and (SWIT-105)
  *  `retracted` = retracted.json, both as parsed JSON (the app's files,
  *  READ-only). Pure. Always ≤ READ_CAP characters. */
-function formatPageRead(page, answers, retracted) {
+function formatPageRead(page, answers, retracted, lane = null) {
   const known = typeof answers === "object" && answers !== null && !Array.isArray(answers) ? answers : {};
   const dismissedIds = dismissedQuestionIds(page, retracted);
+  if (!lane) return fitPageRead(page, known, dismissedIds, READ_CAP);
+  // SWIT-108: a thread in a LANE reads the lane too — AFTER its own page,
+  // inside the same READ_CAP. The lane's floor (headers + counts) is
+  // reserved first, so this page keeps its level rules and its brief is
+  // never clipped; the lane then takes what room is left, at the roomiest of
+  // its own levels that fits.
+  const floor = renderLaneRead(lane, LANE_READ_LEVELS[LANE_READ_LEVELS.length - 1]);
+  const own = fitPageRead(page, known, dismissedIds, READ_CAP - floor.length - 2);
+  const room = READ_CAP - own.length - 2;
+  for (const lim of LANE_READ_LEVELS) {
+    const text = renderLaneRead(lane, lim);
+    if (text.length <= room) return `${own}\n\n${text}`;
+  }
+  return `${own}\n\n${floor.slice(0, Math.max(0, room))}`;
+}
+
+/** The page alone, at the first level that fits `cap`. */
+function fitPageRead(page, known, dismissedIds, cap) {
   let text = "";
   for (const lim of READ_LEVELS) {
     text = renderPageRead(page, known, dismissedIds, lim);
-    if (text.length <= READ_CAP) return text;
+    if (text.length <= cap) return text;
   }
   const cut = "\n… (cut — the page holds more)";
-  return text.slice(0, READ_CAP - cut.length) + cut;
+  return text.slice(0, cap - cut.length) + cut;
+}
+
+// ── The lane roll-up in `read` (SWIT-108) ────────────────────────────────────
+// A thread in a lane starts from what the lane already knows (requirements
+// §4.2): `read` appends the LANE — the lane's brief (the NEWEST brief among
+// its threads, and which thread wrote it), the other threads' findings, the
+// project reports built in the lane and the other threads' open questions.
+// Everything is READ-only: threads.json (the app's), each sibling's
+// page.json / answers.json / retracted.json and the project's report index.
+// Bounded: at most LANE_READ_THREADS threads, and the text gives ground
+// level by level inside what the page left of READ_CAP.
+
+const LANE_READ_LEVELS = [
+  { brief: Infinity, briefLines: BRIEF_LINES_CAP, findings: 20, reports: 10, questions: 12, threads: 12, clip: 200 },
+  { brief: 160, briefLines: BRIEF_LINES_CAP, findings: 12, reports: 6, questions: 8, threads: 8, clip: 140 },
+  { brief: 100, briefLines: 2, findings: 6, reports: 4, questions: 4, threads: 5, clip: 90 },
+  { brief: 60, briefLines: 1, findings: 3, reports: 2, questions: 2, threads: 3, clip: 60 },
+  // The floor: every header and its count; no rows, no brief text.
+  { brief: 0, briefLines: 0, findings: 0, reports: 0, questions: 0, threads: 0, clip: 50 },
+];
+
+function renderLaneRead(lane, lim) {
+  const out = [];
+  const title = (t) => `"${clipLine(t || "untitled", 60)}"`;
+  const more = (total, shown) => {
+    if (total > shown) out.push(`  (+ ${total - shown} more — the lane page lists them)`);
+  };
+  const others = lane.threads.filter((t) => !t.self);
+  out.push(
+    `LANE: ${lane.name} (project ${lane.project}) — this thread and ${others.length} other${others.length === 1 ? "" : "s"}. Read it before asking the user for context; it is what the lane already knows.`
+  );
+  if (lim.threads > 0 && others.length > 0) {
+    out.push(
+      `  other threads: ${others
+        .slice(0, lim.threads)
+        .map((t) => `${title(t.title)}${t.archived ? " (archived)" : ""}`)
+        .join(", ")}${others.length > lim.threads ? `, + ${others.length - lim.threads} more` : ""}`
+    );
+  }
+  out.push("");
+  const b = lane.brief;
+  if (!b) {
+    out.push("LANE BRIEF: none yet — no thread in the lane has written one. Write it (op brief) for the WHOLE lane at your first seam.");
+  } else if (b.self) {
+    out.push("LANE BRIEF: this page's brief (above) is the newest in the lane, so it IS the lane's brief — keep it written for the whole lane.");
+  } else {
+    out.push(
+      `LANE BRIEF (the newest in the lane — thread ${title(b.threadTitle)}${b.brief.updatedAt ? `, rewritten ${b.brief.updatedAt}` : ""}; at your first seam rewrite it WHOLE with op brief, for the lane):`
+    );
+    if (lim.brief === 0) {
+      out.push("  (cut — the room went to this page; the lane page shows it)");
+    } else {
+      const line = (v) => (lim.brief === Infinity ? String(v).replace(/[\r\n]+/g, " ").trim() : clipLine(v, lim.brief));
+      if (typeof b.brief.goal === "string" && b.brief.goal.trim().length > 0) out.push(`  Goal: ${line(b.brief.goal)}`);
+      for (const f of BRIEF_LISTS) {
+        const lines = Array.isArray(b.brief[f]) ? b.brief[f].filter((l) => typeof l === "string" && l.trim().length > 0) : [];
+        if (lines.length === 0) continue;
+        out.push(`  ${BRIEF_READ_LABELS[f]}:`);
+        for (const l of lines.slice(0, lim.briefLines)) out.push(`    - ${line(l)}`);
+        if (lines.length > lim.briefLines) out.push(`    (+ ${lines.length - lim.briefLines} more)`);
+      }
+    }
+  }
+
+  out.push("");
+  out.push(`LANE FINDINGS (${lane.findings.length}, from the other threads, newest first):`);
+  for (const f of lane.findings.slice(0, lim.findings)) {
+    const tail =
+      (typeof f.finding.n === "string" && f.finding.n.length > 0 ? ` | n: ${clipLine(f.finding.n, FINDING_N_CAP)}` : "") +
+      (typeof f.finding.report === "string" && f.finding.report.length > 0 ? ` | report: ${clipLine(f.finding.report, lim.clip)}` : "");
+    out.push(`  [${f.finding.verdict}] ${clipLine(f.finding.claim, lim.clip)}${tail} — ${title(f.threadTitle)}`);
+  }
+  more(lane.findings.length, lim.findings);
+  if (lane.findings.length === 0) out.push("  (none)");
+
+  out.push("");
+  if (lane.reports === null) {
+    out.push("LANE REPORTS: not listed — the project registry could not be read from here.");
+  } else {
+    out.push(`LANE REPORTS (${lane.reports.length}, the project's reports built in this lane, newest first — op show opens one):`);
+    for (const r of lane.reports.slice(0, lim.reports)) {
+      out.push(`  ${projectViewAddress(lane.project, r.id)} ${clipLine(r.title || r.id, lim.clip)}${typeof r.builtAt === "string" && r.builtAt ? ` (built ${r.builtAt})` : ""}`);
+    }
+    more(lane.reports.length, lim.reports);
+    if (lane.reports.length === 0) out.push("  (none)");
+  }
+
+  out.push("");
+  out.push(`OTHER THREADS' OPEN QUESTIONS (${lane.questions.length} — answered on their own thread's page; do not re-ask them here):`);
+  for (const q of lane.questions.slice(0, lim.questions)) {
+    out.push(`  ${title(q.threadTitle)} ${q.id}: ${clipLine(q.text, lim.clip)}`);
+  }
+  more(lane.questions.length, lim.questions);
+  if (lane.questions.length === 0) out.push("  (none)");
+  return out.join("\n");
+}
+
+/** THE LANE ROLL-UP for `read`, or null when this thread is in no lane (or
+ *  the app's files are not handed over). `env` = {threadsJsonPath,
+ *  threadsRoot, selfThreadId, registryPath}. Never throws — a lane that
+ *  cannot be read is simply not appended. */
+function readLaneRollup(env) {
+  try {
+    if (!env || !env.threadsJsonPath || !env.threadsRoot || !env.selfThreadId) return null;
+    const threads = readThreadsFile(env.threadsJsonPath);
+    const self = threads.find((t) => t && t.id === env.selfThreadId);
+    const lane = self ? recordLane(self) : null;
+    if (!lane) return null;
+    const key = laneNameKey(lane.name);
+    const allIds = new Set(threads.filter((t) => t && typeof t.id === "string").map((t) => t.id));
+    const members = threads.filter((t) => {
+      const l = recordLane(t);
+      return l !== null && l.project === lane.project && laneNameKey(l.name) === key;
+    });
+    const memberIds = new Set(members.map((t) => t.id));
+    const others = members
+      .filter((t) => t.id !== self.id)
+      .sort((a, b) => (Number(b.lastActivityAt) || 0) - (Number(a.lastActivityAt) || 0))
+      .slice(0, LANE_READ_THREADS - 1);
+    const read = [self, ...others]
+      .filter((t) => typeof t.id === "string" && /^[A-Za-z0-9-]{1,64}$/.test(t.id))
+      .map((t) => {
+        const dir = path.join(env.threadsRoot, t.id);
+        let raw = "";
+        try {
+          raw = fs.readFileSync(pagePathFor(dir), "utf-8");
+        } catch {
+          // no page yet
+        }
+        return {
+          thread: t,
+          page: parsePage(raw),
+          answers: readAppJson(dir, "answers.json", {}),
+          retracted: readAppJson(dir, "retracted.json", null),
+        };
+      });
+    const validBrief = (x) =>
+      x && typeof x === "object" && ((typeof x.goal === "string" && x.goal.trim().length > 0) || BRIEF_LISTS.some((f) => Array.isArray(x[f]) && x[f].length > 0));
+    const ms = (s) => {
+      const t = Date.parse(s);
+      return Number.isFinite(t) ? t : -Infinity;
+    };
+    // THE LANE BRIEF: the newest brief among the lane's threads, by the
+    // brief's own stamp — a thread that joins with an OLDER brief never
+    // replaces a newer lane brief (requirements, edge case 2).
+    let brief = null;
+    for (const r of read) {
+      if (!validBrief(r.page.brief)) continue;
+      if (brief === null || ms(r.page.brief.updatedAt) > ms(brief.brief.updatedAt)) {
+        brief = { brief: r.page.brief, threadTitle: r.thread.title, self: r.thread.id === self.id };
+      }
+    }
+    const siblings = read.filter((r) => r.thread.id !== self.id);
+    const findings = newestFirstBy(
+      siblings.flatMap((r) =>
+        (Array.isArray(r.page.findings) ? r.page.findings : [])
+          .filter((f) => f && typeof f.claim === "string" && FINDING_VERDICTS.includes(f.verdict))
+          .map((finding) => ({ finding, threadTitle: r.thread.title }))
+      ),
+      (x) => x.finding.updatedAt
+    );
+    const questions = newestFirstBy(
+      siblings.flatMap((r) => {
+        const answers = typeof r.answers === "object" && r.answers !== null && !Array.isArray(r.answers) ? r.answers : {};
+        const dismissed = dismissedQuestionIds(r.page, r.retracted);
+        return r.page.questions
+          .filter(
+            (q) =>
+              q &&
+              typeof q.id === "string" &&
+              typeof q.text === "string" &&
+              !(q.id in answers) &&
+              !(typeof q.answeredAt === "string" && q.answeredAt.length > 0) &&
+              !dismissed.has(q.id)
+          )
+          .map((q) => ({ id: q.id, text: q.text, askedAt: q.askedAt, threadTitle: r.thread.title }));
+      }),
+      (q) => q.askedAt
+    );
+    // The project's reports built in the lane: by the index row's thread
+    // (a thread that moved lanes takes its reports along), plus a report
+    // whose thread no longer exists but was stamped with this lane.
+    let reports = null;
+    const projects = readRegistryProjects(env.registryPath);
+    if (projects) {
+      const project = projects.find((p) => p.key === lane.project);
+      const seen = new Set();
+      const rows = [];
+      for (const repo of project ? project.repos : []) {
+        for (const v of readProjectIndex(repo)) {
+          if (seen.has(v.id)) continue;
+          const tid = typeof v.threadId === "string" ? v.threadId : "";
+          const inLane = memberIds.has(tid) || (!allIds.has(tid) && typeof v.lane === "string" && laneNameKey(v.lane) === key);
+          if (!inLane) continue;
+          seen.add(v.id);
+          rows.push({ id: v.id, title: typeof v.title === "string" ? v.title : v.id, builtAt: typeof v.builtAt === "string" ? v.builtAt : "" });
+        }
+      }
+      reports = newestFirstBy(rows, (r) => r.builtAt);
+    }
+    return {
+      name: lane.name,
+      project: lane.project,
+      threads: members.map((t) => ({ title: t.title, self: t.id === self.id, archived: typeof t.archivedAt === "number" && t.archivedAt > 0 })),
+      brief,
+      findings,
+      reports,
+      questions,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** The lane the calling thread is in, by name — stamped on a project report's
+ *  index row so a report whose thread is later deleted stays on its lane
+ *  (requirements, edge case 6). Null = none / unreadable. */
+function selfLaneName(threadsJsonPath, selfThreadId) {
+  if (!threadsJsonPath || !selfThreadId) return null;
+  const self = readThreadsFile(threadsJsonPath).find((t) => t && t.id === selfThreadId);
+  const lane = self ? recordLane(self) : null;
+  return lane ? lane.name : null;
+}
+
+/** What the `lane` op needs to know (SWIT-108): the thread's current lane and
+ *  who set it, whether the user took it out of one, and whether its folder
+ *  is in a registry project (null = no registry to ask). READ-only. */
+function laneContextFor(env) {
+  const threads = env && env.threadsJsonPath ? readThreadsFile(env.threadsJsonPath) : [];
+  const self = env && env.selfThreadId ? threads.find((t) => t && t.id === env.selfThreadId) : undefined;
+  const current = self ? recordLane(self) : null;
+  const userCleared = !!self && current === null && self.laneSetBy === "user";
+  const projects = env ? readRegistryProjects(env.registryPath) : null;
+  const dir = self && typeof self.workingDir === "string" && self.workingDir.length > 0 ? self.workingDir : env && env.cwd;
+  const projectKnown = projects ? projectPlaceFor(projects, dir) !== null : null;
+  return { current, userCleared, projectKnown };
 }
 
 /** One of the app's files beside page.json, as parsed JSON — READ-only (the
@@ -846,8 +1175,11 @@ function readAppJson(threadDir, name, fallback) {
 }
 
 /** `page` op `read` — reads page.json + answers.json + retracted.json,
- *  writes nothing. */
-function performReadOp(threadDir) {
+ *  writes nothing. SWIT-108: with `env` (the app's files, handed over by the
+ *  server's own env — never read from process.env here, so a test is never
+ *  touched by the machine it runs on) a thread in a lane gets the lane's
+ *  roll-up appended. */
+function performReadOp(threadDir, env = null) {
   let raw = "";
   try {
     raw = fs.readFileSync(pagePathFor(threadDir), "utf-8");
@@ -857,7 +1189,8 @@ function performReadOp(threadDir) {
   return formatPageRead(
     parsePage(raw),
     readAppJson(threadDir, "answers.json", {}),
-    readAppJson(threadDir, "retracted.json", null)
+    readAppJson(threadDir, "retracted.json", null),
+    readLaneRollup(env)
   );
 }
 
@@ -1746,7 +2079,10 @@ function performViewOp(threadDir, args, now, env) {
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(spec, null, 2));
   fs.renameSync(tmp, file);
-  if (scope === "project") writeProjectView(place, spec);
+  // SWIT-108: the index row carries the lane this thread is in NOW, so a
+  // report whose thread is later deleted stays listed on its lane. Only the
+  // env the caller handed over is read (the real server passes its own).
+  if (scope === "project") writeProjectView(place, spec, env ? selfLaneName(env.threadsJsonPath, threadId) : null);
   const owned =
     scope === "project"
       ? ` The PROJECT ${place.key} owns it (${projectViewAddress(place.key, spec.id)} — the address for page evidence, a finding's report or page show), so it outlives this thread and is listed under ${place.key} › reports in the knowledge base.`
@@ -1903,12 +2239,15 @@ function writeJsonAtomic(file, value) {
   fs.renameSync(tmp, file);
 }
 
-/** Write the PROJECT copy + its index entry (newest first, one per id). */
-function writeProjectView(place, spec) {
+/** Write the PROJECT copy + its index entry (newest first, one per id).
+ *  SWIT-108: `lane` = the building thread's lane (or null) — the row keeps it
+ *  so a report outlives a deleted thread ON its lane. */
+function writeProjectView(place, spec, lane = null) {
   const dir = projectViewsDir(place.repoRoot);
   fs.mkdirSync(dir, { recursive: true });
   writeJsonAtomic(path.join(dir, `${spec.id}.json`), spec);
   const entry = { id: spec.id, title: spec.title, kind: spec.kind, builtAt: spec.builtAt, threadId: spec.threadId };
+  if (typeof lane === "string" && lane.length > 0) entry.lane = lane;
   const views = [entry, ...readProjectIndex(place.repoRoot).filter((v) => v.id !== spec.id)].slice(0, PROJECT_VIEW_INDEX_CAP);
   writeJsonAtomic(path.join(dir, "index.json"), { version: 1, views });
 }
@@ -2616,18 +2955,32 @@ const PAGE_TOOL = {
     "and opens like an evidence row. Pass the finding's id (the result gives it) to UPDATE it " +
     "in place as the verdict moves — never file the same claim twice; fields you omit are " +
     "kept, n or report \"\" clears one; findingOp drop {id} removes one that was never right. " +
-    "At most 60 per page. A finding is never an evidence row (finding:<id> is refused).",
+    "At most 60 per page. A finding is never an evidence row (finding:<id> is refused). " +
+    "LANES: a lane is a named body of work inside this thread's project (e.g. \"Gamma model\"); " +
+    "its brief is the newest brief any of its threads wrote, and its findings, reports and " +
+    "decisions are what its threads recorded. op lane {name} puts THIS thread in a lane when it " +
+    "has none — use an existing lane's name when the work belongs to it (≤ 48 chars: letters, " +
+    "digits, spaces, - _ . , & + ' ( ) / : #); it is refused when the thread already has a lane " +
+    "(only the user moves a thread between lanes), when the user took it out of one, or when its " +
+    "folder is in no registry project. In a lane, op read also returns the lane — its brief, the " +
+    "other threads' findings, the project reports built in the lane and the other threads' open " +
+    "questions — and YOUR brief is the lane's brief: rewrite it WHOLE for the whole lane, never " +
+    "for your corner of it.",
   inputSchema: {
     type: "object",
     properties: {
       op: {
         type: "string",
-        enum: ["theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "brief", "finding", "show", "read"],
+        enum: ["theme", "turn", "evidence", "drop_evidence", "ask", "resolve", "item", "brief", "finding", "lane", "show", "read"],
         description: "Which page operation to perform.",
       },
       claim: {
         type: "string",
         description: "finding: ONE sentence (≤ 240 chars) saying what was found.",
+      },
+      name: {
+        type: "string",
+        description: "lane: the lane's name (≤ 48 chars) — an existing lane of this project when the work belongs to it.",
       },
       verdict: {
         type: "string",
@@ -2742,11 +3095,11 @@ function pagePathFor(threadDir) {
 /** Read-modify-write, atomic (tmp + rename): this process is page.json's only
  *  writer, so the read is always our own last write; the atomicity protects
  *  the APP's concurrent 2.5s reads from a torn file. */
-function performOp(threadDir, args, now) {
+function performOp(threadDir, args, now, env = null) {
   // SWIT-102: `show` is the one page op that does not touch page.json.
   if (args && args.op === "show") return performShowOp(threadDir, args, now).message;
   // SWIT-104: `read` writes nothing at all — it returns the page as text.
-  if (args && args.op === "read") return performReadOp(threadDir);
+  if (args && args.op === "read") return performReadOp(threadDir, env);
   const file = pagePathFor(threadDir);
   let raw = "";
   try {
@@ -2766,7 +3119,10 @@ function performOp(threadDir, args, now) {
   // retracted.json): off the page, so not counted against the ask cap.
   const current = parsePage(raw);
   const dismissedIds = dismissedQuestionIds(current, readAppJson(threadDir, "retracted.json", null));
-  const { page, message } = applyOp(current, args, now, answeredIds, dismissedIds);
+  // SWIT-108: `lane` needs what the app's threads.json and the registry say
+  // (read-only) — the thread's current lane, and whether it has a project.
+  const laneCtx = args && args.op === "lane" ? laneContextFor(env) : null;
+  const { page, message } = applyOp(current, args, now, answeredIds, dismissedIds, laneCtx);
   fs.mkdirSync(threadDir, { recursive: true });
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(page, null, 2));
@@ -2847,6 +3203,7 @@ function serve(threadDir) {
                   cwd: process.cwd(),
                   threadId: process.env.SWITCHBOARD_THREAD_ID || "",
                   registryPath: process.env.SWITCHBOARD_REGISTRY,
+                  threadsJsonPath: process.env.SWITCHBOARD_THREADS_JSON,
                 }).message
               : name === "backlog"
                 ? performBacklogOp(
@@ -2876,7 +3233,13 @@ function serve(threadDir) {
                     args,
                     Date.now()
                   ).message
-                : performOp(threadDir, args, Date.now());
+                : performOp(threadDir, args, Date.now(), {
+                    threadsRoot: process.env.SWITCHBOARD_THREADS_ROOT,
+                    threadsJsonPath: process.env.SWITCHBOARD_THREADS_JSON,
+                    selfThreadId: process.env.SWITCHBOARD_THREAD_ID,
+                    registryPath: process.env.SWITCHBOARD_REGISTRY,
+                    cwd: process.cwd(),
+                  });
           respond({
             jsonrpc: "2.0",
             id,
@@ -2937,6 +3300,11 @@ module.exports = {
   performOp,
   formatPageRead,
   performReadOp,
+  readLaneRollup,
+  normalizeLaneName,
+  laneNameKey,
+  LANE_NAME_CAP,
+  LANE_READ_THREADS,
   trimOption,
   dismissedQuestionIds,
   OPTION_CAP,

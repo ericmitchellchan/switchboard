@@ -97,6 +97,10 @@ export interface SavedWorkspace {
    *  writes an entry but the user's toggle since v7 — the surface auto-write
    *  is gone, and a ≤v6 blob's `"left"` entries are dropped on load. */
   panelSides?: Record<string, "left" | "right">;
+  /** SWIT-108: the ARCHIVED lanes (the only lane state that is not a thread
+   *  field). Optional and additive — an older blob has none, an older reader
+   *  ignores it; no version bump. Disk (threads.json) wins like the threads. */
+  lanes?: LaneRecord[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -110,7 +114,7 @@ export interface SavedWorkspace {
 /** Every screen the workstation shell can show. "home" is the default route
  *  (SWIT-45 — the roll-up screen); "terminal" is the classic Switchboard
  *  workspace, where threads live. */
-export type ScreenId = "home" | "terminal" | "kb" | "explorer" | "threads" | "project";
+export type ScreenId = "home" | "terminal" | "kb" | "explorer" | "threads" | "project" | "lane";
 
 /** Discriminated route union keyed on `screen`. Param-carrying screens extend
  *  their variant inline (params are optional deep-link state, not identity —
@@ -140,7 +144,11 @@ export type Route =
   // SWIT-107: a PROJECT VIEW full width — the "open full" of a report the
   // project owns (`?screen=project&project=lodestar&view=v3`). Same screen,
   // the other identity: a view instead of a page. Exactly one of the two.
-  | { screen: "project"; project: string; view: string; page?: undefined; params?: undefined };
+  | { screen: "project"; project: string; view: string; page?: undefined; params?: undefined }
+  // SWIT-108: a LANE's page — a body of work inside one project
+  // (`?screen=lane&project=lodestar&lane=Gamma%20model`). Both params are
+  // identity; a half-specified lane route falls back to Home.
+  | { screen: "lane"; project: string; lane: string };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Threads (T5) — an agent session that survives app/machine restarts.
@@ -314,4 +322,32 @@ export interface Thread {
    *  This field was in T5's first draft and was cut in review as dead
    *  speculative surface. That was right then; it has behaviour now. */
   archivedAt?: number;
+  /** ★ LANE (SWIT-108) — the body of work this thread belongs to, by NAME
+   *  (unique, case-insensitively, within its project). ABSENT while the
+   *  thread is in no lane, like `archivedAt`. Always paired with
+   *  `laneProject`; `lib/lanes.ts` owns the name rule. */
+  lane?: string;
+  /** The registry project key the lane belongs to — resolved from the
+   *  thread's working directory WHEN the lane was set and recorded here, so
+   *  a lane's identity (project + name) needs no registry read to find its
+   *  threads (the MCP server's `page read` roll-up included). */
+  laneProject?: string;
+  /** WHO set the lane (SWIT-108, "Eric's choice wins"): `user` from the
+   *  row's `lane…`, `agent` from the page tool's `lane` op (copied by the
+   *  app only onto a thread with no lane). ALSO present without `lane` —
+   *  `user` only — when the user took the thread OUT of its lane, so the
+   *  agent's page cannot put it back. */
+  laneSetBy?: "user" | "agent";
+}
+
+/** A lane's own state that is not a fact about any one thread (SWIT-108):
+ *  only its ARCHIVE. A lane is otherwise a roll-up of its threads — it
+ *  appears when its first thread joins and goes when the last one leaves —
+ *  so a record exists only while the lane is archived. Persisted beside the
+ *  threads (threads.json's `lanes` + the workspace blob), one writer: the
+ *  app. */
+export interface LaneRecord {
+  project: string;
+  name: string;
+  archivedAt: number;
 }

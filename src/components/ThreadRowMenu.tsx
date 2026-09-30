@@ -31,7 +31,8 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { createPortal } from "react-dom";
 import type { CSSProperties, FocusEvent } from "react";
 import type { Thread } from "../types";
-import { getThreadActions, isThreadArchived, noteTitleEditor, renameEditorHoldsFocus } from "../lib/threadStore";
+import { getThreadActions, getThreads, isThreadArchived, noteTitleEditor, renameEditorHoldsFocus } from "../lib/threadStore";
+import { normalizeLaneName, projectLaneNames, suggestLaneNames, sameLaneName } from "../lib/lanes";
 import { Icon, type IconName } from "./icons";
 
 export type ThreadMenuItem = {
@@ -40,6 +41,9 @@ export type ThreadMenuItem = {
   icon: IconName;
   /** Delete only: red text, and it sits last behind a separator. */
   destructive?: boolean;
+  /** SWIT-108: shown but not choosable (faint); `hint` says why in its title. */
+  disabled?: boolean;
+  hint?: string;
   onSelect: () => void;
 };
 
@@ -67,9 +71,26 @@ export function threadMenuItems(args: {
   onRename: () => void;
   /** Lead with `open`/`revive` (default). The rail passes false. */
   openVerb?: boolean;
+  /** SWIT-108: start this surface's inline `lane…` edit. `laneBlocked` =
+   *  why the thread cannot join a lane (no registry project), or null. */
+  onLane?: () => void;
+  laneBlocked?: string | null;
 }): ThreadMenuItem[] {
-  const { thread, live, onRename, openVerb = true } = args;
+  const { thread, live, onRename, openVerb = true, onLane, laneBlocked = null } = args;
   const actions = getThreadActions();
+  // SWIT-108 (requirement 1.3): `lane…` on live, dead AND archived rows alike
+  // — setting up a lane means gathering its old threads, archived ones too.
+  const lane: ThreadMenuItem[] = onLane
+    ? [
+        {
+          label: thread.lane ? `lane: ${thread.lane}…` : "lane…",
+          icon: "folder",
+          disabled: laneBlocked !== null,
+          hint: laneBlocked ?? "Put this thread in a lane of its project, or move it out",
+          onSelect: onLane,
+        },
+      ]
+    : [];
   const del: ThreadMenuItem = {
     label: "delete…",
     icon: "trash",
@@ -83,6 +104,7 @@ export function threadMenuItems(args: {
         icon: "unarchive",
         onSelect: () => actions?.setThreadArchived(thread.id, false),
       },
+      ...lane,
       del,
     ];
   }
@@ -95,6 +117,7 @@ export function threadMenuItems(args: {
   return [
     ...(openVerb ? [open] : []),
     { label: "rename", icon: "rename", onSelect: onRename },
+    ...lane,
     {
       label: "archive",
       icon: "archive",
@@ -213,6 +236,7 @@ export function ThreadRowMenu({
 
   const choose = (index: number) => {
     const item = items[index];
+    if (item?.disabled) return;
     close();
     item?.onSelect();
   };
@@ -317,15 +341,20 @@ export function ThreadRowMenu({
                 key={item.label}
                 role="menuitem"
                 tabIndex={-1}
+                aria-disabled={item.disabled ? true : undefined}
+                title={item.hint}
                 onClick={() => choose(i)}
                 onMouseEnter={() => setActiveIndex(i)}
                 style={{
                   ...ITEM_STYLE,
+                  cursor: item.disabled ? "default" : "pointer",
                   color: item.destructive
                     ? DESTRUCTIVE_COLOR
-                    : activeIndex === i
-                      ? "var(--text-primary)"
-                      : "var(--text-secondary)",
+                    : item.disabled
+                      ? "var(--text-faint)"
+                      : activeIndex === i
+                        ? "var(--text-primary)"
+                        : "var(--text-secondary)",
                   background: activeIndex === i ? "var(--bg-elevated)" : "none",
                   // The destructive verb is set apart, not just recoloured —
                   // it must not read as the fourth of four equivalent items.
@@ -335,7 +364,7 @@ export function ThreadRowMenu({
                 }}
               >
                 <Icon name={item.icon} size={12} />
-                <span>{item.label}</span>
+                <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.label}</span>
               </div>
             ))}
           </div>,
@@ -463,5 +492,193 @@ export function ThreadTitleEditor({
         ...style,
       }}
     />
+  );
+}
+
+// ── Inline lane editor (SWIT-108) ────────────────────────────────────────────
+
+/** Put a thread in a LANE, IN PLACE — the row's `⋯ → lane…` on both
+ *  surfaces (the rail and the history screen), exactly like Rename. The box
+ *  holds the current lane; under it (portalled — the rail clips) the
+ *  project's EXISTING lanes, filtered by what is typed, and `no lane` when
+ *  the thread has one. Enter takes the highlighted row (↑/↓ move it) or the
+ *  typed name — a new name makes a new lane (requirement 1.5: no separate
+ *  "create lane" step); Esc cancels; a click on a row takes it (mousedown
+ *  keeps the box focused); leaving the box commits a changed, valid name
+ *  and cancels anything else (an emptied box is not a quiet clear — `no
+ *  lane` is). A refusal (a bad name, no project) keeps the box open and
+ *  says why in one line. The act is the user's: `laneSetBy: "user"`. */
+export function ThreadLaneEditor({
+  thread,
+  project,
+  onDone,
+  style,
+}: {
+  thread: Thread;
+  /** The thread's registry project (null = not known yet). */
+  project: string | null;
+  onDone: () => void;
+  style?: CSSProperties;
+}) {
+  const [value, setValue] = useState(thread.lane ?? "");
+  const [error, setError] = useState<string | null>(null);
+  const [highlight, setHighlight] = useState(-1);
+  const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const done = useRef(false);
+
+  const names = project ? projectLaneNames(getThreads(), project) : [];
+  const typed = value.trim();
+  const suggestions = suggestLaneNames(names, typed === (thread.lane ?? "") ? "" : typed).filter(
+    (n) => !(thread.lane && sameLaneName(n, thread.lane))
+  );
+  type Row = { label: string; name: string | null; hint?: string };
+  const rows: Row[] = [
+    ...suggestions.map((n) => ({ label: n, name: n })),
+    ...(thread.lane ? [{ label: "no lane", name: null, hint: "Take the thread out of its lane" }] : []),
+  ];
+
+  useLayoutEffect(() => {
+    const measure = () => {
+      const r = inputRef.current?.getBoundingClientRect();
+      if (r) setPos({ top: r.bottom + 2, left: r.left, width: Math.max(r.width, 180) });
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
+
+  const apply = (name: string | null): boolean => {
+    const reason = getThreadActions()?.setThreadLane(thread.id, name) ?? "the app is not ready";
+    if (reason !== null) {
+      setError(reason);
+      return false;
+    }
+    done.current = true;
+    onDone();
+    return true;
+  };
+  const commitTyped = () => {
+    if (typed.length === 0) {
+      // An empty box on Enter: take it out only if it was in one.
+      if (thread.lane) apply(null);
+      else {
+        done.current = true;
+        onDone();
+      }
+      return;
+    }
+    const n = normalizeLaneName(typed);
+    if (!n.ok) {
+      setError(n.reason);
+      return;
+    }
+    if (thread.lane && sameLaneName(thread.lane, n.name)) {
+      done.current = true;
+      onDone();
+      return;
+    }
+    apply(n.name);
+  };
+
+  return (
+    <>
+      <input
+        ref={inputRef}
+        autoFocus
+        value={value}
+        placeholder="lane name"
+        aria-label="Lane"
+        title={error ?? "A lane of this thread's project — pick one or type a new name"}
+        onFocus={(e) => e.currentTarget.select()}
+        onChange={(e) => {
+          setValue(e.target.value);
+          setError(null);
+          setHighlight(-1);
+        }}
+        onClick={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+        onBlur={() => {
+          if (done.current) return;
+          const n = normalizeLaneName(typed);
+          if (typed.length > 0 && n.ok && !(thread.lane && sameLaneName(thread.lane, n.name))) {
+            if (apply(n.name)) return;
+          }
+          done.current = true;
+          onDone();
+        }}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            setHighlight((h) => Math.min(h + 1, rows.length - 1));
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            setHighlight((h) => Math.max(h - 1, -1));
+          } else if (e.key === "Enter") {
+            e.preventDefault();
+            const row = rows[highlight];
+            if (highlight >= 0 && row) apply(row.name);
+            else commitTyped();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            done.current = true;
+            onDone();
+          }
+        }}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          background: "var(--bg-elevated)",
+          border: `1px solid ${error ? "var(--tone-rose)" : "var(--text-secondary)"}`,
+          borderRadius: 3,
+          padding: "1px 5px",
+          color: "var(--text-primary)",
+          fontFamily: "var(--font-mono)",
+          fontSize: "inherit",
+          outline: "none",
+          ...style,
+        }}
+      />
+      {pos &&
+        (rows.length > 0 || error) &&
+        createPortal(
+          <div
+            role="listbox"
+            aria-label="Lanes of this project"
+            // The box keeps focus: a row is taken on click, not on a blur.
+            onMouseDown={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+            }}
+            onClick={(e) => e.stopPropagation()}
+            style={{ ...MENU_STYLE, top: pos.top, left: pos.left, width: pos.width }}
+          >
+            {error && (
+              <div style={{ ...ITEM_STYLE, cursor: "default", color: "var(--tone-rose)", whiteSpace: "normal", fontSize: 10.5 }}>{error}</div>
+            )}
+            {rows.map((row, i) => (
+              <div
+                key={row.name ?? "__none"}
+                role="option"
+                aria-selected={highlight === i}
+                title={row.hint}
+                onMouseEnter={() => setHighlight(i)}
+                onClick={() => apply(row.name)}
+                style={{
+                  ...ITEM_STYLE,
+                  background: highlight === i ? "var(--bg-elevated)" : "none",
+                  color: row.name === null ? "var(--text-dim)" : highlight === i ? "var(--text-primary)" : "var(--text-secondary)",
+                  borderTop: row.name === null && i > 0 ? "1px solid var(--border-subtle)" : "none",
+                }}
+              >
+                <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.label}</span>
+              </div>
+            ))}
+          </div>,
+          document.body
+        )}
+    </>
   );
 }

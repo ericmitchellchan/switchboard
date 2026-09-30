@@ -28,9 +28,18 @@
 // bulk-replace a thread with an externally-sourced object.
 
 import { useSyncExternalStore } from "react";
-import type { AgentStatus, SavedSession, SavedWorkspace, Thread } from "../types";
+import type { AgentStatus, LaneRecord, SavedSession, SavedWorkspace, Thread } from "../types";
 import { parsePanels, parsePanelsV3, parsePanelWidth, parsePanelSides } from "./panelStore";
 import { sanitizeForTypedLine, SPAWN_CONTEXT_MAX } from "./agentContext";
+import {
+  isInLane,
+  normalizeLaneName,
+  pruneLaneRecords,
+  renameLaneRecords,
+  sanitizeLaneRecords,
+  setLaneArchivedIn,
+  type LaneRef,
+} from "./lanes";
 // Type-only (no runtime edge): explorer.ts imports nothing from this module.
 import type { SessionRepoOption } from "./explorer";
 
@@ -258,6 +267,20 @@ export function sanitizeThread(raw: unknown): Thread | null {
   // byte as it did before archiving existed. A non-positive or non-numeric
   // value is not "archived at the epoch", it is not archived.
   if (typeof t.archivedAt === "number" && t.archivedAt > 0) out.archivedAt = t.archivedAt;
+  // SWIT-108: the LANE rides the same way — the three keys exist only while
+  // the thread is in a lane (or, `laneSetBy: "user"` alone, while the user
+  // has taken it OUT of one), so a laneless record serializes byte-for-byte
+  // as before. A name that fails the lane rule, or a lane with no project,
+  // is no lane; a lane with an unreadable setter is the user's (the
+  // conservative reading: the agent never overrides it).
+  const laneName = normalizeLaneName(t.lane);
+  if (laneName.ok && typeof t.laneProject === "string" && t.laneProject.length > 0) {
+    out.lane = laneName.name;
+    out.laneProject = t.laneProject;
+    out.laneSetBy = t.laneSetBy === "agent" ? "agent" : "user";
+  } else if (t.laneSetBy === "user") {
+    out.laneSetBy = "user";
+  }
   return out;
 }
 
@@ -701,14 +724,34 @@ export function relativeActivity(timestamp: number, now: number = Date.now()): s
 
 export const THREADS_DISK_VERSION = 1;
 
-export function serializeThreadsForDisk(threads: Thread[]): string {
+export function serializeThreadsForDisk(threads: Thread[], lanes: readonly LaneRecord[] = []): string {
+  const clean = sanitizeLaneRecords(lanes);
   return JSON.stringify({
     version: THREADS_DISK_VERSION,
     savedAt: Date.now(),
     // Re-sanitize on the way out — the lean invariant holds even if a caller
     // ever hands us decorated records.
     threads: sanitizeThreads(threads),
+    // SWIT-108: the archived lanes (the one lane-level fact that is not a
+    // thread field) — the key exists only while there is one, so a file
+    // with no archived lane is written exactly as before. Additive: an
+    // older reader ignores it, and the MCP server reads `threads` alone.
+    ...(clean.length > 0 ? { lanes: clean } : {}),
   });
+}
+
+/** SWIT-108: the lane records in the disk mirror. Null for "no disk copy"
+ *  (the same cases parseThreadsFromDisk calls null), so the boot merge can
+ *  let disk win for lanes exactly when it wins for threads. */
+export function parseLanesFromDisk(raw: string): LaneRecord[] | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as { version?: unknown; threads?: unknown; lanes?: unknown };
+    if (parsed?.version !== THREADS_DISK_VERSION || !Array.isArray(parsed.threads)) return null;
+    return sanitizeLaneRecords(parsed.lanes);
+  } catch {
+    return null;
+  }
 }
 
 /** Parse the disk mirror. Returns null for "no disk copy" (empty/absent file
@@ -827,6 +870,8 @@ export function migrateSavedWorkspace(raw: unknown): SavedWorkspace | null {
     panels,
     panelWidth: parsePanelWidth(ws.panelWidth),
     panelSides,
+    // SWIT-108: optional and additive at every version (no bump).
+    lanes: sanitizeLaneRecords(ws.lanes),
   };
 }
 
@@ -953,9 +998,13 @@ export type ThreadsView = {
    *  thread is no longer in `threads` (a request must never outlive its
    *  thread and pop on some later row). Transient. */
   renameRequest: string | null;
+  /** SWIT-108: the ARCHIVED lanes (lanes.ts's records) — every other fact
+   *  about a lane is read off `threads`. Persisted with them. */
+  laneRecords: readonly LaneRecord[];
 };
 
 let threads: Thread[] = [];
+let laneRecords: readonly LaneRecord[] = [];
 const launched = new Set<string>();
 const booting = new Set<string>();
 const prepared = new Map<string, ThreadPrepared>();
@@ -1007,6 +1056,7 @@ export function getThreadsView(): ThreadsView {
       openQuestions,
       unsentDecisions,
       renameRequest,
+      laneRecords,
     };
   }
   return cachedView;
@@ -1074,10 +1124,12 @@ export function isThreadLaunched(threadId: string): boolean {
   return launched.has(threadId);
 }
 
-/** Seed the store at boot with the merged (disk-wins) thread list. Transient
+/** Seed the store at boot with the merged (disk-wins) thread list — and
+ *  (SWIT-108) the archived-lane records that came with it. Transient
  *  liveness resets — nothing is launched yet. */
-export function initThreadStore(initial: Thread[]): void {
+export function initThreadStore(initial: Thread[], lanes: readonly LaneRecord[] = []): void {
   threads = sanitizeThreads(initial);
+  laneRecords = pruneLaneRecords(sanitizeLaneRecords(lanes), threads);
   launched.clear();
   booting.clear();
   prepared.clear();
@@ -1208,6 +1260,54 @@ export function setThreadArchived(threadId: string, archived: boolean): void {
   bump();
 }
 
+// ── Lanes (SWIT-108) ─────────────────────────────────────────────────────────
+// Field-level updates on the existing record, like every mutator here. The
+// RULES (the name, who may set what, rename collisions) are lanes.ts's; these
+// only apply a decision that was already made.
+
+/** The archived-lane records, for the persistence paths. */
+export function getLaneRecords(): readonly LaneRecord[] {
+  return laneRecords;
+}
+
+/** Put a thread in a lane (`lane`) or take it out (null), recording WHO did
+ *  it. Taking a thread out BY THE USER leaves `laneSetBy: "user"` behind, so
+ *  the agent's page cannot put it back (lanes.laneFromPage); an agent never
+ *  clears one. A thread JOINING an archived lane restores that lane — a lane
+ *  with work arriving in it is not "put away" (decided, SWIT-108). A lane
+ *  whose last thread left takes its archive record with it. */
+export function setThreadLane(threadId: string, lane: LaneRef | null, by: "user" | "agent"): void {
+  if (!getThreadById(threadId)) return;
+  threads = threads.map((x) => {
+    if (x.id !== threadId) return x;
+    const { lane: _lane, laneProject: _project, laneSetBy: _by, ...rest } = x;
+    if (lane) return { ...rest, lane: lane.name, laneProject: lane.project, laneSetBy: by };
+    return by === "user" ? { ...rest, laneSetBy: "user" as const } : rest;
+  });
+  if (lane) laneRecords = setLaneArchivedIn(laneRecords, lane, false, Date.now());
+  laneRecords = pruneLaneRecords(laneRecords, threads);
+  bump();
+}
+
+/** Rename a lane — every thread in it follows, and its archive record moves
+ *  with it. The caller has already asked lanes.planLaneRename (a clash is
+ *  refused there, never here). */
+export function renameLaneInStore(lane: LaneRef, to: string): void {
+  if (!threads.some((t) => isInLane(t, lane))) return;
+  threads = threads.map((t) => (isInLane(t, lane) ? { ...t, lane: to } : t));
+  laneRecords = renameLaneRecords(laneRecords, lane, to);
+  bump();
+}
+
+/** Archive or restore a lane (hidden from Home and the side menu, listed
+ *  under an `Archived` fold). Its threads are untouched. */
+export function setLaneArchived(lane: LaneRef, archived: boolean, now: number = Date.now()): void {
+  const next = setLaneArchivedIn(laneRecords, lane, archived, now);
+  if (next === laneRecords) return;
+  laneRecords = next;
+  bump();
+}
+
 /** Bind a live Switchboard session (tab) to the thread. */
 export function bindThreadSession(threadId: string, sessionId: string): void {
   threads = threads.map((t) =>
@@ -1334,6 +1434,8 @@ export function unbindThreadsForSession(sessionId: string): void {
  *  too; what is lost is Switchboard's knowledge of its uuid. */
 export function deleteThread(threadId: string): void {
   threads = threads.filter((t) => t.id !== threadId);
+  // SWIT-108: the last thread of an archived lane takes the record with it.
+  laneRecords = pruneLaneRecords(laneRecords, threads);
   launched.delete(threadId);
   booting.delete(threadId);
   prepared.delete(threadId);
@@ -1445,6 +1547,20 @@ export type ThreadActions = {
    *  Eric posting from a plain shell). Resolves to a confirmation sentence;
    *  rejects with a human-readable reason the composer prints as-is. */
   postToThread: (fromSessionId: string | null, targetQuery: string, body: string) => Promise<string>;
+  /** Row menu → `lane…` (SWIT-108): put the thread in the lane `name` of
+   *  ITS project (an existing lane's spelling is taken), or take it out
+   *  (null). The user's act — `laneSetBy: "user"`. Works on live, dead and
+   *  archived threads alike. Returns the refusal reason (a bad name, no
+   *  project), or null when it was applied. */
+  setThreadLane: (threadId: string, name: string | null) => string | null;
+  /** The lane page's `+ Thread in this lane`: the createThreadNow path in
+   *  the lane's project repo, with the lane set BEFORE the launch. */
+  createThreadInLane: (lane: LaneRef) => void;
+  /** The lane page's rename — every thread follows; a name another lane in
+   *  the project has is refused. Returns the reason, or null. */
+  renameLane: (lane: LaneRef, to: string) => string | null;
+  /** The lane page's archive / restore. */
+  setLaneArchived: (lane: LaneRef, archived: boolean) => void;
 };
 
 let threadActions: ThreadActions | null = null;
@@ -1482,6 +1598,7 @@ export function isTitleEditorOpen(...keys: (string | null | undefined)[]): boole
 export function __resetThreadStoreForTests(): void {
   openTitleEditors.clear();
   threads = [];
+  laneRecords = [];
   launched.clear();
   booting.clear();
   prepared.clear();

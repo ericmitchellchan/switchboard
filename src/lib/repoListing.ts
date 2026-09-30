@@ -111,6 +111,11 @@ export type ProjectViewEntry = {
   builtAt: string;
   threadId: string;
   repo: string;
+  /** SWIT-108: the lane the building thread was in WHEN it built the report
+   *  (`""` = none, or an index written before lanes). Read only for a report
+   *  whose thread no longer exists — a live thread's CURRENT lane is the
+   *  truth (lanes.laneReports). */
+  lane: string;
 };
 
 const VIEW_ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -144,6 +149,7 @@ export function parseProjectViewIndex(raw: string, project: string, repo = ""): 
       builtAt: typeof e.builtAt === "string" ? e.builtAt : "",
       threadId: typeof e.threadId === "string" ? e.threadId : "",
       repo,
+      lane: typeof e.lane === "string" ? e.lane.slice(0, 200) : "",
     });
   }
   return out;
