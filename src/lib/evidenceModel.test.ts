@@ -4,6 +4,8 @@
 import { describe, expect, it } from "vitest";
 import {
   couldBeKbDoc,
+  isMissingFileError,
+  kbDocForMissingRepoFile,
   KB_DOC_EXTENSIONS,
   evidenceKindOf,
   groupEvidence,
@@ -270,5 +272,32 @@ describe("the KB miss is reported only for an address that could BE a KB doc (re
       path: "apps/desktop/src/x.md",
     });
     expect(resolveDocTarget("x.md", ["x.md"], "lodestar", undefined, "apps/desktop/")).toEqual({ kind: "kb-doc", path: "x.md" });
+  });
+});
+
+describe("the stale tab heal (kbDocForMissingRepoFile)", () => {
+  const KB = ["switchboard/features/platform-review-2026-09/review.md", "switchboard/features/one-platform/wireframes/platform-v1.html"];
+  // The real error Eric's panel showed on 0.18.0 for a tab saved under 0.16.0.
+  const MISSING =
+    'cannot resolve "\\?\C:\Users\ericm\projects\switchboard\switchboard\features\platform-review-2026-09\review.md": The system cannot find the path specified. (os error 3)';
+
+  it("a missing repo file whose path IS a KB doc heals to that doc", () => {
+    expect(kbDocForMissingRepoFile(KB[0], MISSING, KB)).toBe(KB[0]);
+    expect(kbDocForMissingRepoFile(KB[1], "The system cannot find the file specified. (os error 2)", KB)).toBe(KB[1]);
+  });
+
+  it("never heals a file that exists, a read that failed for another reason, or a path the KB does not list", () => {
+    expect(kbDocForMissingRepoFile(KB[0], null, KB)).toBeNull();
+    expect(kbDocForMissingRepoFile(KB[0], "file is larger than 512 KB", KB)).toBeNull();
+    expect(kbDocForMissingRepoFile("src/App.tsx", MISSING, KB)).toBeNull();
+    expect(kbDocForMissingRepoFile(KB[0], MISSING, null)).toBeNull();
+  });
+
+  it("isMissingFileError reads Windows' not-found codes, not every error", () => {
+    expect(isMissingFileError(MISSING)).toBe(true);
+    expect(isMissingFileError("(os error 2)")).toBe(true);
+    expect(isMissingFileError("(os error 5)")).toBe(false);
+    expect(isMissingFileError("stream did not contain valid UTF-8")).toBe(false);
+    expect(isMissingFileError(null)).toBe(false);
   });
 });

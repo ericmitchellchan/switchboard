@@ -3,6 +3,8 @@ import type { Artifact, PanelState, Thread } from "../types";
 import {
   // pure helpers
   clampPanelWidth,
+  replaceArtifactInStrip,
+  replaceArtifactEverywhere,
   sanitizeArtifact,
   sanitizePanelState,
   parsePanels,
@@ -2883,5 +2885,33 @@ describe("stepPreview (SWIT-75) — the deck's next/prev swaps the preview in pl
     stepPreview("s1", card("b"));
     __setPanelAuditSink(null);
     expect(lines.some((l) => l.includes("reason=preview-step") && l.includes("to=view:"))).toBe(true);
+  });
+});
+
+describe("replaceArtifactEverywhere (the stale tab heal's store half)", () => {
+  const STALE: Artifact = { kind: "repo-file", project: "switchboard", path: "switchboard/features/x/review.md" };
+  const HEALED: Artifact = { kind: "kb-doc", path: "switchboard/features/x/review.md" };
+  const PAGE: Artifact = { kind: "page", threadId: "th-1" };
+
+  it("rewrites the tab in place in every strip, keeping its slot and the active tab", () => {
+    initPanelStore({ "th-1": strip([PAGE, STALE], 1), "th-2": strip([STALE, KB_DOC], 1), "th-3": one(REPO_FILE) });
+    expect(replaceArtifactEverywhere(STALE, HEALED)).toBe(2);
+    expect(getPanelsRecord()).toEqual({
+      "th-1": strip([PAGE, HEALED], 1),
+      "th-2": strip([HEALED, KB_DOC], 1),
+      "th-3": one(REPO_FILE),
+    });
+  });
+
+  it("folds into the healed doc when the strip already lists it — one artifact, one tab", () => {
+    const next = replaceArtifactInStrip(strip([HEALED, PAGE, STALE], 2), artifactIdentity(STALE), HEALED);
+    expect(next).toEqual(strip([HEALED, PAGE], 0));
+  });
+
+  it("leaves a strip that does not hold it untouched, and is a no-op with nothing to change", () => {
+    initPanelStore({ "th-3": one(REPO_FILE) });
+    expect(replaceArtifactEverywhere(STALE, HEALED)).toBe(0);
+    expect(replaceArtifactEverywhere(HEALED, HEALED)).toBe(0);
+    expect(getPanelsRecord()).toEqual({ "th-3": one(REPO_FILE) });
   });
 });
