@@ -335,6 +335,33 @@ export function resolveDocTarget(
   return null;
 }
 
+/** Does this repo read error say the file is simply NOT THERE? (Windows'
+ *  os error 2 = file not found, 3 = path not found — what explorer.rs's
+ *  canonicalize reports for a missing file or folder.) A file that exists but
+ *  cannot be read (too big, not UTF-8) is a different problem and is never
+ *  healed into something else. Pure. */
+export function isMissingFileError(error: string | null): boolean {
+  if (error === null) return false;
+  return /os error [23]\b|cannot find the (file|path)|no such file|not found/i.test(error);
+}
+
+/** THE STALE TAB HEAL (2026-09-30): a `repo-file` tab whose file is MISSING
+ *  but whose path IS a knowledge-base doc was opened by the pre-SWIT-101
+ *  resolver (a KB doc created after the cached list loaded fell through to the
+ *  repo fallback) — and the workspace restores it as a repo file forever.
+ *  Returns the KB path to open instead, or null. Only on a MISSING read, so a
+ *  real repo file that happens to share a KB doc's path is never replaced.
+ *  Pure. */
+export function kbDocForMissingRepoFile(
+  path: string,
+  error: string | null,
+  kbDocs: readonly string[] | null
+): string | null {
+  if (!isMissingFileError(error) || kbDocs === null) return null;
+  const p = path.trim();
+  return kbDocs.includes(p) ? p : null;
+}
+
 /** The extensions the knowledge base LISTS — mirrors kb.rs `DOC_EXTENSIONS`
  *  (change one, change the other). A path with any other extension cannot be
  *  in the KB doc list, so missing it there is not news. */

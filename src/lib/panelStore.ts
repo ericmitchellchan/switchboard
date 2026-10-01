@@ -146,7 +146,12 @@ export type PanelRemovalReason =
   | "preview-step"
   /** `foldActiveKind` (SWIT-79): N same-kind tabs left the strip INTO one
    *  set tab — nothing is lost, `split` brings them back. A gesture. */
-  | "set-fold";
+  | "set-fold"
+  /** `replaceArtifactEverywhere` (the stale-tab heal, 2026-09-30): a tab was
+   *  rewritten to the artifact it should have been — a `repo-file` whose file
+   *  is missing but whose path is a KB doc becomes that `kb-doc`. Same slot,
+   *  same position; logged because a tab changed kind with no gesture. */
+  | "artifact-healed";
 
 export interface PanelRemoval {
   reason: PanelRemovalReason;
@@ -2858,6 +2863,88 @@ export function closeArtifactByIdentity(
   const index = state.artifacts.findIndex((a) => artifactIdentity(a) === identity);
   if (index < 0) return;
   closeArtifactAt(sessionId, index, reason);
+}
+
+/** One strip with every `fromId` artifact (top level, or a set's member)
+ *  rewritten to `to`, or null when nothing in it matched. ONE ARTIFACT, ONE
+ *  TAB still holds: when the strip already lists `to`, the rewritten entry
+ *  folds into it (the active index follows the surviving tab). Pure. */
+export function replaceArtifactInStrip(state: PanelState, fromId: string, to: Artifact): PanelState | null {
+  let changed = false;
+  const mapped: Artifact[] = state.artifacts.map((a) => {
+    if (artifactIdentity(a) === fromId) {
+      changed = true;
+      return to;
+    }
+    if (a.kind === "set" && a.items.some((m) => artifactIdentity(m) === fromId)) {
+      const set = sanitizeArtifact({ ...a, items: a.items.map((m) => (artifactIdentity(m) === fromId ? to : m)) });
+      if (set) {
+        changed = true;
+        return set;
+      }
+    }
+    return a;
+  });
+  if (!changed) return null;
+  const activeId = artifactIdentity(mapped[clampActiveIndex(mapped.length, state.activeIndex)] ?? to);
+  const seen = new Set<string>();
+  const artifacts = mapped.filter((a) => {
+    const id = artifactIdentity(a);
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+  const activeIndex = Math.max(0, artifacts.findIndex((a) => artifactIdentity(a) === activeId));
+  return { artifacts, activeIndex };
+}
+
+/** Rewrite an artifact WHEREVER it is open — every tab's strip (sets
+ *  included), the hidden-strip toggle memory, the preview mark and back
+ *  stacks, the floating window's record — to another artifact. Returns how
+ *  many strips changed. The stale-tab heal's store half (see
+ *  evidenceModel.kbDocForMissingRepoFile); persisted with the next workspace
+ *  save, so the heal happens once. */
+export function replaceArtifactEverywhere(from: Artifact, to: Artifact): number {
+  const clean = sanitizeArtifact(to);
+  if (!clean) return 0;
+  const fromId = artifactIdentity(from);
+  const toId = artifactIdentity(clean);
+  if (fromId === toId) return 0;
+  let count = 0;
+  let nextPanels: Map<string, PanelState> | null = null;
+  for (const [key, state] of panels) {
+    const next = replaceArtifactInStrip(state, fromId, clean);
+    if (!next) continue;
+    nextPanels ??= new Map(panels);
+    nextPanels.set(key, next);
+    audit("artifact-healed", key, from, `to=${auditName(clean)}`);
+    count++;
+  }
+  if (nextPanels) panels = nextPanels;
+  let touched = count > 0;
+  for (const [key, state] of lastPanelStates) {
+    const next = replaceArtifactInStrip(state, fromId, clean);
+    if (!next) continue;
+    lastPanelStates = new Map(lastPanelStates);
+    lastPanelStates.set(key, next);
+  }
+  for (const [key, id] of previews) {
+    if (id !== fromId) continue;
+    previews = new Map(previews);
+    previews.set(key, toId);
+    touched = true;
+  }
+  for (const [key, stack] of previewBacks) {
+    if (!stack.some((a) => artifactIdentity(a) === fromId)) continue;
+    previewBacks = new Map(previewBacks);
+    previewBacks.set(key, stack.map((a) => (artifactIdentity(a) === fromId ? clean : a)));
+  }
+  if (poppedOut && artifactIdentity(poppedOut.artifact) === fromId) {
+    poppedOut = { ...poppedOut, artifact: clean };
+    touched = true;
+  }
+  if (touched) bump();
+  return count;
 }
 
 export function panelTerminalsAvailable(): boolean {

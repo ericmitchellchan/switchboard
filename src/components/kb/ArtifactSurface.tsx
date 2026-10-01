@@ -29,10 +29,14 @@
 // nothing. Nothing here renders chrome: the header, the tab strip and the
 // pop-out action belong to whoever hosts this.
 
+import { useEffect, useState } from "react";
 import type { Artifact } from "../../types";
 import { REPO_EDIT_POLL_MS, useRepoFile } from "../../lib/explorer";
 import { useHasBuffer } from "../../lib/editor";
-import { artifactIdentity } from "../../lib/panelStore";
+import { artifactIdentity, replaceArtifactEverywhere } from "../../lib/panelStore";
+import { isMissingFileError, kbDocForMissingRepoFile } from "../../lib/evidenceModel";
+import { resolveWithFreshKbDocs } from "../../lib/kb";
+import { log } from "../../lib/logger";
 import { DocView } from "./DocView";
 import { FileViewer } from "../ExplorerView";
 import { LocalhostView } from "./LocalhostView";
@@ -59,7 +63,7 @@ export function ArtifactSurface({
     case "repo-file":
       return (
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-          <RepoFileBody project={artifact.project} path={artifact.path} />
+          <RepoFileBody project={artifact.project} path={artifact.path} active={active} />
         </div>
       );
     case "localhost":
@@ -151,7 +155,7 @@ export function ArtifactSurface({
  *  to pause, unlike DocView's 2.5s doc poll), so gating on visibility would
  *  only buy a re-read on every screen switch back. Matches ExplorerView's
  *  read exactly. */
-function RepoFileBody({ project, path }: { project: string; path: string }) {
+function RepoFileBody({ project, path, active }: { project: string; path: string; active: boolean }) {
   // ONE read implementation for both hosts (lib/explorer.useRepoFile) — a host
   // is chrome + lifecycle, and that includes not owning a second copy of the
   // Explorer screen's effect. It also carries the ⟳'s rule: a reload folds
@@ -166,6 +170,43 @@ function RepoFileBody({ project, path }: { project: string; path: string }) {
   const editing = useHasBuffer(artifactIdentity({ kind: "repo-file", project, path }));
   const { file, reload } = useRepoFile(project, path, editing ? REPO_EDIT_POLL_MS : 0);
 
+  // THE STALE TAB HEAL (2026-09-30 — Eric: "I can't see the artifact (the MD
+  // file) here and the HTML over there"): a KB doc opened by the pre-SWIT-101
+  // resolver was saved as a `repo-file` tab and the workspace restores it that
+  // way forever — a "cannot resolve … os error 3" card where the doc should
+  // be. On a MISSING read, ask the KB list (refreshed once on a miss); when
+  // the path is a KB doc, draw it here at once and rewrite the tab wherever it
+  // is open, so the next save persists the right kind. A file that exists is
+  // never touched; nothing is asked while the read succeeds.
+  const error = file?.error ?? null;
+  const missing = file !== null && file.content === null && isMissingFileError(error);
+  const [healed, setHealed] = useState<string | null>(null);
+  useEffect(() => {
+    setHealed(null);
+    if (!missing) return;
+    let cancelled = false;
+    void resolveWithFreshKbDocs((docs, onKbMiss) => {
+      const hit = kbDocForMissingRepoFile(path, error, docs);
+      if (hit === null && docs !== null) onKbMiss(path);
+      return hit;
+    }).then((kbPath) => {
+      if (cancelled || kbPath === null) return;
+      log.info(`artifact heal: repo-file ${project}/${path} is the KB doc ${kbPath}`);
+      setHealed(kbPath);
+      replaceArtifactEverywhere({ kind: "repo-file", project, path }, { kind: "kb-doc", path: kbPath });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [missing, error, project, path]);
+
+  if (healed !== null) {
+    return (
+      <div style={{ height: "100%", display: "flex" }}>
+        <DocView path={healed} active={active} />
+      </div>
+    );
+  }
   if (!file) return null;
   return <FileViewer project={project} file={file} onReload={reload} />;
 }
