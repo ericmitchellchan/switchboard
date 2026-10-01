@@ -65,5 +65,7 @@ describe("nextToolsVerdict — the chip only after 30s of THIS launch's server g
   it("a dropped launch recovers when its server is back, and does not re-drop while still gone", () => {
     expect(nextToolsVerdict(dropped, LAUNCH, reading("alive"), { badSince: LAUNCH }, LAUNCH + 99_000).kind).toBe("recovered");
     expect(nextToolsVerdict(dropped, LAUNCH, reading("gone"), { badSince: LAUNCH }, LAUNCH + 99_000).kind).toBe("keep");
+    // an OLDER server still alive says nothing about this launch (review L2)
+    expect(nextToolsVerdict(dropped, LAUNCH, reading("alive", LAUNCH - LAUNCH_SKEW_MS - 1), { badSince: LAUNCH }, LAUNCH + 99_000).kind).toBe("keep");
   });
 });

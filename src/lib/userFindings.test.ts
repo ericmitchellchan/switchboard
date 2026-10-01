@@ -35,5 +35,8 @@ describe("findingTargetFor — where a finding from a view is filed (SWIT-114)",
   it("the draft claim is the title, cut to the cap", () => {
     expect(draftClaim("  Gamma flip vs SPX  ")).toBe("Gamma flip vs SPX");
     expect(draftClaim("x".repeat(FINDING_CLAIM_CAP + 10)).length).toBe(FINDING_CLAIM_CAP);
+    // never half an emoji at the cut (review L6)
+    const cut = draftClaim("x".repeat(FINDING_CLAIM_CAP - 1) + "😀tail");
+    expect(cut).toBe("x".repeat(FINDING_CLAIM_CAP - 1));
   });
 });

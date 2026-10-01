@@ -47,5 +47,12 @@ export function findingTargetFor(artifact: ViewArtifact, ctx: FindingTargetConte
  *  user rewrites it into the sentence the report supports. */
 export function draftClaim(title: string): string {
   const t = title.trim();
-  return t.length > FINDING_CLAIM_CAP ? t.slice(0, FINDING_CLAIM_CAP) : t;
+  // Cut by code point, never inside a surrogate pair (review L6) — the cap
+  // counts UTF-16 units, as the input's maxLength does.
+  let out = "";
+  for (const ch of t) {
+    if (out.length + ch.length > FINDING_CLAIM_CAP) break;
+    out += ch;
+  }
+  return out;
 }

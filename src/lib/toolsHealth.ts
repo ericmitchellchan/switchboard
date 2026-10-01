@@ -69,10 +69,10 @@ export function nextToolsVerdict(
 ): ToolsVerdict {
   const thisLaunch = reading.state !== "none" && reading.startedAt >= launchedAt - LAUNCH_SKEW_MS;
   const isDropped = !current.prepared;
+  if (!thisLaunch) return { kind: "keep", watch: { badSince: null } };
   if (reading.state === "alive") {
     return isDropped ? { kind: "recovered", watch: { badSince: null } } : { kind: "keep", watch: { badSince: null } };
   }
-  if (!thisLaunch) return { kind: "keep", watch: { badSince: null } };
   // ended / gone, about this launch's server.
   const badSince = watch.badSince ?? now;
   if (!isDropped && now - badSince >= DROP_AFTER_MS) return { kind: "dropped", watch: { badSince } };

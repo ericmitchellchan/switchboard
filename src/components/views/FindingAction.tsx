@@ -7,12 +7,12 @@
 // outlives the thread like any finding. Where it goes is
 // lib/userFindings.findingTargetFor; nothing renders when there is nowhere.
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { Artifact } from "../../types";
 import { addThreadFinding } from "../../lib/ipc";
 import { FINDING_CLAIM_CAP, FINDING_N_CAP, FINDING_VERDICTS, type FindingVerdict } from "../../lib/pageStore";
 import { verdictTone } from "../../lib/statusPill";
-import { getProjectViews } from "../../lib/repoListing";
+import { fetchProjectViews, getProjectViews, useRepoListings } from "../../lib/repoListing";
 import { getActiveTabSession } from "../../lib/panelStore";
 import { findThreadBySessionId, getThreadById, useThreadsView } from "../../lib/threadStore";
 import { draftClaim, findingTargetFor } from "../../lib/userFindings";
@@ -33,8 +33,10 @@ export function FindingAction({
   buttonStyle: CSSProperties;
 }) {
   // The thread list re-renders this when a thread comes or goes, so the
-  // target is never a deleted thread.
+  // target is never a deleted thread; the project index's version does the
+  // same for a project view's builder (review M4).
   const view = useThreadsView();
+  const listings = useRepoListings();
   const target = useMemo(
     () =>
       findingTargetFor(artifact, {
@@ -43,12 +45,21 @@ export function FindingAction({
         threadExists: (id) => getThreadById(id) !== undefined,
         activeThreadId: findThreadBySessionId(getActiveTabSession() ?? "")?.id ?? null,
       }),
-    // `view` stands in for "the threads moved"; the rest is the artifact.
+    // `view` and `listings` stand in for "the threads / the project index
+    // moved"; the rest is the artifact.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [artifact, view.threads, view.activeSessionId]
+    [artifact, view.threads, view.activeSessionId, listings]
   );
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const close = useCallback(() => setOpen(false), []);
+  // A project view's builder comes from the project's report index, which is
+  // a cache filled when the KB tree or Home asks; ask on open so a report
+  // built since the last refresh is filed on the thread that built it (M4).
+  const project = artifact.project;
+  useEffect(() => {
+    if (open && project !== undefined) fetchProjectViews(project);
+  }, [open, project]);
   if (!target) return null;
   const threadTitle = getThreadById(target.threadId)?.title ?? "this thread";
   return (
@@ -69,7 +80,7 @@ export function FindingAction({
           threadTitle={threadTitle}
           report={target.report}
           initialClaim={draftClaim(title)}
-          onClose={() => setOpen(false)}
+          onClose={close}
         />
       )}
     </>
@@ -106,10 +117,15 @@ function FindingCard({
     const left = Math.max(8, Math.min(r.right - CARD_WIDTH, window.innerWidth - CARD_WIDTH - 8));
     setPos({ top: r.bottom + 4, left });
   }, [anchor]);
+  // Focus once the card is ON SCREEN — the first render returns null until
+  // the position is measured, so an empty-deps effect would find no input
+  // and leave focus (and Escape) on the toolbar button (review M1).
+  const placed = pos !== null;
   useEffect(() => {
+    if (!placed) return;
     claimRef.current?.focus();
     claimRef.current?.select();
-  }, []);
+  }, [placed]);
   useEffect(() => {
     if (state.kind !== "saved") return;
     const t = window.setTimeout(onClose, 1600);
@@ -117,7 +133,9 @@ function FindingCard({
   }, [state.kind, onClose]);
 
   const save = async () => {
-    if (claim.trim().length === 0 || state.kind === "saving") return;
+    // Filed once: a second Enter / click in the `saved` moment is not a
+    // second finding (review M3).
+    if (claim.trim().length === 0 || state.kind === "saving" || state.kind === "saved") return;
     setState({ kind: "saving" });
     try {
       await addThreadFinding(threadId, {
@@ -213,7 +231,7 @@ function FindingCard({
         />
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <button type="button" style={PRIMARY} disabled={claim.trim().length === 0 || state.kind === "saving"} onClick={() => void save()}>
+        <button type="button" style={PRIMARY} disabled={claim.trim().length === 0 || state.kind === "saving" || state.kind === "saved"} onClick={() => void save()}>
           {state.kind === "saving" ? "Filing…" : "File"}
         </button>
         <button type="button" style={QUIET_BUTTON} onClick={onClose}>

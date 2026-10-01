@@ -1756,15 +1756,19 @@ export default function App() {
               try {
                 const reading = await threadMcpHealth(t.id);
                 if (cancelled) return;
-                const watch = toolsWatchRef.current.get(t.id) ?? { badSince: null };
-                const verdict = nextToolsVerdict(prep, launchedAt, reading, watch, Date.now());
-                toolsWatchRef.current.set(t.id, verdict.watch);
-                if (verdict.kind === "dropped") {
-                  log.warn(`Thread id=${t.id}: page tools server ${reading.state} — chip shows`);
-                  setThreadPrepared(t.id, { prepared: false, reason: TOOLS_DROPPED_REASON, dropped: true, at: launchedAt });
-                } else if (verdict.kind === "recovered") {
-                  log.info(`Thread id=${t.id}: page tools server back`);
-                  setThreadPrepared(t.id, { prepared: true, at: launchedAt });
+                // A relaunch or an exit may have rewritten the record during
+                // the IPC — act only on the record the reading was taken for.
+                if (threadPrepared(t.id) === prep) {
+                  const watch = toolsWatchRef.current.get(t.id) ?? { badSince: null };
+                  const verdict = nextToolsVerdict(prep, launchedAt, reading, watch, Date.now());
+                  toolsWatchRef.current.set(t.id, verdict.watch);
+                  if (verdict.kind === "dropped") {
+                    log.warn(`Thread id=${t.id}: page tools server ${reading.state} — chip shows`);
+                    setThreadPrepared(t.id, { prepared: false, reason: TOOLS_DROPPED_REASON, dropped: true, at: launchedAt });
+                  } else if (verdict.kind === "recovered") {
+                    log.info(`Thread id=${t.id}: page tools server back`);
+                    setThreadPrepared(t.id, { prepared: true, at: launchedAt });
+                  }
                 }
               } catch (err) {
                 log.warn(`Thread id=${t.id}: tools health unreadable: ${err}`);

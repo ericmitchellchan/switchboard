@@ -1374,15 +1374,15 @@ export function setThreadPrepared(threadId: string, state: ThreadPrepared): void
   bump();
 }
 
-/** The promotion pass found a conversation it did not launch — prep never ran
- *  for it. Only fills a MISSING entry: the exit/unbind paths clear the map, so
- *  an entry that survives to here was written by OUR launch of this very
- *  claude (idempotent re-detection of the same uuid) and is the truer record. */
 /** The prep record for one thread (SWIT-113's health pass reads it). */
 export function threadPrepared(threadId: string): ThreadPrepared | undefined {
   return prepared.get(threadId);
 }
 
+/** The promotion pass found a conversation it did not launch — prep never ran
+ *  for it. Only fills a MISSING entry: the exit/unbind paths clear the map, so
+ *  an entry that survives to here was written by OUR launch of this very
+ *  claude (idempotent re-detection of the same uuid) and is the truer record. */
 export function noteThreadPreparedOutside(threadId: string): void {
   if (prepared.has(threadId)) return;
   prepared.set(threadId, { prepared: false, reason: OUTSIDE_SWITCHBOARD_REASON });

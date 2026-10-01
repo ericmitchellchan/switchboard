@@ -3487,5 +3487,6 @@ describe("the user's findings (SWIT-114)", () => {
 
   it("the agent cannot write a user- id", () => {
     expect(() => server.applyOp(empty(), { op: "finding", id: "user-1", claim: "x", verdict: "lead" }, NOW)).toThrow(/finding the user filed/);
+    expect(() => server.applyOp(empty(), { op: "finding", id: "user-1", findingOp: "drop" }, NOW)).toThrow(/finding the user filed/);
   });
 });

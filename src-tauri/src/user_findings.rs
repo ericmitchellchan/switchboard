@@ -21,27 +21,29 @@ fn chars(s: &str) -> usize {
     s.chars().count()
 }
 
-/// The rows already in the file — tolerant: a non-object or a row without a
-/// `user-` id drops alone; an unreadable file is an empty list.
-pub fn read_rows(content: &str) -> Vec<Value> {
-    let v: Value = match serde_json::from_str(content) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-    v.get("findings")
-        .and_then(|f| f.as_array())
-        .map(|rows| {
-            rows.iter()
-                .filter(|r| {
-                    r.get("id")
-                        .and_then(|i| i.as_str())
-                        .map(|i| i.starts_with(ID_PREFIX))
-                        .unwrap_or(false)
-                })
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default()
+/// One writer at a time: the card's add and the page's `×` are separate
+/// async commands, and both read-modify-write the same file through one tmp
+/// name (review of b59405f..671913b, M2 — `JOBS_LOCK`'s pattern).
+static FINDINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The rows already in the file. A row without a `user-` id drops alone; a
+/// file that is not a findings file at all is REFUSED (None) — never
+/// rewritten, because a rewrite would drop every finding in it (the jobs and
+/// project indexes' rule).
+pub fn read_rows(content: &str) -> Option<Vec<Value>> {
+    let v: Value = serde_json::from_str(content).ok()?;
+    let rows = v.get("findings")?.as_array()?;
+    Some(
+        rows.iter()
+            .filter(|r| {
+                r.get("id")
+                    .and_then(|i| i.as_str())
+                    .map(|i| i.starts_with(ID_PREFIX))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect(),
+    )
 }
 
 /// Validate one new finding's fields; the error names what is wrong.
@@ -142,9 +144,17 @@ fn write(thread_id: &str, rows: Vec<Value>) -> Result<(), String> {
     std::fs::rename(&tmp, dir.join("findings.json")).map_err(|e| e.to_string())
 }
 
+/// Missing = no findings yet. Unreadable or not a findings file = refused,
+/// with the reason — the file is left as it is.
 fn read(thread_id: &str) -> Result<Vec<Value>, String> {
     let file = crate::threads_data_dir()?.join(thread_id).join("findings.json");
-    Ok(std::fs::read_to_string(file).map(|c| read_rows(&c)).unwrap_or_default())
+    match std::fs::read_to_string(&file) {
+        Ok(c) => read_rows(&c).ok_or_else(|| {
+            "this thread's findings.json cannot be read as findings; it was left as it is".to_string()
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("this thread's findings.json cannot be read: {e}")),
+    }
 }
 
 #[tauri::command]
@@ -158,6 +168,7 @@ pub async fn add_thread_finding(
     if !crate::valid_thread_id(&thread_id) {
         return Err("invalid thread id".into());
     }
+    let _guard = FINDINGS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let rows = read(&thread_id)?;
     let (id, next) = add_row(
         &rows,
@@ -179,6 +190,7 @@ pub async fn remove_thread_finding(thread_id: String, id: String) -> Result<bool
     if !id.starts_with(ID_PREFIX) {
         return Err("only a finding you filed can be taken off here".into());
     }
+    let _guard = FINDINGS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let rows = read(&thread_id)?;
     let (removed, next) = remove_row(&rows, &id);
     if removed {
@@ -229,11 +241,13 @@ mod tests {
     }
 
     #[test]
-    fn reads_only_user_rows_tolerantly() {
-        assert!(read_rows("not json").is_empty());
+    fn reads_only_user_rows_and_refuses_a_file_that_is_not_findings() {
+        assert!(read_rows("not json").is_none());
+        assert!(read_rows("{\"version\":1}").is_none());
         let rows = read_rows(
             r#"{"version":1,"findings":[{"id":"user-2","claim":"a"},{"id":"f1","claim":"agent's"},"junk"]}"#,
-        );
+        )
+        .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(next_id(&rows), "user-3");
     }

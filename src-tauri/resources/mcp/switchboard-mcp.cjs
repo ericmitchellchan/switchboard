@@ -623,6 +623,13 @@ function applyOp(page, args, now, answeredIds = new Set(), dismissedIds = new Se
       if (args.findingOp !== undefined && args.findingOp !== null && args.findingOp !== "drop") {
         throw new OpError('findingOp must be "drop" (or omitted, to add or update)');
       }
+      // SWIT-114: `user-` ids are the USER's findings (filed from a report,
+      // in the app's findings.json) — read them, never write or drop them.
+      if (typeof args.id === "string" && args.id.trim().startsWith(USER_FINDING_PREFIX)) {
+        throw new OpError(
+          `${args.id.trim()} is a finding the user filed — it is theirs; file your own (omit id, or another id) if the evidence has moved`
+        );
+      }
       if (args.findingOp === "drop") {
         const id = text(args.id, "id");
         if (!findings.some((f) => f.id === id)) throw new OpError(`no finding with id ${id} — the page lists them (op read too)`);
@@ -631,13 +638,6 @@ function applyOp(page, args, now, answeredIds = new Set(), dismissedIds = new Se
       const id = args.id === undefined || args.id === null ? null : text(args.id, "id");
       if (id !== null && !/^[A-Za-z0-9_-]{1,40}$/.test(id)) {
         throw new OpError("id must be a short stable key (letters, digits, _ and -; ≤ 40) — or omit it and one is minted");
-      }
-      // SWIT-114: `user-` ids are the USER's findings (filed from a report,
-      // in the app's findings.json) — read them, never write them.
-      if (id !== null && id.startsWith(USER_FINDING_PREFIX)) {
-        throw new OpError(
-          `${id} is a finding the user filed — it is theirs; file your own (omit id, or another id) if the evidence has moved`
-        );
       }
       const prev = id === null ? undefined : findings.find((f) => f.id === id);
       const given = (v) => v !== undefined && v !== null;
@@ -1259,11 +1259,17 @@ function withUserFindings(page, threadDir) {
           )
           .map((f) => ({ ...f, by: "user" }))
       : [];
-  if (rows.length === 0) return page;
+  // An agent row with a `user-` id (written before the refusal) is hidden
+  // whether or not the user has filed any — the app's merge does the same.
   const own = (Array.isArray(page.findings) ? page.findings : []).filter(
     (f) => !(f && typeof f.id === "string" && f.id.startsWith(USER_FINDING_PREFIX))
   );
-  return { ...page, findings: [...own, ...rows] };
+  const all = [...own, ...rows];
+  if (all.length === 0) {
+    const { findings: _none, ...rest } = page;
+    return rest;
+  }
+  return { ...page, findings: all };
 }
 
 function readAppJson(threadDir, name, fallback) {
