@@ -3761,9 +3761,79 @@ function performOp(threadDir, args, now, env = null) {
   return message;
 }
 
+// ── Liveness record (SWIT-113) ──────────────────────────────────────────────
+// The app cannot see whether claude still has this server: a model switch or
+// a disconnect drops the tools mid-session and nothing said so. So the server
+// writes `mcp.json` in the thread dir when it starts — its pid and start time —
+// and stamps `endedAt` when its input closes. The app checks the pid (with
+// the process's own creation time, so a recycled pid never counts) on its 5s
+// pass and says `page tools dropped` when the server is gone while the thread
+// is live. A reconnect (`/mcp` in claude) starts a new server, which rewrites
+// the file, and the warning clears. This file has ONE writer at a time: the
+// newest server; an older one ending marks it only while it is still its own.
+
+const MCP_RECORD = "mcp.json";
+
+function mcpRecordPath(threadDir) {
+  return path.join(threadDir, MCP_RECORD);
+}
+
+/** Write this server's record. Best effort: a liveness file that cannot be
+ *  written must never stop the tools from serving. */
+function writeMcpRecord(threadDir, record) {
+  try {
+    fs.mkdirSync(threadDir, { recursive: true });
+    writeJsonAtomic(mcpRecordPath(threadDir), record);
+  } catch {
+    // the app reads a missing record as "no claim"
+  }
+}
+
+function startMcpRecord(threadDir, pid = process.pid, now = Date.now()) {
+  const record = { version: 1, pid, startedAt: now };
+  writeMcpRecord(threadDir, record);
+  return record;
+}
+
+/** Stamp `endedAt` — only while the record is still THIS server's (a newer
+ *  server after a reconnect owns the file; an old one ending must not mark
+ *  it). Returns whether it wrote. */
+function endMcpRecord(threadDir, pid = process.pid, now = Date.now()) {
+  let current = null;
+  try {
+    current = JSON.parse(fs.readFileSync(mcpRecordPath(threadDir), "utf-8"));
+  } catch {
+    return false;
+  }
+  if (!current || current.pid !== pid || typeof current.endedAt === "number") return false;
+  writeMcpRecord(threadDir, { ...current, endedAt: now });
+  return true;
+}
+
 // ── MCP over stdio (newline-delimited JSON-RPC) ──────────────────────────────
 
+/** Put this server's record back when another took it over (a second,
+ *  short-lived server for the same thread rewrites the file and may stamp it
+ *  ended). The app waits DROP_AFTER_MS (30s) before it believes an end, so a
+ *  re-assert every MCP_REASSERT_MS keeps a live server from reading dropped.
+ *  Returns whether it wrote. */
+function reassertMcpRecord(threadDir, record) {
+  let current = null;
+  try {
+    current = JSON.parse(fs.readFileSync(mcpRecordPath(threadDir), "utf-8"));
+  } catch {
+    // missing or torn — write ours
+  }
+  if (current && current.pid === record.pid && typeof current.endedAt !== "number") return false;
+  writeMcpRecord(threadDir, record);
+  return true;
+}
+
+const MCP_REASSERT_MS = 20_000;
+
 function serve(threadDir) {
+  const mcpRecord = startMcpRecord(threadDir);
+  setInterval(() => reassertMcpRecord(threadDir, mcpRecord), MCP_REASSERT_MS).unref();
   const respond = (msg) => process.stdout.write(JSON.stringify(msg) + "\n");
 
   let buffer = "";
@@ -3784,7 +3854,10 @@ function serve(threadDir) {
       handle(msg);
     }
   });
-  process.stdin.on("end", () => process.exit(0));
+  process.stdin.on("end", () => {
+    endMcpRecord(threadDir);
+    process.exit(0);
+  });
 
   function handle(msg) {
     const { id, method, params } = msg;
@@ -3926,6 +3999,11 @@ if (require.main === module) {
 
 module.exports = {
   isLocalBackendUrl,
+  startMcpRecord,
+  endMcpRecord,
+  reassertMcpRecord,
+  MCP_REASSERT_MS,
+  MCP_RECORD,
   CONTROL_CAP,
   CONTROL_KINDS,
   CONTROL_OPTION_CAP,

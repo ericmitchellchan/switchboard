@@ -133,6 +133,15 @@ export async function threadFilesStamp(threadId: string): Promise<number> {
   return invoke("thread_files_stamp", { threadId });
 }
 
+/** SWIT-113: is the thread's page-tools (MCP) server still there? Reads
+ *  the server's own `mcp.json` and checks its pid against the process's
+ *  creation time. `none` = no record (no claim). */
+export async function threadMcpHealth(
+  threadId: string
+): Promise<{ state: "none" | "alive" | "ended" | "gone"; startedAt: number }> {
+  return invoke("thread_mcp_health", { threadId });
+}
+
 /** A thread's view ids, newest-first (SWIT-50). Missing dir = []. */
 export async function listThreadViews(threadId: string): Promise<string[]> {
   return invoke("list_thread_views", { threadId });

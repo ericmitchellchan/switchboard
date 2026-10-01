@@ -20,7 +20,7 @@ import { useSidebarState } from "./hooks/useSidebarState";
 import { useConfig } from "./hooks/useConfig";
 import { usePaneLayout } from "./hooks/usePaneLayout";
 import { listen } from "@tauri-apps/api/event";
-import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, listThreadViews, readThreadFile, threadFilesStamp, writeThreadAnswer, appendConvention, writeThreadPost, saveTranscript, readBacklog, writeBacklog, takeBacklogInbox, takeJobsInbox, jobStart, jobStop, jobsSnapshot, jobNotify, jobsPost, watchesRead, watchSet, watchRemove, watchRun, watchRecord } from "./lib/ipc";
+import { createSession, closeSession, restartSession, renameSession, clearSessionScrollback, getHomeDir, flashTaskbar, notify, confirmAppClose, openPipWindow, closePipWindow, isPipWindowOpen, writeToSession, loadThreads, claudeSessionExists, discoverClaudeSessions, onSessionOutput, kbReadDoc, kbWriteDoc, kbRoot, scrollbackRoot, threadsRoot, prepareThreadLaunch, threadMcpHealth, listThreadViews, readThreadFile, threadFilesStamp, writeThreadAnswer, appendConvention, writeThreadPost, saveTranscript, readBacklog, writeBacklog, takeBacklogInbox, takeJobsInbox, jobStart, jobStop, jobsSnapshot, jobNotify, jobsPost, watchesRead, watchSet, watchRemove, watchRun, watchRecord } from "./lib/ipc";
 import { disposeTerminal, getTerminal, setTerminalConfig, recoverAllWebGL, clearAllTextureAtlases, getAllTerminalIds, refreshAllTerminalViews, clearSessionDirty, isSessionDirty, serializeForPip, plainTextTerminal, getSessionWriteCount, setTerminalScreenVisible, pasteIntoTerminal } from "./lib/terminal";
 import { onPipReady, sendPipOutput, onPipSwitchSession, broadcastPipSessions, onPipClosing, sendPipHost } from "./lib/pipBridge";
 import { bumpSessionGeneration, addSessionInputListener, getSessionGeneration } from "./lib/terminalRegistry";
@@ -42,6 +42,7 @@ import {
   clearThreadLaunched,
   isThreadLaunched,
   setThreadPrepared,
+  threadPrepared,
   noteThreadPreparedOutside,
   prepFailureReason,
   markChatStarted,
@@ -159,6 +160,7 @@ import { runPromotionPass, promotionPassReason, PROMOTION_POLL_MS } from "./lib/
 import { isOpenItem, isWaitingOnUser, type PageBrief } from "./lib/pageStore";
 import { parsePageFile, parseAnswersFile, parseInboxFile, parseRetractedFile, mergePage, conventionLine, postTimes, countUnreadTimes, nextPassEntry, loadInboxSeen, markInboxSeen, countQuestionStates, requestPageFocus, inboxTypedLine, type ConventionEntry, type ThreadPassEntry } from "./lib/pageStore";
 import { runJobsPass } from "./lib/jobs";
+import { healthLaunchAt, nextToolsVerdict, TOOLS_DROPPED_REASON, type ToolsWatch } from "./lib/toolsHealth";
 import { decideTurnSettle, offerNextThing, clearNextThingOffer } from "./lib/nextThing";
 import { getCachedDocList, refreshDocList, resolveWithFreshKbDocs } from "./lib/kb";
 import { requestReportAnchor } from "./lib/reportStore";
@@ -909,7 +911,7 @@ export default function App() {
         mcpConfig = await prepareThreadLaunch(threadId);
         // SWIT-65: recorded at EVERY spawn — the entry describes the claude
         // this launch line is about to start, never a previous one.
-        setThreadPrepared(threadId, { prepared: true });
+        setThreadPrepared(threadId, { prepared: true, at: Date.now() });
       } catch (err) {
         log.error(`MCP config unavailable for thread id=${threadId} — no page tools: ${err}`);
         setThreadPrepared(threadId, { prepared: false, reason: prepFailureReason(err) });
@@ -1365,7 +1367,9 @@ export default function App() {
           confirmLabel: "Restart claude",
           enterConfirms: false,
           message:
-            `This thread's claude launched without page tools (an empty ✦ page tab, no page/view/post/backlog).\n\n` +
+            (threadPrepared(threadId)?.prepared === false && (threadPrepared(threadId) as { dropped?: boolean }).dropped
+              ? `This thread's page tools stopped answering mid-session. Typing /mcp in claude may reconnect them without a restart.\n\n`
+              : `This thread's claude launched without page tools (an empty ✦ page tab, no page/view/post/backlog).\n\n`) +
             `Restarting relaunches claude with them. The conversation resumes via --resume — nothing on disk is lost — but anything mid-flight in the terminal right now is interrupted.`,
           onConfirm: () => {
             closeConfirm();
@@ -1618,6 +1622,8 @@ export default function App() {
   // (`pageStore.nextPassEntry`), because seen is device-local state, not one
   // of the stamped files: a cached count lied for a tick after a tab switch.
   const threadPassCacheRef = useRef(new Map<string, ThreadPassEntry>());
+  // SWIT-113: per live thread, when its tools server started reading gone.
+  const toolsWatchRef = useRef(new Map<string, ToolsWatch>());
   // SWIT-108 review #1: each read thread's page brief (null = none), filled
   // on a re-read like the entry above — what the lane brief cache is fed.
   const briefByThreadRef = useRef(new Map<string, PageBrief | null>());
@@ -1739,6 +1745,34 @@ export default function App() {
           // already has (the scan never removes). Gated on OUTPUT since the
           // last scan (the registry's per-session write counter) so an idle
           // terminal costs zero buffer walks.
+          // SWIT-113: is this live thread's page-tools server still there?
+          // One file read + one process handle per LIVE thread whose launch
+          // prepared; the rule (lib/toolsHealth) only claims after 30s of a
+          // gone/ended server that belongs to THIS launch.
+          if (live) {
+            const prep = threadPrepared(t.id);
+            const launchedAt = healthLaunchAt(prep);
+            if (prep && launchedAt !== null) {
+              try {
+                const reading = await threadMcpHealth(t.id);
+                if (cancelled) return;
+                const watch = toolsWatchRef.current.get(t.id) ?? { badSince: null };
+                const verdict = nextToolsVerdict(prep, launchedAt, reading, watch, Date.now());
+                toolsWatchRef.current.set(t.id, verdict.watch);
+                if (verdict.kind === "dropped") {
+                  log.warn(`Thread id=${t.id}: page tools server ${reading.state} — chip shows`);
+                  setThreadPrepared(t.id, { prepared: false, reason: TOOLS_DROPPED_REASON, dropped: true, at: launchedAt });
+                } else if (verdict.kind === "recovered") {
+                  log.info(`Thread id=${t.id}: page tools server back`);
+                  setThreadPrepared(t.id, { prepared: true, at: launchedAt });
+                }
+              } catch (err) {
+                log.warn(`Thread id=${t.id}: tools health unreadable: ${err}`);
+              }
+            }
+          } else {
+            toolsWatchRef.current.delete(t.id);
+          }
           if (live && sessionId !== null && noteScanWriteCount(t.id, getSessionWriteCount(sessionId))) {
             const text = plainTextTerminal(sessionId);
             if (text !== null) scanThreadTranscript(t.id, text);

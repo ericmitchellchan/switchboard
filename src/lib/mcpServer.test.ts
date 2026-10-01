@@ -3391,3 +3391,56 @@ describe("the job tool — review fixes (SWIT-109/110)", () => {
     expect(d).toMatch(/a process that left the tree .* keeps running/);
   });
 });
+
+describe("the liveness record (SWIT-113)", () => {
+  const live = server as unknown as {
+    startMcpRecord: (dir: string, pid?: number, now?: number) => { pid: number; startedAt: number };
+    endMcpRecord: (dir: string, pid?: number, now?: number) => boolean;
+    reassertMcpRecord: (dir: string, record: { pid: number; startedAt: number }) => boolean;
+    MCP_REASSERT_MS: number;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeFs = require("fs") as {
+    mkdtempSync: (p: string) => string;
+    readFileSync: (p: string, e: string) => string;
+    rmSync: (p: string, o: { recursive: boolean; force: boolean }) => void;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeOs = require("os") as { tmpdir: () => string };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodePath = require("path") as { join: (...p: string[]) => string };
+  const read = (dir: string) => JSON.parse(nodeFs.readFileSync(nodePath.join(dir, "mcp.json"), "utf-8"));
+
+  it("records pid + start at boot and stamps its OWN end only", () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-mcp-"));
+    try {
+      live.startMcpRecord(dir, 111, 1000);
+      expect(read(dir)).toEqual({ version: 1, pid: 111, startedAt: 1000 });
+      // a newer server (a /mcp reconnect) owns the file now…
+      live.startMcpRecord(dir, 222, 2000);
+      // …so the old one ending must not mark it.
+      expect(live.endMcpRecord(dir, 111, 2500)).toBe(false);
+      expect(read(dir).endedAt).toBeUndefined();
+      expect(live.endMcpRecord(dir, 222, 3000)).toBe(true);
+      expect(read(dir)).toEqual({ version: 1, pid: 222, startedAt: 2000, endedAt: 3000 });
+    } finally {
+      nodeFs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a live server puts its record back after another took it over and ended", () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-mcp-"));
+    try {
+      const mine = live.startMcpRecord(dir, 111, 1000);
+      expect(live.reassertMcpRecord(dir, mine)).toBe(false); // still mine: no write
+      live.startMcpRecord(dir, 333, 1500);
+      live.endMcpRecord(dir, 333, 1600);
+      expect(live.reassertMcpRecord(dir, mine)).toBe(true);
+      expect(read(dir)).toEqual({ version: 1, pid: 111, startedAt: 1000 });
+      // the app waits 30s before it believes an end — longer than one re-assert.
+      expect(live.MCP_REASSERT_MS).toBeLessThan(30_000);
+    } finally {
+      nodeFs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

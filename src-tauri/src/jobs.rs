@@ -554,6 +554,32 @@ unsafe fn handle_facts(handle: windows_sys::Win32::Foundation::HANDLE) -> Option
     Some((filetime_ms(creation)?, running))
 }
 
+/// Creation time (unix ms) + still-running for `pid`, through one handle;
+/// None when it cannot be opened (gone, or not ours to see). SWIT-113's
+/// liveness check reads it for the MCP server's recorded pid.
+#[cfg(windows)]
+pub fn process_facts(pid: u32) -> Option<(u64, bool)> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    if pid == 0 {
+        return None;
+    }
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return None;
+        }
+        let facts = handle_facts(h);
+        CloseHandle(h);
+        facts
+    }
+}
+
+#[cfg(not(windows))]
+pub fn process_facts(_pid: u32) -> Option<(u64, bool)> {
+    None
+}
+
 /// Is `pid` still the process we spawned, and still running?
 #[cfg(windows)]
 pub fn process_matches(pid: u32, started_at: u64) -> bool {

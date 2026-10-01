@@ -229,7 +229,8 @@ function PrepChip({ sessionId, compact }: { sessionId: string; compact: boolean 
       onClick={() => getThreadActions()?.relaunchWithPageTools(hit.threadId)}
       title={
         `${hit.reason}\n\n` +
-        `Relaunch this thread's claude with page tools — the conversation resumes via --resume.`
+        (hit.dropped ? "Or click to relaunch" : "Relaunch") +
+        ` this thread's claude with page tools — the conversation resumes via --resume.`
       }
       style={{
         fontFamily: "var(--font-mono)",
@@ -247,7 +248,7 @@ function PrepChip({ sessionId, compact }: { sessionId: string; compact: boolean 
       onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-secondary)")}
       onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-dim)")}
     >
-      no page — plain shell
+      {hit.dropped ? "page tools dropped" : "no page — plain shell"}
     </button>
   );
 }

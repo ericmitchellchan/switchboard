@@ -1347,7 +1347,13 @@ describe("thread prepared state (SWIT-65)", () => {
   it("chips a launched thread whose launch recorded prepared:false", () => {
     const t = liveThread();
     prep.setThreadPrepared(t.id, { prepared: false, reason: "mcp dir unwritable" });
-    expect(chip("s1")).toEqual({ threadId: t.id, reason: "mcp dir unwritable" });
+    expect(chip("s1")).toEqual({ threadId: t.id, reason: "mcp dir unwritable", dropped: false });
+  });
+
+  it("SWIT-113: a launch whose tools server dropped chips as dropped", () => {
+    const t = liveThread();
+    prep.setThreadPrepared(t.id, { prepared: false, reason: "gone", dropped: true, at: 1 });
+    expect(chip("s1")).toEqual({ threadId: t.id, reason: "gone", dropped: true });
   });
 
   it("no entry = no claim = no chip", () => {
@@ -1386,7 +1392,7 @@ describe("thread prepared state (SWIT-65)", () => {
     expect(chip("s1")).toBeNull();
     const t2 = liveThread("s2");
     prep.noteThreadPreparedOutside(t2.id);
-    expect(chip("s2")).toEqual({ threadId: t2.id, reason: prep.OUTSIDE_SWITCHBOARD_REASON });
+    expect(chip("s2")).toEqual({ threadId: t2.id, reason: prep.OUTSIDE_SWITCHBOARD_REASON, dropped: false });
   });
 
   it("session exit clears the entry, so a later rediscovery may fill it", () => {
@@ -1397,7 +1403,7 @@ describe("thread prepared state (SWIT-65)", () => {
     prep.bindThreadSession(t.id, "s1");
     prep.markThreadLaunched(t.id);
     prep.noteThreadPreparedOutside(t.id);
-    expect(chip("s1")).toEqual({ threadId: t.id, reason: prep.OUTSIDE_SWITCHBOARD_REASON });
+    expect(chip("s1")).toEqual({ threadId: t.id, reason: prep.OUTSIDE_SWITCHBOARD_REASON, dropped: false });
   });
 
   it("unbind and delete clear the entry", () => {

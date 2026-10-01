@@ -3,6 +3,7 @@ mod discovery;
 mod explorer;
 mod ipc_guard;
 mod jobs;
+mod mcp_health;
 mod kb;
 mod power;
 mod pty;
@@ -305,7 +306,7 @@ const THREAD_FILES: [&str; 6] = [
 /// Thread ids are frontend-minted uuids (threadStore.mintUuid). Anything
 /// outside the uuid alphabet is refused outright — there is no path form to
 /// sanitize because none can be expressed.
-fn valid_thread_id(id: &str) -> bool {
+pub(crate) fn valid_thread_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
         && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
@@ -2574,6 +2575,7 @@ fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         read_backlog,
         write_backlog,
         take_backlog_inbox,
+        mcp_health::thread_mcp_health,
         jobs::take_jobs_inbox,
         jobs::job_start,
         jobs::job_stop,
