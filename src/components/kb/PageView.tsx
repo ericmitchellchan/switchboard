@@ -149,7 +149,7 @@ import { viewOwnerKey } from "../../lib/viewStore";
 import type { EvidenceGroupId, ThreadViewRow } from "../../lib/evidenceModel";
 import { useScannedEvidence } from "../../lib/evidenceScan";
 import { getCachedDocList, noteKbMiss, refreshDocList, resolveWithFreshKbDocs, subscribeDocList } from "../../lib/kb";
-import { explorerProjects, listThreadViews, markThreadAnswersSent, readThreadView, retractThreadEvidence } from "../../lib/ipc";
+import { explorerProjects, listThreadViews, markThreadAnswersSent, readThreadView, removeThreadFinding, retractThreadEvidence } from "../../lib/ipc";
 import { projectPlaceForDir } from "../../lib/explorer";
 import { getThreads } from "../../lib/threadStore";
 import { parseViewSpec } from "../../lib/viewStore";
@@ -358,6 +358,24 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
         refresh();
       } catch (err) {
         log.warn(`Could not take ${address} off the page: ${err}`);
+      } finally {
+        setRetracting(null);
+      }
+    },
+    [threadId, refresh]
+  );
+  // SWIT-114: a finding the USER filed (`→ finding` on a report) comes off
+  // through the app's own file (findings.json) — the agent's rows are the
+  // agent's to drop (op finding, findingOp drop). Same in-flight slot as the
+  // evidence `×`; the row leaves when the re-read says so.
+  const removeUserFinding = useCallback(
+    async (id: string) => {
+      setRetracting(`finding:${id}`);
+      try {
+        await removeThreadFinding(threadId, id);
+        refresh();
+      } catch (err) {
+        log.warn(`Could not take finding ${id} off the page: ${err}`);
       } finally {
         setRetracting(null);
       }
@@ -717,17 +735,25 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
           click-time KB re-resolve for a report written seconds ago). */}
       {page.findings.length > 0 && (
         <PageBlock title="Findings" dataPageBlock="findings">
-          <ColumnHeads grid={FINDING_GRID} labels={["Verdict", "Claim", "n", "Report", { label: "Updated", right: true }]} />
+          <ColumnHeads grid={FINDING_GRID} labels={["Verdict", "Claim", "n", "Report", { label: "Updated", right: true }, ""]} />
           {page.findings.map((f) => (
             <div
-              key={f.id}
-              className="page-block-row"
+              key={`${f.by ?? "agent"}:${f.id}`}
+              className="page-evidence-row page-block-row"
               style={{ display: "grid", ...FINDING_GRID, columnGap: 11, alignItems: "center", padding: "7px 0", borderBottom: "1px solid var(--border)" }}
             >
               <span style={{ minWidth: 0 }}>
                 <StatusPill word={f.verdict} tone={verdictTone(f.verdict)} />
               </span>
               <span title={f.claim} style={{ minWidth: 0, fontSize: 12.5, lineHeight: 1.45, color: "var(--text-primary)" }}>
+                {f.by === "user" && (
+                  <span
+                    style={{ fontFamily: MONO, fontSize: 10, color: "var(--text-faint)", marginRight: 6 }}
+                    title="You filed this from a report (→ finding)"
+                  >
+                    you
+                  </span>
+                )}
                 {f.claim}
               </span>
               <span
@@ -738,6 +764,23 @@ export function PageView({ threadId, active }: { threadId: string; active: boole
               </span>
               <span style={{ minWidth: 0, overflow: "hidden" }}>{f.report ? renderAddress(f.report, { fontSize: 10.5 }) : null}</span>
               <Age at={f.updatedAt} isNew={isNewSince(f.updatedAt, seenAt)} />
+              <span>
+                {/* Only the user's own finding comes off here; the agent's
+                    is the agent's to drop. */}
+                {f.by === "user" && (
+                  <button
+                    type="button"
+                    className="page-evidence-x"
+                    disabled={retracting !== null}
+                    data-retracting={retracting === `finding:${f.id}` ? "" : undefined}
+                    onClick={() => void removeUserFinding(f.id)}
+                    title="Take this finding off"
+                    aria-label={`Take finding ${f.id} off`}
+                  >
+                    ×
+                  </button>
+                )}
+              </span>
             </div>
           ))}
         </PageBlock>

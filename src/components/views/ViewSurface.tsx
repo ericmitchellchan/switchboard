@@ -184,6 +184,7 @@ import {
 } from "../../lib/panelStore";
 import { sanitizeForTypedLine, REF_MAX } from "../../lib/agentContext";
 import { kbWriteDoc } from "../../lib/ipc";
+import { FindingAction } from "./FindingAction";
 import {
   SurfaceAnchorContext,
   composeAnchorProviders,
@@ -1101,6 +1102,11 @@ export function ViewChrome({
               >
                 {loading ? "…" : "re-run"}
               </button>
+              {/* SWIT-114: a standalone view (not a drilled child, not a
+                  block inside a report — those file from their report). */}
+              {!embedded && drillKey === null && block === null && (
+                <FindingAction artifact={artifact} title={spec.title} buttonStyle={TOOL_BTN} />
+              )}
               <button
                 type="button"
                 style={TOOL_BTN}

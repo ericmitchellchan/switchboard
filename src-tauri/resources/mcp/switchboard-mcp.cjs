@@ -632,6 +632,13 @@ function applyOp(page, args, now, answeredIds = new Set(), dismissedIds = new Se
       if (id !== null && !/^[A-Za-z0-9_-]{1,40}$/.test(id)) {
         throw new OpError("id must be a short stable key (letters, digits, _ and -; ≤ 40) — or omit it and one is minted");
       }
+      // SWIT-114: `user-` ids are the USER's findings (filed from a report,
+      // in the app's findings.json) — read them, never write them.
+      if (id !== null && id.startsWith(USER_FINDING_PREFIX)) {
+        throw new OpError(
+          `${id} is a finding the user filed — it is theirs; file your own (omit id, or another id) if the evidence has moved`
+        );
+      }
       const prev = id === null ? undefined : findings.find((f) => f.id === id);
       const given = (v) => v !== undefined && v !== null;
       // A new finding needs a claim and a verdict; an update keeps what it
@@ -882,7 +889,8 @@ function renderPageRead(page, answers, dismissedIds, lim) {
     const tail =
       (typeof f.n === "string" && f.n.length > 0 ? ` | n: ${clipLine(f.n, FINDING_N_CAP)}` : "") +
       (typeof f.report === "string" && f.report.length > 0 ? ` | report: ${clipLine(f.report, lim.clip)}` : "");
-    out.push(`  ${f.id} [${f.verdict}] ${clipLine(f.claim, lim.clip)}${tail}`);
+    const who = f.by === "user" ? " (filed by the user)" : "";
+    out.push(`  ${f.id} [${f.verdict}]${who} ${clipLine(f.claim, lim.clip)}${tail}`);
   }
   more(findings.length, lim.findings);
   if (findings.length === 0) out.push("  (none)");
@@ -1000,7 +1008,8 @@ function renderLaneRead(lane, lim) {
     const tail =
       (typeof f.finding.n === "string" && f.finding.n.length > 0 ? ` | n: ${clipLine(f.finding.n, FINDING_N_CAP)}` : "") +
       (typeof f.finding.report === "string" && f.finding.report.length > 0 ? ` | report: ${clipLine(f.finding.report, lim.clip)}` : "");
-    out.push(`  [${f.finding.verdict}] ${clipLine(f.finding.claim, lim.clip)}${tail} — ${title(f.threadTitle)}`);
+    const who = f.finding.by === "user" ? " (filed by the user)" : "";
+    out.push(`  [${f.finding.verdict}]${who} ${clipLine(f.finding.claim, lim.clip)}${tail} — ${title(f.threadTitle)}`);
   }
   more(lane.findings.length, lim.findings);
   if (lane.findings.length === 0) out.push("  (none)");
@@ -1065,7 +1074,7 @@ function readLaneRollup(env) {
         }
         return {
           thread: t,
-          page: parsePage(raw),
+          page: withUserFindings(parsePage(raw), dir),
           answers: readAppJson(dir, "answers.json", {}),
           retracted: readAppJson(dir, "retracted.json", null),
         };
@@ -1229,6 +1238,34 @@ function briefLaneStamp(ctx, page) {
 
 /** One of the app's files beside page.json, as parsed JSON — READ-only (the
  *  app is their one writer). Missing or junk → `fallback`. */
+// SWIT-114: the USER's findings — filed from a report (`→ finding`) into the
+// thread's findings.json, the APP's file (read-only here, like answers.json).
+const USER_FINDING_PREFIX = "user-";
+
+/** The page with the user's findings joined to the agent's (marked
+ *  `by: "user"`). Read-only; a missing or torn file adds nothing. */
+function withUserFindings(page, threadDir) {
+  const file = readAppJson(threadDir, "findings.json", null);
+  const rows =
+    file && Array.isArray(file.findings)
+      ? file.findings
+          .filter(
+            (f) =>
+              f &&
+              typeof f.id === "string" &&
+              f.id.startsWith(USER_FINDING_PREFIX) &&
+              typeof f.claim === "string" &&
+              FINDING_VERDICTS.includes(f.verdict)
+          )
+          .map((f) => ({ ...f, by: "user" }))
+      : [];
+  if (rows.length === 0) return page;
+  const own = (Array.isArray(page.findings) ? page.findings : []).filter(
+    (f) => !(f && typeof f.id === "string" && f.id.startsWith(USER_FINDING_PREFIX))
+  );
+  return { ...page, findings: [...own, ...rows] };
+}
+
 function readAppJson(threadDir, name, fallback) {
   try {
     return JSON.parse(fs.readFileSync(path.join(threadDir, name), "utf-8"));
@@ -1250,7 +1287,7 @@ function performReadOp(threadDir, env = null) {
     // no page yet — the read says so
   }
   return formatPageRead(
-    parsePage(raw),
+    withUserFindings(parsePage(raw), threadDir),
     readAppJson(threadDir, "answers.json", {}),
     readAppJson(threadDir, "retracted.json", null),
     readLaneRollup(env)
@@ -3586,6 +3623,8 @@ const PAGE_TOOL = {
     "in place as the verdict moves — never file the same claim twice; fields you omit are " +
     "kept, n or report \"\" clears one; findingOp drop {id} removes one that was never right. " +
     "At most 60 per page. A finding is never an evidence row (finding:<id> is refused). " +
+    "Findings whose id starts user- are the USER's (filed from a report in the panel, " +
+    "marked \"filed by the user\" in op read): read them as their verdict, never update or drop them. " +
     "LANES: a lane is a named body of work inside this thread's project (e.g. \"Gamma model\"); " +
     "its brief is the newest brief any of its threads wrote, and its findings, reports and " +
     "decisions are what its threads recorded. op lane {name} puts THIS thread in a lane when it " +

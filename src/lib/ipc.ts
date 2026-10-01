@@ -142,6 +142,20 @@ export async function threadMcpHealth(
   return invoke("thread_mcp_health", { threadId });
 }
 
+/** SWIT-114: file a finding from a report into the thread's findings.json
+ *  (the app's file). Rust validates and mints the `user-<n>` id. */
+export async function addThreadFinding(
+  threadId: string,
+  f: { claim: string; verdict: string; n: string | null; report: string | null }
+): Promise<string> {
+  return invoke("add_thread_finding", { threadId, claim: f.claim, verdict: f.verdict, n: f.n, report: f.report });
+}
+
+/** SWIT-114: take a user-filed finding off (a `user-` id only). */
+export async function removeThreadFinding(threadId: string, id: string): Promise<boolean> {
+  return invoke("remove_thread_finding", { threadId, id });
+}
+
 /** A thread's view ids, newest-first (SWIT-50). Missing dir = []. */
 export async function listThreadViews(threadId: string): Promise<string[]> {
   return invoke("list_thread_views", { threadId });

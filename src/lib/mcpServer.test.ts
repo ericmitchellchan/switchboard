@@ -3444,3 +3444,48 @@ describe("the liveness record (SWIT-113)", () => {
     }
   });
 });
+
+describe("the user's findings (SWIT-114)", () => {
+  const uf = server as unknown as {
+    performReadOp: (threadDir: string) => string;
+    performOp: (threadDir: string, args: Record<string, unknown>, now: number) => string;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeFs = require("fs") as {
+    mkdtempSync: (p: string) => string;
+    writeFileSync: (p: string, d: string) => void;
+    rmSync: (p: string, o: { recursive: boolean; force: boolean }) => void;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeOs = require("os") as { tmpdir: () => string };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodePath = require("path") as { join: (...p: string[]) => string };
+
+  it("op read lists them beside the agent's, marked as the user's", () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-uf-"));
+    try {
+      uf.performOp(dir, { op: "finding", claim: "The agent's claim", verdict: "open" }, NOW);
+      nodeFs.writeFileSync(
+        nodePath.join(dir, "findings.json"),
+        JSON.stringify({
+          version: 1,
+          findings: [
+            { id: "user-1", claim: "Resting entry beats next-bar", verdict: "lead", n: "264 nights", report: "view:v3", updatedAt: new Date(NOW + 1000).toISOString() },
+            { id: "f9", claim: "not a user id — ignored", verdict: "lead", updatedAt: "t" },
+          ],
+        })
+      );
+      const text = uf.performReadOp(dir);
+      expect(text).toContain("FINDINGS (2):");
+      expect(text).toContain("  user-1 [lead] (filed by the user) Resting entry beats next-bar | n: 264 nights | report: view:v3");
+      expect(text).toContain("  f1 [open] The agent's claim");
+      expect(text).not.toContain("not a user id");
+    } finally {
+      nodeFs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("the agent cannot write a user- id", () => {
+    expect(() => server.applyOp(empty(), { op: "finding", id: "user-1", claim: "x", verdict: "lead" }, NOW)).toThrow(/finding the user filed/);
+  });
+});

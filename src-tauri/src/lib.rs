@@ -4,6 +4,7 @@ mod explorer;
 mod ipc_guard;
 mod jobs;
 mod mcp_health;
+mod user_findings;
 mod kb;
 mod power;
 mod pty;
@@ -294,13 +295,16 @@ fn threads_data_dir() -> Result<std::path::PathBuf, String> {
 /// `set:`), read by the view-intent poll beside the views/ listing.
 /// SWIT-102 adds shows.json — the MCP server's SHOWS (`page` op `show`: put
 /// an existing doc or file in front of the user), read by the same poll.
-const THREAD_FILES: [&str; 6] = [
+/// SWIT-114 adds findings.json — the USER's findings, filed from a report
+/// (`→ finding`); the app is its one writer (user_findings.rs).
+const THREAD_FILES: [&str; 7] = [
     "page.json",
     "answers.json",
     "inbox.json",
     "retracted.json",
     "sets.json",
     "shows.json",
+    "findings.json",
 ];
 
 /// Thread ids are frontend-minted uuids (threadStore.mintUuid). Anything
@@ -980,7 +984,7 @@ mod attachment_guard_tests {
 /// and a retraction stamped at second precision compared numerically against
 /// a ms `updatedAt` lost by the fraction (SWIT-78 review, F1). Every stamp
 /// this side writes — answers, sentAt, posts, retractions — is this one shape.
-fn chrono_like_now_iso() -> String {
+pub(crate) fn chrono_like_now_iso() -> String {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -2576,6 +2580,8 @@ fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         write_backlog,
         take_backlog_inbox,
         mcp_health::thread_mcp_health,
+        user_findings::add_thread_finding,
+        user_findings::remove_thread_finding,
         jobs::take_jobs_inbox,
         jobs::job_start,
         jobs::job_stop,
