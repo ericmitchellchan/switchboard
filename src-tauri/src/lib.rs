@@ -445,7 +445,9 @@ mod thread_stamp_tests {
         assert!(THREAD_FILES.contains(&"sets.json"));
         // SWIT-102: shows.json (the MCP server's `page` op `show`) is the sixth.
         assert!(THREAD_FILES.contains(&"shows.json"));
-        assert_eq!(THREAD_FILES.len(), 6);
+        // SWIT-114: findings.json (the user's findings, the app's file) is the seventh.
+        assert!(THREAD_FILES.contains(&"findings.json"));
+        assert_eq!(THREAD_FILES.len(), 7);
     }
 
     #[test]
