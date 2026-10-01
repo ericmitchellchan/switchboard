@@ -180,7 +180,7 @@ export const ARTIFACT_GRID: CSSProperties = { gridTemplateColumns: "176px minmax
 /** time · line. */
 export const TURN_GRID: CSSProperties = { gridTemplateColumns: "64px minmax(0,1fr)" };
 /** verdict · claim · n · report · updated (SWIT-106, the Findings ledger). */
-export const FINDING_GRID: CSSProperties = { gridTemplateColumns: "58px minmax(0,1fr) 72px 150px 52px" };
+export const FINDING_GRID: CSSProperties = { gridTemplateColumns: "58px minmax(0,1fr) 72px 150px 52px 14px" };
 /** job · last line · state · age · stop (SWIT-109, the Jobs block). */
 export const JOB_GRID: CSSProperties = { gridTemplateColumns: "130px minmax(0,1fr) 124px 52px 52px" };
 

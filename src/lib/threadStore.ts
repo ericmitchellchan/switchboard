@@ -904,8 +904,14 @@ export function applyWorkspaceStaleness(
 // below, transient like `launched`.
 
 export type ThreadPrepared =
-  | { prepared: true }
-  | { prepared: false; reason: string };
+  /** `at` (SWIT-113): when this launch was recorded — what lets the
+   *  mid-session health rule (lib/toolsHealth) tell this launch's tools
+   *  server from the previous one. */
+  | { prepared: true; at?: number }
+  /** `dropped` (SWIT-113): the launch prepared, and its tools server went
+   *  away mid-session — the chip says `page tools dropped`, and the rule may
+   *  clear it again when a reconnect brings the server back. */
+  | { prepared: false; reason: string; dropped?: boolean; at?: number };
 
 /** The honest reason for a conversation the promotion pass discovered: it was
  *  typed as a plain `claude`, so prep never ran and no flag was passed. */
@@ -936,12 +942,12 @@ export function unpreparedThreadReason(
   threads: readonly Thread[],
   launched: ReadonlySet<string>,
   prepared: ReadonlyMap<string, ThreadPrepared>
-): { threadId: string; reason: string } | null {
+): { threadId: string; reason: string; dropped: boolean } | null {
   const t = threads.find((x) => x.sessionId === sessionId);
   if (!t || !launched.has(t.id)) return null;
   const p = prepared.get(t.id);
   if (!p || p.prepared) return null;
-  return { threadId: t.id, reason: p.reason };
+  return { threadId: t.id, reason: p.reason, dropped: p.dropped === true };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1366,6 +1372,11 @@ export function clearThreadLaunched(threadId: string): void {
 export function setThreadPrepared(threadId: string, state: ThreadPrepared): void {
   prepared.set(threadId, state);
   bump();
+}
+
+/** The prep record for one thread (SWIT-113's health pass reads it). */
+export function threadPrepared(threadId: string): ThreadPrepared | undefined {
+  return prepared.get(threadId);
 }
 
 /** The promotion pass found a conversation it did not launch — prep never ran

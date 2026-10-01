@@ -200,7 +200,30 @@ export type PageFinding = {
   /** The report behind it — an Evidence-style address; null = none. */
   report: string | null;
   updatedAt: string;
+  /** SWIT-114: `user` = filed by the user from a report (`→ finding`), kept
+   *  in the thread's findings.json (the app's file). Absent = the agent's. */
+  by?: "user";
 };
+
+/** SWIT-114: the id prefix Rust mints for a user-filed finding (the MCP
+ *  server refuses it for the agent's own ids, so the ledgers never collide). */
+export const USER_FINDING_PREFIX = "user-";
+
+/** Tolerant parse of findings.json (SWIT-114 — the user's findings, the
+ *  app's file): the same row rules as the agent's ledger, `user-` ids only. */
+export function parseUserFindingsFile(raw: string): PageFinding[] {
+  if (raw.trim().length === 0) return [];
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!isRecord(data)) return [];
+  return parseFindings(data.findings)
+    .filter((f) => f.id.startsWith(USER_FINDING_PREFIX))
+    .map((f) => ({ ...f, by: "user" as const }));
+}
 
 /** page.json — the agent's half, newest-first arrays. */
 export type PageFile = {
@@ -909,7 +932,8 @@ export function mergePage(
   page: PageFile,
   answers: AnswersFile,
   inbox: InboxPost[],
-  retracted: readonly RetractedEvidence[] = NO_RETRACTIONS
+  retracted: readonly RetractedEvidence[] = NO_RETRACTIONS,
+  userFindings: readonly PageFinding[] = []
 ): RenderedPage {
   const openQuestions = page.questions.filter((q) => isQuestionOpen(q, answers, retracted));
   // SWIT-105: dismissed = would be open but for the user's `not needed`. An
@@ -982,7 +1006,11 @@ export function mergePage(
   const merged: RenderedPage = {
     theme: page.theme,
     brief: page.brief,
-    findings: [...page.findings].sort((a, b) => newestFirst(a.updatedAt, b.updatedAt)),
+    // SWIT-114: the user's findings (findings.json) beside the agent's —
+    // one ledger, newest first; a `user-` id never collides with the agent's.
+    findings: [...page.findings.filter((f) => !f.id.startsWith(USER_FINDING_PREFIX)), ...userFindings].sort((a, b) =>
+      newestFirst(a.updatedAt, b.updatedAt)
+    ),
     openQuestions,
     unsentDecisions,
     decisionQuestions,
@@ -1245,7 +1273,7 @@ export function nextPassEntry(
 
 export const PAGE_POLL_MS = 2_500;
 
-const THREAD_FILE_NAMES = ["page.json", "answers.json", "inbox.json", "retracted.json"] as const;
+const THREAD_FILE_NAMES = ["page.json", "answers.json", "inbox.json", "retracted.json", "findings.json"] as const;
 
 export type PageRead = {
   page: RenderedPage;
@@ -1289,18 +1317,19 @@ export function usePage(threadId: string, active: boolean): PageRead {
       if (busyRef.current) return;
       busyRef.current = true;
       try {
-        const [pageRaw, answersRaw, inboxRaw, retractedRaw] = await Promise.all(
+        const [pageRaw, answersRaw, inboxRaw, retractedRaw, findingsRaw] = await Promise.all(
           THREAD_FILE_NAMES.map((name) => readThreadFile(threadId, name))
         );
         if (cancelled) return;
-        const combined = `${pageRaw}\u0000${answersRaw}\u0000${inboxRaw}\u0000${retractedRaw}`;
+        const combined = `${pageRaw}\u0000${answersRaw}\u0000${inboxRaw}\u0000${retractedRaw}\u0000${findingsRaw}`;
         if (combined === lastRawRef.current) return; // unchanged — no re-render
         lastRawRef.current = combined;
         const page = mergePage(
           parsePageFile(pageRaw),
           parseAnswersFile(answersRaw),
           parseInboxFile(inboxRaw),
-          parseRetractedFile(retractedRaw)
+          parseRetractedFile(retractedRaw),
+          parseUserFindingsFile(findingsRaw)
         );
         setState((prev) => ({ page, revision: prev.revision + 1 }));
       } catch {

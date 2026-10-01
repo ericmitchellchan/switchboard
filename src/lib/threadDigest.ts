@@ -5,23 +5,31 @@
 // digest for that thread and the rest render.
 
 import { readThreadFile, threadFilesStamp } from "./ipc";
-import { mergePage, parseAnswersFile, parseInboxFile, parsePageFile, parseRetractedFile } from "./pageStore";
+import { mergePage, parseAnswersFile, parseInboxFile, parsePageFile, parseRetractedFile, parseUserFindingsFile } from "./pageStore";
 import type { InboxPost, RenderedPage } from "./pageStore";
 
 export type ThreadPageDigest = { page: RenderedPage; posts: InboxPost[] };
 
 export async function readThreadDigest(threadId: string): Promise<ThreadPageDigest> {
-  const [pageRaw, answersRaw, inboxRaw, retractedRaw] = await Promise.all([
+  const [pageRaw, answersRaw, inboxRaw, retractedRaw, findingsRaw] = await Promise.all([
     readThreadFile(threadId, "page.json"),
     readThreadFile(threadId, "answers.json"),
     readThreadFile(threadId, "inbox.json"),
     // SWIT-105: a question dismissed on the page (`not needed`) is not open
     // anywhere else either — the dismissals live in this file.
     readThreadFile(threadId, "retracted.json"),
+    // SWIT-114: the user's own findings (filed from a report) join the ledger.
+    readThreadFile(threadId, "findings.json"),
   ]);
   const posts = parseInboxFile(inboxRaw);
   return {
-    page: mergePage(parsePageFile(pageRaw), parseAnswersFile(answersRaw), posts, parseRetractedFile(retractedRaw)),
+    page: mergePage(
+      parsePageFile(pageRaw),
+      parseAnswersFile(answersRaw),
+      posts,
+      parseRetractedFile(retractedRaw),
+      parseUserFindingsFile(findingsRaw)
+    ),
     posts,
   };
 }

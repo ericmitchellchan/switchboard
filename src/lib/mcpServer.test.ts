@@ -3391,3 +3391,102 @@ describe("the job tool — review fixes (SWIT-109/110)", () => {
     expect(d).toMatch(/a process that left the tree .* keeps running/);
   });
 });
+
+describe("the liveness record (SWIT-113)", () => {
+  const live = server as unknown as {
+    startMcpRecord: (dir: string, pid?: number, now?: number) => { pid: number; startedAt: number };
+    endMcpRecord: (dir: string, pid?: number, now?: number) => boolean;
+    reassertMcpRecord: (dir: string, record: { pid: number; startedAt: number }) => boolean;
+    MCP_REASSERT_MS: number;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeFs = require("fs") as {
+    mkdtempSync: (p: string) => string;
+    readFileSync: (p: string, e: string) => string;
+    rmSync: (p: string, o: { recursive: boolean; force: boolean }) => void;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeOs = require("os") as { tmpdir: () => string };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodePath = require("path") as { join: (...p: string[]) => string };
+  const read = (dir: string) => JSON.parse(nodeFs.readFileSync(nodePath.join(dir, "mcp.json"), "utf-8"));
+
+  it("records pid + start at boot and stamps its OWN end only", () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-mcp-"));
+    try {
+      live.startMcpRecord(dir, 111, 1000);
+      expect(read(dir)).toEqual({ version: 1, pid: 111, startedAt: 1000 });
+      // a newer server (a /mcp reconnect) owns the file now…
+      live.startMcpRecord(dir, 222, 2000);
+      // …so the old one ending must not mark it.
+      expect(live.endMcpRecord(dir, 111, 2500)).toBe(false);
+      expect(read(dir).endedAt).toBeUndefined();
+      expect(live.endMcpRecord(dir, 222, 3000)).toBe(true);
+      expect(read(dir)).toEqual({ version: 1, pid: 222, startedAt: 2000, endedAt: 3000 });
+    } finally {
+      nodeFs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a live server puts its record back after another took it over and ended", () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-mcp-"));
+    try {
+      const mine = live.startMcpRecord(dir, 111, 1000);
+      expect(live.reassertMcpRecord(dir, mine)).toBe(false); // still mine: no write
+      live.startMcpRecord(dir, 333, 1500);
+      live.endMcpRecord(dir, 333, 1600);
+      expect(live.reassertMcpRecord(dir, mine)).toBe(true);
+      expect(read(dir)).toEqual({ version: 1, pid: 111, startedAt: 1000 });
+      // the app waits 30s before it believes an end — longer than one re-assert.
+      expect(live.MCP_REASSERT_MS).toBeLessThan(30_000);
+    } finally {
+      nodeFs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the user's findings (SWIT-114)", () => {
+  const uf = server as unknown as {
+    performReadOp: (threadDir: string) => string;
+    performOp: (threadDir: string, args: Record<string, unknown>, now: number) => string;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeFs = require("fs") as {
+    mkdtempSync: (p: string) => string;
+    writeFileSync: (p: string, d: string) => void;
+    rmSync: (p: string, o: { recursive: boolean; force: boolean }) => void;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeOs = require("os") as { tmpdir: () => string };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodePath = require("path") as { join: (...p: string[]) => string };
+
+  it("op read lists them beside the agent's, marked as the user's", () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "swb-uf-"));
+    try {
+      uf.performOp(dir, { op: "finding", claim: "The agent's claim", verdict: "open" }, NOW);
+      nodeFs.writeFileSync(
+        nodePath.join(dir, "findings.json"),
+        JSON.stringify({
+          version: 1,
+          findings: [
+            { id: "user-1", claim: "Resting entry beats next-bar", verdict: "lead", n: "264 nights", report: "view:v3", updatedAt: new Date(NOW + 1000).toISOString() },
+            { id: "f9", claim: "not a user id — ignored", verdict: "lead", updatedAt: "t" },
+          ],
+        })
+      );
+      const text = uf.performReadOp(dir);
+      expect(text).toContain("FINDINGS (2):");
+      expect(text).toContain("  user-1 [lead] (filed by the user) Resting entry beats next-bar | n: 264 nights | report: view:v3");
+      expect(text).toContain("  f1 [open] The agent's claim");
+      expect(text).not.toContain("not a user id");
+    } finally {
+      nodeFs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("the agent cannot write a user- id", () => {
+    expect(() => server.applyOp(empty(), { op: "finding", id: "user-1", claim: "x", verdict: "lead" }, NOW)).toThrow(/finding the user filed/);
+    expect(() => server.applyOp(empty(), { op: "finding", id: "user-1", findingOp: "drop" }, NOW)).toThrow(/finding the user filed/);
+  });
+});

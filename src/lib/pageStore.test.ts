@@ -7,6 +7,7 @@ import { describe, it, expect } from "vitest";
 import pageStoreSource from "./pageStore.ts?raw";
 import {
   parsePageFile,
+  parseUserFindingsFile,
   parseAnswersFile,
   parseInboxFile,
   mergePage,
@@ -940,5 +941,26 @@ describe("review of c178f2f — the keyboard `not needed` hand-off and Home's di
   it("nit — Home's `not needed` saved note replaces the card's form (a success)", () => {
     expect(dismissSuccessNote()).toEqual({ kind: "success", text: "not needed · off the page" });
     expect(noteReplacesFormForDismiss(dismissSuccessNote())).toBe(true);
+  });
+});
+
+describe("the user's findings merge (SWIT-114)", () => {
+  it("parses findings.json's user- rows and merges them newest first beside the agent's", () => {
+    const user = parseUserFindingsFile(
+      JSON.stringify({
+        version: 1,
+        findings: [
+          { id: "user-1", claim: "Mine", verdict: "fact", n: null, report: "view:v3", updatedAt: "2026-09-30T12:00:00.000Z" },
+          { id: "f1", claim: "not mine", verdict: "lead", updatedAt: "2026-09-30T13:00:00.000Z" },
+        ],
+      })
+    );
+    expect(user).toEqual([{ id: "user-1", claim: "Mine", verdict: "fact", n: null, report: "view:v3", updatedAt: "2026-09-30T12:00:00.000Z", by: "user" }]);
+    const page = parsePageFile(
+      JSON.stringify({ findings: [{ id: "f1", claim: "Agent's", verdict: "open", updatedAt: "2026-09-30T11:00:00.000Z" }] })
+    );
+    expect(mergePage(page, {}, [], [], user).findings.map((f) => `${f.by ?? "agent"}:${f.id}`)).toEqual(["user:user-1", "agent:f1"]);
+    expect(parseUserFindingsFile("")).toEqual([]);
+    expect(parseUserFindingsFile("{torn")).toEqual([]);
   });
 });

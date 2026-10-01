@@ -58,10 +58,25 @@ import type { ViewSpec } from "../../lib/viewStore";
 import { statTone } from "../../lib/viewTone";
 import { MarkdownBody, MarkdownDocStyles } from "../kb/MarkdownDoc";
 import { ViewChrome } from "./ViewSurface";
+import { FindingAction } from "./FindingAction";
 
 const MONO = "var(--font-mono)";
 
 type ViewArtifact = Extract<Artifact, { kind: "view" }>;
+
+/** The toolbar's one button (`→ finding`), in ViewChrome's TOOL_BTN voice. */
+const REPORT_TOOL_BTN: CSSProperties = {
+  background: "transparent",
+  border: "1px solid transparent",
+  borderRadius: 3,
+  color: "var(--text-dim)",
+  fontFamily: MONO,
+  fontSize: 10,
+  lineHeight: "16px",
+  padding: "0 5px",
+  cursor: "pointer",
+  flex: "none",
+};
 
 const TOOLBAR_STYLE: CSSProperties = {
   height: 26,
@@ -287,6 +302,8 @@ export default function ReportView({
           {sourcePath}
           {spec.builtAt ? ` · ${spec.builtAt.slice(0, 16).replace("T", " ")}` : ""} · {spec.builtBy}
         </span>
+        {/* SWIT-114: the report you trust becomes a finding. */}
+        <FindingAction artifact={artifact} title={spec.title} buttonStyle={REPORT_TOOL_BTN} />
       </div>
       <div ref={rootRef} style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
         {/* The narrative fragments share the KB doc typography; the report
