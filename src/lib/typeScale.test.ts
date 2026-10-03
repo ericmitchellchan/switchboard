@@ -23,8 +23,9 @@ const path = require("path") as { join: (...p: string[]) => string };
 const root = (globalThis as unknown as { process: { cwd(): string } }).process.cwd();
 const read = (rel: string) => fs.readFileSync(path.join(root, rel), "utf8");
 
-/** The files the sweep has reached. Batch 1: the token module + the kit. */
-const SWEPT = ["src/lib/typeScale.ts", "src/components/kit.ts"];
+/** The files the sweep has reached. Batch 1: the token module + the kit;
+ *  SWIT-117: the chat view, built on the tokens from day one. */
+const SWEPT = ["src/lib/typeScale.ts", "src/components/kit.ts", "src/components/ChatPane.tsx"];
 
 /** A line that SETS a font size at all — an object key or an assignment
  *  (`fontSize: …`, `fontSize = …`), a JSX/SVG attribute (`fontSize={…}`,

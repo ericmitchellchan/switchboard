@@ -1983,6 +1983,148 @@ async fn claude_session_exists(working_dir: String, session_id: String) -> Resul
     Ok(exists)
 }
 
+// ── The chat view's read (SWIT-117) ─────────────────────────────────────────
+// The chat view draws claude's OWN session record — the same jsonl file the
+// existence check above looks at — instead of the terminal. It only ever
+// reads the TAIL: `max_bytes` (clamped to TRANSCRIPT_TAIL_MAX) from the end,
+// cut forward to the first line boundary so the frontend never sees half a
+// JSON record. The path is built exactly as `claude_session_exists` builds
+// it (uuid-shaped id, munged cwd under ~/.claude/projects), so this command
+// can read nothing that check could not already see.
+
+const TRANSCRIPT_TAIL_MAX: u64 = 8 * 1024 * 1024;
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TranscriptTail {
+    text: String,
+    /// True when the read started after the file's first byte — the view
+    /// says so and offers to reach further back.
+    truncated: bool,
+    size: u64,
+    modified_ms: u64,
+    /// True when the caller's `known_size` + `known_modified_ms` still match:
+    /// nothing was read and `text` is empty (review of SWIT-117 — an idle
+    /// re-read used to copy the whole window over IPC every poll).
+    unchanged: bool,
+}
+
+/// The tail text. When the read did not begin at the file's start, `bytes`
+/// carries ONE byte from before the window: if that byte ends a line, the
+/// window's first record is whole and kept; otherwise everything up to the
+/// first `\n` is a partial record and dropped. Pure — tested below.
+fn transcript_tail_text(bytes: &[u8], started_mid_file: bool) -> String {
+    let body = if started_mid_file {
+        match bytes.iter().position(|b| *b == b'\n') {
+            Some(i) => &bytes[i + 1..],
+            None => &bytes[bytes.len()..],
+        }
+    } else {
+        bytes
+    };
+    String::from_utf8_lossy(body).into_owned()
+}
+
+#[tauri::command]
+async fn read_claude_transcript(
+    working_dir: String,
+    session_id: String,
+    max_bytes: u64,
+    known_size: Option<u64>,
+    known_modified_ms: Option<u64>,
+) -> Result<Option<TranscriptTail>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    if session_id.is_empty()
+        || session_id.len() > 64
+        || !session_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err("invalid session id".to_string());
+    }
+    let home = dirs::home_dir().ok_or("Cannot resolve home directory")?;
+    let path = home
+        .join(".claude")
+        .join("projects")
+        .join(munge_claude_project_dir(&working_dir))
+        .join(format!("{}.jsonl", session_id));
+    let mut file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        // No record yet (claude writes it after the first real turn) — the
+        // view says "nothing said yet", which is not an error.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot open the session record: {}", e)),
+    };
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("the session record is not a file".to_string());
+    }
+    let size = meta.len();
+    let modified_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let want = max_bytes.clamp(1, TRANSCRIPT_TAIL_MAX);
+    let start = size.saturating_sub(want);
+    if known_size == Some(size) && known_modified_ms == Some(modified_ms) {
+        return Ok(Some(TranscriptTail {
+            text: String::new(),
+            truncated: start > 0,
+            size,
+            modified_ms,
+            unchanged: true,
+        }));
+    }
+    // One byte from before the window, so a record that begins exactly at the
+    // window's edge is recognised as whole (transcript_tail_text).
+    let from = start.saturating_sub(if start > 0 { 1 } else { 0 });
+    file.seek(SeekFrom::Start(from)).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::with_capacity((size - from) as usize);
+    file.take(size - from)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    Ok(Some(TranscriptTail {
+        text: transcript_tail_text(&bytes, start > 0),
+        truncated: start > 0,
+        size,
+        modified_ms,
+        unchanged: false,
+    }))
+}
+
+#[cfg(test)]
+mod transcript_tail_tests {
+    use super::transcript_tail_text;
+
+    #[test]
+    fn a_read_from_the_start_keeps_every_line() {
+        assert_eq!(transcript_tail_text(b"{\"a\":1}\n{\"b\":2}\n", false), "{\"a\":1}\n{\"b\":2}\n");
+    }
+
+    #[test]
+    fn a_read_from_mid_file_drops_the_partial_first_record() {
+        // the leading byte is the one from before the window: mid-record here
+        assert_eq!(transcript_tail_text(b"1\"a\":1}\n{\"b\":2}\n", true), "{\"b\":2}\n");
+    }
+
+    #[test]
+    fn a_window_that_starts_on_a_line_boundary_keeps_its_first_record() {
+        // the byte before the window is a newline → the first record is whole
+        assert_eq!(transcript_tail_text(b"\n{\"a\":1}\n{\"b\":2}\n", true), "{\"a\":1}\n{\"b\":2}\n");
+    }
+
+    #[test]
+    fn a_mid_file_read_with_no_line_break_yields_nothing() {
+        assert_eq!(transcript_tail_text(b"half a record", true), "");
+    }
+
+    #[test]
+    fn invalid_utf8_is_replaced_not_fatal() {
+        let out = transcript_tail_text(b"x\n{\"t\":\"\xff\"}\n", true);
+        assert!(out.starts_with("{\"t\":\""));
+    }
+}
+
 #[cfg(test)]
 mod claude_munge_tests {
     use super::munge_claude_project_dir;
@@ -2598,6 +2740,7 @@ fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         jobs::watch_run,
         jobs::watch_record,
         claude_session_exists,
+        read_claude_transcript,
         discover_claude_sessions,
         clear_scrollback,
         clear_session_scrollback,
