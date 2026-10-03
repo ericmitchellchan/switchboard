@@ -2598,6 +2598,11 @@ function projectViewAddress(project, id) {
   return `view:${project}/${id}`;
 }
 
+// SWIT-118: the loopback query server ships beside this file; the view tool's
+// description names its real path so an agent can start it as a job.
+const VIEW_QUERY_SERVER = path.join(__dirname, "view-query-server.py").split(path.sep).join("/");
+const VIEW_QUERY_PORT = 8792;
+
 const VIEW_TOOL = {
   name: "view",
   description:
@@ -2660,6 +2665,15 @@ const VIEW_TOOL = {
     "each change (select: options <=24; number: default, min?, max?, step?; date: default " +
     "YYYY-MM-DD; a panel or the drill may name the same {name}; in a file path a value is one " +
     "path component, in a query url it is URL-encoded, in a query body it is JSON-escaped). " +
+    "To let a knob re-ask the DATA instead of picking a file you prepared, run the view query " +
+    `server as a job (the job tool, so it outlives you): python "${VIEW_QUERY_SERVER}" --db ` +
+    "<name>=<file.duckdb | postgres:<url>> --sql-dir <folder of .sql files, relative to this thread's " +
+    `folder> (loopback port ${VIEW_QUERY_PORT}; a second server needs --port <n> and that port in its ` +
+    "URLs; the app's python must import duckdb; use a read-only Postgres role — the URL is in the job's " +
+    "command); each <query>.sql holds ONE statement with $param placeholders, bound and read-only, " +
+    "values arriving as text (cast: $width::INTEGER); then use source:{type:'query', " +
+    `url:'http://127.0.0.1:${VIEW_QUERY_PORT}/q/<db>/<query>?expiry={expiry}'}. A refusal names its ` +
+    "reason in the view's error line and in job log. " +
     "Prefer ONE line view " +
     "with `panels` [{title, source}] (small multiples: a 2-up grid with the main chart, " +
     "shared time axis, <=6, no {key}) over several near-identical views, and give every " +

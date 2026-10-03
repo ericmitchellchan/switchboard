@@ -1600,8 +1600,26 @@ async function fetchViewRaw(owner: string, source: ViewSource): Promise<string> 
     ? { method: "POST", headers: { "content-type": "application/json" }, body: source.body }
     : { method: "GET" };
   const res = await fetch(source.url, init);
-  if (!res.ok) throw new Error(`the backend answered ${res.status}`);
+  if (!res.ok) throw new Error(backendErrorLine(res.status, await res.text().catch(() => "")));
   return res.text();
+}
+
+/** The error line for a failed query read: the status, plus the backend's own
+ *  reason when it sent one as `{"error": "…"}` (SWIT-118 — the view query
+ *  server names a missing parameter or a SQL error; the view's line should
+ *  too, not just "400"). Pure; capped. */
+export function backendErrorLine(status: number, body: string): string {
+  let reason = "";
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed && typeof parsed === "object" && typeof (parsed as { error?: unknown }).error === "string") {
+      reason = (parsed as { error: string }).error.replace(/\s+/g, " ").trim();
+    }
+  } catch {
+    // not JSON — the status alone
+  }
+  if (reason.length > 200) reason = `${reason.slice(0, 199)}…`;
+  return reason ? `the backend answered ${status}: ${reason}` : `the backend answered ${status}`;
 }
 
 // ── Controls (SWIT-111): the knobs' state ────────────────────────────────────
