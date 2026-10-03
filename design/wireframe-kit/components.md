@@ -414,7 +414,7 @@ and typeface, kept for what has NOT changed (the head, the batch, the bodies):
   summary (theme + newest turn line) 12.5px `--text-secondary` under it; then the one
   `next →` / `start here →` line — the arrow 11px `--text-faint`, the target 11px
   `--accent`, underlined under the pointer (`.page-next`).
-- **Section = H2:** 14px weight 600 `--text-primary`, `padding-bottom: 6px`, a 1px
+- **Section = H2:** [since SWIT-116 the kit's SECTION_TITLE is the type scale's `subheading`, 13/20 600 — `src/lib/typeScale.ts` is authoritative for sizes; this entry's numbers are pre-scale] 14px weight 600 `--text-primary`, `padding-bottom: 6px`, a 1px
   `--border` hairline under, `margin-bottom: 4px`; the count 10px weight 400
   `--text-faint` beside it; `hot` (Open questions) turns the title `--tone-amber`; the
   NEW dot after it is 6px `--accent`. Sections are 18px apart (Ky `pt-3 pb-1`).

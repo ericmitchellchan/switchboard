@@ -7,20 +7,26 @@
 // confirm dialog (`ConfirmDialog.tsx`). Duplication over a cross-import from
 // PageView, which would put three unrelated surfaces on one page's silent
 // contract.
+//
+// TYPE (SWIT-116): every size here is a token from `lib/typeScale.ts` — the
+// shared kit is the first batch of the type-scale sweep, so its sizes moved on
+// EVERY importer: Home, BacklogPanel, ConfirmDialog, LaneView, JobsBlock,
+// views/FindingAction and kb/PageView (TEXT_LINK only — PageView keeps its own
+// copies of the rest). A surface that spreads one of these and then sets its
+// own `fontSize` keeps that size until its own batch.
 
 import type { CSSProperties } from "react";
+import { T } from "../lib/typeScale";
 
 export const MONO = "var(--font-mono)";
 /** The reading face (Ky's `font-sans`): bodies, not chrome. */
 export const READING = "var(--font-reading)";
 
-/** Ky's section H2 (`PlanPanel.Section`): 14px semibold, a hairline under
- *  it, the count/meta 10px faint beside it. */
+/** Ky's section H2 (`PlanPanel.Section`), on the scale: subheading (Ky's
+ *  precedent — a 14px semibold section head is a subheading), a hairline
+ *  under it. */
 export const SECTION_TITLE: CSSProperties = {
-  fontFamily: READING,
-  fontSize: 14,
-  fontWeight: 600,
-  lineHeight: 1.3,
+  ...T.subheading,
   color: "var(--text-primary)",
   margin: 0,
   paddingBottom: 6,
@@ -52,6 +58,7 @@ export function checkboxStyle(done: boolean): CSSProperties {
     border: "1px solid var(--text-primary)",
     background: done ? "var(--text-primary)" : "transparent",
     color: "var(--bg-primary)",
+    // off-scale: the ✓ glyph is sized to sit inside the 12px box, not read as text
     fontSize: 9,
     lineHeight: "10px",
     textAlign: "center",
@@ -67,9 +74,7 @@ export const FIELD: CSSProperties = {
   border: "1px solid var(--border)",
   borderRadius: 6,
   color: "var(--text-primary)",
-  fontFamily: READING,
-  fontSize: 12,
-  lineHeight: 1.45,
+  ...T.bodySm,
   padding: "6px 10px",
   outline: "none",
 };
@@ -81,8 +86,7 @@ export const PRIMARY: CSSProperties = {
   border: "none",
   borderRadius: 6,
   color: "var(--bg-primary)",
-  fontFamily: READING,
-  fontSize: 12,
+  ...T.bodySm,
   fontWeight: 600,
   padding: "4px 12px",
   cursor: "pointer",
@@ -95,22 +99,20 @@ export const QUIET_BUTTON: CSSProperties = {
   border: "1px solid var(--border-subtle)",
   borderRadius: 6,
   color: "var(--text-secondary)",
-  fontFamily: READING,
-  fontSize: 12,
-  fontWeight: 400,
+  ...T.bodySm,
   padding: "4px 12px",
   cursor: "pointer",
 };
 
-/** Ky's text link button (`show all 12`, `clear done`): mono, faint →
- *  primary on hover. */
+/** Ky's text link button (`show all 12`, `clear done`): faint → primary on
+ *  hover. A caption, not mono — the words are a control, not a value (the
+ *  face rule). */
 export const TEXT_LINK: CSSProperties = {
   background: "none",
   border: "none",
   padding: "0 2px",
   marginTop: 4, // PageView's copy carries it; the two must not drift
-  fontFamily: MONO,
-  fontSize: 10,
+  ...T.caption,
   color: "var(--text-faint)",
   cursor: "pointer",
 };

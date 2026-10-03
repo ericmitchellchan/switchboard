@@ -34,8 +34,8 @@
 // SKIN (SWIT-54 hierarchy pass; re-cut SWIT-91 — the ✦ page's Ky pass,
 // SWIT-90, reads like Ky's PlanPanel and Home did not): ONE left-aligned
 // column (max 720px), Ky's HomeScreen hierarchy logic in the page's own
-// grammar. Sections are H2s — the page's SECTION_TITLE (14px 600 reading
-// face, a 1px `--border` hairline under, the count/meta 10px mono faint
+// grammar. Sections are H2s — the kit's SECTION_TITLE (the type scale's
+// subheading since SWIT-116, a 1px `--border` hairline under, the count/meta 10px mono faint
 // beside it) — 18px apart; the rule-with-label header and the uppercase
 // faint section-label voice are RETIRED on Home (kept nowhere else that
 // still reads that way). Rows are 12.5px reading-face `--text-primary` with
