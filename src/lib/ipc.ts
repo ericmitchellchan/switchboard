@@ -400,6 +400,32 @@ export async function claudeSessionExists(
   return invoke("claude_session_exists", { workingDir, sessionId });
 }
 
+/** The chat view's read (SWIT-117): the TAIL of claude's session record —
+ *  the same file `claudeSessionExists` checks — cut to a line boundary.
+ *  `null` = no record yet (nothing has been said). */
+export interface TranscriptTail {
+  text: string;
+  truncated: boolean;
+  size: number;
+  modifiedMs: number;
+  /** The file still matches `known` — nothing was read, `text` is empty. */
+  unchanged: boolean;
+}
+export async function readClaudeTranscript(
+  workingDir: string,
+  sessionId: string,
+  maxBytes: number,
+  known?: { size: number; modifiedMs: number } | null
+): Promise<TranscriptTail | null> {
+  return invoke("read_claude_transcript", {
+    workingDir,
+    sessionId,
+    maxBytes,
+    knownSize: known?.size ?? null,
+    knownModifiedMs: known?.modifiedMs ?? null,
+  });
+}
+
 /** Claude discovery (increment C): which of these tabs currently has a claude
  *  conversation running inside it, and which conversation?
  *

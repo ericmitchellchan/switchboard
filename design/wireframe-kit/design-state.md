@@ -40,6 +40,30 @@ the chrome components change (see README).
 
 Font weights bundled: 400 / 500 / 600 / 700 (global.css:1-31). True-dark, no light theme.
 
+## Type scale (src/lib/typeScale.ts + global.css `--t-*`, SWIT-116, 2026-10-03)
+
+Ky's scale, adopted as is. Floor 11px in both faces. Reading = IBM Plex Sans, mono = JetBrains Mono.
+
+| Token (`T.`) | Size/line | Face | Weight · tracking | Use |
+|---|---|---|---|---|
+| `display` | 28/36 | reading | 600 · −0.01em | page titles |
+| `title` | 20/28 | reading | 600 | screen title |
+| `heading` | 16/24 | reading | 600 | section heading |
+| `subheading` | 13/20 | reading | 600 | row title, small section head |
+| `body` | 13/20 | reading | 400 | rows, menus, buttons, prose |
+| `bodySm` | 12/16 | reading | 400 | fields, secondary rows |
+| `caption` | 11/16 | reading | 400 | small labels that are words |
+| `mono` | 12/16 | mono | 400 | code, diffs, inputs that take ids |
+| `label` | 11/16 | mono | 500 · 0.02em | ids, counts, times, column heads |
+| `kicker` | 11/16 | mono | 500 · 0.06em · UPPER | short eyebrow labels only |
+| `metric` / `metricLg` | 20/24 · 28/36 | mono | 600 | stat numbers |
+| `doc` | 16/24 | reading | 400 | long-form reading |
+
+Swept so far: `components/kit.ts`, read by Home, the To-dos dropdown (BacklogPanel), the confirm dialog, the lane page (LaneView), the Jobs block's arm buttons (JobsBlock), the → finding card (FindingAction) and the ✦ page's `not needed` link (PageView, TEXT_LINK only). Those surfaces now mix
+kit tokens with their own pre-scale sizes (Home's 12.5px rows sit under a 13px/600 section
+title — interim until Home's batch); every other surface keeps its pre-scale sizes until
+its batch.
+
 ## Agent status system (src/lib/statusConfig.ts — single source of truth)
 
 | Status | Color | Pulse | Icon | Label |

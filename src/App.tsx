@@ -205,6 +205,7 @@ import {
 import { remapSessionIds, getMaxPaneIdNumber, setPaneIdCounter, closePane, getVisibleSessionIds } from "./lib/paneLayout";
 import type { PaneNode } from "./lib/paneLayout";
 import { toggleComposer, isComposerVisible, composeSend, deliverComposed, afterPendingSends } from "./lib/composer";
+import { focusComposerFor, insertIntoComposer, isChatShownFor } from "./lib/chatView";
 import { markSessionResumed, forgetResumeHeal } from "./lib/resumeHealRunner";
 import { initTaskDetector, destroyTaskDetector } from "./lib/taskDetector";
 import { startUpdater, registerPreRelaunchFlush } from "./lib/updater";
@@ -2648,6 +2649,9 @@ export default function App() {
     if (!sessionId || text.length === 0) return;
     if (getNavState().route.screen !== "terminal") navigate({ screen: "terminal" });
     log.info(`Send to thread session=${sessionId}: ${text}`);
+    // SWIT-117: under the chat view the reference goes into the COMPOSER (the
+    // input you can see), still unsent — the Enter stays the user's.
+    if (isChatShownFor(sessionId) && insertIntoComposer(sessionId, text)) return;
     // Queued behind any composed send in flight (SWIT-99) — typed before that
     // message's Enter, the reference would be submitted with it, and this
     // seam's rule is that the Enter is the user's.
@@ -2720,7 +2724,7 @@ export default function App() {
         void saveThreadsToDisk();
       }
       if ((effectiveActiveIdRef.current ?? activeIdRef.current) === sessionId) {
-        getTerminal(sessionId)?.terminal.focus();
+        if (!(isChatShownFor(sessionId) && focusComposerFor(sessionId))) getTerminal(sessionId)?.terminal.focus();
       }
       for (const c of opts?.conventions ?? []) {
         // SWIT-58: a standing rule is written down where the next agent (and
@@ -3239,8 +3243,11 @@ export default function App() {
       }
 
       // Paste into the focused terminal session (respects bracketed paste
-      // mode; held while a turn-end rewrite is parsing — SWIT-103)
+      // mode; held while a turn-end rewrite is parsing — SWIT-103) — unless
+      // the chat view covers it (SWIT-117): then the paste goes to the
+      // composer, never into a terminal nobody can see.
       const sessionId = effectiveActiveIdRef.current;
+      if (sessionId && isChatShownFor(sessionId) && insertIntoComposer(sessionId, text)) return;
       if (sessionId) pasteIntoTerminal(sessionId, text);
     });
 

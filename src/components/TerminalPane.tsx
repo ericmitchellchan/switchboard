@@ -38,6 +38,8 @@ import {
 import { resizeSession } from "../lib/ipc";
 import { SearchBar } from "./SearchBar";
 import { Composer } from "./Composer";
+import { ChatPane, ChatChip } from "./ChatPane";
+import { focusComposerFor, isChatShownFor, useChatTarget, useChatViewEnabled } from "../lib/chatView";
 
 // The resume heal (SWIT-100) reads the live xterm and resizes the PTY through
 // these; injected so its clock stays testable without xterm. The same IO
@@ -235,6 +237,21 @@ export const TerminalPane = memo(function TerminalPane({
   const [stolen, setStolen] = useState(false);
   const stolenRef = useRef(false);
 
+  // Increment D: the composer belongs to THIS pane's session (Decision 2) —
+  // in a split each pane addresses its own. Visibility is derived in
+  // lib/composer from increment C's promotion signal plus the per-session
+  // toggle; when it is false NOTHING renders, so a hidden composer costs the
+  // terminal exactly zero height.
+  const composerVisible = useComposerVisible(session.id);
+  // SWIT-117: THE CHAT VIEW — claude's own session record drawn as chat OVER
+  // this terminal (components/ChatPane). Shown for a launched thread with a
+  // conversation while the global toggle is on and the composer is there to
+  // type into; the terminal underneath keeps running, untouched. While it is
+  // shown, focus belongs to the composer, never to the hidden terminal.
+  const chatTarget = useChatTarget(session.id);
+  const chatOn = useChatViewEnabled();
+  const chatShown = chatTarget !== null && chatOn && composerVisible && !stolen;
+
   // Update module-level callback refs on every render so hook closures always
   // invoke the latest callbacks from whichever component instance is active.
   sessionCallbacks.set(session.id, { onStatusChange, onExited, onAutoTask, onResolveTask });
@@ -389,12 +406,12 @@ export const TerminalPane = memo(function TerminalPane({
       const wasHidden = showTerminal(sessionId);
       if (wasHidden) {
         log.debug(`Terminal becoming visible id=${sessionId}`);
-        landTerminalView(sessionId, "show", { toBottom: true, focus: isFocused });
+        landTerminalView(sessionId, "show", { toBottom: true, focus: isFocused && !chatShown });
         // A clean rewrite that was deferred because the terminal was hidden
         // ("not-laid-out") runs now that it is on screen — a beat later, like
         // a pane resize, so the tab is drawn before the parse hides it.
         scheduleRepaint("show");
-      } else if (isFocused) {
+      } else if (isFocused && !chatShown) {
         // Already visible, just needs focus (e.g. split pane focus change)
         const instance = getTerminal(sessionId);
         if (instance) instance.terminal.focus();
@@ -402,7 +419,28 @@ export const TerminalPane = memo(function TerminalPane({
     } else {
       hideTerminal(sessionId);
     }
-  }, [visible, session.id, isFocused, scheduleRepaint]);
+  }, [visible, session.id, isFocused, scheduleRepaint, chatShown]);
+
+  // SWIT-117: with the chat view up, the focused pane's input is its
+  // composer — keystrokes must not land in a terminal nobody can see. It
+  // never takes focus from a field the user is typing in ELSEWHERE (the new
+  // thread's title box opens seconds before the launch flips the chat on —
+  // review of SWIT-117).
+  const paneRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!chatShown || !visible || !isFocused) return;
+    const active = document.activeElement as HTMLElement | null;
+    const typingElsewhere =
+      active !== null &&
+      active !== document.body &&
+      (active instanceof HTMLInputElement ||
+        active instanceof HTMLTextAreaElement ||
+        active.isContentEditable) &&
+      !active.classList.contains("xterm-helper-textarea") &&
+      !(paneRef.current?.contains(active) ?? false);
+    if (typingElsewhere) return;
+    focusComposerFor(session.id);
+  }, [chatShown, visible, isFocused, session.id]);
 
   // The pane changed size (window resize, divider drag, the panel opening,
   // the composer appearing). The terminal does NOT: the grid is pinned, so
@@ -442,6 +480,7 @@ export const TerminalPane = memo(function TerminalPane({
   // Close search refocuses terminal
   const handleCloseSearch = useCallback(() => {
     onCloseSearch?.();
+    if (isChatShownFor(session.id) && focusComposerFor(session.id)) return;
     const instance = getTerminal(session.id);
     if (instance) {
       instance.terminal.focus();
@@ -450,15 +489,9 @@ export const TerminalPane = memo(function TerminalPane({
 
   const searchAddon = getTerminal(session.id)?.searchAddon;
 
-  // Increment D: the composer belongs to THIS pane's session (Decision 2) —
-  // in a split each pane addresses its own. Visibility is derived in
-  // lib/composer from increment C's promotion signal plus the per-session
-  // toggle; when it is false NOTHING renders, so a hidden composer costs the
-  // terminal exactly zero height.
-  const composerVisible = useComposerVisible(session.id);
-
   return (
     <div
+      ref={paneRef}
       style={{
         flex: 1,
         display: "flex",
@@ -471,6 +504,9 @@ export const TerminalPane = memo(function TerminalPane({
       {searchOpen && searchAddon && (
         <SearchBar searchAddon={searchAddon} onClose={handleCloseSearch} />
       )}
+      {/* The host and the chat view share one box: the chat sits OVER the
+          host (absolute), the composer stays a sibling below both. */}
+      <div style={{ flex: 1, minHeight: 0, position: "relative", display: "flex", flexDirection: "column" }}>
       <div
         ref={containerRef}
         // `terminal-host` carries the scrollbar rule (global.css): thin, one
@@ -521,6 +557,9 @@ export const TerminalPane = memo(function TerminalPane({
           contain: "layout paint",
         }}
       />
+      {chatShown && chatTarget && <ChatPane sessionId={session.id} target={chatTarget} visible={visible} />}
+      {chatTarget && !chatOn && composerVisible && !stolen && <ChatChip />}
+      </div>
       {composerVisible && !stolen && <Composer sessionId={session.id} />}
       {stolen && (
         <div

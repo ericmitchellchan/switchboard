@@ -65,6 +65,7 @@ import {
   stepHistory,
   useComposerAttachments,
 } from "../lib/composer";
+import { isChatShownFor } from "../lib/chatView";
 import { pickPastedFiles, stagePastedFiles, stagePaths } from "../lib/attachments";
 import { useFileDropZone } from "../hooks/useFileDropZone";
 
@@ -318,9 +319,11 @@ export function Composer({ sessionId }: { sessionId: string }) {
 
       if (e.key === "Escape") {
         // NOT proxied — nothing is written. Escape hands FOCUS back to the
-        // terminal, which is where Escape actually means something (Decision 3).
+        // terminal, which is where Escape actually means something (Decision 3)
+        // — except under the chat view (SWIT-117), where the terminal is
+        // hidden and focus stays here.
         e.preventDefault();
-        getTerminal(sessionId)?.terminal.focus();
+        if (!isChatShownFor(sessionId)) getTerminal(sessionId)?.terminal.focus();
       }
     },
     [send, sessionId]

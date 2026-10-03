@@ -9,8 +9,8 @@ that stop being true.
   and chips use white/zinc emphasis, not color. Applies to all new-surface mocks;
   the app's existing purple chrome (#A78BFA tab underline, StatusBar badges) migrates
   to match when the workstation ships.
-- 2026-07-31 — Everything is JetBrains Mono. No second typeface, ever; hierarchy comes
-  from size (9-13px range), weight (400-700), and the zinc text ramp.
+- 2026-07-31 — ~~Everything is JetBrains Mono.~~ REPLACED twice: 2026-09-09 (IBM Plex
+  Sans for page and doc bodies) and 2026-10-03 (Ky's type scale and face rule, below).
 - 2026-07-31 — True-dark zinc palette only (#0A-#15 backgrounds). No blue-tinted darks,
   no light theme. Purple #A78BFA is the brand accent; status colors are reserved for
   agent status and must not be used decoratively.
@@ -245,7 +245,8 @@ that stop being true.
   "Bundle IBM Plex Sans for page and doc bodies"). `--font-reading` = IBM Plex Sans,
   bundled (latin, four weights, OFL), for BODIES: the ✦ page's title, rows, turn lines,
   questions, input and button; the markdown doc; a stat card's label and figure.
-  `--font-mono` stays for CHROME: every bar, menu and tree, and on those same surfaces
+  [2026-10-03: the face rule below REPLACES this chrome-is-mono clause; it applies as each
+  area is swept.] `--font-mono` stays for CHROME: every bar, menu and tree, and on those same surfaces
   the counts, owner column, addresses, stamps, wire text, tables and code — the
   elements Ky marks `font-mono`. Not `--font-sans`: that name belongs to surfaces.css's
   Tailwind theme, and Lodestar's pages keep their mono.
@@ -323,6 +324,20 @@ that stop being true.
   packed, and it counts against `REPORT_BLOCK_CAP` like any other live block. All three
   strict-per-block, isolated-per-block: a malformed block still errors ONE card, in its
   own cell, and the rest of the report renders.
+
+- 2026-10-03 — KY'S TYPE SCALE AND FACE RULE (SWIT-115/116; Eric: "Yes: 13px body, 16px
+  docs, 11px minimum" and "Yes, Ky's rule: sentences sans, ids/numbers mono"). Thirteen
+  tokens, six sizes, ONE place: `src/lib/typeScale.ts` (`T.body`, `T.label`…) reading the
+  `--t-<token>-size/-line` variables in global.css — display 28/36 · title 20/28 · heading
+  16/24 · subheading 13/20 600 · body 13/20 · body-sm 12/16 · caption 11/16 · mono 12/16 ·
+  label 11/16 mono 500 · kicker 11/16 mono 500 uppercase · metric 20/24 · metric-lg 28/36 ·
+  doc 16/24. Nothing under 11px in either face. THE FACE RULE: a sentence — a title, a row,
+  a menu item, a button, prose — is the reading face; mono is for what is read as a value:
+  ids, counts, times, numbers, code, addresses. A mock draws from the tokens, never a size
+  of its own; a one-off weight or leading overrides the token, it does not replace it. A
+  size off the scale carries `off-scale: <reason>` (a glyph sized to a box), and the guard
+  test (`typeScale.test.ts`) fails on any other. The sweep goes area by area; until an
+  area is swept it keeps its old sizes.
 
 ## Decisions recorded by the app
 

@@ -122,6 +122,24 @@
      decision covered page and doc bodies, nothing else). Chrome stays
      `--font-mono`. */
   --font-reading: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  /* THE TYPE SCALE (SWIT-116, 2026-10-03 — Eric adopted Ky's as is: 13px body,
+     16px docs, an 11px floor in both faces). Size + line height per token;
+     face, weight, tracking and case live beside them in src/lib/typeScale.ts,
+     whose test asserts the two agree — change one, change the other. A
+     surface reads a token, never a number of its own. */
+  --t-display-size: 28px;   --t-display-line: 36px;
+  --t-title-size: 20px;     --t-title-line: 28px;
+  --t-heading-size: 16px;   --t-heading-line: 24px;
+  --t-subheading-size: 13px; --t-subheading-line: 20px;
+  --t-body-size: 13px;      --t-body-line: 20px;
+  --t-body-sm-size: 12px;   --t-body-sm-line: 16px;
+  --t-caption-size: 11px;   --t-caption-line: 16px;
+  --t-mono-size: 12px;      --t-mono-line: 16px;
+  --t-label-size: 11px;     --t-label-line: 16px;
+  --t-kicker-size: 11px;    --t-kicker-line: 16px;
+  --t-metric-size: 20px;    --t-metric-line: 24px;
+  --t-metric-lg-size: 28px; --t-metric-lg-line: 36px;
+  --t-doc-size: 16px;       --t-doc-line: 24px;
   /* SIGN + CHART TONES AT THE ROOT (SWIT-81 review fix, 2026-09-22). These were
      declared only under `.sb-surface` (surfaces.css), the scope a project page
      mounts in — and a `view` artifact's renderers (ViewSurface's bars and
