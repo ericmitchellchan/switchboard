@@ -50,10 +50,11 @@ export type SurfacePage = {
    *  on it falls back to a generic size. */
   window?: { width: number; height: number; title?: string };
   /** Which side-menu band lists the page (SWIT-46): "research" pages appear
-   *  under the Research ▸ destination, grouped by project. Untagged pages are
-   *  reachable through the Projects tree / their own destinations (Trading's
-   *  cockpit tabs) and draw no Research row. */
-  section?: "research";
+   *  under the Research ▸ destination, grouped by project; "main" pages get
+   *  their own destination row under Trading, in bare mode too. Untagged pages
+   *  are reachable through the Projects tree / the panel's + picker and draw
+   *  no menu row. */
+  section?: "research" | "main";
 };
 
 /** The Tauri window label for a page's own window: `surface-<project>-<page>`
@@ -112,6 +113,7 @@ export const SURFACES: Readonly<Record<string, ProjectSurfaces>> = {
       {
         id: "kalshi-trading",
         label: "Kalshi Trading",
+        section: "main",
         load: () => import("../projects/lodestar/pages/KalshiTrading"),
         pinHint: "game:<game> a game row, line:<game>:<ml|spread|total> a line cell, detail:<game>:<line> the open game detail, pt:<iso> a point on its handle chart",
       },
@@ -194,6 +196,16 @@ export function researchPages(project: string): SurfacePage[] {
  *  without research never draws an empty group (decided Q5). */
 export function projectsWithResearch(): string[] {
   return Object.keys(SURFACES).filter((project) => researchPages(project).length > 0);
+}
+
+/** Every project's MAIN-menu pages, in registry order — one destination row
+ *  each under Trading. Adding a row is tagging its page `section: "main"`. */
+export function mainMenuPages(): { project: string; page: SurfacePage }[] {
+  return Object.keys(SURFACES).flatMap((project) =>
+    surfacePages(project)
+      .filter((p) => p.section === "main")
+      .map((page) => ({ project, page }))
+  );
 }
 
 /** What to PRINT for a page: its label when registered, its id otherwise —

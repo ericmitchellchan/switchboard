@@ -6,7 +6,8 @@
 // is reserved for status dots.
 //
 // THREE BANDS (SWIT-46, the coaching-platform reorg):
-//   1. DESTINATIONS — Home · Trading · Research ▸ · Knowledge base ▸. The
+//   1. DESTINATIONS — Home · Trading · [registry `section: "main"` pages] ·
+//      Research ▸ · Knowledge base ▸. The
 //      expandables open INLINE; Research groups by project and renders ONLY
 //      projects with research pages (registry `section: "research"` — an
 //      empty group never draws, decided Q5).
@@ -22,8 +23,8 @@
 // modes; it draws nothing until a thread is in a lane.
 //
 // SHELL MODE (SWIT-55): in BARE mode (the default) the Research band and the
-// Explorer band do not render — the menu is `Home · Trading · Knowledge base
-// ▸` then THREADS. `?shell=full` / config `shell_mode` brings them back. The
+// Explorer band do not render — the menu is `Home · Trading · <registry
+// "main" pages> · Knowledge base ▸` then THREADS. `?shell=full` / config `shell_mode` brings them back. The
 // gate is a render check here (`useShellMode`), never a code-path removal:
 // their routes still resolve and their code stays built and tested.
 
@@ -33,7 +34,7 @@ import type { Artifact, Route } from "../types";
 import { navigateToScreen } from "../lib/route";
 import { openArtifact, useActiveTabArtifact } from "../lib/panelStore";
 import { useShellMode } from "../lib/shellMode";
-import { projectsWithResearch, researchPages } from "../surfaces/registry";
+import { mainMenuPages, projectsWithResearch, researchPages } from "../surfaces/registry";
 import { ThreadsSection } from "./ThreadsSection";
 import { LanesSection } from "./LanesSection";
 import type { RepoConfig } from "../types";
@@ -164,6 +165,24 @@ export function SideMenu({ route, repos }: { route: Route; repos: readonly RepoC
               )
             }
           />
+          {/* Registry-driven destinations: any page tagged `section: "main"`
+              draws a row here, in bare mode too, through the same openArtifact
+              / decideOpen rule as Trading (which predates these rows and stays
+              hand-written). */}
+          {mainMenuPages().map(({ project, page }) => (
+            <DestRow
+              key={`${project}/${page.id}`}
+              label={page.label}
+              glyph="▦"
+              active={isSurfaceShown(route, shown, project, page.id)}
+              onClick={(e) =>
+                openArtifact(
+                  { kind: "surface", project, page: page.id },
+                  { modifier: e.ctrlKey || e.metaKey }
+                )
+              }
+            />
+          ))}
           {!bare && (
             <DestRow
               label="Research"

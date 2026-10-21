@@ -11,6 +11,8 @@ import {
   surfaceLabel,
   surfaceWindowLabel,
   componentFor,
+  mainMenuPages,
+  researchPages,
 } from "./registry";
 
 describe("surface registry", () => {
@@ -51,6 +53,12 @@ describe("surface registry", () => {
     const a = componentFor(page);
     const b = componentFor(page);
     expect(a).toBe(b);
+  });
+
+  it("main-menu rows come from the registry tag, and never double as research rows", () => {
+    const main = mainMenuPages().map(({ project, page }) => `${project}/${page.id}`);
+    expect(main).toEqual(["lodestar/kalshi-trading"]);
+    expect(researchPages("lodestar").map((p) => p.id)).not.toContain("kalshi-trading");
   });
 
   it("the backend hint is prose, never a bare command the shell would run", () => {
