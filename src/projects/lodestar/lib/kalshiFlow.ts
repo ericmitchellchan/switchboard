@@ -30,7 +30,8 @@ export const LINE_LABEL: Readonly<Record<NbaFlowLineKey, string>> = {
 export const OUTAGE_SHARE = 0.2;
 export const OUTAGE_CHIP = "handle incomplete (capture outage)";
 
-export const BIG_BET_USD = 1000;
+/** A side leans when its share of money beats its share of bets by this many points. */
+export const LEAN_POINTS = 10;
 
 /** The size buckets in ascending order, the page's public-to-sharp axis. */
 export const SIZE_BUCKETS: readonly NbaFlowSizeBucket[] = ["<$10", "$10-100", "$100-1k", "$1k-10k", "$10k+"];
@@ -190,6 +191,9 @@ export function selectionReducer(prev: FlowSelection | null, a: SelectionAction)
 
 // -- the timeline -------------------------------------------------------------
 
+/** The bucket width the page asks the backend for (`bucket_min`). */
+export const BUCKET_MIN = 15;
+
 /** ISO to ms; a stamp with no zone designator is UTC. NaN when unparseable. */
 export function parseIso(ts: string): number {
   const s = ts.replace(" ", "T");
@@ -197,31 +201,42 @@ export function parseIso(ts: string): number {
 }
 
 export interface FlowSeries {
-  /** UTC seconds, ascending: every bucket start, plus the tip when it falls
-   *  outside or between them (so the tip marker sits at the real time). */
+  /** UTC seconds, ascending. */
   xs: number[];
   /** The source ISO per x. */
   isos: string[];
-  /** Cumulative handle in dollars per side, carried forward between buckets. */
+  /** Cumulative handle in dollars per side at each x. */
   handle: Record<string, number[]>;
   /** Price in cents per side, the last seen carried forward; null before a
    *  side's first priced bucket. */
   price: Record<string, (number | null)[]>;
-  /** Cumulative bets per side at the last x. */
+  /** Totals per side over the whole timeline. */
   totals: Record<string, { bets: number; handle: number }>;
 }
 
 /**
  * Cumulative handle and last-seen price per side from the bucketed timeline.
- * Rows may arrive in any order and any side may be absent from a bucket.
- * `tipIso`, when given and parseable, becomes an x of its own so the marker is
- * drawn at the true tip time rather than the nearest bucket.
+ *
+ * A timeline row is stamped at the bucket START and holds the bets in
+ * [t, t + bucket), so a bucket's bets are only all in by its END. The
+ * cumulative is therefore plotted at the bucket end: a zero anchor at the
+ * first bucket's start, then for each bucket a point at its start (carrying
+ * the previous total, only when there is a gap) and one at its end holding the
+ * new total. The price is carried forward the same way.
+ *
+ * The tip gets an x of its own, holding the total of everything that was in
+ * before it (the last point at or before the tip): a bucket the tip falls
+ * inside therefore ramps up AFTER the tip marker, never before it, and a tip
+ * on a bucket boundary reads exactly the pre-tip total. A tip before the first
+ * bucket reads zero. No rows means no points, tip or not.
  */
 export function buildFlowSeries(
   timeline: readonly NbaFlowTimelineRow[],
   sides: readonly string[],
   tipIso?: string | null,
+  bucketMin: number = BUCKET_MIN,
 ): FlowSeries {
+  const bucketMs = bucketMin * 60_000;
   const byT = new Map<number, Map<string, NbaFlowTimelineRow[]>>();
   for (const r of timeline) {
     const t = parseIso(r.t);
@@ -232,40 +247,109 @@ export function buildFlowSeries(
     if (arr) arr.push(r);
     else m.set(r.side, [r]);
   }
-  const times = [...byT.keys()];
-  const tipMs = tipIso ? parseIso(tipIso) : NaN;
-  if (Number.isFinite(tipMs) && times.length > 0 && !byT.has(tipMs)) times.push(tipMs);
-  times.sort((a, b) => a - b);
+  const starts = [...byT.keys()].sort((a, b) => a - b);
 
-  const handle: Record<string, number[]> = {};
-  const price: Record<string, (number | null)[]> = {};
   const totals: Record<string, { bets: number; handle: number }> = {};
+  const lastPrice: Record<string, number | null> = {};
   for (const s of sides) {
-    handle[s] = [];
-    price[s] = [];
     totals[s] = { bets: 0, handle: 0 };
+    lastPrice[s] = null;
   }
-  const lastPrice: Record<string, number | null> = Object.fromEntries(sides.map((s) => [s, null]));
 
-  for (const t of times) {
-    const bucket = byT.get(t);
+  type Pt = { ms: number; handle: Record<string, number>; price: Record<string, number | null> };
+  const snap = (ms: number): Pt => ({
+    ms,
+    handle: Object.fromEntries(sides.map((s) => [s, totals[s].handle])),
+    price: { ...lastPrice },
+  });
+  const pts: Pt[] = [];
+  if (starts.length > 0) pts.push(snap(starts[0])); // the zero anchor
+  for (const t of starts) {
+    if (pts[pts.length - 1].ms < t) pts.push(snap(t)); // a gap: hold until this bucket opens
     for (const s of sides) {
-      for (const r of bucket?.get(s) ?? []) {
+      for (const r of byT.get(t)?.get(s) ?? []) {
         totals[s].handle += r.handle;
         totals[s].bets += r.bets;
         if (r.price != null && Number.isFinite(r.price)) lastPrice[s] = r.price;
       }
-      handle[s].push(totals[s].handle);
-      price[s].push(lastPrice[s]);
     }
+    pts.push(snap(t + bucketMs));
+  }
+
+  const tipMs = tipIso ? parseIso(tipIso) : NaN;
+  if (Number.isFinite(tipMs) && pts.length > 0 && !pts.some((p) => p.ms === tipMs)) {
+    let before: Pt | null = null;
+    for (const p of pts) if (p.ms <= tipMs) before = p;
+    const zero: Pt = {
+      ms: tipMs,
+      handle: Object.fromEntries(sides.map((s) => [s, 0])),
+      price: Object.fromEntries(sides.map((s) => [s, null])),
+    };
+    const at: Pt = before ? { ...before, ms: tipMs } : zero;
+    const idx = pts.findIndex((p) => p.ms > tipMs);
+    if (idx < 0) pts.push(at);
+    else pts.splice(idx, 0, at);
+  }
+
+  const handle: Record<string, number[]> = {};
+  const price: Record<string, (number | null)[]> = {};
+  for (const s of sides) {
+    handle[s] = pts.map((p) => p.handle[s]);
+    price[s] = pts.map((p) => p.price[s]);
   }
   return {
-    xs: times.map((t) => t / 1000),
-    isos: times.map((t) => new Date(t).toISOString()),
+    xs: pts.map((p) => p.ms / 1000),
+    isos: pts.map((p) => new Date(p.ms).toISOString()),
     handle,
     price,
     totals,
   };
+}
+
+/** More than a day on the x axis: time-of-day ticks alone would be ambiguous. */
+export function spansMoreThanADay(xs: readonly number[]): boolean {
+  return xs.length > 1 && xs[xs.length - 1] - xs[0] > 86_400;
+}
+
+/** A readable one-liner under the handle chart: each side's share of bets and
+ *  of money, and which side the money leans to (10+ points over its bets). */
+export function flowSummary(totals: FlowSeries["totals"], sides: readonly string[]): string {
+  const bets = sides.reduce((a, s) => a + (totals[s]?.bets ?? 0), 0);
+  const money = sides.reduce((a, s) => a + (totals[s]?.handle ?? 0), 0);
+  if (bets <= 0 || money <= 0) return "no bets in this window";
+  const parts = sides.map((s) => {
+    const b = ((totals[s]?.bets ?? 0) / bets) * 100;
+    const m = ((totals[s]?.handle ?? 0) / money) * 100;
+    return { s, b, m };
+  });
+  const text = parts.map((p) => `${p.s} ${fmtPct(p.b)} of bets, ${fmtPct(p.m)} of money`).join("; ");
+  const lean = parts.find((p) => p.m - p.b >= LEAN_POINTS);
+  return `${text}; ${lean ? `money leans ${lean.s}` : "no side leans by 10+ points"}`;
+}
+
+/** A readable one-liner under the price chart: each side's first and last price. */
+export function priceSummary(price: FlowSeries["price"], sides: readonly string[]): string {
+  const parts = sides.map((s) => {
+    const vals = (price[s] ?? []).filter((v): v is number => v != null);
+    return vals.length ? `${s} ${fmtPriceMove(vals[0], vals[vals.length - 1])}` : `${s} no price yet`;
+  });
+  return parts.join("; ");
+}
+
+/** Sides in a stable order whatever order the backend sent them in, so a
+ *  side keeps its colour across rungs: away team first (moneyline, spread),
+ *  Over first (total). Unknown shapes keep the backend order. */
+export function orderSides(
+  sides: readonly string[],
+  line: NbaFlowLineKey,
+  game: Pick<NbaFlowGame, "away"> | undefined,
+): string[] {
+  const rank = (s: string): number => {
+    if (line === "total") return /^over(\s|$)/i.test(s) ? 0 : 1;
+    if (game) return s === game.away || s.startsWith(`${game.away} `) ? 0 : 1;
+    return 0;
+  };
+  return [...sides].sort((a, b) => rank(a) - rank(b));
 }
 
 // -- size mix -----------------------------------------------------------------
@@ -311,4 +395,79 @@ export function sideProfile(
     const big = rows.filter((r) => r.bucket === "$1k-10k" || r.bucket === "$10k+").reduce((a, r) => a + r.handle, 0);
     return { side, bets, handle, avg: bets > 0 ? handle / bets : 0, bigShare: handle > 0 ? (big / handle) * 100 : 0 };
   });
+}
+
+// -- wording ------------------------------------------------------------------
+
+/** "1 bet", "412 bets". */
+export function fmtBets(n: number): string {
+  return `${fmtCount(n)} ${n === 1 ? "bet" : "bets"}`;
+}
+
+/** The readable rung when the backend gave one, its code otherwise, "" for none. */
+export function rungText(x: { rung?: string | null; rung_label?: string | null; label?: string | null }): string {
+  return x.rung_label ?? x.label ?? x.rung ?? "";
+}
+
+/**
+ * What to tell the person when a fetch fails. The client's errors read
+ * "GET /path -> 404 Not Found · detail": an HTTP answer means the backend is up
+ * and the ENDPOINT is the problem, which "backend unreachable" would hide.
+ */
+export function fetchErrorText(message: string): string {
+  const m = /->\s*(\d{3})\s*([^·]*?)\s*(?:·\s*(.*))?$/.exec(message);
+  if (m) {
+    const status = [m[1], m[2]].filter(Boolean).join(" ");
+    return `endpoint returned ${status}${m[3] ? ` - ${m[3]}` : ""}`;
+  }
+  return `backend unreachable - ${message.replace(/^Error:\s*/, "")}`;
+}
+
+/** Everything a line cell says, in a sentence, for a screen reader: the cell is
+ *  a button, so its inner bars are presentational and only this is read. */
+export function lineAriaLabel(lineKey: NbaFlowLineKey, line: NbaFlowLine): string {
+  const rung = rungText(line);
+  const sides = line.sides
+    .map((s) => `${s.side}: ${fmtPct(s.ticket_pct)} of bets, ${fmtPct(s.money_pct)} of money`)
+    .join("; ");
+  const bits = [
+    `${LINE_LABEL[lineKey]}${rung ? ` ${rung}` : ""}`,
+    sides,
+    `${fmtBets(line.bets)}, ${fmtMoney(line.handle)} handle`,
+    line.lean ? `money leans ${line.lean}` : null,
+    resultLabel(line),
+    leanOutcomeLabel(leanOutcome(line)),
+  ];
+  return `${bits.filter(Boolean).join(". ")}. Opens the game detail.`;
+}
+
+/** A past slate whose games are all final no longer changes: stop polling it. */
+export function slateIsSettled(slate: { date: string; games: readonly Pick<NbaFlowGame, "status">[] } | null, today: string): boolean {
+  return !!slate && slate.date < today && slate.games.length > 0 && slate.games.every((g) => g.status === "final");
+}
+
+// -- stale-response guards ------------------------------------------------------
+
+/** The slate answers the date and phase on screen (a late answer for the
+ *  previous ones must not be drawn). */
+export function slateMatches<T extends { date: string; phase: string }>(slate: T | null | undefined, date: string, phase: string): slate is T {
+  return !!slate && slate.date === date && slate.phase === phase;
+}
+
+/** The detail answers the selection on screen: same game and line, and - when
+ *  a rung was chosen - that rung. With no rung chosen the backend picks the
+ *  main one, so the response's rung cannot be compared. (Not guarded on the
+ *  rung alone: for an unknown rung the backend falls back to the main one.) */
+export function detailMatches<T extends { game: string; line: string; rung: string | null }>(
+  sel: { game: string; line: string; rung: string | null },
+  d: T | null | undefined,
+): d is T {
+  return !!d && d.game === sel.game && d.line === sel.line && (sel.rung == null || d.rung === sel.rung);
+}
+
+/** Keep the SAME object while the data is unchanged, so a poll that returns
+ *  identical rows does not rebuild the series and reset the chart's zoom. */
+export function stabilize<T>(prev: { json: string; value: T } | null, next: T): { json: string; value: T } {
+  const json = JSON.stringify(next);
+  return prev && prev.json === json ? prev : { json, value: next };
 }

@@ -10,21 +10,39 @@
  *   Positions  Reserved: the combo-desk positions view (demo / live).
  *
  * Reads GET /nba/flow/games and GET /nba/flow/game on the Lodestar backend.
- * Pin anchors: game:<game> a game row, line:<game>:<ml|spread|total> a line cell.
+ * Pin anchors: game:<game> a game row, line:<game>:<ml|spread|total> a line
+ * cell, detail:<game>:<line> the open detail, pt:<iso> a point on its chart.
+ *
+ * Date, phase and the open game live on the page, not the Flow tab, so a trip
+ * to Positions and back keeps them.
  */
 
-import { useReducer, useState } from "react";
+import { useEffect, useReducer, useRef, useState, type Dispatch } from "react";
 import { api, type NbaFlowGameDetail, type NbaFlowPhase } from "../api/client";
+import Chip from "../components/trading/Chip";
 import FlowGameDetail from "../components/trading/FlowGameDetail";
 import FlowGamesTable from "../components/trading/FlowGamesTable";
 import Panel from "../components/Panel";
 import Spinner from "../components/Spinner";
 import { usePoll } from "../hooks/usePoll";
-import { HELP, selectionReducer, todayLocal, type FlowSelection } from "../lib/kalshiFlow";
+import { useStableData } from "../hooks/useStableData";
+import {
+  BUCKET_MIN,
+  HELP,
+  detailMatches,
+  fetchErrorText,
+  selectionReducer,
+  slateIsSettled,
+  slateMatches,
+  todayLocal,
+  type FlowSelection,
+  type SelectionAction,
+} from "../lib/kalshiFlow";
 import { T } from "../../../lib/typeScale";
 
 const POLL_MS = 30_000;
-const BUCKET_MIN = 15;
+/** Until the first answer lands, ask often so a real failure shows in seconds. */
+const BOOT_POLL_MS = 3_000;
 
 type Tab = "flow" | "positions";
 
@@ -60,29 +78,58 @@ function HelpText() {
           </li>
         ))}
         <li>
-          Each side shows two bars: its share of the tickets (grey) and its share of the money (blue). A side whose
-          money bar is much longer than its ticket bar is being bet by fewer, larger tickets.
+          Each side shows two bars, labelled % of bets and % of money. A side whose money bar is much longer than its
+          bets bar is being bet by fewer, larger tickets.
         </li>
       </ul>
     </details>
   );
 }
 
-function FlowTab() {
-  const [date, setDate] = useState(() => todayLocal());
-  const [phase, setPhase] = useState<NbaFlowPhase>("pregame");
-  const [selection, dispatch] = useReducer(selectionReducer, null);
+interface FlowTabProps {
+  date: string;
+  phase: NbaFlowPhase;
+  selection: FlowSelection | null;
+  setDate: (d: string) => void;
+  setPhase: (p: NbaFlowPhase) => void;
+  dispatch: Dispatch<SelectionAction>;
+}
 
-  const { data: slate, error } = usePoll(() => api.getNbaFlowGames(date, phase), POLL_MS, `${date}|${phase}`);
+function FlowTab({ date, phase, selection, setDate, setPhase, dispatch }: FlowTabProps) {
+  const today = todayLocal();
 
+  // A finished past slate no longer changes: stop its interval (the data stays).
+  const [settled, setSettled] = useState(false);
+  const { data: slateRaw, error } = usePoll(
+    () => api.getNbaFlowGames(date, phase),
+    POLL_MS,
+    `${date}|${phase}`,
+    "kalshi-flow-games",
+    { bootIntervalMs: BOOT_POLL_MS, paused: settled },
+  );
+  // Only an answer for the date and phase on screen is drawn.
+  const slate = slateMatches(slateRaw, date, phase) ? slateRaw : null;
+  const slateSettled = slateIsSettled(slate, today);
+  useEffect(() => setSettled(slateSettled), [slateSettled]);
+
+  const selectedGame = selection ? slate?.games.find((g) => g.game === selection.game) : undefined;
   const selKey = selection ? `${selection.game}|${selection.line}|${selection.rung ?? ""}` : "";
-  const { data: detail, error: detailError } = usePoll(
+  const { data: detailRaw, error: detailError } = usePoll(
     () => (selection ? loadFlowDetail(selection) : Promise.resolve(null)),
     POLL_MS,
     selKey,
+    "kalshi-flow-game",
+    { bootIntervalMs: BOOT_POLL_MS, paused: selectedGame?.status === "final" },
   );
+  // Identical polls keep one object, so the charts keep their zoom.
+  const detailStable = useStableData(detailRaw);
+  const detail = selection && detailMatches(selection, detailStable) ? detailStable : null;
 
-  const selectedGame = selection ? slate?.games.find((g) => g.game === selection.game) : undefined;
+  // The last answer for this game, kept while the next line/rung loads so the
+  // controls stay mounted (focus and layout hold).
+  const lastRef = useRef<NbaFlowGameDetail | null>(null);
+  if (detail) lastRef.current = detail;
+  const previous = selection && lastRef.current?.game === selection.game ? lastRef.current : null;
 
   return (
     <div className="flex flex-col gap-4">
@@ -106,7 +153,7 @@ function FlowTab() {
           <SegButton on={phase === "all"} onClick={() => setPhase("all")}>All</SegButton>
         </div>
         <span style={{ ...T.caption, color: "var(--dim2)" }}>
-          {phase === "pregame" ? "bets placed before the tip" : "every bet, including in-game"}
+          {phase === "pregame" ? "table: bets placed before the tip" : "table: every bet, including in-game"}
         </span>
       </div>
 
@@ -114,7 +161,7 @@ function FlowTab() {
 
       {slate == null && error ? (
         <div className="rounded-lg border border-line p-4 text-dn" style={T.bodySm}>
-          backend unreachable - {error}
+          {fetchErrorText(error)}
         </div>
       ) : slate == null ? (
         <div className="p-6"><Spinner label="loading NBA flow…" /></div>
@@ -123,19 +170,30 @@ function FlowTab() {
           no NBA games with Kalshi bets on tape for {slate.date}
         </div>
       ) : (
-        <FlowGamesTable
-          games={slate.games}
-          selected={selection}
-          onRow={(game) => dispatch({ type: "row", game })}
-          onLine={(game, line) => dispatch({ type: "line", game, line })}
-        />
+        <>
+          {error ? (
+            <div className="flex items-center gap-2" style={{ ...T.bodySm, color: "var(--dim)" }}>
+              <Chip tone="warn">refresh failing</Chip>
+              {fetchErrorText(error)} - showing the last data
+            </div>
+          ) : null}
+          <FlowGamesTable
+            games={slate.games}
+            selected={selection}
+            phase={phase}
+            onRow={(game) => dispatch({ type: "row", game })}
+            onLine={(game, line) => dispatch({ type: "line", game, line })}
+          />
+        </>
       )}
 
       {selection ? (
         <FlowGameDetail
           game={selectedGame}
           selection={selection}
-          detail={detail && detail.game === selection.game && detail.line === selection.line ? detail : null}
+          phase={phase}
+          detail={detail}
+          previous={previous}
           error={detailError}
           onLine={(line) => dispatch({ type: "setLine", line })}
           onRung={(rung) => dispatch({ type: "rung", rung })}
@@ -165,6 +223,10 @@ function PositionsTab() {
 
 export default function KalshiTrading() {
   const [tab, setTab] = useState<Tab>("flow");
+  // Lifted so Flow -> Positions -> Flow keeps the day, the phase and the open game.
+  const [date, setDate] = useState(() => todayLocal());
+  const [phase, setPhase] = useState<NbaFlowPhase>("pregame");
+  const [selection, dispatch] = useReducer(selectionReducer, null);
   return (
     <div className="flex h-full min-h-0 flex-col gap-4 overflow-auto p-4">
       <div className="flex items-center gap-3">
@@ -174,7 +236,11 @@ export default function KalshiTrading() {
           <SegButton on={tab === "positions"} onClick={() => setTab("positions")}>Positions</SegButton>
         </div>
       </div>
-      {tab === "flow" ? <FlowTab /> : <PositionsTab />}
+      {tab === "flow" ? (
+        <FlowTab date={date} phase={phase} selection={selection} setDate={setDate} setPhase={setPhase} dispatch={dispatch} />
+      ) : (
+        <PositionsTab />
+      )}
     </div>
   );
 }

@@ -3,8 +3,13 @@
 import { describe, it, expect } from "vitest";
 import type { NbaFlowGame, NbaFlowLine, NbaFlowSizeRow, NbaFlowTimelineRow } from "../api/client";
 import {
+  bigTotals,
   buildFlowSeries,
   defaultLine,
+  detailMatches,
+  fetchErrorText,
+  flowSummary,
+  fmtBets,
   fmtCount,
   fmtGap,
   fmtMoney,
@@ -15,14 +20,21 @@ import {
   leanLabel,
   leanOutcome,
   leanOutcomeLabel,
+  lineAriaLabel,
+  orderSides,
   parseIso,
+  priceSummary,
   resultLabel,
+  rungText,
   scoreLabel,
   selectionReducer,
   sideProfile,
   sizeMix,
+  slateIsSettled,
+  slateMatches,
+  spansMoreThanADay,
+  stabilize,
   todayLocal,
-  bigTotals,
 } from "./kalshiFlow";
 
 const side = (s: string, o: Partial<NbaFlowLine["sides"][number]> = {}): NbaFlowLine["sides"][number] => ({
@@ -69,6 +81,11 @@ describe("formatting", () => {
   });
   it("today is the local calendar date", () => {
     expect(todayLocal(new Date(2026, 9, 5, 23, 59))).toBe("2026-10-05");
+  });
+  it("pluralises bets", () => {
+    expect(fmtBets(1)).toBe("1 bet");
+    expect(fmtBets(0)).toBe("0 bets");
+    expect(fmtBets(1203)).toBe("1,203 bets");
   });
 });
 
@@ -139,41 +156,186 @@ describe("buildFlowSeries", () => {
   const T0 = "2026-10-21T20:00:00Z";
   const T1 = "2026-10-21T20:15:00Z";
   const T2 = "2026-10-21T20:30:00Z";
+  const T3 = "2026-10-21T20:45:00Z";
+  const sec = (iso: string) => Date.parse(iso) / 1000;
+  /** The side's cumulative at the point whose x is exactly `iso`. */
+  const at = (f: ReturnType<typeof buildFlowSeries>, s: string, iso: string) => {
+    const i = f.xs.indexOf(sec(iso));
+    expect(i).toBeGreaterThanOrEqual(0);
+    return f.handle[s][i];
+  };
 
-  it("accumulates handle per side, carries a missing bucket forward, sorts rows", () => {
-    const f = buildFlowSeries(
-      [row(T2, "B", 10, 1, 55), row(T0, "A", 100, 4, 40), row(T1, "A", 50, 2, 42), row(T0, "B", 30, 3, 60)],
-      ["A", "B"],
-    );
-    expect(f.xs).toEqual([Date.parse(T0) / 1000, Date.parse(T1) / 1000, Date.parse(T2) / 1000]);
-    expect(f.handle.A).toEqual([100, 150, 150]);
-    expect(f.handle.B).toEqual([30, 30, 40]);
-    expect(f.price.A).toEqual([40, 42, 42]);
-    expect(f.price.B).toEqual([60, 60, 55]);
+  it("plots each bucket's total at its END, with a zero anchor at the first start", () => {
+    // rows are stamped at the bucket START and hold [t, t + 15 min)
+    const f = buildFlowSeries([row(T1, "A", 50, 2, 42), row(T0, "A", 100, 4, 40), row(T0, "B", 30, 3, 60)], ["A", "B"]);
+    expect(f.xs).toEqual([sec(T0), sec(T1), sec(T2)]);
+    expect(f.handle.A).toEqual([0, 100, 150]);
+    expect(f.handle.B).toEqual([0, 30, 30]);
     expect(f.totals.A).toEqual({ bets: 6, handle: 150 });
   });
 
-  it("a side with no price yet is null, not zero", () => {
-    const f = buildFlowSeries([row(T0, "A", 5, 1, 40), row(T1, "B", 5, 1, 50)], ["A", "B"]);
-    expect(f.price.B).toEqual([null, 50]);
+  it("carries the price forward from the bucket end; null before a side's first price", () => {
+    const f = buildFlowSeries([row(T0, "A", 5, 1, 40), row(T1, "B", 5, 1, 50), row(T2, "A", 5, 1, 45)], ["A", "B"]);
+    expect(f.xs).toEqual([sec(T0), sec(T1), sec(T2), sec(T3)]);
+    expect(f.price.A).toEqual([null, 40, 40, 45]);
+    expect(f.price.B).toEqual([null, null, 50, 50]);
   });
 
-  it("the tip gets an x of its own, after the last bucket or between buckets", () => {
-    const after = buildFlowSeries([row(T0, "A", 1, 1, 1), row(T1, "A", 1, 1, 1)], ["A"], "2026-10-21T23:30:00Z");
-    expect(after.xs.length).toBe(3);
-    expect(after.isos[2]).toBe("2026-10-21T23:30:00.000Z");
-    expect(after.handle.A).toEqual([1, 2, 2]);
-    const between = buildFlowSeries([row(T0, "A", 1, 1, 1), row(T2, "A", 1, 1, 1)], ["A"], T1);
-    expect(between.isos[1]).toBe("2026-10-21T20:15:00.000Z");
-    // a tip already on a bucket adds nothing; no rows means no tip x either
-    expect(buildFlowSeries([row(T0, "A", 1, 1, 1)], ["A"], T0).xs.length).toBe(1);
-    expect(buildFlowSeries([], ["A"], T0).xs).toEqual([]);
+  it("a missing bucket holds the total flat until the next bucket opens", () => {
+    const f = buildFlowSeries([row(T0, "A", 100, 4, 40), row(T2, "A", 10, 1, 41)], ["A"]);
+    // anchor T0, end of T0's bucket (T1), hold until T2 opens, end of T2's bucket (T3)
+    expect(f.xs).toEqual([sec(T0), sec(T1), sec(T2), sec(T3)]);
+    expect(f.handle.A).toEqual([0, 100, 100, 110]);
+  });
+
+  describe("the tip marker", () => {
+    const rows = [row(T0, "A", 100, 4, 40), row(T1, "A", 50, 2, 42), row(T2, "A", 25, 1, 43)];
+
+    it("on a bucket boundary: no extra x, and the total at the tip is exactly what was in before it", () => {
+      const f = buildFlowSeries(rows, ["A"], T1);
+      expect(f.xs).toEqual([sec(T0), sec(T1), sec(T2), sec(T3)]); // the tip is already an x
+      expect(at(f, "A", T1)).toBe(100); // only the [T0, T1) bucket was in
+      expect(at(f, "A", T2)).toBe(150);
+    });
+
+    it("mid-bucket: the tip sits between the last pre-tip point and the first post-tip point", () => {
+      const tip = "2026-10-21T20:20:00Z"; // inside [T1, T2)
+      const f = buildFlowSeries(rows, ["A"], tip);
+      const i = f.xs.indexOf(sec(tip));
+      expect(i).toBeGreaterThan(0);
+      expect(f.xs[i - 1]).toBe(sec(T1));
+      expect(f.xs[i + 1]).toBe(sec(T2));
+      expect(f.handle.A[i]).toBe(100); // the pre-tip total, not part of the straddling bucket
+      expect(f.handle.A[i + 1]).toBe(150); // the straddling bucket lands after the marker
+      expect(f.price.A[i]).toBe(40);
+      // the series stays ascending in x and non-decreasing in handle
+      expect([...f.xs].sort((p, q) => p - q)).toEqual(f.xs);
+      expect([...f.handle.A].sort((p, q) => p - q)).toEqual(f.handle.A);
+    });
+
+    it("after the last bucket: appended with the full total", () => {
+      const f = buildFlowSeries(rows.slice(0, 2), ["A"], "2026-10-21T23:30:00Z");
+      expect(f.isos[f.isos.length - 1]).toBe("2026-10-21T23:30:00.000Z");
+      expect(f.handle.A[f.handle.A.length - 1]).toBe(150);
+    });
+
+    it("before the first bucket (all in-play): zero at the tip", () => {
+      const f = buildFlowSeries(rows, ["A"], "2026-10-21T19:00:00Z");
+      expect(f.xs[0]).toBe(sec("2026-10-21T19:00:00Z"));
+      expect(f.handle.A[0]).toBe(0);
+    });
+
+    it("no rows means no points, tip or not", () => {
+      expect(buildFlowSeries([], ["A"], T0).xs).toEqual([]);
+    });
+  });
+
+  it("honours a different bucket width", () => {
+    const f = buildFlowSeries([row(T0, "A", 10, 1, 40)], ["A"], null, 5);
+    expect(f.xs).toEqual([sec(T0), sec("2026-10-21T20:05:00Z")]);
   });
 
   it("unparseable stamps are dropped, and a zoneless stamp is UTC", () => {
     expect(buildFlowSeries([row("nope", "A", 1, 1, 1)], ["A"]).xs).toEqual([]);
     expect(parseIso("2026-10-21 20:00:00")).toBe(Date.parse(T0));
     expect(parseIso("2026-10-21T20:00:00+00:00")).toBe(Date.parse(T0));
+  });
+
+  it("a span over 24 h is not an intraday axis", () => {
+    expect(spansMoreThanADay([0, 3600])).toBe(false);
+    expect(spansMoreThanADay([0, 86_400])).toBe(false);
+    expect(spansMoreThanADay([0, 86_401])).toBe(true);
+    expect(spansMoreThanADay([5])).toBe(false);
+  });
+});
+
+describe("chart summaries", () => {
+  it("states each side's share of bets and money, and where the money leans", () => {
+    const totals = { MIN: { bets: 300, handle: 4000 }, MIA: { bets: 100, handle: 14000 } };
+    expect(flowSummary(totals, ["MIN", "MIA"])).toBe(
+      "MIN 75% of bets, 22% of money; MIA 25% of bets, 78% of money; money leans MIA",
+    );
+    const even = { A: { bets: 50, handle: 500 }, B: { bets: 50, handle: 500 } };
+    expect(flowSummary(even, ["A", "B"])).toContain("no side leans by 10+ points");
+    expect(flowSummary({ A: { bets: 0, handle: 0 } }, ["A"])).toBe("no bets in this window");
+  });
+  it("states each side's first and last price", () => {
+    expect(priceSummary({ A: [null, 44, 44, 41], B: [null, null, null, null] }, ["A", "B"])).toBe("A 44c to 41c; B no price yet");
+  });
+});
+
+describe("side order", () => {
+  it("away first for ml and spread, Over first for a total, whatever order the backend used", () => {
+    const g = { away: "MIN" };
+    expect(orderSides(["MIA", "MIN"], "ml", g)).toEqual(["MIN", "MIA"]);
+    expect(orderSides(["MIA -4.5", "MIN +4.5"], "spread", g)).toEqual(["MIN +4.5", "MIA -4.5"]);
+    expect(orderSides(["Under 243.5", "Over 243.5"], "total", g)).toEqual(["Over 243.5", "Under 243.5"]);
+    expect(orderSides(["b", "a"], "ml", undefined)).toEqual(["b", "a"]);
+  });
+});
+
+describe("wording", () => {
+  it("shows the readable rung when there is one and the code otherwise", () => {
+    expect(rungText({ rung: "MIA5", rung_label: "MIA -4.5" })).toBe("MIA -4.5");
+    expect(rungText({ rung: "MIA5", label: "MIA -4.5" })).toBe("MIA -4.5");
+    expect(rungText({ rung: "MIA5" })).toBe("MIA5");
+    expect(rungText({ rung: null })).toBe("");
+  });
+  it("tells an HTTP failure from an unreachable backend", () => {
+    expect(fetchErrorText("Error: GET /nba/flow/games?date=x -> 404 Not Found")).toBe("endpoint returned 404 Not Found");
+    expect(fetchErrorText("Error: GET /p -> 500 Server Error · db down")).toBe("endpoint returned 500 Server Error - db down");
+    expect(fetchErrorText("TypeError: Failed to fetch")).toBe("backend unreachable - TypeError: Failed to fetch");
+  });
+  it("gives a line cell a sentence a screen reader can use", () => {
+    const l = line({
+      rung: "MIA5", rung_label: "MIA -4.5", bets: 412, handle: 18_240, lean: "MIA -4.5", result: "MIA -4.5",
+      sides: [
+        side("MIN +4.5", { ticket_pct: 73, money_pct: 22 }),
+        side("MIA -4.5", { ticket_pct: 27, money_pct: 78 }),
+      ],
+    });
+    const t = lineAriaLabel("spread", l);
+    expect(t).toContain("Spread MIA -4.5");
+    expect(t).not.toContain("MIA5");
+    expect(t).toContain("MIN +4.5: 73% of bets, 22% of money");
+    expect(t).toContain("MIA -4.5: 27% of bets, 78% of money");
+    expect(t).toContain("412 bets, $18.2k handle");
+    expect(t).toContain("money leans MIA -4.5");
+    expect(t).toContain("lean won");
+  });
+});
+
+describe("stale-response guards", () => {
+  it("the slate must answer the date and phase on screen", () => {
+    const slate = { date: "2026-10-21", phase: "pregame" };
+    expect(slateMatches(slate, "2026-10-21", "pregame")).toBe(true);
+    expect(slateMatches(slate, "2026-10-22", "pregame")).toBe(false);
+    expect(slateMatches(slate, "2026-10-21", "all")).toBe(false);
+    expect(slateMatches(null, "2026-10-21", "all")).toBe(false);
+  });
+  it("the detail must answer the game, the line and - only when one was chosen - the rung", () => {
+    const d = { game: "G", line: "spread", rung: "MIA5" };
+    expect(detailMatches({ game: "G", line: "spread", rung: null }, d)).toBe(true); // main rung: whatever it is
+    expect(detailMatches({ game: "G", line: "spread", rung: "MIA5" }, d)).toBe(true);
+    expect(detailMatches({ game: "G", line: "spread", rung: "MIA6" }, d)).toBe(false);
+    expect(detailMatches({ game: "G", line: "total", rung: null }, d)).toBe(false);
+    expect(detailMatches({ game: "H", line: "spread", rung: null }, d)).toBe(false);
+    expect(detailMatches({ game: "G", line: "spread", rung: null }, null)).toBe(false);
+  });
+  it("identical data keeps the same object, changed data does not", () => {
+    const first = stabilize(null, { a: 1 });
+    expect(stabilize(first, { a: 1 })).toBe(first);
+    const next = stabilize(first, { a: 2 });
+    expect(next).not.toBe(first);
+    expect(next.value).toEqual({ a: 2 });
+  });
+  it("a past slate stops polling only when every game is final", () => {
+    const g = (status: "final" | "live") => ({ status });
+    expect(slateIsSettled({ date: "2026-10-20", games: [g("final"), g("final")] }, "2026-10-21")).toBe(true);
+    expect(slateIsSettled({ date: "2026-10-20", games: [g("final"), g("live")] }, "2026-10-21")).toBe(false);
+    expect(slateIsSettled({ date: "2026-10-21", games: [g("final")] }, "2026-10-21")).toBe(false);
+    expect(slateIsSettled({ date: "2026-10-20", games: [] }, "2026-10-21")).toBe(false);
+    expect(slateIsSettled(null, "2026-10-21")).toBe(false);
   });
 });
 

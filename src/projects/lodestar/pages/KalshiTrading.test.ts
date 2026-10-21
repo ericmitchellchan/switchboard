@@ -2,7 +2,13 @@
 // runs in node, no jsdom / testing-library), so the page is tested the way the
 // shell's other views are: server-render the hook-free views to markup, walk
 // the element tree of the hook-free table to "click" a row, and drive the real
-// api client against a mocked fetch to see the request a click makes.
+// api client against a mocked fetch to see the request a click makes. What
+// that cannot reach (usePoll effects, the date input) is covered at the seams:
+// usePoll.test.ts for the stale-drop, kalshiFlow.test.ts for the guards.
+//
+// Fixtures are shaped like the verified backend: a rung is a CODE ("MIA5")
+// with a readable label ("MIA -4.5"); prices are cents; pcts are 0-100;
+// price_zero_share is 0-1.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createElement, isValidElement, type ReactElement, type ReactNode } from "react";
@@ -12,15 +18,21 @@ import { selectionReducer } from "../lib/kalshiFlow";
 
 // uPlot touches `document` at import; the chart is not what these tests are about.
 vi.mock("../../../surfaces/charts/LinePanel", () => ({
-  default: (p: { series: { label: string }[] }) => createElement("div", { "data-chart": p.series.map((s) => s.label).join("|") }),
+  default: (p: { series: { label: string }[]; intraday?: boolean; points?: string[] }) =>
+    createElement("div", {
+      "data-chart": p.series.map((s) => s.label).join("|"),
+      "data-intraday": String(p.intraday),
+      "data-points": p.points ? "yes" : "no",
+    }),
 }));
 
 import FlowGameDetail from "../components/trading/FlowGameDetail";
 import FlowGamesTable from "../components/trading/FlowGamesTable";
 import KalshiTrading, { loadFlowDetail } from "./KalshiTrading";
 
-const line = (rung: string | null, a: string, b: string, o: Partial<NbaFlowLine> = {}): NbaFlowLine => ({
+const line = (rung: string | null, rungLabel: string | null, a: string, b: string, o: Partial<NbaFlowLine> = {}): NbaFlowLine => ({
   rung,
+  rung_label: rungLabel,
   bets: 412,
   handle: 18_240,
   sides: [
@@ -42,8 +54,8 @@ const GAME: NbaFlowGame = {
   home_score: 108,
   price_zero_share: 0.05,
   lines: {
-    ml: line(null, "MIN", "MIA", { result: "MIA" }),
-    spread: line("MIA -4.5", "MIN +4.5", "MIA -4.5", { result: "MIN +4.5" }),
+    ml: line(null, null, "MIN", "MIA", { result: "MIA" }),
+    spread: line("MIA5", "MIA -4.5", "MIN +4.5", "MIA -4.5", { result: "MIN +4.5" }),
     total: null,
   },
 };
@@ -69,7 +81,7 @@ function findAll(node: ReactNode, pred: (props: Record<string, unknown>) => bool
 }
 
 describe("games table", () => {
-  const props = { games: [GAME], selected: null, onRow: () => {}, onLine: () => {} };
+  const props = { games: [GAME], selected: null, phase: "all" as const, onRow: () => {}, onLine: () => {} };
 
   it("draws the matchup, each side of each line with its two shares, the lean and the result", () => {
     const out = html(createElement(FlowGamesTable, props));
@@ -77,13 +89,29 @@ describe("games table", () => {
     expect(out).toContain("final");
     expect(out).toContain("MIN 101 - MIA 108");
     for (const s of ["MIN", "MIA", "MIN +4.5", "MIA -4.5"]) expect(out).toContain(`data-side="${s}"`);
-    expect(out).toContain("MIA -4.5"); // the rung label
     expect(out).toContain("73%");
     expect(out).toContain("78%");
-    expect(out).toContain("lean MIA +51"); // the lean chip
+    expect(out).toContain("lean MIA -4.5 +51"); // the lean chip
     expect(out).toContain("won MIA · lean won"); // ML: lean side won
     expect(out).toContain("won MIN +4.5 · lean lost"); // spread: it did not
-    expect(out).toContain("no bets on tape"); // the empty total
+    expect(out).toContain("no bets on tape"); // the empty total (phase all)
+    expect(out).toContain("$1k+ 9 bets");
+    // one big bet reads "1 bet", never "1 bets"
+    const one = line(null, null, "MIN", "MIA");
+    one.sides[0].big_bets = 0;
+    one.sides[1].big_bets = 1;
+    const single = html(createElement(FlowGamesTable, { ...props, games: [{ ...GAME, lines: { ml: one, spread: null, total: null } }] }));
+    expect(single).toContain("$1k+ 1 bet ·");
+    expect(single).not.toMatch(/\b1 bets\b/);
+  });
+
+  it("shows the readable rung, never the code", () => {
+    const out = html(createElement(FlowGamesTable, props));
+    expect(out).toContain("MIA -4.5");
+    expect(out).not.toContain("MIA5");
+    // a line with no label falls back to its code
+    const coded = { ...GAME, lines: { ...GAME.lines, spread: { ...GAME.lines.spread!, rung_label: undefined } } };
+    expect(html(createElement(FlowGamesTable, { ...props, games: [coded] }))).toContain("MIA5");
   });
 
   it("marks rows and cells for pins", () => {
@@ -91,6 +119,37 @@ describe("games table", () => {
     expect(out).toContain('data-anchor="game:26OCT21MINMIA"');
     expect(out).toContain('data-anchor="line:26OCT21MINMIA:ml"');
     expect(out).toContain('data-anchor="line:26OCT21MINMIA:spread"');
+    expect(out).toContain('data-anchor-label="MIN @ MIA · Spread MIA -4.5"');
+  });
+
+  it("gives every number its meaning for a screen reader, and nests no interactive role", () => {
+    const out = html(createElement(FlowGamesTable, props));
+    expect(out).toContain("MIN +4.5: 73% of bets, 22% of money");
+    expect(out).toContain("MIA -4.5: 27% of bets, 78% of money");
+    // a list, not a table with button rows
+    expect(out).toContain("<ul");
+    expect(out).toContain("<li");
+    expect(out).not.toContain('role="table"');
+    expect(out).not.toContain('role="row"');
+    // the row's own button is the matchup; cells are buttons; no button holds a button
+    const tree = expand(FlowGamesTable(props));
+    const buttons = findAll(tree, (p) => p.role === "button" || (p["aria-expanded"] !== undefined));
+    expect(buttons.length).toBe(3); // matchup, ML, spread (the total has no bets and is not openable)
+    for (const b of buttons) {
+      expect(findAll(b.props.children as ReactNode, (p) => p.role === "button")).toEqual([]);
+    }
+  });
+
+  it("in pregame mode a line with no pregame bets says so and still opens the detail", () => {
+    const onLine = vi.fn();
+    const p = { ...props, phase: "pregame" as const, onLine };
+    const out = html(createElement(FlowGamesTable, p));
+    expect(out).toContain("no pregame bets");
+    expect(out).not.toContain("no bets on tape");
+    const tree = expand(FlowGamesTable(p));
+    const cell = findAll(tree, (q) => q["data-anchor"] === "line:26OCT21MINMIA:total")[0];
+    (cell.props.onClick as (e: { stopPropagation(): void }) => void)({ stopPropagation() {} });
+    expect(onLine).toHaveBeenCalledWith(GAME, "total");
   });
 
   it("shows the outage chip only above 0.2", () => {
@@ -129,14 +188,14 @@ describe("a click requests /nba/flow/game", () => {
     expect((fetchMock.mock.calls[0] as unknown[])[0]).toBe("http://127.0.0.1:8799/nba/flow/game?game=26OCT21MINMIA&line=ml&bucket_min=15");
   });
 
-  it("a spread cell with a chosen rung sends the rung", async () => {
+  it("a spread cell with a chosen rung sends the rung CODE, not the label", async () => {
     const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({}) }) as Response);
     vi.stubGlobal("fetch", fetchMock);
     let sel = selectionReducer(null, { type: "line", game: GAME, line: "spread" });
-    sel = selectionReducer(sel, { type: "rung", rung: "MIA -5.5" });
+    sel = selectionReducer(sel, { type: "rung", rung: "MIA6" });
     await loadFlowDetail(sel!);
     expect((fetchMock.mock.calls[0] as unknown[])[0]).toBe(
-      "http://127.0.0.1:8799/nba/flow/game?game=26OCT21MINMIA&line=spread&rung=MIA+-5.5&bucket_min=15",
+      "http://127.0.0.1:8799/nba/flow/game?game=26OCT21MINMIA&line=spread&rung=MIA6&bucket_min=15",
     );
   });
 
@@ -151,46 +210,110 @@ describe("a click requests /nba/flow/game", () => {
 });
 
 describe("game detail", () => {
+  const T0 = Date.parse("2026-10-21T20:00:00Z");
+  const iso = (ms: number) => new Date(ms).toISOString();
   const detail: NbaFlowGameDetail = {
     game: GAME.game,
     line: "spread",
-    rung: "MIA -4.5",
+    rung: "MIA5",
+    rung_label: "MIA -4.5",
     tip_utc: GAME.tip_utc,
-    sides: ["MIN +4.5", "MIA -4.5"],
+    // the backend's order: home side first - the page puts the away side first
+    sides: ["MIA -4.5", "MIN +4.5"],
     timeline: [
-      { t: "2026-10-21T20:00:00Z", side: "MIN +4.5", bets: 5, handle: 50, big_bets: 0, big_handle: 0, price: 44 },
-      { t: "2026-10-21T20:15:00Z", side: "MIA -4.5", bets: 2, handle: 3000, big_bets: 2, big_handle: 3000, price: 57 },
+      { t: iso(T0), side: "MIN +4.5", bets: 5, handle: 50, big_bets: 0, big_handle: 0, price: 44 },
+      { t: iso(T0 + 15 * 60_000), side: "MIA -4.5", bets: 2, handle: 3000, big_bets: 2, big_handle: 3000, price: 57 },
     ],
     sizes: [
       { bucket: "<$10", side: "MIN +4.5", bets: 4, handle: 20 },
       { bucket: "$1k-10k", side: "MIA -4.5", bets: 2, handle: 3000 },
     ],
     rungs: [
-      { rung: "MIA -4.5", bets: 7, handle: 3050 },
-      { rung: "MIA -5.5", bets: 1, handle: 10 },
+      { rung: "MIA5", label: "MIA -4.5", bets: 7, handle: 3050 },
+      { rung: "MIA6", label: "MIA -5.5", bets: 1, handle: 10 },
     ],
     price_zero_share: 0.4,
   };
-  const base = { game: GAME, selection: { game: GAME.game, line: "spread" as const, rung: null }, error: null, onLine: () => {}, onRung: () => {}, onClose: () => {} };
+  const base = {
+    game: GAME,
+    selection: { game: GAME.game, line: "spread" as const, rung: null },
+    phase: "all" as const,
+    previous: null,
+    error: null,
+    onLine: () => {},
+    onRung: () => {},
+    onClose: () => {},
+  };
 
-  it("draws the line selector, rung dropdown, both charts, the size buckets and the outage chip", () => {
+  it("draws the line selector, rung dropdown (labels shown, codes sent), both charts and the outage chip", () => {
     const out = html(createElement(FlowGameDetail, { ...base, detail }));
     expect(out).toContain("Moneyline");
     expect(out).toContain("Spread");
-    expect(out).toContain("MIA -5.5 · 1 bets");
+    expect(out).toContain('<option value="MIA5" selected="">MIA -4.5 · 7 bets');
+    expect(out).toContain('<option value="MIA6">MIA -5.5 · 1 bet ·');
+    expect(out).not.toContain(">MIA5<");
     expect(out).toContain("cumulative handle by side");
     expect(out).toContain("price paid per $1");
-    expect((out.match(/data-chart="MIN \+4.5\|MIA -4.5"/g) ?? []).length).toBe(2);
-    for (const b of ["&lt;$10", "$10-100", "$100-1k", "$1k-10k", "$10k+"]) expect(out).toContain(`data-size-bucket="${b}"`);
     expect(out).toContain("handle incomplete (capture outage)");
-    // the total line has no bets, so its tab is disabled
-    expect(out).toMatch(/<button[^>]*disabled=""[^>]*>Total<\/button>/);
-    expect(out).not.toMatch(/<button[^>]*disabled=""[^>]*>Spread<\/button>/);
+    expect(out).toContain("whole tape: pregame + in play");
+    // away side first on both charts, whatever order the backend used
+    expect((out.match(/data-chart="MIN \+4.5\|MIA -4.5"/g) ?? []).length).toBe(2);
+    // only the first chart publishes pt: anchors
+    expect((out.match(/data-points="yes"/g) ?? []).length).toBe(1);
+    expect(out).toContain('data-intraday="true"');
   });
 
-  it("loading, error and empty states", () => {
-    expect(html(createElement(FlowGameDetail, { ...base, detail: null }))).toContain("loading game flow");
-    expect(html(createElement(FlowGameDetail, { ...base, detail: null, error: "boom" }))).toContain("backend unreachable - boom");
+  it("anchors the panel as detail:<game>:<line>, not as the game row", () => {
+    const out = html(createElement(FlowGameDetail, { ...base, detail }));
+    expect(out).toContain('data-anchor="detail:26OCT21MINMIA:spread"');
+    expect(out).not.toContain('data-anchor="game:');
+  });
+
+  it("puts a text summary under each chart", () => {
+    const out = html(createElement(FlowGameDetail, { ...base, detail }));
+    expect(out).toMatch(/MIN \+4\.5 \d+% of bets, \d+% of money; MIA -4\.5 \d+% of bets, \d+% of money; money leans MIA -4\.5/);
+    expect(out).toContain("MIN +4.5 44c; MIA -4.5 57c");
+  });
+
+  it("the size mix is a real table with column and row headers", () => {
+    const out = html(createElement(FlowGameDetail, { ...base, detail }));
+    expect(out).toContain('scope="col"');
+    for (const h of ["bet size", "side", "bets", "handle", "avg bet"]) expect(out).toContain(`>${h}</th>`);
+    for (const b of ["&lt;$10", "$10-100", "$100-1k", "$1k-10k", "$10k+"]) expect(out).toContain(`data-size-bucket="${b}"`);
+    expect(out).toContain('scope="row"');
+  });
+
+  it("spans over a day draw a dated axis", () => {
+    const long = { ...detail, timeline: [...detail.timeline, { ...detail.timeline[0], t: iso(T0 + 30 * 3600_000) }] };
+    const out = html(createElement(FlowGameDetail, { ...base, detail: long }));
+    expect(out).toContain('data-intraday="false"');
+  });
+
+  it("line tabs: a line with no bets is disabled in All mode and openable in Pregame mode", () => {
+    const all = html(createElement(FlowGameDetail, { ...base, detail }));
+    expect(all).toMatch(/<button[^>]*disabled=""[^>]*>Total<\/button>/);
+    expect(all).not.toMatch(/<button[^>]*disabled=""[^>]*>Spread<\/button>/);
+    const pre = html(createElement(FlowGameDetail, { ...base, phase: "pregame", detail }));
+    expect(pre).not.toMatch(/<button[^>]*disabled=""[^>]*>Total<\/button>/);
+  });
+
+  it("while the next line or rung loads, the controls stay mounted from the previous answer", () => {
+    const out = html(createElement(FlowGameDetail, { ...base, detail: null, previous: detail }));
+    expect(out).toContain("loading game flow");
+    expect(out).toContain('<option value="MIA6">'); // the rung select did not unmount
+    expect(out).toContain('aria-busy="true"');
+    expect(out).not.toContain("<select disabled");
+    // with nothing to keep there is nothing to show
+    expect(html(createElement(FlowGameDetail, { ...base, detail: null }))).not.toContain("<select");
+  });
+
+  it("error and empty states say what happened", () => {
+    expect(html(createElement(FlowGameDetail, { ...base, detail: null, error: "Error: GET /x -> 404 Not Found" }))).toContain(
+      "endpoint returned 404 Not Found",
+    );
+    expect(html(createElement(FlowGameDetail, { ...base, detail: null, error: "TypeError: Failed to fetch" }))).toContain(
+      "backend unreachable",
+    );
     const empty = { ...detail, timeline: [], sizes: [], price_zero_share: 0 };
     expect(html(createElement(FlowGameDetail, { ...base, detail: empty }))).toContain("no bets on tape for this line");
   });
@@ -207,5 +330,6 @@ describe("the page", () => {
     expect(out).toContain("one taker order");
     expect(out).toContain("$1,000 or more");
     expect(out).toContain("loading NBA flow");
+    expect(out).not.toMatch(/grey|blue/);
   });
 });

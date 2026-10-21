@@ -18,21 +18,65 @@ const BOOT_GRACE_FAILURES = 6; // x poll interval ≈ how long boot may take
  *  Only written for callers that opt in with `cacheKey` (see below). */
 const POLL_CACHE = new Map<string, unknown>();
 
+/** One KEY's life: set when the key-change effect runs, flipped when that run
+ *  is torn down (key change or unmount). A response belongs to the run that
+ *  asked for it, so a late answer for the previous key can never paint over
+ *  the new one — each run owns its own flag (a single shared flag was reset to
+ *  false by the next run's setup, which let the old in-flight response through). */
+export interface PollRun {
+  cancelled: boolean;
+}
+
+/** Start a new run; the previous one (if any) is cancelled for good. */
+export function beginRun(prev: PollRun | null): PollRun {
+  if (prev) prev.cancelled = true;
+  return { cancelled: false };
+}
+
+/** One fetch, answered to the run that asked. Pure of React so the stale-drop
+ *  has a unit test. `onCache` fires even for a cancelled run: the value is
+ *  still current for its key, and the next mount is who wants it. */
+export async function runTick<T>(
+  run: PollRun,
+  fn: () => Promise<T>,
+  h: { onCache?: (d: T) => void; onData: (d: T) => void; onError: (e: unknown) => void },
+): Promise<void> {
+  let d: T;
+  try {
+    d = await fn();
+  } catch (e) {
+    if (!run.cancelled) h.onError(e);
+    return;
+  }
+  h.onCache?.(d);
+  if (!run.cancelled) h.onData(d);
+}
+
+export interface PollOptions {
+  /** Poll at this (shorter) interval until the first success, then at
+   *  `intervalMs` - so a slow cadence does not also make boot errors slow. */
+  bootIntervalMs?: number;
+  /** Stop the interval (the first fetch still happens; data is kept). Does not
+   *  reset or refetch, unlike changing `intervalMs`. */
+  paused?: boolean;
+}
+
 /** `resetKey`: when it changes, data clears and the poll restarts immediately
  * (e.g. a sport-tab switch must not show the previous tab's rows for 10s).
  *
  * `cacheKey`: opt IN to surviving unmount. Without it the hook behaves exactly
- * as before — blank on mount, fill on first tick. With it, the last value is
+ * as before - blank on mount, fill on first tick. With it, the last value is
  * kept at module scope and repainted on the FIRST frame after a remount, so
  * navigating away and back no longer empties the surface while it refetches
  * (owner-reported 2026-08-02). Only pass a key whose `fn` is a pure read of the
- * same thing every time — the key IS the identity of the data.
+ * same thing every time - the key IS the identity of the data.
  */
 export function usePoll<T>(
   fn: () => Promise<T>,
   intervalMs = 2000,
   resetKey?: unknown,
   cacheKey?: string,
+  options?: PollOptions,
 ) {
   // `cacheKey` is combined with `resetKey` so one surface polling different
   // keys (a sport tab, a symbol) can't repaint another key's rows.
@@ -41,43 +85,45 @@ export function usePoll<T>(
     fullKey != null ? (POLL_CACHE.get(fullKey) as T | undefined) ?? null : null,
   );
   const [error, setError] = useState<string | null>(null);
+  const [booted, setBooted] = useState(false);
   const active = useSurfaceActive();
   const fnRef = useRef(fn);
   fnRef.current = fn;
   const hadSuccess = useRef(false);
   const failures = useRef(0);
 
-  // ONE tick function for both effects; `cancelled` is per key so a late
-  // response for the previous key never paints over the new one.
-  const cancelledRef = useRef(false);
+  // ONE tick function for both effects. The run is read when the tick STARTS,
+  // so an interval tick after a key change belongs to the new run and a
+  // response that was already in flight stays bound to the old (cancelled) one.
+  const runRef = useRef<PollRun | null>(null);
   const tick = (): void => {
-    fnRef
-      .current()
-      .then((d) => {
-        // Cache even if this instance unmounted mid-flight: the value is
-        // still current, and the NEXT mount is exactly who wants it.
+    const run = runRef.current;
+    if (!run) return;
+    void runTick(run, fnRef.current, {
+      onCache: (d) => {
         if (fullKey != null) POLL_CACHE.set(fullKey, d);
-        if (!cancelledRef.current) {
-          hadSuccess.current = true;
-          failures.current = 0;
-          setData(d);
-          setError(null);
-        }
-      })
-      .catch((e: unknown) => {
-        if (cancelledRef.current) return;
+      },
+      onData: (d) => {
+        hadSuccess.current = true;
+        failures.current = 0;
+        setBooted(true);
+        setData(d);
+        setError(null);
+      },
+      onError: (e) => {
         failures.current += 1;
         if (hadSuccess.current || failures.current >= BOOT_GRACE_FAILURES) {
           setError(String(e));
         }
-      });
+      },
+    });
   };
   const tickRef = useRef(tick);
   tickRef.current = tick;
 
   // KEY change: reset + first tick (the original behaviour).
   useEffect(() => {
-    cancelledRef.current = false;
+    runRef.current = beginRun(runRef.current);
     // Keep the cached value on screen while the first tick lands; without a
     // cacheKey this is the original blank-then-fill behaviour.
     setData(fullKey != null ? ((POLL_CACHE.get(fullKey) as T | undefined) ?? null) : null);
@@ -85,20 +131,23 @@ export function usePoll<T>(
     failures.current = 0; // boot-grace counts per key, not across tabs
     tickRef.current();
     return () => {
-      cancelledRef.current = true;
+      if (runRef.current) runRef.current.cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [intervalMs, resetKey, fullKey]);
 
   // SWITCHBOARD: the INTERVAL runs only while the surface is ON SCREEN
   // (page-api useSurfaceActive). Going inactive stops the timer and keeps the
-  // last data — no reset, no tick; coming back restarts the cadence. Beside a
+  // last data - no reset, no tick; coming back restarts the cadence. Beside a
   // live terminal, an ungated 2s poll is a cost the shell refuses.
+  const paused = options?.paused === true;
+  const bootMs = options?.bootIntervalMs;
+  const everyMs = bootMs != null && !booted ? Math.min(bootMs, intervalMs) : intervalMs;
   useEffect(() => {
-    if (!active) return;
-    const id = setInterval(() => tickRef.current(), intervalMs);
+    if (!active || paused) return;
+    const id = setInterval(() => tickRef.current(), everyMs);
     return () => clearInterval(id);
-  }, [active, intervalMs, resetKey, fullKey]);
+  }, [active, paused, everyMs, resetKey, fullKey]);
 
   return { data, error };
 }

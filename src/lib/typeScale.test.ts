@@ -31,6 +31,7 @@ const SWEPT = [
   "src/components/ChatPane.tsx",
   // SWIT-130: the Kalshi Trading page, built on the tokens from day one.
   "src/projects/lodestar/pages/KalshiTrading.tsx",
+  "src/projects/lodestar/components/trading/Chip.tsx",
   "src/projects/lodestar/components/trading/FlowGamesTable.tsx",
   "src/projects/lodestar/components/trading/FlowGameDetail.tsx",
 ];
