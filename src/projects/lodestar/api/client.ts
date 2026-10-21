@@ -1529,6 +1529,10 @@ export const api = {
     ),
   getNbaContext: (ticker: string): Promise<NbaGameContext> =>
     getJson<NbaGameContext>(`/nba/context/${encodeURIComponent(ticker)}`),
+  getNbaFlowGames: (date: string, phase: NbaFlowPhase = "pregame"): Promise<NbaFlowGames> =>
+    getJson<NbaFlowGames>(`/nba/flow/games?date=${encodeURIComponent(date)}&phase=${phase}`, { signal: flowTimeout() }),
+  getNbaFlowGame: (q: NbaFlowGameQuery): Promise<NbaFlowGameDetail> =>
+    getJson<NbaFlowGameDetail>(nbaFlowGamePath(q), { signal: flowTimeout() }),
   getNbaPbp: (ticker: string): Promise<NbaPbp> =>
     getJson<NbaPbp>(`/nba/pbp/${encodeURIComponent(ticker)}`),
   getTennisContext: (ticker: string): Promise<TennisMatchContext> =>
@@ -1899,6 +1903,125 @@ export interface SextantDay {
   n_bars: number;
   n_suspect: number;
   bars: SextantBar[];
+}
+
+// --- NBA betting flow from our own Kalshi tape (SWIT-130) ---
+// A BET = one taker order; HANDLE = dollars the takers paid; BIG = a bet of
+// $1,000 or more. Percentages are 0..100 and `gap` is money_pct - ticket_pct
+// in points. Prices are cents per $1 for that side.
+
+export type NbaFlowPhase = "pregame" | "all";
+export type NbaFlowLineKey = "ml" | "spread" | "total";
+export type NbaFlowStatus = "scheduled" | "live" | "final";
+
+export interface NbaFlowSide {
+  side: string;
+  bets: number;
+  handle: number;
+  big_bets: number;
+  big_handle: number;
+  ticket_pct: number;
+  money_pct: number;
+  gap: number;
+  price_first: number | null;
+  price_last: number | null;
+}
+
+export interface NbaFlowLine {
+  /** Kalshi's rung code (e.g. "DET6"); send this back as `rung`. */
+  rung: string | null;
+  /** Readable rung (e.g. "DET -6.5", "243.5"); null for the moneyline. */
+  rung_label?: string | null;
+  bets: number;
+  handle: number;
+  sides: NbaFlowSide[];
+  /** The side whose money share beats its ticket share by 10+ points. */
+  lean: string | null;
+  /** The winning side, or "push"; null until settled. */
+  result: string | null;
+}
+
+export interface NbaFlowGame {
+  game: string;
+  away: string;
+  home: string;
+  tip_utc: string | null;
+  status: NbaFlowStatus;
+  away_score: number | null;
+  home_score: number | null;
+  price_zero_share: number;
+  lines: Record<NbaFlowLineKey, NbaFlowLine | null>;
+}
+
+/** GET /nba/flow/games */
+export interface NbaFlowGames {
+  date: string;
+  phase: NbaFlowPhase;
+  games: NbaFlowGame[];
+}
+
+export interface NbaFlowTimelineRow {
+  t: string;
+  side: string;
+  bets: number;
+  handle: number;
+  big_bets: number;
+  big_handle: number;
+  price: number | null;
+}
+
+export type NbaFlowSizeBucket = "<$10" | "$10-100" | "$100-1k" | "$1k-10k" | "$10k+";
+
+export interface NbaFlowSizeRow {
+  bucket: NbaFlowSizeBucket;
+  side: string;
+  bets: number;
+  handle: number;
+}
+
+export interface NbaFlowRung {
+  rung: string;
+  /** Readable rung, e.g. "DET -6.5". */
+  label?: string | null;
+  bets: number;
+  handle: number;
+}
+
+/** GET /nba/flow/game */
+export interface NbaFlowGameDetail {
+  game: string;
+  line: NbaFlowLineKey;
+  rung: string | null;
+  rung_label?: string | null;
+  tip_utc: string | null;
+  sides: string[];
+  timeline: NbaFlowTimelineRow[];
+  sizes: NbaFlowSizeRow[];
+  rungs: NbaFlowRung[];
+  price_zero_share: number;
+}
+
+export interface NbaFlowGameQuery {
+  game: string;
+  line: NbaFlowLineKey;
+  rung?: string | null;
+  bucketMin?: number;
+}
+
+/** The flow endpoints read a whole day's prints and must not hang a poll: give
+ *  them a ~30 s abort (where the runtime has AbortSignal.timeout). */
+function flowTimeout(): AbortSignal | undefined {
+  return typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(30_000) : undefined;
+}
+
+/** The request path for GET /nba/flow/game (pure, so a test can pin it). */
+export function nbaFlowGamePath(q: NbaFlowGameQuery): string {
+  const p = new URLSearchParams();
+  p.set("game", q.game);
+  p.set("line", q.line);
+  if (q.rung) p.set("rung", q.rung);
+  p.set("bucket_min", String(q.bucketMin ?? 15));
+  return `/nba/flow/game?${p.toString()}`;
 }
 
 export { BASE_URL };
