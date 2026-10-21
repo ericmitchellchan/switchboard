@@ -74,7 +74,7 @@ describe("usePoll runs", () => {
   });
 
   it("beginRun with nothing before it is a fresh live run", () => {
-    expect(beginRun(null)).toEqual({ cancelled: false, pending: false });
+    expect(beginRun(null)).toEqual({ cancelled: false, pending: false, pendingSince: 0, seq: 0 });
   });
 
   it("a tick is skipped while the same run's request is still in flight, then the next one goes", async () => {
@@ -115,5 +115,50 @@ describe("usePoll runs", () => {
     expect(h2.onData).toHaveBeenCalledWith("fresh");
     slow.resolve("old");
     await t1;
+  });
+
+  it("a request pending past the stale age is abandoned: the next tick goes and the late result cannot land", async () => {
+    const run = beginRun(null);
+    let t = 1_000;
+    const opts = { staleAfterMs: 45_000, now: () => t };
+    const hung = deferred<string>();
+    const hHung = handlers();
+    const first = runTick(run, () => hung.promise, hHung, opts);
+
+    t += 44_000; // not yet stale: skipped
+    const skipped = vi.fn(async () => "x");
+    await runTick(run, skipped, handlers(), opts);
+    expect(skipped).not.toHaveBeenCalled();
+
+    t += 2_000; // 46 s: abandoned
+    const hNext = handlers();
+    await runTick(run, async () => "fresh", hNext, opts);
+    expect(hNext.onData).toHaveBeenCalledWith("fresh");
+
+    hung.resolve("very late"); // the abandoned request finally answers
+    await first;
+    expect(hHung.onData).not.toHaveBeenCalled();
+    expect(hHung.onCache).not.toHaveBeenCalled();
+    expect(run.pending).toBe(false);
+  });
+
+  it("an abandoned request that finally FAILS does not report an error or free the new request", async () => {
+    const run = beginRun(null);
+    let t = 0;
+    const opts = { staleAfterMs: 10, now: () => t };
+    const hung = deferred<string>();
+    const hHung = handlers();
+    const first = runTick(run, () => hung.promise, hHung, opts);
+    t = 100;
+    const slow = deferred<string>();
+    const hNew = handlers();
+    const second = runTick(run, () => slow.promise, hNew, opts);
+    hung.reject(new Error("late"));
+    await first;
+    expect(hHung.onError).not.toHaveBeenCalled();
+    expect(run.pending).toBe(true); // the new request still holds the slot
+    slow.resolve("ok");
+    await second;
+    expect(hNew.onData).toHaveBeenCalledWith("ok");
   });
 });

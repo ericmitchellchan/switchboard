@@ -28,12 +28,17 @@ export interface PollRun {
   /** A request of THIS run is still in flight: the next tick is skipped, so a
    *  slow answer (or a fast boot cadence) never stacks concurrent copies. */
   pending: boolean;
+  /** When the pending request started (ms), and a counter that numbers the
+   *  requests of this run - an abandoned request's late result carries an old
+   *  number and cannot land. */
+  pendingSince: number;
+  seq: number;
 }
 
 /** Start a new run; the previous one (if any) is cancelled for good. */
 export function beginRun(prev: PollRun | null): PollRun {
   if (prev) prev.cancelled = true;
-  return { cancelled: false, pending: false };
+  return { cancelled: false, pending: false, pendingSince: 0, seq: 0 };
 }
 
 /** One fetch, answered to the run that asked. Pure of React so the stale-drop
@@ -43,21 +48,35 @@ export async function runTick<T>(
   run: PollRun,
   fn: () => Promise<T>,
   h: { onCache?: (d: T) => void; onData: (d: T) => void; onError: (e: unknown) => void },
+  opts?: { staleAfterMs?: number; now?: () => number },
 ): Promise<void> {
-  if (run.pending) return;
+  const now = opts?.now ?? Date.now;
+  if (run.pending) {
+    // A request that never settles must not stall the poll forever: past this
+    // age it is abandoned, the next tick goes, and the abandoned request's late
+    // result can no longer land (it carries an old request number).
+    if (now() - run.pendingSince < (opts?.staleAfterMs ?? ABANDON_FLOOR_MS)) return;
+  }
+  const mine = ++run.seq;
   run.pending = true;
+  run.pendingSince = now();
   let d: T;
   try {
     d = await fn();
   } catch (e) {
+    if (mine !== run.seq) return;
     run.pending = false;
     if (!run.cancelled) h.onError(e);
     return;
   }
+  if (mine !== run.seq) return;
   run.pending = false;
   h.onCache?.(d);
   if (!run.cancelled) h.onData(d);
 }
+
+/** A pending request older than max(this, 1.5 x the interval) is abandoned. */
+export const ABANDON_FLOOR_MS = 45_000;
 
 export interface PollOptions {
   /** Poll at this (shorter) interval until the first success, then at
@@ -123,7 +142,7 @@ export function usePoll<T>(
           setError(String(e));
         }
       },
-    });
+    }, { staleAfterMs: Math.max(ABANDON_FLOOR_MS, 1.5 * intervalMs) });
   };
   const tickRef = useRef(tick);
   tickRef.current = tick;

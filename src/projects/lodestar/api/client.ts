@@ -1530,9 +1530,9 @@ export const api = {
   getNbaContext: (ticker: string): Promise<NbaGameContext> =>
     getJson<NbaGameContext>(`/nba/context/${encodeURIComponent(ticker)}`),
   getNbaFlowGames: (date: string, phase: NbaFlowPhase = "pregame"): Promise<NbaFlowGames> =>
-    getJson<NbaFlowGames>(`/nba/flow/games?date=${encodeURIComponent(date)}&phase=${phase}`),
+    getJson<NbaFlowGames>(`/nba/flow/games?date=${encodeURIComponent(date)}&phase=${phase}`, { signal: flowTimeout() }),
   getNbaFlowGame: (q: NbaFlowGameQuery): Promise<NbaFlowGameDetail> =>
-    getJson<NbaFlowGameDetail>(nbaFlowGamePath(q)),
+    getJson<NbaFlowGameDetail>(nbaFlowGamePath(q), { signal: flowTimeout() }),
   getNbaPbp: (ticker: string): Promise<NbaPbp> =>
     getJson<NbaPbp>(`/nba/pbp/${encodeURIComponent(ticker)}`),
   getTennisContext: (ticker: string): Promise<TennisMatchContext> =>
@@ -2006,6 +2006,12 @@ export interface NbaFlowGameQuery {
   line: NbaFlowLineKey;
   rung?: string | null;
   bucketMin?: number;
+}
+
+/** The flow endpoints read a whole day's prints and must not hang a poll: give
+ *  them a ~30 s abort (where the runtime has AbortSignal.timeout). */
+function flowTimeout(): AbortSignal | undefined {
+  return typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(30_000) : undefined;
 }
 
 /** The request path for GET /nba/flow/game (pure, so a test can pin it). */
