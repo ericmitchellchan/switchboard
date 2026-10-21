@@ -339,6 +339,15 @@ that stop being true.
   test (`typeScale.test.ts`) fails on any other. The sweep goes area by area; until an
   area is swept it keeps its old sizes.
 
+- 2026-10-21 — A DATA PAGE IS A BOARD, NOT A DOCUMENT (Eric, on the first Kalshi Trading
+  build: "a glorified MD file … padding's messed up, it's against borders and there are a
+  lot of borders. I don't see actual bets"). A trading/sports page leads with the numbers
+  drawn as visuals (split bars, charts), one hairline between rows and NO box per cell;
+  text against a border is a bug; an empty state never fills the screen (fold it to one
+  line). Sports pages read like a sportsbook board: one row per game, the markets as
+  aligned columns, click a market for its timeline. Mock:
+  personal-kb switchboard/features/kalshi-trading/wireframes/flow-v2.html.
+
 ## Decisions recorded by the app
 
 - 2026-09-09 — Bundle IBM Plex Sans for page and doc bodies (asked: Ky's page and docs read in IBM Plex Sans; ours are still JetBrains Mono at Ky's sizes. Bring in a sans reading face?; thread: New thread)
