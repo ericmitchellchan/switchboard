@@ -25,12 +25,15 @@ const POLL_CACHE = new Map<string, unknown>();
  *  false by the next run's setup, which let the old in-flight response through). */
 export interface PollRun {
   cancelled: boolean;
+  /** A request of THIS run is still in flight: the next tick is skipped, so a
+   *  slow answer (or a fast boot cadence) never stacks concurrent copies. */
+  pending: boolean;
 }
 
 /** Start a new run; the previous one (if any) is cancelled for good. */
 export function beginRun(prev: PollRun | null): PollRun {
   if (prev) prev.cancelled = true;
-  return { cancelled: false };
+  return { cancelled: false, pending: false };
 }
 
 /** One fetch, answered to the run that asked. Pure of React so the stale-drop
@@ -41,13 +44,17 @@ export async function runTick<T>(
   fn: () => Promise<T>,
   h: { onCache?: (d: T) => void; onData: (d: T) => void; onError: (e: unknown) => void },
 ): Promise<void> {
+  if (run.pending) return;
+  run.pending = true;
   let d: T;
   try {
     d = await fn();
   } catch (e) {
+    run.pending = false;
     if (!run.cancelled) h.onError(e);
     return;
   }
+  run.pending = false;
   h.onCache?.(d);
   if (!run.cancelled) h.onData(d);
 }

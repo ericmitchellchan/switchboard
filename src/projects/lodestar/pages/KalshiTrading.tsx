@@ -46,6 +46,14 @@ const BOOT_POLL_MS = 3_000;
 
 type Tab = "flow" | "positions";
 
+/** One detail poll: the answer, tied to the request that asked for it. */
+interface DetailPoll {
+  key: string;
+  /** The request started while the game was already final. */
+  afterFinal: boolean;
+  detail: NbaFlowGameDetail;
+}
+
 /** The one request a selected game/line/rung makes (exported for the test). */
 export function loadFlowDetail(sel: FlowSelection): Promise<NbaFlowGameDetail> {
   return api.getNbaFlowGame({ game: sel.game, line: sel.line, rung: sel.rung, bucketMin: BUCKET_MIN });
@@ -114,22 +122,37 @@ function FlowTab({ date, phase, selection, setDate, setPhase, dispatch }: FlowTa
 
   const selectedGame = selection ? slate?.games.find((g) => g.game === selection.game) : undefined;
   const selKey = selection ? `${selection.game}|${selection.line}|${selection.rung ?? ""}` : "";
-  const { data: detailRaw, error: detailError } = usePoll(
-    () => (selection ? loadFlowDetail(selection) : Promise.resolve(null)),
+  // A game that has just turned final gets one more fetch - a request STARTED
+  // after it was final - before its detail stops polling.
+  const finalNow = selectedGame?.status === "final";
+  const [detailDone, setDetailDone] = useState(false);
+  const { data: detailRaw, error: detailError } = usePoll<DetailPoll | null>(
+    () =>
+      selection
+        ? loadFlowDetail(selection).then((d) => ({ key: selKey, afterFinal: finalNow, detail: d }))
+        : Promise.resolve(null),
     POLL_MS,
     selKey,
     "kalshi-flow-game",
-    { bootIntervalMs: BOOT_POLL_MS, paused: selectedGame?.status === "final" },
+    { bootIntervalMs: BOOT_POLL_MS, paused: detailDone },
   );
   // Identical polls keep one object, so the charts keep their zoom.
-  const detailStable = useStableData(detailRaw);
-  const detail = selection && detailMatches(selection, detailStable) ? detailStable : null;
+  const polled = useStableData(detailRaw);
+  // Drawn only if it answers THIS selection (its own key) for this game and line.
+  const answered = !!selection && polled?.key === selKey && detailMatches(selection, polled.detail);
+  const detail = answered ? polled!.detail : null;
+  const done = finalNow && answered && polled!.afterFinal;
+  useEffect(() => setDetailDone(done), [done]);
 
-  // The last answer for this game, kept while the next line/rung loads so the
-  // controls stay mounted (focus and layout hold).
+  // The last answer for this game AND line, kept while a rung change loads so
+  // the rung select stays mounted (focus and layout hold). A line change keeps
+  // nothing: the old line's rungs must not stay selectable.
   const lastRef = useRef<NbaFlowGameDetail | null>(null);
   if (detail) lastRef.current = detail;
-  const previous = selection && lastRef.current?.game === selection.game ? lastRef.current : null;
+  const previous =
+    selection && lastRef.current?.game === selection.game && lastRef.current.line === selection.line
+      ? lastRef.current
+      : null;
 
   return (
     <div className="flex flex-col gap-4">

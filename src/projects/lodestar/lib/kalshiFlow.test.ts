@@ -8,6 +8,7 @@ import {
   defaultLine,
   detailMatches,
   fetchErrorText,
+  gameCodeTeams,
   flowSummary,
   fmtBets,
   fmtCount,
@@ -313,14 +314,16 @@ describe("stale-response guards", () => {
     expect(slateMatches(slate, "2026-10-21", "all")).toBe(false);
     expect(slateMatches(null, "2026-10-21", "all")).toBe(false);
   });
-  it("the detail must answer the game, the line and - only when one was chosen - the rung", () => {
+  it("the detail must answer the game and the line; the rung is not compared (the backend may substitute its main one)", () => {
     const d = { game: "G", line: "spread", rung: "MIA5" };
-    expect(detailMatches({ game: "G", line: "spread", rung: null }, d)).toBe(true); // main rung: whatever it is
-    expect(detailMatches({ game: "G", line: "spread", rung: "MIA5" }, d)).toBe(true);
-    expect(detailMatches({ game: "G", line: "spread", rung: "MIA6" }, d)).toBe(false);
-    expect(detailMatches({ game: "G", line: "total", rung: null }, d)).toBe(false);
-    expect(detailMatches({ game: "H", line: "spread", rung: null }, d)).toBe(false);
-    expect(detailMatches({ game: "G", line: "spread", rung: null }, null)).toBe(false);
+    expect(detailMatches({ game: "G", line: "spread" }, d)).toBe(true);
+    expect(detailMatches({ game: "G", line: "total" }, d)).toBe(false);
+    expect(detailMatches({ game: "H", line: "spread" }, d)).toBe(false);
+    expect(detailMatches({ game: "G", line: "spread" }, null)).toBe(false);
+  });
+  it("the team codes come out of the game code", () => {
+    expect(gameCodeTeams("26OCT21MINMIA")).toEqual({ away: "MIN", home: "MIA" });
+    expect(gameCodeTeams("nonsense")).toBeNull();
   });
   it("identical data keeps the same object, changed data does not", () => {
     const first = stabilize(null, { a: 1 });

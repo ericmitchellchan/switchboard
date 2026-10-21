@@ -454,15 +454,23 @@ export function slateMatches<T extends { date: string; phase: string }>(slate: T
   return !!slate && slate.date === date && slate.phase === phase;
 }
 
-/** The detail answers the selection on screen: same game and line, and - when
- *  a rung was chosen - that rung. With no rung chosen the backend picks the
- *  main one, so the response's rung cannot be compared. (Not guarded on the
- *  rung alone: for an unknown rung the backend falls back to the main one.) */
-export function detailMatches<T extends { game: string; line: string; rung: string | null }>(
-  sel: { game: string; line: string; rung: string | null },
+/** The detail answers the game and line on screen. The rung is NOT compared:
+ *  the backend may substitute its main rung for the one asked for, and a
+ *  comparison would then wait forever. A response is tied to its own request by
+ *  the poll's per-run stale drop and the selection-keyed cache, and the page
+ *  shows the answer's rung in the select. */
+export function detailMatches<T extends { game: string; line: string }>(
+  sel: { game: string; line: string },
   d: T | null | undefined,
 ): d is T {
-  return !!d && d.game === sel.game && d.line === sel.line && (sel.rung == null || d.rung === sel.rung);
+  return !!d && d.game === sel.game && d.line === sel.line;
+}
+
+/** The two team codes in a game code ("26OCT21MINMIA" -> MIN away, MIA home),
+ *  so the side order does not wait for the slate row. */
+export function gameCodeTeams(code: string): { away: string; home: string } | null {
+  const m = /^\d{2}[A-Z]{3}\d{2}([A-Z]{3})([A-Z]{3})$/.exec(code);
+  return m ? { away: m[1], home: m[2] } : null;
 }
 
 /** Keep the SAME object while the data is unchanged, so a poll that returns

@@ -253,6 +253,7 @@ describe("game detail", () => {
     expect(out).toContain('<option value="MIA6">MIA -5.5 · 1 bet ·');
     expect(out).not.toContain(">MIA5<");
     expect(out).toContain("cumulative handle by side");
+    expect(out).toContain("bets in the bucket the tip falls inside appear after the marker");
     expect(out).toContain("price paid per $1");
     expect(out).toContain("handle incomplete (capture outage)");
     expect(out).toContain("whole tape: pregame + in play");
@@ -261,6 +262,31 @@ describe("game detail", () => {
     // only the first chart publishes pt: anchors
     expect((out.match(/data-points="yes"/g) ?? []).length).toBe(1);
     expect(out).toContain('data-intraday="true"');
+  });
+
+  it("shows the rung the answer is for, even when it is not the one asked for", () => {
+    // the backend substituted its main rung (MIA5) for the one chosen (MIA6)
+    const out = html(createElement(FlowGameDetail, { ...base, selection: { ...base.selection, rung: "MIA6" }, detail }));
+    expect(out).toContain('<option value="MIA5" selected="">');
+    expect(out).not.toContain('<option value="MIA6" selected="">');
+  });
+
+  it("while a chosen rung loads, the select shows the chosen rung", () => {
+    const out = html(createElement(FlowGameDetail, { ...base, selection: { ...base.selection, rung: "MIA6" }, detail: null, previous: detail }));
+    expect(out).toContain('<option value="MIA6" selected="">');
+  });
+
+  it("after a line change nothing from the old line is selectable until the new answer lands", () => {
+    // the page passes previous = null when the line differs
+    const out = html(createElement(FlowGameDetail, { ...base, selection: { game: GAME.game, line: "total", rung: null }, detail: null, previous: null }));
+    expect(out).toContain("Spread"); // the line tabs stay
+    expect(out).not.toContain("<select");
+    expect(out).toContain("loading game flow");
+  });
+
+  it("orders the sides away-first from the game code when the slate row is not there", () => {
+    const out = html(createElement(FlowGameDetail, { ...base, game: undefined, detail }));
+    expect((out.match(/data-chart="MIN \+4.5\|MIA -4.5"/g) ?? []).length).toBe(2);
   });
 
   it("anchors the panel as detail:<game>:<line>, not as the game row", () => {

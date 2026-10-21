@@ -35,6 +35,7 @@ import {
   fmtMoney,
   fmtPct,
   fmtTip,
+  gameCodeTeams,
   isHandleIncomplete,
   orderSides,
   priceSummary,
@@ -54,8 +55,9 @@ export interface FlowGameDetailProps {
   phase: NbaFlowPhase;
   /** The response for exactly this selection, or null while it loads. */
   detail: NbaFlowGameDetail | null;
-  /** The last response for this game, kept while the next one loads so the
-   *  controls (and the rung select's focus and width) do not disappear. */
+  /** The last response for this game AND line, kept while a rung change loads
+   *  so the rung select (its focus and width) does not disappear. Null after a
+   *  line change: the old line's rungs must not stay selectable. */
   previous: NbaFlowGameDetail | null;
   error: string | null;
   onLine: (line: NbaFlowLineKey) => void;
@@ -103,6 +105,9 @@ function SeriesCharts({ detail, sides }: { detail: NbaFlowGameDetail; sides: rea
     <div className="flex flex-col gap-3">
       <figure className="m-0">
         <figcaption className="mb-1" style={{ ...T.kicker, color: "var(--dim)" }}>cumulative handle by side</figcaption>
+        <div className="mb-1" style={{ ...T.caption, color: "var(--dim2)" }}>
+          each 15-minute bucket is drawn at its end, so bets in the bucket the tip falls inside appear after the marker
+        </div>
         <LinePanel
           xs={m.xs}
           series={m.series}
@@ -203,7 +208,9 @@ export default function FlowGameDetail({ game, selection, phase, detail, previou
   const ctl = detail ?? previous;
   const rungs = ctl?.rungs ?? [];
   const outage = isHandleIncomplete((detail ?? ctl)?.price_zero_share ?? game?.price_zero_share);
-  const away = game?.away;
+  // The away team from the slate row, or from the game code while the slate is
+  // changing, so a side keeps its colour either way.
+  const away = game?.away ?? gameCodeTeams(selection.game)?.away;
   const sides = useMemo(
     () => (detail ? orderSides(detail.sides, detail.line, away ? { away } : undefined) : []),
     [detail, away],
@@ -251,7 +258,7 @@ export default function FlowGameDetail({ game, selection, phase, detail, previou
               <select
                 className={SELECT_CLASS}
                 style={T.mono}
-                value={selection.rung ?? ctl?.rung ?? ""}
+                value={(detail ? detail.rung : (selection.rung ?? ctl?.rung)) ?? ""}
                 aria-busy={!detail}
                 onChange={(e) => onRung(e.target.value || null)}
               >

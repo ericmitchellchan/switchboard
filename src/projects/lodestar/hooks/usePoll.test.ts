@@ -74,6 +74,46 @@ describe("usePoll runs", () => {
   });
 
   it("beginRun with nothing before it is a fresh live run", () => {
-    expect(beginRun(null)).toEqual({ cancelled: false });
+    expect(beginRun(null)).toEqual({ cancelled: false, pending: false });
+  });
+
+  it("a tick is skipped while the same run's request is still in flight, then the next one goes", async () => {
+    const run = beginRun(null);
+    const slow = deferred<string>();
+    const fn = vi.fn(() => slow.promise);
+    const h = handlers();
+    const first = runTick(run, fn, h);
+    // boot cadence fires three more times before the first answer lands
+    await runTick(run, fn, h);
+    await runTick(run, fn, h);
+    await runTick(run, fn, h);
+    expect(fn).toHaveBeenCalledTimes(1);
+    slow.resolve("late");
+    await first;
+    expect(h.onData).toHaveBeenCalledTimes(1);
+    expect(run.pending).toBe(false);
+    await runTick(run, async () => "next", h);
+    expect(h.onData).toHaveBeenLastCalledWith("next");
+  });
+
+  it("a failed request frees the run for the next tick", async () => {
+    const run = beginRun(null);
+    await runTick(run, async () => { throw new Error("x"); }, handlers());
+    expect(run.pending).toBe(false);
+    const h = handlers();
+    await runTick(run, async () => 1, h);
+    expect(h.onData).toHaveBeenCalledWith(1);
+  });
+
+  it("a new run is not blocked by the previous run's pending request", async () => {
+    const run1 = beginRun(null);
+    const slow = deferred<string>();
+    const t1 = runTick(run1, () => slow.promise, handlers());
+    const run2 = beginRun(run1);
+    const h2 = handlers();
+    await runTick(run2, async () => "fresh", h2);
+    expect(h2.onData).toHaveBeenCalledWith("fresh");
+    slow.resolve("old");
+    await t1;
   });
 });
