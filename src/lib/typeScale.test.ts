@@ -32,7 +32,16 @@ const SWEPT = [
   // SWIT-130: the Kalshi Trading page, built on the tokens from day one.
   "src/projects/lodestar/pages/KalshiTrading.tsx",
   "src/projects/lodestar/components/trading/Chip.tsx",
-  "src/projects/lodestar/components/trading/FlowGamesTable.tsx",
+  "src/projects/lodestar/components/trading/FlowBoard.tsx",
+  "src/projects/lodestar/components/trading/FlowSplits.tsx",
+  "src/projects/lodestar/components/trading/MarketCell.tsx",
+  "src/projects/lodestar/components/trading/SplitBars.tsx",
+  "src/projects/lodestar/components/trading/Seg.tsx",
+  "src/projects/lodestar/components/trading/flowInk.ts",
+  "src/projects/lodestar/components/trading/FlowShareChart.tsx",
+  "src/projects/lodestar/components/trading/FlowSizes.tsx",
+  "src/projects/lodestar/components/trading/FlowBigBets.tsx",
+  "src/projects/lodestar/components/trading/FlowWhen.tsx",
   "src/projects/lodestar/components/trading/FlowGameDetail.tsx",
 ];
 

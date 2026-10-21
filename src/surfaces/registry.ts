@@ -115,7 +115,7 @@ export const SURFACES: Readonly<Record<string, ProjectSurfaces>> = {
         label: "Kalshi Trading",
         section: "main",
         load: () => import("../projects/lodestar/pages/KalshiTrading"),
-        pinHint: "game:<game> a game row, line:<game>:<ml|spread|total> a line cell, detail:<game>:<line> the open game detail, pt:<iso> a point on its handle chart",
+        pinHint: "game:<game> a game row, line:<game>:<ml|spread|total> a market cell, detail:<game>:<line> the open game detail, pt:<iso> a point on its money-vs-bets chart",
       },
       // Research surfaces (Inc 5b — SWIT-40). Their pin vocabularies grow as
       // the pages mark elements; headings/rows inside their markdown are

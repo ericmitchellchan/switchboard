@@ -1,56 +1,85 @@
 /**
- * Kalshi Trading / Flow - one game's detail (SWIT-130): cumulative handle per
- * side over time with the tip marked, the price each side paid, and the size
- * mix (bets and handle by bet size) that separates the public from the sharps.
+ * Kalshi Trading / Flow - one game's detail (SWIT-130): the versus block, the
+ * one-line read, ONE chart (money vs bets over time), when the money came in,
+ * who bet what size, and the real $1k+ bets.
  *
- * The detail covers the WHOLE tape (pregame + in play) whatever the table's
- * Pregame / All toggle says; the caption says so.
+ * Every number on the page is for the same rung and the same phase: the versus
+ * block, the read and the tables come from the detail's own size mix and
+ * timeline, so choosing another rung or Before tip / Whole game moves them
+ * together. DraftKings sits beside Kalshi, never mixed in: its shares appear as
+ * one mono line under each side and as a dotted line on the chart; it has no
+ * dollars, so none are shown for it.
  *
- * Chart choice: the shared LinePanel (uPlot), not a hand-drawn SVG like
- * FlowDeepDive. FlowDeepDive draws dots on a price axis it owns end to end;
- * this is two plain time series with a labelled vertical marker, which is
- * exactly LinePanel's job (markers, a time axis, a legend naming each series,
- * pan/zoom). The two panels share one x range, so the price strip reads
- * against the handle chart above it (their plot areas can still differ by a
- * few pixels, because the y-axis labels differ in width). Side identity is
- * never colour alone: the legend names each side, the second side is dashed,
- * and a one-line text summary sits under each chart. The two series tones are
- * ones the rest of the page does not use (blue is "money" in the table, amber
- * is the warning chip), and a side keeps its tone across rungs because sides
- * are put in a fixed order (away team first, Over first).
+ * Presentational and hook-free (state lives on the page): props in, markup out.
+ * The page is an investigation tool. Nothing here says to bet.
  */
 
-import { useMemo } from "react";
-import LinePanel, { type LineSeries } from "../../../../surfaces/charts/LinePanel";
-import { SERIES_PALETTE } from "../../../../surfaces/charts/candles";
-import type { NbaFlowGame, NbaFlowGameDetail, NbaFlowLineKey, NbaFlowPhase } from "../../api/client";
+import type { ReactNode } from "react";
+import type {
+  NbaFlowBookGame,
+  NbaFlowBookSeries,
+  NbaFlowGame,
+  NbaFlowGameDetail,
+  NbaFlowGapBands,
+  NbaFlowLineKey,
+  NbaFlowPhase,
+  NbaFlowSide,
+} from "../../api/client";
 import {
+  BUCKET_MIN,
   LINE_KEYS,
   LINE_LABEL,
   OUTAGE_CHIP,
-  buildFlowSeries,
-  fetchErrorText,
-  flowSummary,
+  avgBet,
+  avgBetSentence,
+  bandsFor,
+  bigBetsFor,
+  buildCell,
   fmtBets,
+  fmtCount,
+  fmtEt,
   fmtMoney,
   fmtPct,
-  fmtTip,
   gameCodeTeams,
+  gapRead,
+  gapSentence,
   isHandleIncomplete,
+  leanSentence,
   orderSides,
-  priceSummary,
-  sideProfile,
+  fetchErrorText,
+  parseIso,
+  rungText,
+  shortSide,
+  sideStats,
   sizeMix,
-  spansMoreThanADay,
+  whenTheMoneyCame,
   type FlowSelection,
 } from "../../lib/kalshiFlow";
+import {
+  RANGE_LABEL,
+  bookPoints,
+  bookWindow,
+  buildSharePoints,
+  chartWindow,
+  type ChartRange,
+} from "../../lib/kalshiFlowSeries";
 import { T } from "../../../../lib/typeScale";
-import Panel from "../Panel";
 import Spinner from "../Spinner";
 import Chip from "./Chip";
+import FlowBigBets from "./FlowBigBets";
+import FlowShareChart, { chartContents, type ChartMode } from "./FlowShareChart";
+import FlowSizes from "./FlowSizes";
+import FlowWhen from "./FlowWhen";
+import { HAIRLINE, SIDE_INK } from "./flowInk";
+import Seg from "./Seg";
 
 export interface FlowGameDetailProps {
   game: NbaFlowGame | undefined;
+  /** DraftKings' latest split for this game, if it has one. */
+  book: NbaFlowBookGame | undefined;
+  /** DraftKings' snapshots for the open line, if loaded. */
+  bookSeries: NbaFlowBookSeries | null;
+  bands: NbaFlowGapBands | null;
   selection: FlowSelection;
   phase: NbaFlowPhase;
   /** The response for exactly this selection, or null while it loads. */
@@ -60,240 +89,436 @@ export interface FlowGameDetailProps {
    *  line change: the old line's rungs must not stay selectable. */
   previous: NbaFlowGameDetail | null;
   error: string | null;
+  range: ChartRange;
+  mode: ChartMode;
+  price: boolean;
+  onRange: (r: ChartRange) => void;
+  onMode: (m: ChartMode) => void;
+  onPrice: (on: boolean) => void;
   onLine: (line: NbaFlowLineKey) => void;
   onRung: (rung: string | null) => void;
   onClose: () => void;
 }
 
-const SIDE_INK = [SERIES_PALETTE[1], SERIES_PALETTE[3]] as const;
-const CHART_H = 220;
-const PRICE_H = 130;
-
-const formatMoneyAxis = (v: number): string => fmtMoney(v);
-const formatCentsAxis = (v: number): string => `${Math.round(v)}c`;
-
+/** The backend returns at most this many $1k+ bets (the largest). */
+const BIG_BET_CAP = 100;
 const SELECT_CLASS = "rounded border border-line bg-bg px-2 py-1 text-text focus:border-accent focus:outline-none";
+const QUIET = { ...T.label, fontWeight: 400, letterSpacing: "normal", color: "var(--text-dim)" } as const;
 
-function SeriesCharts({ detail, sides }: { detail: NbaFlowGameDetail; sides: readonly string[] }) {
-  const m = useMemo(() => {
-    const f = buildFlowSeries(detail.timeline, sides, detail.tip_utc);
-    const mk = (values: Record<string, (number | null)[]>): LineSeries[] =>
-      sides.map((s, i) => ({
-        label: s,
-        values: values[s],
-        color: SIDE_INK[i % SIDE_INK.length],
-        dashed: i % 2 === 1,
-        width: 1.75,
-      }));
-    return {
-      series: mk(f.handle),
-      price: mk(f.price),
-      xs: f.xs,
-      isos: f.isos,
-      markers: detail.tip_utc ? [{ ts: detail.tip_utc, label: "tip" }] : [],
-      xRange: [f.xs[0], f.xs[f.xs.length - 1]] as [number, number],
-      intraday: !spansMoreThanADay(f.xs),
-      handleText: flowSummary(f.totals, sides),
-      priceText: priceSummary(f.price, sides),
-    };
-  }, [detail, sides]);
-
-  if (m.xs.length < 2) {
-    return <div style={{ ...T.bodySm, color: "var(--dim)" }}>not enough bets on tape to draw a timeline yet</div>;
-  }
+/** Render `**bold**` spans from the read sentences. */
+export function Emph({ text }: { text: string }) {
   return (
-    <div className="flex flex-col gap-3">
-      <figure className="m-0">
-        <figcaption className="mb-1" style={{ ...T.kicker, color: "var(--dim)" }}>cumulative handle by side</figcaption>
-        <div className="mb-1" style={{ ...T.caption, color: "var(--dim2)" }}>
-          each 15-minute bucket is drawn at its end, so bets in the bucket the tip falls inside appear after the marker
-        </div>
-        <LinePanel
-          xs={m.xs}
-          series={m.series}
-          height={CHART_H}
-          formatY={formatMoneyAxis}
-          points={m.isos}
-          markers={m.markers}
-          xRange={m.xRange}
-          intraday={m.intraday}
-        />
-        <p className="m-0 mt-1" style={{ ...T.bodySm, color: "var(--dim)" }}>{m.handleText}</p>
-      </figure>
-      <figure className="m-0">
-        <figcaption className="mb-1" style={{ ...T.kicker, color: "var(--dim)" }}>
-          price paid per $1 (cents) - last price carried forward between bets
-        </figcaption>
-        <LinePanel
-          xs={m.xs}
-          series={m.price}
-          height={PRICE_H}
-          formatY={formatCentsAxis}
-          markers={m.markers}
-          xRange={m.xRange}
-          intraday={m.intraday}
-        />
-        <p className="m-0 mt-1" style={{ ...T.bodySm, color: "var(--dim)" }}>{m.priceText}</p>
-      </figure>
+    <>
+      {text.split("**").map((part, i) =>
+        i % 2 === 1 ? (
+          <b key={i} style={{ color: "var(--text-primary)", fontWeight: 600 }}>
+            {part}
+          </b>
+        ) : (
+          part
+        ),
+      )}
+    </>
+  );
+}
+
+function SectionHead({ title, meta, children }: { title: string; meta?: string; children?: ReactNode }) {
+  return (
+    <div style={{ display: "flex", alignItems: "baseline", gap: 12, margin: "28px 0 10px", flexWrap: "wrap" }}>
+      <h3 style={{ ...T.heading, margin: 0, color: "var(--text-primary)" }}>{title}</h3>
+      {meta ? <span style={QUIET}>{meta}</span> : null}
+      {children}
     </div>
   );
 }
 
-function SizeMix({ detail, sides }: { detail: NbaFlowGameDetail; sides: readonly string[] }) {
-  const rows = useMemo(() => sizeMix(detail.sizes, sides), [detail, sides]);
-  const profile = useMemo(() => sideProfile(detail.sizes, sides), [detail, sides]);
-  const maxBets = Math.max(1, ...rows.map((r) => r.bets));
-  const maxHandle = Math.max(1, ...rows.map((r) => r.handle));
-  const th = { ...T.caption, color: "var(--dim2)", fontWeight: 400 } as const;
+function Fig({ value, label }: { value: string; label: string }) {
   return (
     <div>
-      <div className="mb-1" style={{ ...T.kicker, color: "var(--dim)" }}>size mix - many small tickets is the public, few large ones the sharps</div>
-      <ul className="m-0 mb-2 flex list-none flex-wrap gap-x-4 gap-y-1 p-0">
-        {profile.map((p, i) => (
-          <li key={p.side} style={{ ...T.mono, color: "var(--dim)" }}>
-            <span style={{ color: SIDE_INK[i % SIDE_INK.length] }} aria-hidden>{i % 2 === 1 ? "- - " : "--- "}</span>
-            {p.side}: avg bet {fmtMoney(p.avg)} · {fmtPct(p.bigShare)} of handle in $1k+ bets
-          </li>
-        ))}
-      </ul>
-      <table className="w-full border-collapse text-left" aria-label="bets and handle by bet size">
-        <thead>
-          <tr>
-            <th scope="col" className="pr-3 text-left" style={th}>bet size</th>
-            <th scope="col" className="pr-3 text-left" style={th}>side</th>
-            <th scope="col" className="pr-3 text-left" style={th}>bets</th>
-            <th scope="col" className="pr-3 text-left" style={th}>handle</th>
-            <th scope="col" className="text-left" style={th}>avg bet</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => {
-            const si = Math.max(0, sides.indexOf(r.side));
-            const ink = SIDE_INK[si % SIDE_INK.length];
-            return (
-              <tr key={`${r.bucket}|${r.side}`} data-size-bucket={r.bucket}>
-                <th scope="row" className={`pr-3 py-0.5 text-left ${si === 0 ? "" : "sr-only"}`} style={{ ...T.mono, color: "var(--text)", fontWeight: 400 }}>
-                  {r.bucket}
-                </th>
-                <td className="truncate pr-3" style={{ ...T.bodySm, color: "var(--dim)" }}>{r.side}</td>
-                <td className="pr-3"><Bar value={r.bets} max={maxBets} ink={ink} label={String(r.bets)} /></td>
-                <td className="pr-3"><Bar value={r.handle} max={maxHandle} ink={ink} label={fmtMoney(r.handle)} /></td>
-                <td style={{ ...T.mono, color: "var(--dim)" }}>{r.bets > 0 ? fmtMoney(r.avg) : "-"}</td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-      <div className="mt-1" style={{ ...T.caption, color: "var(--dim2)" }}>
-        bar lengths share one scale per column across every bucket and side; the side is the row label.
-      </div>
+      <div style={{ ...T.metric, color: "var(--text-primary)" }}>{value}</div>
+      <div style={{ ...T.bodySm, color: "var(--text-muted)" }}>{label}</div>
     </div>
   );
 }
 
-function Bar({ value, max, ink, label }: { value: number; max: number; ink: string; label: string }) {
-  const w = max > 0 ? Math.max(0, Math.min(100, (value / max) * 100)) : 0;
+function Versus({
+  tone,
+  name,
+  won,
+  stats,
+  dk,
+  dkNote,
+  phase,
+}: {
+  tone: "a" | "b";
+  name: string;
+  won: boolean;
+  stats: NbaFlowSide | null;
+  dk: { bets: number | null; money: number | null } | null;
+  /** Why there is no DraftKings split for this side ("DK favours the other side: ..."). */
+  dkNote?: string | null;
+  phase: NbaFlowPhase;
+}) {
   return (
-    <div className="flex items-center gap-2">
-      <div className="h-2 min-w-12 flex-1 rounded-sm bg-surface2" aria-hidden>
-        <div className="h-full rounded-sm" style={{ width: `${w}%`, background: ink }} />
+    <div data-versus={tone}>
+      <div style={{ ...T.heading, display: "flex", alignItems: "center", gap: 8, color: "var(--text-primary)" }}>
+        <i aria-hidden style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: SIDE_INK[tone] }} />
+        {name}
+        {won ? <span style={{ ...T.label, color: "var(--up)" }}>won</span> : null}
       </div>
-      <span className="w-14 shrink-0 text-right" style={{ ...T.mono, color: "var(--text)" }}>{label}</span>
+      {stats ? (
+        <div style={{ display: "flex", flexWrap: "wrap", columnGap: 28, rowGap: 8, marginTop: 6 }}>
+          <Fig value={fmtPct(stats.ticket_pct)} label={`of bets · ${fmtCount(stats.bets)}`} />
+          <Fig value={fmtPct(stats.money_pct)} label={`of money · ${fmtMoney(stats.handle)}`} />
+          <Fig
+            value={stats.price_last == null ? "-" : `${Math.round(stats.price_last)}¢`}
+            label={phase === "pregame" ? "last price before tip" : "last price"}
+          />
+          <Fig value={fmtCount(stats.big_bets)} label={`$1k+ bets · ${fmtMoney(stats.big_handle)}`} />
+        </div>
+      ) : dk && dk.bets != null && dk.money != null ? (
+        <div style={{ display: "flex", flexWrap: "wrap", columnGap: 28, rowGap: 8, marginTop: 6 }}>
+          <Fig value={fmtPct(dk.bets)} label="of bets · DraftKings" />
+          <Fig value={fmtPct(dk.money)} label="of money · DraftKings" />
+        </div>
+      ) : null}
+      <div style={{ ...QUIET, marginTop: 6 }} data-dk-line={tone}>
+        {dk && dk.bets != null && dk.money != null
+          ? `DraftKings ${fmtPct(dk.bets)} bets · ${fmtPct(dk.money)} money`
+          : (dkNote ?? "no DraftKings split")}
+      </div>
     </div>
   );
 }
 
-export default function FlowGameDetail({ game, selection, phase, detail, previous, error, onLine, onRung, onClose }: FlowGameDetailProps) {
+function LegendItem({ children, swatch }: { children: ReactNode; swatch: ReactNode }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+      {swatch}
+      {children}
+    </span>
+  );
+}
+
+const line = (color: string, extra: object = {}) => (
+  <i aria-hidden style={{ display: "inline-block", flexShrink: 0, width: 14, height: 0, borderTop: `2px solid ${color}`, ...extra }} />
+);
+
+function Legend({
+  mode,
+  a,
+  b,
+  has,
+  price,
+  onPrice,
+  zones,
+  dkOnly,
+}: {
+  dkOnly: boolean;
+  mode: ChartMode;
+  a: string;
+  b: string;
+  /** What the chart actually draws: the legend lists only that. */
+  has: { dk: boolean; price: boolean; exGap: boolean; big: boolean };
+  price: boolean;
+  onPrice: (on: boolean) => void;
+  zones: { z1: number; z2: number } | null;
+}) {
+  return (
+    <div style={{ ...T.bodySm, display: "flex", flexWrap: "wrap", gap: "4px 16px", color: "var(--text-muted)", margin: "-2px 0 8px" }}>
+      {dkOnly ? (
+        <>
+          <LegendItem swatch={line(SIDE_INK.a, { borderTopStyle: "dotted" })}>{`DK money on ${shortSide(a)}`}</LegendItem>
+          <LegendItem swatch={line(SIDE_INK.a, { borderTopStyle: "dashed" })}>{`DK bets on ${shortSide(a)}`}</LegendItem>
+        </>
+      ) : mode === "share" ? (
+        <>
+          <LegendItem swatch={line(SIDE_INK.a)}>{`money on ${shortSide(a)}`}</LegendItem>
+          <LegendItem swatch={line(SIDE_INK.a, { borderTopStyle: "dashed" })}>{`bets on ${shortSide(a)}`}</LegendItem>
+          {has.dk ? <LegendItem swatch={line(SIDE_INK.a, { borderTopStyle: "dotted" })}>{`DK money on ${shortSide(a)}`}</LegendItem> : null}
+          {has.price ? (
+            <button
+              type="button"
+              aria-pressed={price}
+              onClick={() => onPrice(!price)}
+              style={{ ...T.bodySm, background: "transparent", border: 0, padding: 0, cursor: "pointer", color: price ? "var(--text-muted)" : "var(--text-faint)" }}
+            >
+              <LegendItem swatch={line("var(--text-muted)", { borderTopWidth: 1 })}>{`${shortSide(a)} price (${price ? "on" : "off"})`}</LegendItem>
+            </button>
+          ) : null}
+          {has.exGap ? <LegendItem swatch={line("var(--text-primary)", { borderTopWidth: 1 })}>gap without $1k+ bets</LegendItem> : null}
+        </>
+      ) : (
+        <>
+          <LegendItem swatch={line(SIDE_INK.a)}>{`$ ${shortSide(a)}`}</LegendItem>
+          <LegendItem swatch={line(SIDE_INK.b)}>{`$ ${shortSide(b)}`}</LegendItem>
+          <LegendItem swatch={line("var(--text-muted)", { borderTopStyle: "dashed" })}>bets, dashed (right scale)</LegendItem>
+        </>
+      )}
+      {!dkOnly && has.big ? (
+        <LegendItem swatch={<i aria-hidden style={{ display: "inline-block", flexShrink: 0, width: 8, height: 8, borderRadius: "50%", background: SIDE_INK.b }} />}>
+          $1k+ bet, size = $
+        </LegendItem>
+      ) : null}
+      <LegendItem swatch={<i aria-hidden style={{ display: "inline-block", flexShrink: 0, width: 1, height: 10, background: "var(--text-muted)" }} />}>tip</LegendItem>
+      {mode === "share" && zones ? (
+        <span style={{ color: "var(--text-dim)" }}>
+          {`shaded = ordinary (last season's middle half, ±${zones.z1}) · dashed = widest fifth (±${zones.z2})`}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+export default function FlowGameDetail(p: FlowGameDetailProps) {
+  const { game, book, bookSeries, selection, phase, detail, previous, error } = p;
+  const key = selection.line;
   const title = game ? `${game.away} @ ${game.home}` : selection.game;
+  const teams = game ?? gameCodeTeams(selection.game);
   const ctl = detail ?? previous;
   const rungs = ctl?.rungs ?? [];
   const outage = isHandleIncomplete((detail ?? ctl)?.price_zero_share ?? game?.price_zero_share);
-  // The away team from the slate row, or from the game code while the slate is
-  // changing, so a side keeps its colour either way.
-  const away = game?.away ?? gameCodeTeams(selection.game)?.away;
-  const sides = useMemo(
-    () => (detail ? orderSides(detail.sides, detail.line, away ? { away } : undefined) : []),
-    [detail, away],
-  );
-  return (
-    <Panel
-      title={`game detail · ${title}`}
-      headerRight={
-        <button type="button" onClick={onClose} className="rounded border border-line px-2 py-0.5 text-dim hover:text-text" style={T.label}>
-          close
-        </button>
-      }
-    >
-      <div
-        className="flex flex-col gap-4"
-        data-anchor={`detail:${selection.game}:${selection.line}`}
-        data-anchor-label={`${title} · ${LINE_LABEL[selection.line]} detail`}
-      >
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="flex gap-1" role="tablist" aria-label="line">
-            {LINE_KEYS.map((k) => {
-              // In pregame mode a line with no pregame bets can still have an
-              // in-play tape, so it stays openable.
-              const exists = !game || !!game.lines[k] || phase === "pregame";
-              const on = selection.line === k;
-              return (
-                <button
-                  key={k}
-                  type="button"
-                  role="tab"
-                  aria-selected={on}
-                  disabled={!exists}
-                  onClick={() => onLine(k)}
-                  className={`rounded-full border px-3 py-0.5 transition-colors disabled:opacity-40 ${on ? "border-accent text-accent" : "border-line text-dim hover:text-text"}`}
-                  style={T.label}
-                >
-                  {LINE_LABEL[k]}
-                </button>
-              );
-            })}
-          </div>
-          {rungs.length > 1 ? (
-            <label className="flex items-center gap-2" style={{ ...T.bodySm, color: "var(--dim)" }}>
-              rung
-              <select
-                className={SELECT_CLASS}
-                style={T.mono}
-                value={(detail ? detail.rung : (selection.rung ?? ctl?.rung)) ?? ""}
-                aria-busy={!detail}
-                onChange={(e) => onRung(e.target.value || null)}
-              >
-                {rungs.map((r) => (
-                  <option key={r.rung} value={r.rung}>
-                    {r.label ?? r.rung} · {fmtBets(r.bets)} · {fmtMoney(r.handle)}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : ctl?.rung ? (
-            <span style={{ ...T.mono, color: "var(--text)" }}>{ctl.rung_label ?? ctl.rung}</span>
-          ) : null}
-          {ctl ? <span style={{ ...T.mono, color: "var(--dim)" }}>tip {fmtTip(ctl.tip_utc)}</span> : null}
-          {outage ? <Chip tone="warn">{OUTAGE_CHIP}</Chip> : null}
-        </div>
-        <div style={{ ...T.caption, color: "var(--dim2)" }}>whole tape: pregame + in play</div>
+  const kLine = game?.lines[key] ?? null;
+  const dkLine = book?.lines[key] ?? null;
+  const tipIso = detail?.tip_utc ?? game?.tip_utc ?? ctl?.tip_utc ?? null;
+  const tipMs = tipIso ? parseIso(tipIso) : NaN;
+  const fin = game?.status === "final" && game.away_score != null && game.home_score != null;
+  const includeLive = phase === "all";
 
-        {error && !detail ? (
-          <div className="rounded-lg border border-line p-4 text-dn" style={T.bodySm}>
-            {fetchErrorText(error)}
-          </div>
-        ) : !detail ? (
-          <Spinner label="loading game flow…" />
-        ) : detail.timeline.length === 0 && detail.sizes.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-line p-4 text-dim" style={T.bodySm}>
-            no bets on tape for this line
-          </div>
-        ) : (
-          <>
-            <SeriesCharts detail={detail} sides={sides} />
-            <SizeMix detail={detail} sides={sides} />
-          </>
-        )}
+  // The two sides, left (away / Over) first: the detail's own spelling when it
+  // has answered, else the slate's, else DraftKings'.
+  const awayRef = teams ? { away: teams.away } : undefined;
+  const names: [string, string] | null = (() => {
+    // The detail's own spelling when it has two sides (a game with no Kalshi bets answers []).
+    const src = [detail?.sides, kLine?.sides.map((s) => s.side), dkLine?.sides.map((s) => s.side)].find((x) => x && x.length >= 2);
+    if (!src) return null;
+    const o = orderSides(src, key, awayRef);
+    return [o[0], o[1]];
+  })();
+
+  const cell = game ? buildCell(game, key, kLine, dkLine, "kalshi") : null;
+  const pregameSizes = detail?.sizes_pregame;
+  const sizesRows = detail ? (phase === "pregame" ? (pregameSizes ?? detail.sizes) : detail.sizes) : null;
+  const sizesNote = !detail ? "" : phase === "pregame" ? (pregameSizes ? "before tip" : "whole game (before-tip split not available)") : "whole game";
+  const stats: [NbaFlowSide, NbaFlowSide] | null =
+    detail && names && sizesRows && sizesRows.length > 0
+      ? sideStats(sizesRows, detail.timeline, names, tipMs, includeLive)
+      : kLine && names
+        ? (() => {
+            const f = (n: string) => kLine.sides.find((s) => s.side === n);
+            const x = f(names[0]);
+            const y = f(names[1]);
+            return x && y ? ([x, y] as [NbaFlowSide, NbaFlowSide]) : null;
+          })()
+        : null;
+  const bandTable = bandsFor(p.bands, key);
+  const dkSide = (i: 0 | 1) => {
+    const s = i === 0 ? cell?.a : cell?.b;
+    return s && s.dkBetsPct != null && s.dkMoneyPct != null ? { bets: s.dkBetsPct, money: s.dkMoneyPct } : null;
+  };
+
+  // The slate's result belongs to its main rung: on another rung nothing is said about who won.
+  const isMainRung = detail
+    ? (detail.rung ?? null) === (kLine?.rung ?? null)
+    : (selection.rung ?? null) === null || selection.rung === (kLine?.rung ?? null);
+  const result = isMainRung ? (kLine?.result ?? null) : null;
+  const left = names?.[0] ?? "";
+  const right = names?.[1] ?? "";
+
+  // The chart.
+  const dkPts = names ? bookPoints(bookSeries, key, names[0]) : [];
+  const points = detail && names ? buildSharePoints(detail.timeline, names[0], names[1], { tipMs, includeLive: p.range === "all" }) : [];
+  const win = (points.length > 0 ? chartWindow(points, p.range, tipMs, BUCKET_MIN) : null) ?? bookWindow(dkPts, tipMs);
+  const hasKalshiPoints = points.length > 0;
+  // A line with nothing from Kalshi has no totals view: it is the DraftKings shares only.
+  const effMode: ChartMode = hasKalshiPoints ? p.mode : "share";
+  const drawn = win
+    ? chartContents({ points, window: win, dk: dkPts, bigBets: detail ? bigBetsFor(detail.big_bets, p.range === "all") : [], a: left })
+    : null;
+  const bigAll = detail ? bigBetsFor(detail.big_bets, p.range === "all") : [];
+  const bigTable = detail ? bigBetsFor(detail.big_bets, includeLive) : [];
+  const capped = (detail?.big_bets?.length ?? 0) >= BIG_BET_CAP;
+  const hasTape = !!detail && (detail.timeline.length > 0 || (sizesRows ?? []).some((r) => r.bets > 0));
+  const when = detail && names ? whenTheMoneyCame(detail.timeline, names[0], tipMs, includeLive) : [];
+  const zones = bandTable ? { z1: Math.round(bandTable[50]), z2: Math.round(bandTable[80]) } : null;
+
+  const lineTab = (k: NbaFlowLineKey) => {
+    const slateLine = game?.lines[k] ?? null;
+    const dk = book?.lines[k] ?? null;
+    const exists = !game || !!slateLine || !!dk;
+    const sub = slateLine ? rungText(slateLine) : (dk?.line_label ?? "");
+    const on = key === k;
+    return (
+      <button
+        key={k}
+        type="button"
+        aria-pressed={on}
+        disabled={!exists}
+        data-line-tab={k}
+        onClick={() => p.onLine(k)}
+        style={{
+          ...T.body,
+          background: "transparent",
+          border: 0,
+          borderBottom: `2px solid ${on ? "var(--text-primary)" : "transparent"}`,
+          marginBottom: -1,
+          padding: "6px 0",
+          cursor: exists ? "pointer" : "default",
+          color: on ? "var(--text-primary)" : exists ? "var(--text-muted)" : "var(--text-faint)",
+        }}
+      >
+        {LINE_LABEL[k]}
+        {sub ? <span style={{ ...T.mono, color: "var(--text-dim)" }}>{` ${sub}`}</span> : null}
+      </button>
+    );
+  };
+
+  return (
+    <div
+      data-anchor={`detail:${selection.game}:${key}`}
+      data-anchor-label={`${title} · ${LINE_LABEL[key]} detail`}
+      style={{ paddingBottom: 24 }}
+    >
+      <button
+        type="button"
+        onClick={p.onClose}
+        style={{ ...T.body, background: "transparent", border: 0, padding: 0, margin: "18px 0 6px", cursor: "pointer", color: "var(--text-muted)" }}
+      >
+        {"← All games"}
+      </button>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 16, flexWrap: "wrap" }}>
+        <span style={{ ...T.title, color: "var(--text-primary)" }}>{title}</span>
+        <span style={{ ...T.mono, color: "var(--text-muted)" }}>
+          {fin ? `final ${game?.away_score}–${game?.home_score} · ` : ""}
+          {tipIso ? `tip ${fmtEt(tipIso, true)} ET` : "tip time unknown"}
+        </span>
+        {outage ? <Chip tone="warn">{OUTAGE_CHIP}</Chip> : null}
       </div>
-    </Panel>
+      <div style={{ display: "flex", alignItems: "center", gap: 18, margin: "12px 0 18px", borderBottom: HAIRLINE }}>
+        {LINE_KEYS.map(lineTab)}
+        {rungs.length > 1 ? (
+          <label style={{ ...T.bodySm, marginLeft: "auto", display: "flex", alignItems: "center", gap: 8, color: "var(--text-muted)" }}>
+            rung
+            <select
+              className={SELECT_CLASS}
+              style={T.mono}
+              value={(detail ? detail.rung : (selection.rung ?? ctl?.rung)) ?? ""}
+              aria-busy={!detail}
+              onChange={(e) => p.onRung(e.target.value || null)}
+            >
+              {rungs.map((r) => (
+                <option key={r.rung} value={r.rung}>
+                  {r.label ?? r.rung} {"·"} {fmtBets(r.bets)} {"·"} {fmtMoney(r.handle)}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+      </div>
+
+      {!names ? (
+        <div style={{ ...T.bodySm, color: "var(--text-faint)" }}>
+          {error && !detail ? fetchErrorText(error) : detail ? "no bets or splits recorded on this line" : <Spinner label="loading game flow…" />}
+        </div>
+      ) : (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 28 }}>
+            <Versus tone="a" name={left} won={!!result && result === left} stats={stats?.[0] ?? null} dk={dkSide(0)} dkNote={cell?.dkMismatch} phase={phase} />
+            <Versus tone="b" name={right} won={!!result && result === right} stats={stats?.[1] ?? null} dk={dkSide(1)} dkNote={cell?.dkMismatch ? "" : undefined} phase={phase} />
+          </div>
+
+          <p
+            data-read
+            style={{ ...T.body, margin: "18px 0 0", padding: "10px 0", borderTop: HAIRLINE, borderBottom: HAIRLINE, color: "var(--text-secondary)" }}
+          >
+            {stats ? (
+              <>
+                <Emph text={leanSentence(stats[0], stats[1])} /> <Emph text={gapSentence(gapRead(stats[0], stats[1], bandTable), key)} />{" "}
+                <Emph text={avgBetSentence(avgBet(stats[0], stats[1]))} />
+                {result ? <span style={{ color: "var(--text-muted)" }}>{` Result: ${result}.`}</span> : null}
+              </>
+            ) : (
+              "no Kalshi bets on this line"
+            )}
+          </p>
+
+          <SectionHead title="Money vs bets over time">
+            {hasKalshiPoints ? (
+              <Seg
+                label="chart mode"
+                value={p.mode}
+                onChange={p.onMode}
+                options={[
+                  { key: "share", label: "share" },
+                  { key: "totals", label: "totals" },
+                ]}
+              />
+            ) : null}
+            <Seg
+              label="chart range"
+              value={p.range}
+              onChange={p.onRange}
+              options={(["6h", "pre", "all"] as const).map((k) => ({ key: k, label: RANGE_LABEL[k] }))}
+            />
+          </SectionHead>
+          {win && drawn && (drawn.points || drawn.dk) ? (
+            <>
+              <Legend
+                dkOnly={!drawn.points}
+                mode={effMode}
+                a={left}
+                b={right}
+                has={drawn}
+                price={p.price}
+                onPrice={p.onPrice}
+                zones={drawn.points ? zones : null}
+              />
+              <FlowShareChart
+                mode={effMode}
+                points={points}
+                window={win}
+                a={left}
+                b={right}
+                bigBets={bigAll}
+                dk={dkPts}
+                showPrice={p.price}
+                bands={bandTable}
+                tipMs={tipMs}
+                bucketMin={BUCKET_MIN}
+              />
+            </>
+          ) : (
+            <div style={{ ...T.bodySm, color: "var(--text-faint)" }}>
+              {!detail && !error ? (
+                <Spinner label="loading game flow…" />
+              ) : error && !detail ? (
+                fetchErrorText(error)
+              ) : win ? (
+                "no bets in this range"
+              ) : (
+                "fewer than 20 bets on this line so far - too few to chart a share"
+              )}
+            </div>
+          )}
+
+          {detail && hasTape ? (
+            <>
+              <SectionHead title="When the money came in" meta={`${shortSide(left)} share inside each window · ${includeLive ? "whole game" : "before tip"}`} />
+              <FlowWhen rows={when} left={left} tipKnown={Number.isFinite(tipMs)} />
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1.1fr) minmax(0,1fr)", gap: 36 }}>
+                <div>
+                  <SectionHead title="Who bet what size" meta={sizesNote} />
+                  <FlowSizes rows={sizeMix(sizesRows ?? [], left, right)} a={left} b={right} />
+                </div>
+                <div>
+                  <SectionHead title="$1k+ bets" meta={`${capped ? `${bigTable.length} of the ${BIG_BET_CAP} largest` : `${bigTable.length} bets`}, ${includeLive ? "whole game" : "before tip"}`} />
+                  <FlowBigBets bets={bigTable} a={left} />
+                </div>
+              </div>
+            </>
+          ) : null}
+        </>
+      )}
+    </div>
   );
 }

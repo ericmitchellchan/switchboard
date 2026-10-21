@@ -78,9 +78,23 @@ export async function runTick<T>(
 /** A pending request older than max(this, 1.5 x the interval) is abandoned. */
 export const ABANDON_FLOOR_MS = 45_000;
 
+/** The fast boot cadence is tried this many times at most: a backend that keeps
+ *  failing (a permanent 503) falls back to the normal interval instead of being
+ *  hammered every few seconds. Equal to BOOT_GRACE_FAILURES so the failure that
+ *  surfaces the error still lands on the fast cadence (seconds, not a minute). */
+export const BOOT_RETRY_LIMIT = BOOT_GRACE_FAILURES;
+export { BOOT_GRACE_FAILURES };
+
+/** The interval to run at: the boot cadence only until the first success AND
+ *  only for the first BOOT_RETRY_LIMIT failures. Pure, so it has a unit test. */
+export function pollEveryMs(intervalMs: number, bootMs: number | undefined, booted: boolean, failures: number): number {
+  return bootMs != null && !booted && failures < BOOT_RETRY_LIMIT ? Math.min(bootMs, intervalMs) : intervalMs;
+}
+
 export interface PollOptions {
-  /** Poll at this (shorter) interval until the first success, then at
-   *  `intervalMs` - so a slow cadence does not also make boot errors slow. */
+  /** Poll at this (shorter) interval until the first success (and at most
+   *  BOOT_RETRY_LIMIT failures), then at `intervalMs` - so a slow cadence does
+   *  not also make boot errors slow. */
   bootIntervalMs?: number;
   /** Stop the interval (the first fetch still happens; data is kept). Does not
    *  reset or refetch, unlike changing `intervalMs`. */
@@ -112,6 +126,8 @@ export function usePoll<T>(
   );
   const [error, setError] = useState<string | null>(null);
   const [booted, setBooted] = useState(false);
+  // Failures in a row, as state so the interval effect sees the boot window close.
+  const [failureCount, setFailureCount] = useState(0);
   const active = useSurfaceActive();
   const fnRef = useRef(fn);
   fnRef.current = fn;
@@ -132,12 +148,16 @@ export function usePoll<T>(
       onData: (d) => {
         hadSuccess.current = true;
         failures.current = 0;
+        setFailureCount(0);
         setBooted(true);
         setData(d);
         setError(null);
       },
       onError: (e) => {
         failures.current += 1;
+        // clamped: past the boot window the count no longer changes the cadence,
+        // so it must not re-render every failed tick
+        setFailureCount(Math.min(failures.current, BOOT_RETRY_LIMIT));
         if (hadSuccess.current || failures.current >= BOOT_GRACE_FAILURES) {
           setError(String(e));
         }
@@ -155,6 +175,7 @@ export function usePoll<T>(
     setData(fullKey != null ? ((POLL_CACHE.get(fullKey) as T | undefined) ?? null) : null);
     setError(null); // a prefix-specific failure must not poison the next key
     failures.current = 0; // boot-grace counts per key, not across tabs
+    setFailureCount(0);
     tickRef.current();
     return () => {
       if (runRef.current) runRef.current.cancelled = true;
@@ -168,7 +189,7 @@ export function usePoll<T>(
   // live terminal, an ungated 2s poll is a cost the shell refuses.
   const paused = options?.paused === true;
   const bootMs = options?.bootIntervalMs;
-  const everyMs = bootMs != null && !booted ? Math.min(bootMs, intervalMs) : intervalMs;
+  const everyMs = pollEveryMs(intervalMs, bootMs, booted, failureCount);
   useEffect(() => {
     if (!active || paused) return;
     const id = setInterval(() => tickRef.current(), everyMs);
