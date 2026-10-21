@@ -194,6 +194,9 @@ describe("matching Kalshi's sides to DraftKings'", () => {
     expect(handicapSign("CHA -1.5")).toBe(-1);
     expect(handicapSign("CHA +1.5")).toBe(1);
     expect(handicapSign("CHA")).toBe(0);
+    // DraftKings writes a pick'em as +0 on both teams: no direction, so it matches by team
+    expect(handicapSign("MIA +0")).toBe(0);
+    expect(matchBookSide("spread", "MIA -1.5", [{ side: "MIN +0" }, { side: "MIA +0" }])?.side).toBe("MIA +0");
     const dk = [{ side: "CHA -1.5" }, { side: "BKN +1.5" }];
     expect(matchBookSide("spread", "CHA +1.5", dk)).toBeNull(); // Kalshi CHA is the underdog, DraftKings the favourite
     expect(matchBookSide("spread", "BKN -1.5", dk)).toBeNull();

@@ -175,10 +175,12 @@ export function sideTeam(side: string): string {
 const isOver = (s: string) => /^over\b/i.test(s.trim());
 const isUnder = (s: string) => /^under\b/i.test(s.trim());
 
-/** -1 for a favourite's handicap ("ORL -2.5"), +1 for an underdog's ("ATL +2.5"), 0 for none. */
+/** -1 for a favourite's handicap ("ORL -2.5"), +1 for an underdog's ("ATL +2.5"), 0 for none
+ *  or a pick'em ("MIA +0": DraftKings writes PK as +0 on both teams, so it matches either side). */
 export function handicapSign(side: string): -1 | 0 | 1 {
-  const m = /([+-])\s*\d/.exec(side);
-  return m ? (m[1] === "-" ? -1 : 1) : 0;
+  const m = /([+-])\s*(\d+(?:\.\d+)?)/.exec(side);
+  if (!m || Number(m[2]) === 0) return 0;
+  return m[1] === "-" ? -1 : 1;
 }
 
 /**

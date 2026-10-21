@@ -80,8 +80,10 @@ export const ABANDON_FLOOR_MS = 45_000;
 
 /** The fast boot cadence is tried this many times at most: a backend that keeps
  *  failing (a permanent 503) falls back to the normal interval instead of being
- *  hammered every few seconds. */
-export const BOOT_RETRY_LIMIT = 5;
+ *  hammered every few seconds. Equal to BOOT_GRACE_FAILURES so the failure that
+ *  surfaces the error still lands on the fast cadence (seconds, not a minute). */
+export const BOOT_RETRY_LIMIT = BOOT_GRACE_FAILURES;
+export { BOOT_GRACE_FAILURES };
 
 /** The interval to run at: the boot cadence only until the first success AND
  *  only for the first BOOT_RETRY_LIMIT failures. Pure, so it has a unit test. */
@@ -153,7 +155,9 @@ export function usePoll<T>(
       },
       onError: (e) => {
         failures.current += 1;
-        setFailureCount(failures.current);
+        // clamped: past the boot window the count no longer changes the cadence,
+        // so it must not re-render every failed tick
+        setFailureCount(Math.min(failures.current, BOOT_RETRY_LIMIT));
         if (hadSuccess.current || failures.current >= BOOT_GRACE_FAILURES) {
           setError(String(e));
         }
