@@ -1928,7 +1928,10 @@ export interface NbaFlowSide {
 }
 
 export interface NbaFlowLine {
+  /** Kalshi's rung code (e.g. "DET6"); send this back as `rung`. */
   rung: string | null;
+  /** Readable rung (e.g. "DET -6.5", "243.5"); null for the moneyline. */
+  rung_label?: string | null;
   bets: number;
   handle: number;
   sides: NbaFlowSide[];
@@ -1978,6 +1981,8 @@ export interface NbaFlowSizeRow {
 
 export interface NbaFlowRung {
   rung: string;
+  /** Readable rung, e.g. "DET -6.5". */
+  label?: string | null;
   bets: number;
   handle: number;
 }
@@ -1987,6 +1992,7 @@ export interface NbaFlowGameDetail {
   game: string;
   line: NbaFlowLineKey;
   rung: string | null;
+  rung_label?: string | null;
   tip_utc: string | null;
   sides: string[];
   timeline: NbaFlowTimelineRow[];

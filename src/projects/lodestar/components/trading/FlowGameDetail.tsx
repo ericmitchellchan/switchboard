@@ -210,13 +210,13 @@ export default function FlowGameDetail({ game, selection, detail, error, onLine,
               >
                 {rungs.map((r) => (
                   <option key={r.rung} value={r.rung}>
-                    {r.rung} · {fmtCount(r.bets)} bets · {fmtMoney(r.handle)}
+                    {r.label ?? r.rung} · {fmtCount(r.bets)} bets · {fmtMoney(r.handle)}
                   </option>
                 ))}
               </select>
             </label>
           ) : detail?.rung ? (
-            <span style={{ ...T.mono, color: "var(--text)" }}>{detail.rung}</span>
+            <span style={{ ...T.mono, color: "var(--text)" }}>{detail.rung_label ?? detail.rung}</span>
           ) : null}
           {detail ? <span style={{ ...T.mono, color: "var(--dim)" }}>tip {fmtTip(detail.tip_utc)}</span> : null}
           {outage ? <Chip tone="warn">{OUTAGE_CHIP}</Chip> : null}

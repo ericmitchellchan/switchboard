@@ -128,7 +128,7 @@ function LineCell({
       className={`${base} cursor-pointer hover:bg-surface2/40 ${active ? "border-accent bg-surface2/40" : "border-line"}`}
       data-line={lineKey}
       data-anchor={`line:${g.game}:${lineKey}`}
-      data-anchor-label={`${g.away} @ ${g.home} · ${LINE_LABEL[lineKey]}${line.rung ? ` ${line.rung}` : ""}`}
+      data-anchor-label={`${g.away} @ ${g.home} · ${LINE_LABEL[lineKey]}${line.rung_label ?? line.rung ? ` ${line.rung_label ?? line.rung}` : ""}`}
       onClick={(e: MouseEvent) => {
         e.stopPropagation();
         onLine(g, lineKey);
@@ -143,7 +143,7 @@ function LineCell({
     >
       <div className="mb-1 flex items-baseline justify-between gap-2">
         <span style={{ ...T.kicker, color: "var(--dim)" }}>{LINE_LABEL[lineKey]}</span>
-        <span style={{ ...T.mono, color: "var(--text)" }}>{line.rung ?? ""}</span>
+        <span style={{ ...T.mono, color: "var(--text)" }}>{line.rung_label ?? line.rung ?? ""}</span>
       </div>
       <div className="grid gap-x-2" style={{ ...SIDE_GRID, ...T.caption, color: "var(--dim2)" }} aria-hidden>
         <span />
