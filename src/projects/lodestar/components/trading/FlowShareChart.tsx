@@ -96,6 +96,13 @@ export function FlowChartSvg(p: FlowChartProps) {
   const axisBottom = H - AXIS_H;
   const label = SVG_TEXT;
 
+  // Each plotted point owns the stretch from its bucket's start to the next
+  // point's bucket start: the shares are cumulative, so a bucket with no bets
+  // keeps the previous value and the bars / the hit columns run on unbroken.
+  const starts: number[] = [];
+  vis.forEach((q, i) => starts.push(Math.max(w.t0, q.t - bucketMs, i > 0 ? starts[i - 1] : -Infinity)));
+  const spans = vis.map((q, i) => ({ x0: x(starts[i]), x1: x(i + 1 < vis.length ? starts[i + 1] : q.t) }));
+
   let body: ReactNode = null;
 
   if (share) {
@@ -146,7 +153,7 @@ export function FlowChartSvg(p: FlowChartProps) {
             <path d={pathOf(dkIn, (q) => x(q.t), (q) => yPct(q.money))} fill="none" stroke={SIDE_INK.a} strokeWidth={1.6} strokeDasharray="1 3" strokeLinecap="round" />
           ) : null}
           {dkIn.map((q) => (
-            <circle key={q.t} cx={x(q.t)} cy={yPct(q.money)} r={2.2} fill="var(--bg-panel)" stroke={SIDE_INK.a} strokeWidth={1.2}>
+            <circle key={q.t} cx={x(q.t)} cy={yPct(q.money)} r={2.2} fill="var(--bg-panel)" stroke={SIDE_INK.a} strokeWidth={1.2} pointerEvents="auto">
               <title>{`DraftKings ${fmtEt(q.t, true)} ET · money ${fmtPct(q.money)} · bets ${fmtPct(q.bets)}`}</title>
             </circle>
           ))}
@@ -164,13 +171,27 @@ export function FlowChartSvg(p: FlowChartProps) {
         <path key="bets" d={pathOf(vis, (q) => x(q.t), (q) => yPct(q.bA))} fill="none" stroke={SIDE_INK.a} strokeWidth={1.6} strokeDasharray="5 4" />,
         <path key="money" d={pathOf(vis, (q) => x(q.t), (q) => yPct(q.mA))} fill="none" stroke={SIDE_INK.a} strokeWidth={2.2} />,
       );
+      // The end values sit in the right gutter, level with where the lines end,
+      // pushed apart so they never overlap each other, the side names or the dots.
       const last = vis[vis.length - 1];
-      const up = last.mA >= last.bA;
+      const lo = TOP + 26;
+      const hi = TOP + SHARE_H - 18;
+      let ym = Math.min(hi, Math.max(lo, yPct(last.mA) + 4));
+      let yb = Math.min(hi, Math.max(lo, yPct(last.bA) + 4));
+      if (Math.abs(ym - yb) < 14) {
+        if (ym <= yb) {
+          ym = Math.max(lo, yb - 14);
+          yb = Math.max(yb, ym + 14);
+        } else {
+          yb = Math.max(lo, ym - 14);
+          ym = Math.max(ym, yb + 14);
+        }
+      }
       parts.push(
-        <text key="lm" x={x(last.t) - 6} y={yPct(last.mA) + (up ? -8 : 16)} textAnchor="end" style={{ ...label, fill: "var(--text-primary)" }}>
+        <text key="lm" x={plotR + 6} y={ym} style={{ ...label, fill: "var(--text-primary)" }}>
           {`money ${fmtPct(last.mA)}`}
         </text>,
-        <text key="lbt" x={x(last.t) - 6} y={yPct(last.bA) + (up ? 16 : -8)} textAnchor="end" style={{ ...label, fill: "var(--text-secondary)" }}>
+        <text key="lbt" x={plotR + 6} y={yb} style={{ ...label, fill: "var(--text-secondary)" }}>
           {`bets ${fmtPct(last.bA)}`}
         </text>,
       );
@@ -201,8 +222,7 @@ export function FlowChartSvg(p: FlowChartProps) {
         }
       }
       vis.forEach((q, i) => {
-        const x0 = x(Math.max(w.t0, i > 0 ? Math.max(vis[i - 1].t, q.t - bucketMs) : q.t - bucketMs));
-        const bw = Math.max(1, x(q.t) - x0 - 1);
+        const { x0, x1 } = spans[i];
         const mag = Math.abs(q.gap);
         const op = z1 == null || z2 == null ? 0.55 : mag >= z2 ? 0.9 : mag >= z1 ? 0.55 : 0.22;
         parts.push(
@@ -210,25 +230,23 @@ export function FlowChartSvg(p: FlowChartProps) {
             key={`g${q.t}`}
             x={x0}
             y={Math.min(gMid, yG(q.gap))}
-            width={bw}
+            width={Math.max(1, x1 - x0)}
             height={Math.max(0.5, Math.abs(yG(q.gap) - gMid))}
             fill={q.gap >= 0 ? SIDE_INK.a : SIDE_INK.b}
             opacity={op}
+            shapeRendering="crispEdges"
           />,
         );
       });
-      const ex = vis.filter((q) => q.exGap != null);
-      if (ex.length > 1) {
-        parts.push(
-          <path
-            key="ex"
-            d={pathOf(ex, (q) => x(q.t) - (x(q.t) - x(q.t - bucketMs)) / 2, (q) => yG(Math.max(-gMax, Math.min(gMax, q.exGap as number))))}
-            fill="none"
-            stroke="var(--text-primary)"
-            strokeWidth={1.4}
-            opacity={0.85}
-          />,
-        );
+      // the same gap without $1k+ bets, as a step line over the same stretches
+      const exSteps: string[] = [];
+      vis.forEach((q, i) => {
+        if (q.exGap == null) return;
+        const y = yG(Math.max(-gMax, Math.min(gMax, q.exGap))).toFixed(1);
+        exSteps.push(`${exSteps.length ? "L" : "M"}${spans[i].x0.toFixed(1)},${y} L${spans[i].x1.toFixed(1)},${y}`);
+      });
+      if (exSteps.length > 0) {
+        parts.push(<path key="ex" d={exSteps.join(" ")} fill="none" stroke="var(--text-primary)" strokeWidth={1.4} opacity={0.85} />);
       }
       parts.push(
         <line key="g0" x1={PAD.l} x2={plotR} y1={gMid} y2={gMid} stroke="var(--border-subtle)" />,
@@ -290,42 +308,18 @@ export function FlowChartSvg(p: FlowChartProps) {
 
   return (
     <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label={chartLabel(p.points, a, dk)} data-chart={mode}>
-      {tipX !== null && w.t1 > tipMs ? (
-        <rect x={tipX} y={TOP} width={x(w.t1) - tipX} height={axisBottom - TOP} fill="var(--text-primary)" opacity={0.025} />
-      ) : null}
-      {ticks.map((t) => (
-        <g key={t}>
-          <line x1={x(t)} x2={x(t)} y1={TOP} y2={axisBottom} stroke="var(--bg-active)" />
-          <text x={x(t)} y={H - 6} textAnchor="middle" style={label}>{fmtEt(t, day)}</text>
-        </g>
-      ))}
-      {body}
-      {hasRail ? (
-        <g data-rail="big-bets">
-          <line x1={PAD.l} x2={plotR} y1={railY} y2={railY} stroke="var(--border)" />
-          {dots.map(({ z, t, k, r }) => (
-            <circle key={`${z.ts}${z.side}${z.dollars}`} cx={x(t)} cy={railY + (k === "a" ? -1 : 1) * Math.min(r, 7)} r={r} fill={SIDE_INK[k]} opacity={0.85}>
-              <title>{`${shortSide(z.side)} · ${fmtMoney(z.dollars)}${z.price != null ? ` · ${Math.round(z.price)}¢` : ""}`}</title>
-            </circle>
-          ))}
-        </g>
-      ) : null}
-      {tipX !== null ? (
-        <g>
-          <line x1={tipX} x2={tipX} y1={TOP} y2={axisBottom} stroke="var(--text-muted)" />
-          <text x={tipX - 4} y={TOP + 10} textAnchor="end" style={{ ...label, fill: "var(--text-muted)" }}>tip</text>
-        </g>
-      ) : null}
+      {/* The pin columns come FIRST, under everything, and the drawing lets clicks
+          through (pointer-events none) so a click lands on its column - while the
+          rail and DraftKings dots, which carry tooltips, take their own hover. */}
       {vis.map((q, i) => {
-        const x0 = x(Math.max(w.t0, i > 0 ? Math.max(vis[i - 1].t, q.t - bucketMs) : q.t - bucketMs));
         const iso = new Date(q.t).toISOString();
         return (
           // SWITCHBOARD: `data-anchor` makes the point pinnable (surfaces/anchors.ts).
           <rect
             key={iso}
-            x={x0}
+            x={spans[i].x0}
             y={TOP}
-            width={Math.max(2, x(q.t) - x0)}
+            width={Math.max(2, spans[i].x1 - spans[i].x0)}
             height={axisBottom - TOP}
             fill="transparent"
             data-anchor={`pt:${iso}`}
@@ -335,8 +329,51 @@ export function FlowChartSvg(p: FlowChartProps) {
           </rect>
         );
       })}
+      <g pointerEvents="none">
+        {tipX !== null && w.t1 > tipMs ? (
+          <rect x={tipX} y={TOP} width={x(w.t1) - tipX} height={axisBottom - TOP} fill="var(--text-primary)" opacity={0.025} />
+        ) : null}
+        {ticks.map((t) => (
+          <g key={t}>
+            <line x1={x(t)} x2={x(t)} y1={TOP} y2={axisBottom} stroke="var(--bg-active)" />
+            <text x={x(t)} y={H - 6} textAnchor="middle" style={label}>{fmtEt(t, day)}</text>
+          </g>
+        ))}
+        {body}
+        {tipX !== null ? (
+          <g>
+            <line x1={tipX} x2={tipX} y1={TOP} y2={axisBottom} stroke="var(--text-muted)" />
+            <text x={tipX - 4} y={TOP + 10} textAnchor="end" style={{ ...label, fill: "var(--text-muted)" }}>tip</text>
+          </g>
+        ) : null}
+      </g>
+      {hasRail ? (
+        <g data-rail="big-bets" pointerEvents="none">
+          <line x1={PAD.l} x2={plotR} y1={railY} y2={railY} stroke="var(--border)" />
+          {dots.map(({ z, t, k, r }) => (
+            <circle key={`${z.ts}${z.side}${z.dollars}`} cx={x(t)} cy={railY + (k === "a" ? -1 : 1) * Math.min(r, 7)} r={r} fill={SIDE_INK[k]} opacity={0.85} pointerEvents="auto">
+              <title>{`${shortSide(z.side)} · ${fmtMoney(z.dollars)}${z.price != null ? ` · ${Math.round(z.price)}¢` : ""}`}</title>
+            </circle>
+          ))}
+        </g>
+      ) : null}
     </svg>
   );
+}
+
+/** What the chart actually draws for these inputs, so the legend lists only that. */
+export function chartContents(
+  c: Pick<FlowChartProps, "points" | "window" | "dk" | "bigBets" | "a">,
+): { points: boolean; dk: boolean; price: boolean; exGap: boolean; big: boolean } {
+  const vis = pointsIn(c.points, c.window);
+  const inWin = (t: number) => t >= c.window.t0 && t <= c.window.t1;
+  return {
+    points: vis.length > 0,
+    dk: c.dk.some((d) => inWin(d.t)),
+    price: vis.filter((q) => q.px != null).length > 1,
+    exGap: vis.some((q) => q.exGap != null),
+    big: vis.length > 0 && c.bigBets.some((z) => inWin(parseIso(z.ts))),
+  };
 }
 
 const BIG_FLOOR = 1000;

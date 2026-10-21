@@ -67,7 +67,7 @@ import { T } from "../../../../lib/typeScale";
 import Spinner from "../Spinner";
 import Chip from "./Chip";
 import FlowBigBets from "./FlowBigBets";
-import FlowShareChart, { type ChartMode } from "./FlowShareChart";
+import FlowShareChart, { chartContents, type ChartMode } from "./FlowShareChart";
 import FlowSizes from "./FlowSizes";
 import FlowWhen from "./FlowWhen";
 import { HAIRLINE, SIDE_INK } from "./flowInk";
@@ -100,6 +100,8 @@ export interface FlowGameDetailProps {
   onClose: () => void;
 }
 
+/** The backend returns at most this many $1k+ bets (the largest). */
+const BIG_BET_CAP = 100;
 const SELECT_CLASS = "rounded border border-line bg-bg px-2 py-1 text-text focus:border-accent focus:outline-none";
 const QUIET = { ...T.label, fontWeight: 400, letterSpacing: "normal", color: "var(--text-dim)" } as const;
 
@@ -145,6 +147,7 @@ function Versus({
   won,
   stats,
   dk,
+  dkNote,
   phase,
 }: {
   tone: "a" | "b";
@@ -152,6 +155,8 @@ function Versus({
   won: boolean;
   stats: NbaFlowSide | null;
   dk: { bets: number | null; money: number | null } | null;
+  /** Why there is no DraftKings split for this side ("DK favours the other side: ..."). */
+  dkNote?: string | null;
   phase: NbaFlowPhase;
 }) {
   return (
@@ -178,7 +183,9 @@ function Versus({
         </div>
       ) : null}
       <div style={{ ...QUIET, marginTop: 6 }} data-dk-line={tone}>
-        {dk && dk.bets != null && dk.money != null ? `DraftKings ${fmtPct(dk.bets)} bets · ${fmtPct(dk.money)} money` : "no DraftKings split"}
+        {dk && dk.bets != null && dk.money != null
+          ? `DraftKings ${fmtPct(dk.bets)} bets · ${fmtPct(dk.money)} money`
+          : (dkNote ?? "no DraftKings split")}
       </div>
     </div>
   );
@@ -201,7 +208,7 @@ function Legend({
   mode,
   a,
   b,
-  hasDk,
+  has,
   price,
   onPrice,
   zones,
@@ -211,7 +218,8 @@ function Legend({
   mode: ChartMode;
   a: string;
   b: string;
-  hasDk: boolean;
+  /** What the chart actually draws: the legend lists only that. */
+  has: { dk: boolean; price: boolean; exGap: boolean; big: boolean };
   price: boolean;
   onPrice: (on: boolean) => void;
   zones: { z1: number; z2: number } | null;
@@ -227,16 +235,18 @@ function Legend({
         <>
           <LegendItem swatch={line(SIDE_INK.a)}>{`money on ${shortSide(a)}`}</LegendItem>
           <LegendItem swatch={line(SIDE_INK.a, { borderTopStyle: "dashed" })}>{`bets on ${shortSide(a)}`}</LegendItem>
-          {hasDk ? <LegendItem swatch={line(SIDE_INK.a, { borderTopStyle: "dotted" })}>{`DK money on ${shortSide(a)}`}</LegendItem> : null}
-          <button
-            type="button"
-            aria-pressed={price}
-            onClick={() => onPrice(!price)}
-            style={{ ...T.bodySm, background: "transparent", border: 0, padding: 0, cursor: "pointer", color: price ? "var(--text-muted)" : "var(--text-faint)" }}
-          >
-            <LegendItem swatch={line("var(--text-muted)", { borderTopWidth: 1 })}>{`${shortSide(a)} price (${price ? "on" : "off"})`}</LegendItem>
-          </button>
-          <LegendItem swatch={line("var(--text-primary)", { borderTopWidth: 1 })}>gap without $1k+ bets</LegendItem>
+          {has.dk ? <LegendItem swatch={line(SIDE_INK.a, { borderTopStyle: "dotted" })}>{`DK money on ${shortSide(a)}`}</LegendItem> : null}
+          {has.price ? (
+            <button
+              type="button"
+              aria-pressed={price}
+              onClick={() => onPrice(!price)}
+              style={{ ...T.bodySm, background: "transparent", border: 0, padding: 0, cursor: "pointer", color: price ? "var(--text-muted)" : "var(--text-faint)" }}
+            >
+              <LegendItem swatch={line("var(--text-muted)", { borderTopWidth: 1 })}>{`${shortSide(a)} price (${price ? "on" : "off"})`}</LegendItem>
+            </button>
+          ) : null}
+          {has.exGap ? <LegendItem swatch={line("var(--text-primary)", { borderTopWidth: 1 })}>gap without $1k+ bets</LegendItem> : null}
         </>
       ) : (
         <>
@@ -245,15 +255,15 @@ function Legend({
           <LegendItem swatch={line("var(--text-muted)", { borderTopStyle: "dashed" })}>bets, dashed (right scale)</LegendItem>
         </>
       )}
-      {dkOnly ? null : (
+      {!dkOnly && has.big ? (
         <LegendItem swatch={<i aria-hidden style={{ display: "inline-block", flexShrink: 0, width: 8, height: 8, borderRadius: "50%", background: SIDE_INK.b }} />}>
           $1k+ bet, size = $
         </LegendItem>
-      )}
+      ) : null}
       <LegendItem swatch={<i aria-hidden style={{ display: "inline-block", flexShrink: 0, width: 1, height: 10, background: "var(--text-muted)" }} />}>tip</LegendItem>
       {mode === "share" && zones ? (
         <span style={{ color: "var(--text-dim)" }}>
-          {`gap stripe: shaded = ordinary (inside last season's middle half, ±${zones.z1}), dashed = widest fifth (±${zones.z2})`}
+          {`shaded = ordinary (last season's middle half, ±${zones.z1}) · dashed = widest fifth (±${zones.z2})`}
         </span>
       ) : null}
     </div>
@@ -307,7 +317,11 @@ export default function FlowGameDetail(p: FlowGameDetailProps) {
     return s && s.dkBetsPct != null && s.dkMoneyPct != null ? { bets: s.dkBetsPct, money: s.dkMoneyPct } : null;
   };
 
-  const result = kLine?.result ?? null;
+  // The slate's result belongs to its main rung: on another rung nothing is said about who won.
+  const isMainRung = detail
+    ? (detail.rung ?? null) === (kLine?.rung ?? null)
+    : (selection.rung ?? null) === null || selection.rung === (kLine?.rung ?? null);
+  const result = isMainRung ? (kLine?.result ?? null) : null;
   const left = names?.[0] ?? "";
   const right = names?.[1] ?? "";
 
@@ -315,8 +329,15 @@ export default function FlowGameDetail(p: FlowGameDetailProps) {
   const dkPts = names ? bookPoints(bookSeries, key, names[0]) : [];
   const points = detail && names ? buildSharePoints(detail.timeline, names[0], names[1], { tipMs, includeLive: p.range === "all" }) : [];
   const win = (points.length > 0 ? chartWindow(points, p.range, tipMs, BUCKET_MIN) : null) ?? bookWindow(dkPts, tipMs);
+  const hasKalshiPoints = points.length > 0;
+  // A line with nothing from Kalshi has no totals view: it is the DraftKings shares only.
+  const effMode: ChartMode = hasKalshiPoints ? p.mode : "share";
+  const drawn = win
+    ? chartContents({ points, window: win, dk: dkPts, bigBets: detail ? bigBetsFor(detail.big_bets, p.range === "all") : [], a: left })
+    : null;
   const bigAll = detail ? bigBetsFor(detail.big_bets, p.range === "all") : [];
   const bigTable = detail ? bigBetsFor(detail.big_bets, includeLive) : [];
+  const capped = (detail?.big_bets?.length ?? 0) >= BIG_BET_CAP;
   const hasTape = !!detail && (detail.timeline.length > 0 || (sizesRows ?? []).some((r) => r.bets > 0));
   const when = detail && names ? whenTheMoneyCame(detail.timeline, names[0], tipMs, includeLive) : [];
   const zones = bandTable ? { z1: Math.round(bandTable[50]), z2: Math.round(bandTable[80]) } : null;
@@ -369,7 +390,7 @@ export default function FlowGameDetail(p: FlowGameDetailProps) {
         <span style={{ ...T.title, color: "var(--text-primary)" }}>{title}</span>
         <span style={{ ...T.mono, color: "var(--text-muted)" }}>
           {fin ? `final ${game?.away_score}–${game?.home_score} · ` : ""}
-          {tipIso ? `tip ${fmtEt(tipIso, true)} ET` : "tip unknown"}
+          {tipIso ? `tip ${fmtEt(tipIso, true)} ET` : "tip time unknown"}
         </span>
         {outage ? <Chip tone="warn">{OUTAGE_CHIP}</Chip> : null}
       </div>
@@ -402,8 +423,8 @@ export default function FlowGameDetail(p: FlowGameDetailProps) {
       ) : (
         <>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 28 }}>
-            <Versus tone="a" name={left} won={!!result && result === left} stats={stats?.[0] ?? null} dk={dkSide(0)} phase={phase} />
-            <Versus tone="b" name={right} won={!!result && result === right} stats={stats?.[1] ?? null} dk={dkSide(1)} phase={phase} />
+            <Versus tone="a" name={left} won={!!result && result === left} stats={stats?.[0] ?? null} dk={dkSide(0)} dkNote={cell?.dkMismatch} phase={phase} />
+            <Versus tone="b" name={right} won={!!result && result === right} stats={stats?.[1] ?? null} dk={dkSide(1)} dkNote={cell?.dkMismatch ? "" : undefined} phase={phase} />
           </div>
 
           <p
@@ -417,20 +438,22 @@ export default function FlowGameDetail(p: FlowGameDetailProps) {
                 {result ? <span style={{ color: "var(--text-muted)" }}>{` Result: ${result}.`}</span> : null}
               </>
             ) : (
-              "No Kalshi bets on this line, so there is no dollar figure, no big-bet breakdown and no gap zone: only DraftKings' percentages (above) and its snapshots (below)."
+              "no Kalshi bets on this line"
             )}
           </p>
 
           <SectionHead title="Money vs bets over time">
-            <Seg
-              label="chart mode"
-              value={p.mode}
-              onChange={p.onMode}
-              options={[
-                { key: "share", label: "share" },
-                { key: "totals", label: "totals" },
-              ]}
-            />
+            {hasKalshiPoints ? (
+              <Seg
+                label="chart mode"
+                value={p.mode}
+                onChange={p.onMode}
+                options={[
+                  { key: "share", label: "share" },
+                  { key: "totals", label: "totals" },
+                ]}
+              />
+            ) : null}
             <Seg
               label="chart range"
               value={p.range}
@@ -438,11 +461,20 @@ export default function FlowGameDetail(p: FlowGameDetailProps) {
               options={(["6h", "pre", "all"] as const).map((k) => ({ key: k, label: RANGE_LABEL[k] }))}
             />
           </SectionHead>
-          {win ? (
+          {win && drawn && (drawn.points || drawn.dk) ? (
             <>
-              <Legend dkOnly={points.length === 0} mode={p.mode} a={left} b={right} hasDk={dkPts.length > 0} price={p.price} onPrice={p.onPrice} zones={points.length > 0 ? zones : null} />
+              <Legend
+                dkOnly={!drawn.points}
+                mode={effMode}
+                a={left}
+                b={right}
+                has={drawn}
+                price={p.price}
+                onPrice={p.onPrice}
+                zones={drawn.points ? zones : null}
+              />
               <FlowShareChart
-                mode={p.mode}
+                mode={effMode}
                 points={points}
                 window={win}
                 a={left}
@@ -461,6 +493,8 @@ export default function FlowGameDetail(p: FlowGameDetailProps) {
                 <Spinner label="loading game flow…" />
               ) : error && !detail ? (
                 fetchErrorText(error)
+              ) : win ? (
+                "no bets in this range"
               ) : (
                 "fewer than 20 bets on this line so far - too few to chart a share"
               )}
@@ -470,14 +504,14 @@ export default function FlowGameDetail(p: FlowGameDetailProps) {
           {detail && hasTape ? (
             <>
               <SectionHead title="When the money came in" meta={`${shortSide(left)} share inside each window · ${includeLive ? "whole game" : "before tip"}`} />
-              <FlowWhen rows={when} left={left} />
+              <FlowWhen rows={when} left={left} tipKnown={Number.isFinite(tipMs)} />
               <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1.1fr) minmax(0,1fr)", gap: 36 }}>
                 <div>
                   <SectionHead title="Who bet what size" meta={sizesNote} />
                   <FlowSizes rows={sizeMix(sizesRows ?? [], left, right)} a={left} b={right} />
                 </div>
                 <div>
-                  <SectionHead title="$1k+ bets" meta={`${bigTable.length} bets, ${includeLive ? "whole game" : "before tip"}`} />
+                  <SectionHead title="$1k+ bets" meta={`${capped ? `${bigTable.length} of the ${BIG_BET_CAP} largest` : `${bigTable.length} bets`}, ${includeLive ? "whole game" : "before tip"}`} />
                   <FlowBigBets bets={bigTable} a={left} />
                 </div>
               </div>

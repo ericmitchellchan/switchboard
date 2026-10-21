@@ -85,7 +85,25 @@ export function loadFlowDetail(sel: FlowSelection): Promise<NbaFlowGameDetail> {
   return api.getNbaFlowGame({ game: sel.game, line: sel.line, rung: sel.rung, bucketMin: BUCKET_MIN });
 }
 
-const QUIET = { ...T.label, fontWeight: 400, letterSpacing: "normal", color: "var(--text-dim)" } as const;
+/** What each source switch position draws (the Source switch's hover text). */
+const SOURCE_HELP: Record<FlowSource, string> = {
+  kalshi: "Kalshi bets and dollars; white ticks mark DraftKings' shares",
+  dk: "DraftKings percentages (no dollars); white ticks mark Kalshi's shares",
+  both: "simple average of the Kalshi and DraftKings shares, no weighting",
+};
+
+/** A quiet text button: no box, no border. */
+function RetryButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{ ...T.bodySm, background: "transparent", border: 0, padding: 0, marginLeft: 8, cursor: "pointer", color: "var(--accent)" }}
+    >
+      retry
+    </button>
+  );
+}
 
 /** The chart range a phase opens on: the whole game when it is in, else everything before the tip. */
 const defaultRange = (phase: NbaFlowPhase): ChartRange => (phase === "all" ? "all" : "pre");
@@ -117,6 +135,9 @@ interface FlowTabProps {
 
 function FlowTab({ date, phase, source, sort, selection, dispatch, setSort }: FlowTabProps) {
   const today = todayEt();
+  // A manual retry (after a failure on a day that is no longer refreshing itself).
+  const [retry, setRetry] = useState(0);
+  const again = () => setRetry((n) => n + 1);
   // Past days do not change once played: the book splits and the open detail
   // stop refreshing (they still load once).
   const live = date >= today;
@@ -126,7 +147,7 @@ function FlowTab({ date, phase, source, sort, selection, dispatch, setSort }: Fl
   const { data: slateRaw, error } = usePoll(
     () => api.getNbaFlowGames(date, phase),
     POLL_MS,
-    `${date}|${phase}`,
+    `${date}|${phase}|${retry}`,
     "kalshi-flow-games",
     { bootIntervalMs: BOOT_POLL_MS, paused: settled },
   );
@@ -141,7 +162,7 @@ function FlowTab({ date, phase, source, sort, selection, dispatch, setSort }: Fl
   const { data: booksRaw, error: booksError } = usePoll<NbaFlowBooks>(
     () => api.getNbaFlowBooks(date),
     POLL_MS,
-    date,
+    `${date}|${retry}`,
     "kalshi-flow-books",
     { bootIntervalMs: BOOT_POLL_MS, paused: !live },
   );
@@ -168,7 +189,7 @@ function FlowTab({ date, phase, source, sort, selection, dispatch, setSort }: Fl
     POLL_MS,
     selKey,
     "kalshi-flow-game",
-    { bootIntervalMs: BOOT_POLL_MS, paused: detailDone || !live },
+    { bootIntervalMs: BOOT_POLL_MS, paused: detailDone || !live || !selection },
   );
   // Identical polls keep one object, so the chart keeps its identity.
   const polled = useStableData(detailRaw);
@@ -187,7 +208,7 @@ function FlowTab({ date, phase, source, sort, selection, dispatch, setSort }: Fl
     POLL_MS,
     seriesKey,
     "kalshi-flow-book-series",
-    { bootIntervalMs: BOOT_POLL_MS, paused: !live },
+    { bootIntervalMs: BOOT_POLL_MS, paused: !live || !selection },
   );
   const bookSeries = selection && detailMatches(selection, seriesRaw) ? seriesRaw : null;
 
@@ -248,10 +269,14 @@ function FlowTab({ date, phase, source, sort, selection, dispatch, setSort }: Fl
       {booksError && !books ? (
         <div style={{ ...T.bodySm, color: "var(--text-dim)", marginTop: 14 }}>
           DraftKings splits unavailable ({fetchErrorText(booksError)}) - showing Kalshi only
+          <RetryButton onClick={again} />
         </div>
       ) : null}
       {slate == null && error ? (
-        <div className="text-dn" style={{ ...T.bodySm, marginTop: 14 }}>{fetchErrorText(error)}</div>
+        <div className="text-dn" style={{ ...T.bodySm, marginTop: 14 }}>
+          {fetchErrorText(error)}
+          <RetryButton onClick={again} />
+        </div>
       ) : slate == null ? (
         <div className="p-6"><Spinner label="loading NBA flow…" /></div>
       ) : slate.games.length === 0 ? (
@@ -386,6 +411,7 @@ export default function KalshiTrading() {
         />
         <Seg
           label="source"
+          title={SOURCE_HELP[source]}
           value={source}
           onChange={setSource}
           options={SOURCES.map((s) => ({ key: s.key, label: s.label }))}
@@ -398,13 +424,6 @@ export default function KalshiTrading() {
             Positions
           </button>
         </div>
-      </div>
-      <div style={{ ...QUIET, marginTop: 6 }}>
-        {source === "kalshi"
-          ? "Kalshi bets and dollars; white ticks mark DraftKings' shares"
-          : source === "dk"
-            ? "DraftKings percentages (no dollars); white ticks mark Kalshi's shares"
-            : "simple average of the Kalshi and DraftKings shares, no weighting"}
       </div>
       {tab === "flow" ? (
         <FlowTab date={date} phase={phase} source={source} sort={sort} selection={selection} dispatch={dispatch} setSort={setSort} />

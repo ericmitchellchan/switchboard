@@ -48,8 +48,10 @@ export interface ShareOptions {
 /**
  * Cumulative share points from the timeline. A row is stamped at its bucket
  * START and holds the bets in [t, t + bucket), so its point sits at the bucket
- * end - except in a before-tip view, where a bucket the tip falls inside is
- * clamped to the tip. Points are dropped until the line has `minBets` bets.
+ * end. The backend cuts the bucket the tip falls inside AT the tip, so a row
+ * with t < tip is pregame (its point is clamped to the tip) and a row with
+ * t >= tip is live: a before-tip view stops at the first row at or after the
+ * tip. Points are dropped until the line has `minBets` bets.
  */
 export function buildSharePoints(
   timeline: readonly NbaFlowTimelineRow[],
@@ -87,8 +89,10 @@ export function buildSharePoints(
         run.bnb += r.big_bets;
       }
     }
+    // The backend cuts a bucket at the tip: a row that starts before it is purely
+    // pregame (so it ends there), a row that starts AT the tip holds the live part.
     let t = start + bucketMs;
-    if (!includeLive && Number.isFinite(tipMs)) t = Math.min(t, tipMs);
+    if (Number.isFinite(tipMs) && start < tipMs) t = Math.min(t, tipMs);
     const money = run.ha + run.hb;
     const bets = run.na + run.nb;
     const mA = money > 0 ? (run.ha / money) * 100 : 50;

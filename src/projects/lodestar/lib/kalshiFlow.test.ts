@@ -34,6 +34,7 @@ import {
   fmtMoney,
   fmtPct,
   gameCodeTeams,
+  handicapSign,
   gapPercentile,
   gapRead,
   gapSentence,
@@ -115,6 +116,12 @@ describe("formatting", () => {
     expect(fmtMoney(114_201)).toBe("$114k");
     expect(fmtMoney(1_250_000)).toBe("$1.3M");
     expect(fmtMoney(NaN)).toBe("-");
+    // tiers follow the ROUNDED value: never "$1000" or "$1000k"
+    expect(fmtMoney(999.4)).toBe("$999");
+    expect(fmtMoney(999.6)).toBe("$1k");
+    expect(fmtMoney(99_950)).toBe("$100k");
+    expect(fmtMoney(999_400)).toBe("$999k");
+    expect(fmtMoney(999_999)).toBe("$1M");
   });
   it("counts, percentages and signed gaps", () => {
     expect(fmtCount(1203)).toBe("1,203");
@@ -137,8 +144,8 @@ describe("formatting", () => {
     expect(fmtEt("2026-10-21T23:30:00Z")).toBe("7:30 PM");
     expect(fmtEt("2026-10-21T23:30:00Z", true)).toBe("Wed 7:30 PM");
     expect(fmtEt("2026-10-21T23:30:00Z", false, "UTC")).toBe("11:30 PM");
-    expect(fmtEt(null)).toBe("tip unknown");
-    expect(fmtEt("not a date")).toBe("tip unknown");
+    expect(fmtEt(null)).toBe("-");
+    expect(fmtEt("not a date")).toBe("-");
   });
   it("today is the Eastern calendar date, whatever zone the viewer is in", () => {
     // 02:30 UTC on the 22nd is still the 21st in New York
@@ -182,6 +189,19 @@ describe("matching Kalshi's sides to DraftKings'", () => {
     expect(matchBookSide("total", "Over 249.5", dk)).toBe(dk[0]);
     expect(matchBookSide("total", "ATL", dk)).toBeNull();
     expect(matchBookSide("total", "Over 1", null)).toBeNull();
+  });
+  it("a spread side is a team AND a direction: DraftKings other-way favourite is a different bet and matches nothing", () => {
+    expect(handicapSign("CHA -1.5")).toBe(-1);
+    expect(handicapSign("CHA +1.5")).toBe(1);
+    expect(handicapSign("CHA")).toBe(0);
+    const dk = [{ side: "CHA -1.5" }, { side: "BKN +1.5" }];
+    expect(matchBookSide("spread", "CHA +1.5", dk)).toBeNull(); // Kalshi CHA is the underdog, DraftKings the favourite
+    expect(matchBookSide("spread", "BKN -1.5", dk)).toBeNull();
+    // same direction, different number: still compared
+    expect(matchBookSide("spread", "BKN +9.5", dk)).toBe(dk[1]);
+    expect(matchBookSide("spread", "CHA -9.5", dk)).toBe(dk[0]);
+    // a moneyline has no direction
+    expect(matchBookSide("ml", "CHA", [{ side: "CHA" }])).toEqual({ side: "CHA" });
   });
   it("puts the away team first for ml and spread, Over first for a total", () => {
     const g = { away: "MIN" };
@@ -290,6 +310,85 @@ describe("the market cell and the source switch", () => {
     expect([tot.a.short, tot.b.short]).toEqual(["O 240.5", "U 240.5"]);
   });
 
+  describe("a spread DraftKings has the other way round", () => {
+    // Kalshi: MIN +1.5 / MIA -1.5 (MIA the favourite). DraftKings: MIN -1.5 / MIA +1.5 (MIN the favourite).
+    const kSp = line({
+      rung: "MIA1", rung_label: "MIA -1.5", bets: 100, handle: 20_000,
+      sides: [
+        side("MIA -1.5", { ticket_pct: 40, money_pct: 80, price_last: 50 }),
+        side("MIN +1.5", { ticket_pct: 60, money_pct: 20, price_last: 50 }),
+      ],
+    });
+    const dkOther: NbaFlowBookLine = {
+      line_label: "MIN -1.5",
+      sides: [
+        { side: "MIN -1.5", handle_pct: 10, bets_pct: 54 },
+        { side: "MIA +1.5", handle_pct: 90, bets_pct: 46 },
+      ],
+    };
+    it("uses none of DraftKings numbers - no ticks, no average - and says why in one quiet line", () => {
+      for (const source of ["kalshi", "dk", "both"] as const) {
+        const c = buildCell(g, "spread", kSp, dkOther, source)!;
+        expect(c.drawn).toBe("kalshi");
+        expect([c.a.side, c.b.side]).toEqual(["MIN +1.5", "MIA -1.5"]);
+        expect([c.a.betsPct, c.a.moneyPct]).toEqual([60, 20]);
+        expect(c.tickSource).toBeNull();
+        expect([c.a.tickBetsPct, c.a.dkBetsPct, c.a.dkMoneyPct]).toEqual([null, null, null]);
+        expect(c.note).toBe("DK favours the other side: MIN -1.5");
+        expect(c.dkMismatch).toBe("DK favours the other side: MIN -1.5");
+        expect(c.dkLine).toBeNull(); // not also "DK line ..."
+        expect(dkLine(c)).toBeNull();
+      }
+    });
+    it("DraftKings alone still draws its own sides (nothing to mismatch with)", () => {
+      const c = buildCell(g, "spread", null, dkOther, "both")!;
+      expect(c.drawn).toBe("dk");
+      expect(c.dkMismatch).toBeNull();
+      expect([c.a.side, c.b.side]).toEqual(["MIN -1.5", "MIA +1.5"]);
+    });
+  });
+
+  describe("a spread DraftKings has with the same favourite but a different number", () => {
+    const kSp = line({
+      rung: "MIA4", rung_label: "MIA -4.5", bets: 100, handle: 20_000,
+      sides: [
+        side("MIA -4.5", { ticket_pct: 40, money_pct: 80 }),
+        side("MIN +4.5", { ticket_pct: 60, money_pct: 20 }),
+      ],
+    });
+    const dkSame: NbaFlowBookLine = {
+      line_label: "MIA -2.5",
+      sides: [
+        { side: "MIA -2.5", handle_pct: 70, bets_pct: 50 },
+        { side: "MIN +2.5", handle_pct: 30, bets_pct: 50 },
+      ],
+    };
+    it("compares as before - ticks, average - and keeps the DK line note", () => {
+      const k = buildCell(g, "spread", kSp, dkSame, "kalshi")!;
+      expect(k.dkMismatch).toBeNull();
+      expect([k.a.tickBetsPct, k.a.tickMoneyPct]).toEqual([50, 30]);
+      expect(k.dkLine).toBe("MIA -2.5");
+      const both = buildCell(g, "spread", kSp, dkSame, "both")!;
+      expect(both.drawn).toBe("avg");
+      expect(both.a.moneyPct).toBeCloseTo((20 + 30) / 2);
+      expect(both.dkLine).toBe("MIA -2.5");
+    });
+  });
+
+  it("a total compares Over with Over at any number, with the line noted", () => {
+    const k = line({ rung: "243", rung_label: "243.5", bets: 50, handle: 9000, sides: [
+      side("Over 243.5", { ticket_pct: 60, money_pct: 30 }), side("Under 243.5", { ticket_pct: 40, money_pct: 70 }),
+    ] });
+    const dk: NbaFlowBookLine = { line_label: "230.5", sides: [
+      { side: "Under 230.5", handle_pct: 55, bets_pct: 45 }, { side: "Over 230.5", handle_pct: 45, bets_pct: 55 },
+    ] };
+    const c = buildCell(g, "total", k, dk, "both")!;
+    expect(c.drawn).toBe("avg");
+    expect(c.dkMismatch).toBeNull();
+    expect(c.a.moneyPct).toBeCloseTo((30 + 45) / 2);
+    expect(c.dkLine).toBe("230.5");
+  });
+
   it("neither source has the market: nothing to draw", () => {
     expect(buildCell(g, "ml", null, undefined, "both")).toBeNull();
     expect(buildCell(g, "ml", line({ sides: [side("MIN")] }), null, "kalshi")).toBeNull();
@@ -370,18 +469,32 @@ describe("biggest splits", () => {
     // g2's moneyline has a bigger gap (85) but only $2k of handle
     expect(out.some((e) => e.game.game === "26OCT21CCCDDD" && e.line === "ml")).toBe(false);
   });
-  it("a DraftKings-only line has no handle to test and stays in", () => {
-    const out = biggestSplits([g1, g3], books, "kalshi");
-    expect(out.map((e) => e.game.game)).toEqual(["26OCT21EEEFFF", "26OCT21AAABBB"]);
-    expect(out[0].cell.handle).toBeNull();
-    expect(out[0].gap).toBe(45);
+  it("Kalshi and Both leave DraftKings-only lines out of the strip", () => {
+    for (const source of ["kalshi", "both"] as const) {
+      const out = biggestSplits([g1, g3], books, source);
+      expect(out.map((e) => e.game.game)).toEqual(["26OCT21AAABBB"]);
+    }
   });
-  it("follows the source, and keeps at most the count asked for", () => {
-    const both = [g1, g2, g3];
-    expect(biggestSplits(both, books, "kalshi", 2)).toHaveLength(2);
-    expect(biggestSplits(both, books, "kalshi", 10).length).toBe(3);
-    // DraftKings as the source: a Kalshi-only line is drawn from Kalshi (a fallback)
-    expect(biggestSplits([g1], null, "dk")[0].cell.drawn).toBe("kalshi");
+  it("DraftKings ranks its own shares with no dollar gate, and only lines DraftKings has", () => {
+    const dkBooks = { games: [
+      ...books.games,
+      bookGameOf({ ml: { line_label: null, sides: [
+        { side: "CCC", handle_pct: 10, bets_pct: 60 }, { side: "DDD", handle_pct: 90, bets_pct: 40 },
+      ] } }, "26OCT21CCCDDD"),
+    ] };
+    const out = biggestSplits([g1, g2, g3], dkBooks, "dk");
+    // g2 moneyline has only $2k of Kalshi handle - the gate does not apply to DraftKings
+    expect(out.map((e) => `${e.game.game}:${e.line}`)).toEqual(["26OCT21CCCDDD:ml", "26OCT21EEEFFF:ml"]);
+    expect(out[0].gap).toBe(50);
+    expect(out.every((e) => e.cell.drawn === "dk")).toBe(true);
+    // g1 has no DraftKings split: not a DraftKings line, so not ranked there
+    expect(out.some((e) => e.game.game === "26OCT21AAABBB")).toBe(false);
+    // the same books under Kalshi still gate g2 ml
+    expect(biggestSplits([g2], dkBooks, "kalshi").every((e) => e.line !== "ml")).toBe(true);
+  });
+  it("keeps at most the count asked for", () => {
+    expect(biggestSplits([g1, g2, g3], books, "kalshi", 1)).toHaveLength(1);
+    expect(biggestSplits([g1, g2, g3], books, "kalshi", 10)).toHaveLength(2);
     expect(biggestSplits([], null, "kalshi")).toEqual([]);
   });
 });
@@ -450,8 +563,7 @@ describe("last season's gap bands", () => {
     const t = gapSentence(r, "total");
     expect(t).toContain("**63 pts** toward A");
     expect(t).toContain("wider than 100% of total lines last season (widest fifth)");
-    expect(t).toContain("Take out the 3 $1k+ bets on A and it is -8");
-    expect(t).toContain("a few big bets, not broad money");
+    expect(t).toContain("Take out all 3 $1k+ bets (+63 \u2192 -8 without them): **mostly a few big bets**.");
   });
 
   it("a wide gap that holds without the big bets says it is broad money", () => {
@@ -463,8 +575,7 @@ describe("last season's gap bands", () => {
     expect(r.bigBets).toBe("broad");
     const t = gapSentence(r, "ml");
     expect(t).toContain("wider than 100% of moneyline lines last season (widest fifth)");
-    expect(t).toContain("Without the $1k+ bets it is still +31");
-    expect(t).toContain("**broad money, not just big bets**");
+    expect(t).toContain("Take out all 9 $1k+ bets (+51 \u2192 +31 without them): **broad money**."); // both sides big bets
   });
 
   it("an ordinary gap makes no claim about big bets, whatever they do to it", () => {
@@ -477,7 +588,24 @@ describe("last season's gap bands", () => {
     expect(r.bigBets).toBeNull();
     const t = gapSentence(r, "spread");
     expect(t).toContain("**7 pts** toward A, wider than 17% of spread lines last season (ordinary).");
-    expect(t).not.toMatch(/big bets|broad money|Take out|Without/);
+    expect(t).not.toMatch(/big bets|broad money|Take out/);
+  });
+
+  it("few versus broad is the share of the gap that survives: under half is few", () => {
+    const mk = (exLeadHandle: number) => {
+      // lead: 20 bets, $10k, one big bet holding all but exLeadHandle; other: 80 bets, $2k
+      const lead = side("A", { bets: 20, handle: 10_000, big_bets: 1, big_handle: 10_000 - exLeadHandle, ticket_pct: 20, money_pct: (10_000 / 12_000) * 100 });
+      const other = side("B", { bets: 80, handle: 2_000, ticket_pct: 80, money_pct: (2_000 / 12_000) * 100 });
+      return gapRead(lead, other, P);
+    };
+    const gap = (10_000 / 12_000) * 100 - 20;
+    expect(mk(100).exGap! / gap).toBeLessThan(0.5);
+    expect(mk(100).bigBets).toBe("few");
+    expect(mk(8_000).exGap! / gap).toBeGreaterThan(0.5);
+    expect(mk(8_000).bigBets).toBe("broad");
+    // no big bets at all: nothing to attribute
+    const none = gapRead(side("A", { bets: 20, handle: 10_000, ticket_pct: 20, money_pct: 83 }), side("B", { bets: 80, handle: 2_000, ticket_pct: 80, money_pct: 17 }), P);
+    expect(none.bigBets).toBeNull();
   });
 
   it("with no bands file there are no zone and no big-bet claims", () => {
@@ -550,6 +678,16 @@ describe("when the money came in", () => {
     expect(out[3]).toMatchObject({ bets: 10, handle: 0, leftBetPct: 100, leftMoneyPct: null });
     expect(out[4]).toMatchObject({ label: "in game", bets: 5, leftBetPct: 0 });
   });
+  it("an off-grid tip: the backend cuts the bucket at the tip, so t < tip is pregame and t >= tip is live", () => {
+    const tip2 = Date.parse("2026-10-21T23:20:00Z");
+    const mk = (t: string, s: string, bets: number): NbaFlowTimelineRow => ({ t, side: s, bets, handle: bets * 10, big_bets: 0, big_handle: 0, price: null });
+    const tl = [mk("2026-10-21T23:00:00Z", "MIN", 10), mk("2026-10-21T23:15:00Z", "MIN", 3), mk("2026-10-21T23:20:00Z", "MIN", 7)];
+    const pre = whenTheMoneyCame(tl, "MIN", tip2, false);
+    expect(pre).toHaveLength(1);
+    expect(pre[0]).toMatchObject({ bucket: "lastHour", bets: 13 }); // 23:00 and the 23:15 partial
+    const all = whenTheMoneyCame(tl, "MIN", tip2, true);
+    expect(all.map((r) => [r.bucket, r.bets])).toEqual([["lastHour", 13], ["inGame", 7]]);
+  });
   it("leaves out in-game bets before the tip view, and windows with no bets", () => {
     const out = whenTheMoneyCame(rows, "MIN", tip, false);
     expect(out.map((r) => r.bucket)).not.toContain("inGame");
@@ -583,6 +721,11 @@ describe("one rung's sides for the phase on screen", () => {
     expect(a.gap).toBeCloseTo(a.money_pct - a.ticket_pct);
     // whole game: the last price is the last one printed
     expect(sideStats(sizes, timeline, ["A", "B"], tip, true)[0].price_last).toBe(12);
+    // an off-grid tip: a row starting AT the tip is live, one just before is pregame
+    const tip2 = Date.parse("2026-10-21T23:20:00Z");
+    const tl2 = [tl("2026-10-21T23:15:00Z", "A", 40), tl("2026-10-21T23:20:00Z", "A", 9)];
+    expect(sideStats(sizes, tl2, ["A", "B"], tip2, false)[0].price_last).toBe(40);
+    expect(sideStats(sizes, tl2, ["A", "B"], tip2, true)[0].price_last).toBe(9);
   });
   it("nothing on a side gives zero shares, not NaN", () => {
     const [a, b] = sideStats([], [], ["A", "B"], tip, true);

@@ -10,7 +10,10 @@ import { fmtBets, fmtMoney, fmtPct, shortSide, type WhenRow } from "../../lib/ka
 import { T } from "../../../../lib/typeScale";
 import { HAIRLINE } from "./flowInk";
 
-export default function FlowWhen({ rows, left }: { rows: readonly WhenRow[]; left: string }) {
+export default function FlowWhen({ rows, left, tipKnown = true }: { rows: readonly WhenRow[]; left: string; tipKnown?: boolean }) {
+  if (!tipKnown) {
+    return <div style={{ ...T.bodySm, color: "var(--text-faint)" }}>tip time unknown</div>;
+  }
   if (rows.length === 0) {
     return <div style={{ ...T.bodySm, color: "var(--text-faint)" }}>no bets on tape for this line</div>;
   }

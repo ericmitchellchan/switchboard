@@ -68,12 +68,21 @@ describe("buildSharePoints", () => {
     expect(all.map((p) => p.t).slice(-2)).toEqual([Date.parse("2026-10-21T23:45:00Z"), Date.parse("2026-10-22T00:00:00Z")]);
     expect(all[all.length - 1]).toMatchObject({ ha: 1330, hb: 1050, na: 25, nb: 15 });
   });
-  it("a bucket the tip falls inside is clamped to the tip in a before-tip view", () => {
-    const tl = [row("2026-10-21T23:20:00Z", "A", 30, 300), row("2026-10-21T23:20:00Z", "B", 10, 100)];
-    const p = buildSharePoints(tl, "A", "B", { tipMs: TIP, includeLive: false });
-    expect(p).toHaveLength(1);
-    expect(p[0].t).toBe(TIP);
-    expect(buildSharePoints(tl, "A", "B", { tipMs: TIP, includeLive: true })[0].t).toBe(Date.parse("2026-10-21T23:35:00Z"));
+  it("an off-grid tip: t < tip is pregame (its point ends at the tip), t >= tip is live", () => {
+    // the backend cut the 23:15 bucket at the 23:20 tip: a partial pregame row and a live row at the tip
+    const tip2 = Date.parse("2026-10-21T23:20:00Z");
+    const tl = [
+      row("2026-10-21T23:00:00Z", "A", 30, 300), row("2026-10-21T23:00:00Z", "B", 10, 100),
+      row("2026-10-21T23:15:00Z", "A", 5, 50),
+      row("2026-10-21T23:20:00Z", "A", 4, 40),
+    ];
+    const pre = buildSharePoints(tl, "A", "B", { tipMs: tip2, includeLive: false });
+    expect(pre.map((p) => p.t)).toEqual([Date.parse("2026-10-21T23:15:00Z"), tip2]);
+    expect(pre[1]).toMatchObject({ na: 35, nb: 10 }); // the live row is not in
+    const all = buildSharePoints(tl, "A", "B", { tipMs: tip2, includeLive: true });
+    // in order, and the pregame part never ends after the tip even in a whole-game view
+    expect(all.map((p) => p.t)).toEqual([Date.parse("2026-10-21T23:15:00Z"), tip2, Date.parse("2026-10-21T23:35:00Z")]);
+    expect(all[2]).toMatchObject({ na: 39, nb: 10 });
   });
   it("the same gap with every $1k+ bet out of both sides", () => {
     // by the tip: A has no big bets, B has one ($500 of its $650)

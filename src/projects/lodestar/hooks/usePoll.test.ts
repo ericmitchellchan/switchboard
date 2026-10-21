@@ -4,7 +4,7 @@
 // the hook is a thin shell over exactly these two functions.
 
 import { describe, expect, it, vi } from "vitest";
-import { beginRun, runTick } from "./usePoll";
+import { BOOT_RETRY_LIMIT, beginRun, pollEveryMs, runTick } from "./usePoll";
 
 function deferred<T>() {
   let resolve!: (v: T) => void;
@@ -160,5 +160,21 @@ describe("usePoll runs", () => {
     slow.resolve("ok");
     await second;
     expect(hNew.onData).toHaveBeenCalledWith("ok");
+  });
+});
+
+describe("the boot cadence", () => {
+  it("runs fast only until the first success", () => {
+    expect(pollEveryMs(60_000, 3_000, false, 0)).toBe(3_000);
+    expect(pollEveryMs(60_000, 3_000, true, 0)).toBe(60_000);
+  });
+  it("gives up after a few failures: a permanent 503 is not hammered every 3 s", () => {
+    expect(BOOT_RETRY_LIMIT).toBe(5);
+    expect(pollEveryMs(60_000, 3_000, false, BOOT_RETRY_LIMIT - 1)).toBe(3_000);
+    expect(pollEveryMs(60_000, 3_000, false, BOOT_RETRY_LIMIT)).toBe(60_000);
+  });
+  it("has no boot cadence unless asked for, and never polls slower than the normal interval allows", () => {
+    expect(pollEveryMs(60_000, undefined, false, 0)).toBe(60_000);
+    expect(pollEveryMs(2_000, 3_000, false, 0)).toBe(2_000);
   });
 });

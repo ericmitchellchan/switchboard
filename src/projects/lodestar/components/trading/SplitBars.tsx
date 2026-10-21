@@ -65,12 +65,14 @@ export function SplitRow({
   faded?: boolean;
   tick?: number | null;
 }) {
+  // The two printed shares always add to 100: round the left, the right is the rest.
+  const left = Number.isFinite(a) ? Math.max(0, Math.min(100, Math.round(a))) : NaN;
   return (
     <div style={{ ...ROW, ...T.label, fontWeight: 400, letterSpacing: "normal" }}>
       <span style={{ color: "var(--text-dim)" }}>{label}</span>
-      <span style={{ textAlign: "right", color: "var(--text-secondary)" }}>{fmtPct(a)}</span>
+      <span style={{ textAlign: "right", color: "var(--text-secondary)" }}>{fmtPct(left)}</span>
       <SplitBar a={a} faded={faded} tick={tick} />
-      <span style={{ color: "var(--text-secondary)" }}>{fmtPct(100 - a)}</span>
+      <span style={{ color: "var(--text-secondary)" }}>{fmtPct(100 - left)}</span>
     </div>
   );
 }

@@ -19,7 +19,15 @@ import { T } from "../../../../lib/typeScale";
 import { SIDE_INK } from "./flowInk";
 import { ShareRow } from "./SplitBars";
 
-const SOURCE_NAME: Record<FlowSource, string> = { kalshi: "Kalshi", dk: "DraftKings", both: "avg of Kalshi + DK" };
+/** What the strip ranks, per source: Kalshi and Both only lines Kalshi has bets
+ *  on (with the dollar gate); DraftKings ranks its own shares, no dollars. */
+export function splitsMeta(source: FlowSource, phase: NbaFlowPhase): string {
+  const what =
+    source === "dk"
+      ? "DraftKings shares, no dollar gate"
+      : `Kalshi lines with ${fmtMoney(SPLITS_MIN_HANDLE)}+ · ${source === "both" ? "avg of Kalshi + DK" : "Kalshi"}`;
+  return `money share minus bet share · ${what} · ${phase === "pregame" ? "before tip" : "whole game"}`;
+}
 
 function Entry({ e, onOpen }: { e: SplitEntry; onOpen: (g: NbaFlowGame, line: NbaFlowLineKey) => void }) {
   const { cell, side, game } = e;
@@ -84,13 +92,12 @@ export default function FlowSplits({
   phase: NbaFlowPhase;
   onOpen: (g: NbaFlowGame, line: NbaFlowLineKey) => void;
 }) {
-  const dkOnly = entries.length > 0 && entries.every((e) => e.cell.drawn === "dk");
   return (
     <section aria-label="biggest splits" style={{ margin: "18px 0 26px" }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
         <h3 style={{ ...T.heading, margin: 0, color: "var(--text-primary)" }}>Biggest splits</h3>
         <span style={{ ...T.label, fontWeight: 400, letterSpacing: "normal", color: "var(--text-dim)" }}>
-          {`money share minus bet share · Kalshi lines with ${fmtMoney(SPLITS_MIN_HANDLE)}+ · ${dkOnly ? "DraftKings only, no Kalshi bets yet" : SOURCE_NAME[source]} · ${phase === "pregame" ? "before tip" : "whole game"}`}
+          {splitsMeta(source, phase)}
         </span>
       </div>
       {entries.length === 0 ? (

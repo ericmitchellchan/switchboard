@@ -28,6 +28,8 @@ import { biggestSplits, selectionReducer, type FlowSource } from "../lib/kalshiF
 import FlowBoard from "../components/trading/FlowBoard";
 import FlowGameDetail, { type FlowGameDetailProps } from "../components/trading/FlowGameDetail";
 import { FlowChartSvg } from "../components/trading/FlowShareChart";
+import { SplitRow } from "../components/trading/SplitBars";
+import type { SharePoint } from "../lib/kalshiFlowSeries";
 import FlowSplits from "../components/trading/FlowSplits";
 import KalshiTrading, { loadFlowDetail } from "./KalshiTrading";
 
@@ -235,10 +237,11 @@ describe("the board", () => {
       expect(out).not.toContain("data-tick=");
       // MIN bets (73 + 40) / 2 = 56.5, money (22 + 9) / 2 = 15.5; MIA bets 43.5, money 84.5
       const t = text(out);
+      // the two printed shares always add to 100: the left is rounded, the right is the rest
       expect(t).toContain("57%");
       expect(t).toContain("16%");
-      expect(t).toContain("44%");
-      expect(t).toContain("85%");
+      expect(t).toContain("43%");
+      expect(t).toContain("84%");
       // DraftKings' own spread line differs from Kalshi's, so it is named
       expect(t).toContain("DK line MIA -2.5");
     });
@@ -267,6 +270,50 @@ describe("the board", () => {
   });
 });
 
+describe("a spread DraftKings has the other way round", () => {
+  // Kalshi: MIN +4.5 / MIA -4.5. DraftKings has MIN as the favourite: MIN -2.5 / MIA +2.5.
+  const OTHER_WAY: NbaFlowBookGame = {
+    game: GAME.game,
+    captured_at: "2026-10-21T17:00:00Z",
+    lines: { spread: { line_label: "MIN -2.5", sides: [{ side: "MIN -2.5", handle_pct: 12, bets_pct: 58 }, { side: "MIA +2.5", handle_pct: 88, bets_pct: 42 }] } },
+  };
+  it("the board uses none of DraftKings numbers for it - no ticks, no average - and says why", () => {
+    for (const source of ["kalshi", "dk", "both"] as const) {
+      const out = html(createElement(FlowBoard, boardProps({ books: { games: [OTHER_WAY] }, source })));
+      const t = text(out);
+      expect(t).toContain("DK favours the other side: MIN -2.5");
+      expect(out).toContain('data-drawn="kalshi"');
+      expect(out).not.toContain('data-drawn="avg"');
+      expect(out).not.toContain("data-tick=");
+      expect(t).not.toContain("DK line"); // the line note would be a second, misleading line
+    }
+  });
+  it("the detail says it under the side instead of showing DraftKings numbers, and draws no dotted line", () => {
+    const series: NbaFlowBookSeries = {
+      game: GAME.game, line: "spread", book: "draftkings",
+      series: [
+        { t: "2026-10-21T20:00:00Z", sides: [{ side: "MIN -2.5", handle_pct: 12, bets_pct: 58 }, { side: "MIA +2.5", handle_pct: 88, bets_pct: 42 }] },
+        { t: "2026-10-21T22:00:00Z", sides: [{ side: "MIN -2.5", handle_pct: 14, bets_pct: 57 }, { side: "MIA +2.5", handle_pct: 86, bets_pct: 43 }] },
+      ],
+    };
+    const out = detail({ book: OTHER_WAY, bookSeries: series });
+    expect(text(out)).toContain("DK favours the other side: MIN -2.5");
+    expect(text(out)).not.toContain("DraftKings 58% bets");
+    expect(out).not.toContain('data-series="dk-money"');
+    expect(text(out)).not.toContain("DK money on");
+  });
+});
+
+describe("the printed shares", () => {
+  it("a row's two shares always add to 100", () => {
+    for (const [a, l, r] of [[56.5, "57%", "43%"], [12.5, "13%", "87%"], [15.5, "16%", "84%"], [0.4, "0%", "100%"]] as const) {
+      const t = text(html(createElement(SplitRow, { label: "bets", a })));
+      expect(t).toContain(l);
+      expect(t).toContain(r);
+    }
+  });
+});
+
 describe("biggest splits", () => {
   const entries = biggestSplits([GAME, EMPTY_GAME].slice(0, 1), BOOKS, "kalshi");
 
@@ -282,12 +329,26 @@ describe("biggest splits", () => {
     expect(t).toMatch(/won|lost/);
   });
 
-  it("says where the numbers come from when it is DraftKings alone, with no dollar figure", () => {
-    const dkEntries = biggestSplits([EMPTY_GAME], BOOKS, "kalshi");
+  it("DraftKings mode ranks DraftKings shares with no dollar gate and labels it so", () => {
+    const dkEntries = biggestSplits([EMPTY_GAME], BOOKS, "dk");
     expect(dkEntries.length).toBeGreaterThan(0);
-    const t = text(html(createElement(FlowSplits, { entries: dkEntries, source: "kalshi", phase: "pregame", onOpen: () => {} })));
-    expect(t).toContain("DraftKings only, no Kalshi bets yet");
+    const t = text(html(createElement(FlowSplits, { entries: dkEntries, source: "dk", phase: "pregame", onOpen: () => {} })));
+    expect(t).toContain("DraftKings shares, no dollar gate");
+    expect(t).not.toContain("$5k+");
     expect(t).toContain("no dollar figures");
+    // with Kalshi bets on the line the label does not claim there are none
+    const withKalshi = text(html(createElement(FlowSplits, { entries: biggestSplits([GAME], BOOKS, "dk"), source: "dk", phase: "pregame", onOpen: () => {} })));
+    expect(withKalshi).toContain("DraftKings shares, no dollar gate");
+    expect(withKalshi).not.toContain("no Kalshi bets yet");
+    expect(withKalshi).toContain("$18.2k");
+  });
+
+  it("Kalshi and Both never list a DraftKings-only line, and Both says it is the average", () => {
+    expect(biggestSplits([EMPTY_GAME], BOOKS, "kalshi")).toEqual([]);
+    expect(biggestSplits([EMPTY_GAME], BOOKS, "both")).toEqual([]);
+    const both = text(html(createElement(FlowSplits, { entries: biggestSplits([GAME], BOOKS, "both"), source: "both", phase: "all", onOpen: () => {} })));
+    expect(both).toContain("Kalshi lines with $5k+ \u00b7 avg of Kalshi + DK");
+    expect(both).toContain("whole game");
   });
 
   it("an empty strip folds to one line, and a click opens the game on that line", () => {
@@ -464,8 +525,9 @@ describe("game detail", () => {
     const t = text(detail());
     expect(t).toContain("Money leans MIA -4.5");
     expect(t).toMatch(/Gap \d+ pts toward MIA -4\.5, wider than \d+% of spread lines last season \(widest fifth\)/);
-    expect(t).toContain("broad money, not just big bets");
-    expect(t).not.toContain("a few big bets");
+    expect(t).toContain("Take out all 4 $1k+ bets (");
+    expect(t).toMatch(/without them\): broad money\s*\./);
+    expect(t).not.toContain("mostly a few big bets");
     expect(t).toContain("Average bet:");
     expect(t).toContain("Result: MIN +4.5");
   });
@@ -478,7 +540,7 @@ describe("game detail", () => {
     const t = text(detail({ detail: ordinary }));
     expect(t).toMatch(/Gap \d+ pts toward MIA -4\.5, wider than \d+% of spread lines last season \(ordinary\)\./);
     expect(t).toContain("No lean");
-    expect(t).not.toMatch(/a few big bets|broad money|Take out the|Without the \$1k\+/);
+    expect(t).not.toMatch(/few big bets|broad money|Take out all|without them/);
   });
 
   it("a gap that is a few big bets says so", () => {
@@ -495,8 +557,7 @@ describe("game detail", () => {
       ],
     });
     const t = text(detail({ detail: few }));
-    expect(t).toContain("Take out the 3 $1k+ bets on MIA -4.5 and it is -8");
-    expect(t).toContain("a few big bets, not broad money");
+    expect(t).toMatch(/Take out all 3 \$1k\+ bets \(\+63 \u2192 -8 without them\): mostly a few big bets\s*\./);
   });
 
   it("says nothing about zones when last season's file is missing", () => {
@@ -572,7 +633,9 @@ describe("game detail", () => {
       bookSeries: series,
     });
     const t = text(out);
-    expect(t).toContain("No Kalshi bets on this line");
+    expect(t).toContain("no Kalshi bets on this line");
+    expect(t).not.toContain("so there is no dollar figure"); // no narration: one short line
+    expect(out).not.toContain('data-seg="totals"'); // no totals view without Kalshi dollars
     expect(t).toContain("40% of bets · DraftKings");
     expect(t).toContain("91% of money · DraftKings");
     expect(t).not.toContain("When the money came in");
@@ -582,6 +645,54 @@ describe("game detail", () => {
     expect(t).not.toContain("gap without $1k+ bets");
     expect(out).not.toContain('data-rail="big-bets"');
     expect(out).toContain('data-series="dk-money"');
+  });
+
+  it("only the main rung says who won: another rung hides the result", () => {
+    const main = detail();
+    expect(text(main)).toContain("Result: MIN +4.5");
+    expect(text(main)).toMatch(/MIN \+4\.5 won/);
+    const other = detail({ detail: detailOf({ rung: "MIA6", rung_label: "MIA -5.5" }), selection: { game: GAME.game, line: "spread", rung: "MIA6" } });
+    expect(text(other)).not.toContain("Result:");
+    expect(text(other)).not.toMatch(/won/);
+    // while another rung loads, nothing is said either
+    const loading = detail({ detail: null, previous: detailOf(), selection: { game: GAME.game, line: "spread", rung: "MIA6" } });
+    expect(text(loading)).not.toMatch(/\bwon\b/);
+  });
+
+  it("the $1k+ table says how many of the backend's 100 largest it shows when the cap is hit", () => {
+    const hundred = Array.from({ length: 100 }, (_, i) => ({
+      ts: new Date(T0 + i * 60_000).toISOString(), side: "MIA -4.5", dollars: 1000 + i, contracts: 2000, price: 57, phase: "pregame" as const,
+    }));
+    const out = text(detail({ detail: detailOf({ big_bets: hundred }) }));
+    expect(out).toContain("100 of the 100 largest, before tip");
+    expect(text(detail())).toContain("2 bets, before tip"); // not capped: plain count
+  });
+
+  it("an unknown tip says so once, in the head, the board and the when-table", () => {
+    const noTip = { ...GAME, tip_utc: null };
+    const out = text(detail({ game: noTip, detail: detailOf({ tip_utc: null }) }));
+    expect(out).toContain("tip time unknown");
+    expect(out).not.toContain("tip unknown");
+    expect(out.match(/tip time unknown/g)!.length).toBe(2); // the head and the when-table
+    const board = text(html(createElement(FlowBoard, boardProps({ games: [noTip] }))));
+    expect(board).toContain("tip time unknown");
+    expect(board).not.toContain("tip tip");
+  });
+
+  it("the legend lists only what is drawn: no price item without prices, no DraftKings item without snapshots", () => {
+    const noPrice = detailOf({ timeline: timeline(["MIN +4.5", "MIA -4.5"]).map((r) => ({ ...r, price: null })) });
+    const t = text(detail({ detail: noPrice }));
+    expect(t).not.toContain("price (");
+    expect(t).not.toContain("DK money on");
+    expect(text(detail())).toContain("MIN +4.5 price (on)");
+  });
+
+  it("an empty range is one quiet line, not an empty chart", () => {
+    // the last bet was long before the six-hour window
+    const stale = detailOf({ timeline: timeline(["MIN +4.5", "MIA -4.5"]).slice(0, 10) }); // ends ~21:15Z; tip 23:30Z
+    const out = detail({ detail: { ...stale, tip_utc: "2026-10-22T20:00:00Z" }, range: "6h", game: { ...GAME, tip_utc: "2026-10-22T20:00:00Z" } });
+    expect(text(out)).toContain("no bets in this range");
+    expect(out).not.toContain("<svg");
   });
 
   it("totals mode draws cumulative dollars per side and no gap strip", () => {
@@ -666,6 +777,57 @@ describe("the chart on its own", () => {
     expect(out).toMatch(/<svg[^>]*role="img"[^>]*aria-label="Money vs bets over time\. At the end, MIN \+4\.5 has \d+% of the money and \d+% of the bets\./);
   });
 
+  const pt = (t: number, gap: number): SharePoint => ({ t, ha: 1, hb: 1, na: 20, nb: 20, mA: 50 + gap, bA: 50, gap, exGap: gap, px: 50 });
+
+  it("the pin columns come first and the drawing lets clicks through, so rail and DraftKings dots keep their tooltips", () => {
+    const series: NbaFlowBookSeries = {
+      game: GAME.game, line: "spread", book: "draftkings",
+      series: [
+        { t: "2026-10-21T20:00:00Z", sides: [{ side: "MIN +2.5", handle_pct: 34, bets_pct: 47 }, { side: "MIA -2.5", handle_pct: 66, bets_pct: 53 }] },
+        { t: "2026-10-21T22:00:00Z", sides: [{ side: "MIN +2.5", handle_pct: 30, bets_pct: 45 }, { side: "MIA -2.5", handle_pct: 70, bets_pct: 55 }] },
+      ],
+    };
+    const out = detail({ bookSeries: series });
+    const firstPin = out.indexOf('data-anchor="pt:');
+    expect(firstPin).toBeGreaterThan(0);
+    expect(firstPin).toBeLessThan(out.indexOf('data-rail="big-bets"'));
+    expect(firstPin).toBeLessThan(out.indexOf('data-series="dk-money"'));
+    expect(out).toContain('pointer-events="none"');
+    expect(out).toMatch(/<circle[^>]*pointer-events="auto"/);
+  });
+
+  it("the gap bars carry forward across empty buckets: unbroken, each bar runs to the next one", () => {
+    const t0 = Date.parse("2026-10-21T10:00:00Z");
+    const pts = [pt(t0 + 15 * 60_000, 30), pt(t0 + 120 * 60_000, -20)]; // nothing between 10:15 and 12:00
+    const svg = html(
+      createElement(FlowChartSvg, {
+        mode: "share", points: pts, window: { t0, t1: t0 + 120 * 60_000 }, a: "A", b: "B", bigBets: [], dk: [], showPrice: false,
+        bands: BANDS.all, tipMs: t0 + 120 * 60_000, bucketMin: 15, width: 900,
+      }),
+    );
+    const bars = [...svg.matchAll(/<rect x="([\d.]+)"[^>]*width="([\d.]+)"[^>]*shape-rendering="crispEdges"/g)].map((m) => [Number(m[1]), Number(m[2])]);
+    expect(bars).toHaveLength(2);
+    expect(bars[0][0] + bars[0][1]).toBeCloseTo(bars[1][0], 0); // no hole between them
+    expect(bars[0][1]).toBeGreaterThan(bars[1][1] * 4); // the first value holds for most of the window
+  });
+
+  it("the end values sit in the right gutter, clear of each other", () => {
+    const t0 = Date.parse("2026-10-21T10:00:00Z");
+    const svg = html(
+      createElement(FlowChartSvg, {
+        mode: "share", points: [pt(t0 + 15 * 60_000, 1), pt(t0 + 30 * 60_000, 1)], window: { t0, t1: t0 + 60 * 60_000 }, a: "A", b: "B",
+        bigBets: [], dk: [], showPrice: false, bands: null, tipMs: t0 + 60 * 60_000, bucketMin: 15, width: 900,
+      }),
+    );
+    const ys = ["money 51%", "bets 50%"].map((label) => {
+      const m = new RegExp(`<text x="([\\d.]+)" y="([\\d.]+)"[^>]*>${label}</text>`).exec(svg);
+      expect(m).not.toBeNull();
+      expect(Number(m![1])).toBeGreaterThan(900 - 86); // right of the plot
+      return Number(m![2]);
+    });
+    expect(Math.abs(ys[0] - ys[1])).toBeGreaterThanOrEqual(14);
+  });
+
   it("with nothing to draw it says so in the svg label", () => {
     const svg = html(
       createElement(FlowChartSvg, {
@@ -691,6 +853,9 @@ describe("the page", () => {
     for (const s of ["Kalshi", "DraftKings", "Both"]) expect(t).toContain(s);
     expect(t).toContain("Flow");
     expect(t).toContain("Positions");
+    // no narration under the bar: the source's meaning is the switch's hover text
+    expect(t).not.toContain("white ticks mark");
+    expect(out).toContain("white ticks mark DraftKings");
     expect(out).toContain('aria-label="previous day"');
     expect(out).toContain('aria-label="next day"');
     // Kalshi is the default source, Before tip the default phase

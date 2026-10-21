@@ -58,7 +58,8 @@ function Teams({ g }: { g: NbaFlowGame }) {
       {fin ? <span style={{ ...T.mono, color: "var(--text-secondary)" }}>{score}</span> : null}
     </span>
   );
-  const when = g.status === "final" ? `final · tip ${fmtEt(g.tip_utc)}` : g.status === "live" ? `live · tip ${fmtEt(g.tip_utc)}` : `tip ${fmtEt(g.tip_utc)}`;
+  const tip = g.tip_utc ? `tip ${fmtEt(g.tip_utc)}` : "tip time unknown";
+  const when = g.status === "final" ? `final · ${tip}` : g.status === "live" ? `live · ${tip}` : tip;
   return (
     <span style={{ display: "block" }}>
       {line(g.away, g.away_score, awayWon)}

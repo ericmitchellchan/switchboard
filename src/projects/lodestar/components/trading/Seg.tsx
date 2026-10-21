@@ -15,17 +15,21 @@ export default function Seg<K extends string>({
   value,
   onChange,
   label,
+  title,
 }: {
   options: readonly SegOption<K>[];
   value: K;
   onChange?: (k: K) => void;
   /** What the switch chooses, for a screen reader. */
   label: string;
+  /** Hover text for the whole switch (what the choice means). */
+  title?: string;
 }) {
   return (
     <div
       role="group"
       aria-label={label}
+      title={title}
       style={{ display: "inline-flex", gap: 2, background: "var(--bg-secondary)", borderRadius: 6, padding: 2 }}
     >
       {options.map((o) => {

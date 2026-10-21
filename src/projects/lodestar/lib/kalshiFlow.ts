@@ -58,9 +58,10 @@ export function fmtMoney(v: number): string {
   if (!Number.isFinite(v)) return "-";
   const a = Math.abs(v);
   const sign = v < 0 ? "-" : "";
-  if (a >= 1_000_000) return `${sign}$${trim1(a / 1_000_000)}M`;
+  // Tiers on the ROUNDED value, so 999.6 reads "$1k" (not "$1000") and 999,999 "$1M".
+  if (a >= 999_500) return `${sign}$${trim1(a / 1_000_000)}M`;
   if (a >= 100_000) return `${sign}$${Math.round(a / 1000)}k`;
-  if (a >= 1000) return `${sign}$${trim1(a / 1000)}k`;
+  if (a >= 999.5) return `${sign}$${trim1(a / 1000)}k`;
   return `${sign}$${Math.round(a)}`;
 }
 
@@ -97,12 +98,12 @@ export function fmtBets(n: number): string {
 
 const ET = "America/New_York";
 
-/** A time in Eastern ("7:30 PM"), with the weekday when asked ("Sat 7:30 PM").
- *  `tz` pins another zone for tests. */
+/** A time in Eastern ("7:30 PM"), with the weekday when asked ("Sat 7:30 PM"); "-" when
+ *  there is no time. `tz` pins another zone for tests. */
 export function fmtEt(iso: string | number | null | undefined, withDay = false, tz: string = ET): string {
-  if (iso == null || iso === "") return "tip unknown";
+  if (iso == null || iso === "") return "-";
   const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "tip unknown";
+  if (Number.isNaN(d.getTime())) return "-";
   return new Intl.DateTimeFormat("en-US", {
     hour: "numeric",
     minute: "2-digit",
@@ -174,10 +175,20 @@ export function sideTeam(side: string): string {
 const isOver = (s: string) => /^over\b/i.test(s.trim());
 const isUnder = (s: string) => /^under\b/i.test(s.trim());
 
+/** -1 for a favourite's handicap ("ORL -2.5"), +1 for an underdog's ("ATL +2.5"), 0 for none. */
+export function handicapSign(side: string): -1 | 0 | 1 {
+  const m = /([+-])\s*\d/.exec(side);
+  return m ? (m[1] === "-" ? -1 : 1) : 0;
+}
+
 /**
- * DraftKings' side that corresponds to a Kalshi side: totals by Over/Under,
- * moneyline and spread by TEAM (DraftKings may quote a different spread, so the
- * label never decides). Null when the book has no such side.
+ * DraftKings' side that corresponds to a Kalshi side. A total matches by
+ * Over/Under at any number. A moneyline matches by TEAM. A spread side is a
+ * team AND a handicap direction: it matches by team only when both books give
+ * the team the same direction (favourite with favourite, underdog with
+ * underdog) - the number may differ. If DraftKings has the OTHER team as the
+ * favourite, its numbers are a different bet and nothing matches. Null when the
+ * book has no such side.
  */
 export function matchBookSide<S extends { side: string }>(
   line: NbaFlowLineKey,
@@ -190,7 +201,14 @@ export function matchBookSide<S extends { side: string }>(
     return want ? (candidates.find((c) => want(c.side)) ?? null) : null;
   }
   const team = sideTeam(side);
-  return candidates.find((c) => sideTeam(c.side) === team) ?? null;
+  const sign = line === "spread" ? handicapSign(side) : 0;
+  return (
+    candidates.find((c) => {
+      if (sideTeam(c.side) !== team) return false;
+      const cs = line === "spread" ? handicapSign(c.side) : 0;
+      return sign === 0 || cs === 0 || cs === sign;
+    }) ?? null
+  );
 }
 
 /** Sides in a stable order whatever order the backend sent them in, so a
@@ -288,6 +306,9 @@ export interface CellModel {
   note: string | null;
   /** DraftKings' own line, when it is not Kalshi's. */
   dkLine: string | null;
+  /** A spread whose favourite is the OTHER team at DraftKings ("DK favours the
+   *  other side: CHA -1.5"): its numbers are a different bet, so none are used. */
+  dkMismatch: string | null;
   /** Kalshi's readable rung. */
   rung: string;
   result: string | null;
@@ -330,6 +351,13 @@ export function buildCell(
     !!dA && !!dB && finite(dA.bets_pct) && finite(dA.handle_pct) && finite(dB.bets_pct) && finite(dB.handle_pct) && dA !== dB;
   if (!hasK && !hasD) return null;
 
+  // A spread DraftKings has the other way round is a different bet: say so, use nothing of it.
+  let dkMismatch: string | null = null;
+  if (key === "spread" && hasK && dk && (!dA || !dB) && dk.sides.some((s) => names.some((n) => sideTeam(n) === sideTeam(s.side)))) {
+    const fav = dk.sides.find((s) => handicapSign(s.side) < 0);
+    if (fav) dkMismatch = `DK favours the other side: ${fav.side}`;
+  }
+
   let drawn: DrawnSource;
   if (source === "both") drawn = hasK && hasD ? "avg" : hasK ? "kalshi" : "dk";
   else if (source === "kalshi") drawn = hasK ? "kalshi" : "dk";
@@ -339,13 +367,14 @@ export function buildCell(
   // or when "both" had only one to give; a plain Kalshi board says nothing.
   const asked: DrawnSource = source === "dk" ? "dk" : "kalshi";
   const note =
-    drawn === "avg"
+    dkMismatch ??
+    (drawn === "avg"
       ? "avg of Kalshi + DK"
       : source === "both" || drawn !== asked
         ? drawn === "kalshi"
           ? "Kalshi only"
           : "DraftKings only"
-        : null;
+        : null);
   const tickSource: CellModel["tickSource"] = drawn === "kalshi" && hasD ? "dk" : drawn === "dk" && hasK ? "kalshi" : null;
 
   const side = (name: string, k: NbaFlowSide | null, d: typeof dA): CellSide => {
@@ -393,7 +422,8 @@ export function buildCell(
     maxGap: Math.max(0, a.gap, b.gap),
     tickSource,
     note,
-    dkLine: hasK ? bookLineNote(key, game, kalshi ?? null, dk) : null,
+    dkLine: hasK && !dkMismatch ? bookLineNote(key, game, kalshi ?? null, dk) : null,
+    dkMismatch,
     rung: kalshi ? rungText(kalshi) : (dk?.line_label ?? ""),
     result: hasK && kalshi ? kalshi.result : null,
   };
@@ -439,9 +469,10 @@ export interface SplitEntry {
 
 /**
  * The lines where one side's money share sits furthest above its bet share,
- * under the chosen source. Kalshi lines with under $5k of handle are left out
- * (a few small bets can swing a share); a DraftKings-only line has no handle to
- * test and stays in.
+ * under the chosen source. Kalshi and Both rank only lines Kalshi has bets on,
+ * and leave out those under $5k of handle (a few small bets can swing a share);
+ * DraftKings-only lines stay out of them. DraftKings ranks the DraftKings
+ * shares with no dollar gate (the book publishes no dollars).
  */
 export function biggestSplits(
   games: readonly NbaFlowGame[],
@@ -455,7 +486,11 @@ export function biggestSplits(
     for (const line of LINE_KEYS) {
       const cell = buildCell(game, line, game.lines[line], bg?.lines[line], source);
       if (!cell) continue;
-      if (cell.handle != null && cell.handle < SPLITS_MIN_HANDLE) continue;
+      if (source === "dk") {
+        if (cell.drawn !== "dk") continue;
+      } else if (cell.drawn === "dk" || (cell.handle != null && cell.handle < SPLITS_MIN_HANDLE)) {
+        continue;
+      }
       const side = cell.a.gap >= cell.b.gap ? cell.a : cell.b;
       if (side.gap <= 0) continue;
       all.push({ game, line, cell, side, gap: side.gap });
@@ -544,7 +579,10 @@ export interface GapRead {
   /** The share of last season's lines this gap is wider than. */
   wider: number | null;
   exGap: number | null;
-  /** What the $1k+ bets explain - only said for a gap past the median. */
+  /** Every $1k+ bet on the line, both sides. */
+  bigCount: number;
+  /** What the $1k+ bets explain - only said for a gap past the median: "few" when
+   *  less than half the gap survives without them, else "broad". */
   bigBets: "few" | "broad" | null;
 }
 
@@ -555,9 +593,10 @@ export function gapRead(a: NbaFlowSide, b: NbaFlowSide, p: readonly number[] | n
   const exGap = gapWithoutBig(lead, other);
   const zone = p ? gapZone(gap, p) : null;
   const wider = p ? gapPercentile(gap, p) : null;
+  const bigCount = lead.big_bets + other.big_bets;
   let bigBets: GapRead["bigBets"] = null;
-  if (p && exGap != null && gap >= p[50]) bigBets = exGap < p[50] / 2 ? "few" : "broad";
-  return { lead, other, gap, zone, wider, exGap, bigBets };
+  if (p && exGap != null && gap > 0 && bigCount > 0 && gap >= p[50]) bigBets = exGap / gap < 0.5 ? "few" : "broad";
+  return { lead, other, gap, zone, wider, exGap, bigCount, bigBets };
 }
 
 export interface AvgBet {
@@ -605,11 +644,11 @@ export function gapSentence(read: GapRead, line: NbaFlowLineKey): string {
   const kind = LINE_LABEL[line].toLowerCase();
   let out = read.zone && read.wider != null ? `${head}, wider than ${read.wider}% of ${kind} lines last season (${GAP_ZONE_LABEL[read.zone]}).` : `${head}.`;
   if (read.bigBets && read.exGap != null) {
-    const ex = `${read.exGap >= 0 ? "+" : "-"}${Math.abs(Math.round(read.exGap))}`;
+    const change = `${fmtGap(read.gap)} → ${fmtGap(read.exGap)} without them`;
     out +=
       read.bigBets === "few"
-        ? ` Take out the ${read.lead.big_bets} $1k+ bets on ${lead} and it is ${ex}: **a few big bets, not broad money**.`
-        : ` Without the $1k+ bets it is still ${ex}: **broad money, not just big bets**.`;
+        ? ` Take out all ${read.bigCount} $1k+ bets (${change}): **mostly a few big bets**.`
+        : ` Take out all ${read.bigCount} $1k+ bets (${change}): **broad money**.`;
   }
   return out;
 }
