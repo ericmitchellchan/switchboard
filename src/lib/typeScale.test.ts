@@ -25,7 +25,15 @@ const read = (rel: string) => fs.readFileSync(path.join(root, rel), "utf8");
 
 /** The files the sweep has reached. Batch 1: the token module + the kit;
  *  SWIT-117: the chat view, built on the tokens from day one. */
-const SWEPT = ["src/lib/typeScale.ts", "src/components/kit.ts", "src/components/ChatPane.tsx"];
+const SWEPT = [
+  "src/lib/typeScale.ts",
+  "src/components/kit.ts",
+  "src/components/ChatPane.tsx",
+  // SWIT-130: the Kalshi Trading page, built on the tokens from day one.
+  "src/projects/lodestar/pages/KalshiTrading.tsx",
+  "src/projects/lodestar/components/trading/FlowGamesTable.tsx",
+  "src/projects/lodestar/components/trading/FlowGameDetail.tsx",
+];
 
 /** A line that SETS a font size at all — an object key or an assignment
  *  (`fontSize: …`, `fontSize = …`), a JSX/SVG attribute (`fontSize={…}`,
