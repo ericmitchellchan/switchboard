@@ -1533,6 +1533,15 @@ export const api = {
     getJson<NbaFlowGames>(`/nba/flow/games?date=${encodeURIComponent(date)}&phase=${phase}`, { signal: flowTimeout() }),
   getNbaFlowGame: (q: NbaFlowGameQuery): Promise<NbaFlowGameDetail> =>
     getJson<NbaFlowGameDetail>(nbaFlowGamePath(q), { signal: flowTimeout() }),
+  getNbaFlowBooks: (date: string): Promise<NbaFlowBooks> =>
+    getJson<NbaFlowBooks>(`/nba/flow/books?date=${encodeURIComponent(date)}`, { signal: flowTimeout() }),
+  getNbaFlowBookSeries: (game: string, line: NbaFlowLineKey): Promise<NbaFlowBookSeries> =>
+    getJson<NbaFlowBookSeries>(
+      `/nba/flow/books/game?game=${encodeURIComponent(game)}&line=${line}`,
+      { signal: flowTimeout() },
+    ),
+  getNbaFlowGapBands: (): Promise<NbaFlowGapBands> =>
+    getJson<NbaFlowGapBands>("/nba/flow/gap_bands", { signal: flowTimeout() }),
   getNbaPbp: (ticker: string): Promise<NbaPbp> =>
     getJson<NbaPbp>(`/nba/pbp/${encodeURIComponent(ticker)}`),
   getTennisContext: (ticker: string): Promise<TennisMatchContext> =>
@@ -1987,6 +1996,17 @@ export interface NbaFlowRung {
   handle: number;
 }
 
+/** One individual $1k+ bet (GET /nba/flow/game `big_bets`, up to 100, oldest first). */
+export interface NbaFlowBigBet {
+  ts: string;
+  side: string;
+  dollars: number;
+  contracts: number;
+  /** Cents per $1, null when the print carried no price. */
+  price: number | null;
+  phase: "pregame" | "live";
+}
+
 /** GET /nba/flow/game */
 export interface NbaFlowGameDetail {
   game: string;
@@ -1996,9 +2016,63 @@ export interface NbaFlowGameDetail {
   tip_utc: string | null;
   sides: string[];
   timeline: NbaFlowTimelineRow[];
+  /** The size mix over the whole tape. */
   sizes: NbaFlowSizeRow[];
+  /** The same mix over bets placed before the tip (absent on an older backend). */
+  sizes_pregame?: NbaFlowSizeRow[];
+  /** The 100 largest $1k+ bets, oldest first (absent on an older backend). */
+  big_bets?: NbaFlowBigBet[];
   rungs: NbaFlowRung[];
   price_zero_share: number;
+}
+
+// --- DraftKings betting splits (SWIT-130). Percentages are 0..100; the book
+// publishes no dollars and no bet counts, so there is no handle to show. ---
+
+export interface NbaFlowBookSide {
+  /** A tricode (ml), "ORL -2.5" (spread) or "Over 234.5" (total). */
+  side: string;
+  handle_pct: number | null;
+  bets_pct: number | null;
+  /** American odds, e.g. -110. */
+  odds?: number | null;
+}
+
+export interface NbaFlowBookLine {
+  /** DraftKings' own line, e.g. "ORL -2.5" or "234.5"; null for the moneyline. */
+  line_label: string | null;
+  sides: NbaFlowBookSide[];
+}
+
+export interface NbaFlowBookGame {
+  game: string;
+  captured_at: string;
+  /** A market the book has no snapshot for is absent. */
+  lines: Partial<Record<NbaFlowLineKey, NbaFlowBookLine | null>>;
+}
+
+/** GET /nba/flow/books */
+export interface NbaFlowBooks {
+  date: string;
+  book: string;
+  games: NbaFlowBookGame[];
+}
+
+/** GET /nba/flow/books/game */
+export interface NbaFlowBookSeries {
+  game: string;
+  line: NbaFlowLineKey;
+  book: string;
+  series: { t: string; sides: { side: string; handle_pct: number | null; bets_pct: number | null }[] }[];
+}
+
+/** GET /nba/flow/gap_bands: 101 percentiles (p0..p100) of the |money share - bet
+ *  share| gap in points over last season, overall and per line. */
+export interface NbaFlowGapBands {
+  all: number[];
+  ml?: number[];
+  spread?: number[];
+  total?: number[];
 }
 
 export interface NbaFlowGameQuery {
