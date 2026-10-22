@@ -9,21 +9,25 @@
  *              draws either or their plain average. Click a cell for the game
  *              detail: the versus block, ONE chart of money vs bets over time,
  *              when the money came in, who bet what size, and the $1k+ bets.
- *   Positions  Reserved: the combo-desk positions view (demo / live).
+ *   Positions  The combo desk (SWIT-129): the ledger against Kalshi, the
+ *              exposure against each cap, requests, fills, settlements and
+ *              the kill switch, for the Demo or the Live account.
  *
- * Reads GET /nba/flow/games, /game, /books, /books/game and /gap_bands on the
- * Lodestar backend. Pin anchors: game:<game> a game row, line:<game>:<line> a
+ * Reads GET /nba/flow/games, /game, /books, /books/game and /gap_bands, and
+ * /combos/desk (30 s) on the Lodestar backend. Pin anchors: game:<game> a game row, line:<game>:<line> a
  * market cell, detail:<game>:<line> the open detail, pt:<iso> a point on its
  * chart. An investigation tool: it lays numbers out and never says to bet.
  *
- * Date, phase, source and the open game live on the page, not the Flow tab, so
- * a trip to Positions and back keeps them. When the date is today the games,
+ * Date, phase, source, the open game and the desk's Demo/Live live on the page,
+ * not the tabs, so a trip to Positions and back keeps them. When the date is today the games,
  * the book splits and the open detail refresh every minute.
  */
 
 import { useEffect, useReducer, useRef, useState, type Dispatch } from "react";
 import {
   api,
+  type ComboDeskEnv,
+  type ComboDeskView,
   type NbaFlowBookSeries,
   type NbaFlowBooks,
   type NbaFlowGameDetail,
@@ -31,12 +35,12 @@ import {
   type NbaFlowPhase,
 } from "../api/client";
 import Chip from "../components/trading/Chip";
+import DeskPositions, { type KillState } from "../components/trading/DeskPositions";
 import FlowBoard from "../components/trading/FlowBoard";
 import FlowGameDetail from "../components/trading/FlowGameDetail";
 import type { ChartMode } from "../components/trading/FlowShareChart";
 import FlowSplits from "../components/trading/FlowSplits";
 import Seg from "../components/trading/Seg";
-import Panel from "../components/Panel";
 import Spinner from "../components/Spinner";
 import { usePoll } from "../hooks/usePoll";
 import { useStableData } from "../hooks/useStableData";
@@ -60,6 +64,7 @@ import {
   type FlowSource,
   type SelectionAction,
 } from "../lib/kalshiFlow";
+import { killErrorText } from "../lib/comboDesk";
 import type { ChartRange } from "../lib/kalshiFlowSeries";
 import { T } from "../../../lib/typeScale";
 
@@ -69,6 +74,8 @@ const POLL_MS = 60_000;
 const BOOT_POLL_MS = 3_000;
 /** Last season's gap bands change once a season. */
 const BANDS_POLL_MS = 3_600_000;
+/** The combo desk's refresh cadence. */
+const DESK_POLL_MS = 30_000;
 
 type Tab = "flow" | "positions";
 
@@ -107,21 +114,6 @@ function RetryButton({ onClick }: { onClick: () => void }) {
 
 /** The chart range a phase opens on: the whole game when it is in, else everything before the tip. */
 const defaultRange = (phase: NbaFlowPhase): ChartRange => (phase === "all" ? "all" : "pre");
-
-function SegButton({ on, children, disabled }: { on: boolean; children: string; disabled?: boolean }) {
-  return (
-    <button
-      type="button"
-      role="tab"
-      aria-selected={on}
-      disabled={disabled}
-      className={`rounded-full border px-3 py-0.5 transition-colors disabled:opacity-40 ${on ? "border-accent text-accent" : "border-line text-dim hover:text-text"}`}
-      style={T.label}
-    >
-      {children}
-    </button>
-  );
-}
 
 interface FlowTabProps {
   date: string;
@@ -309,20 +301,50 @@ function FlowTab({ date, phase, source, sort, selection, dispatch, setSort }: Fl
   );
 }
 
-function PositionsTab() {
+/** The Positions tab: polls the combo desk and owns the kill button's state. */
+function PositionsTab({ env, onEnv }: { env: ComboDeskEnv; onEnv: (e: ComboDeskEnv) => void }) {
+  // A kill or unkill bumps this so the desk is read again at once (the view on
+  // screen stays until the new answer lands).
+  const [refresh, setRefresh] = useState(0);
+  const [killState, setKillState] = useState<KillState>("idle");
+  const { data, error } = usePoll<ComboDeskView>(
+    () => api.getComboDesk(env),
+    DESK_POLL_MS,
+    `${env}|${refresh}`,
+    "combo-desk",
+    { bootIntervalMs: BOOT_POLL_MS },
+  );
+  // The last answer for THIS account, held across a refresh and drawn only for the account on screen.
+  const lastRef = useRef<ComboDeskView | null>(null);
+  if (data && data.env === env) lastRef.current = data;
+  const view = data && data.env === env ? data : lastRef.current?.env === env ? lastRef.current : null;
+
+  // A switch of account forgets the other account's confirm or error.
+  useEffect(() => {
+    setKillState("idle");
+  }, [env]);
+
+  const act = (call: (e: ComboDeskEnv) => Promise<unknown>) => {
+    setKillState("busy");
+    call(env).then(
+      () => {
+        setKillState("idle");
+        setRefresh((n) => n + 1);
+      },
+      (e: unknown) => setKillState({ error: killErrorText(String(e)) }),
+    );
+  };
   return (
-    <Panel title="positions">
-      <div className="flex flex-col gap-3">
-        <div className="flex gap-1" role="tablist" aria-label="account (not available yet)">
-          <SegButton on disabled>Demo</SegButton>
-          <SegButton on={false} disabled>Live</SegButton>
-        </div>
-        <p className="text-dim" style={T.bodySm}>
-          The combo-desk positions view (demo and live) is coming - SWIT-129. This tab holds its place so the layout
-          does not move when it lands.
-        </p>
-      </div>
-    </Panel>
+    <DeskPositions
+      view={view}
+      error={error}
+      env={env}
+      onEnv={onEnv}
+      onKill={() => act(api.comboDeskKill)}
+      onUnkill={() => act(api.comboDeskUnkill)}
+      killState={killState}
+      onKillState={setKillState}
+    />
   );
 }
 
@@ -360,6 +382,8 @@ function DateStepper({ date, onDate }: { date: string; onDate: (d: string) => vo
 
 export default function KalshiTrading() {
   const [tab, setTab] = useState<Tab>("flow");
+  // The desk's account lives here too, so Flow -> Positions -> Flow keeps it.
+  const [deskEnv, setDeskEnv] = useState<ComboDeskEnv>("demo");
   // Lifted so Flow -> Positions -> Flow keeps the day, the phase, the source and the open game.
   const [date, setDate] = useState(() => todayEt());
   const [phase, setPhase] = useState<NbaFlowPhase>("pregame");
@@ -384,38 +408,43 @@ export default function KalshiTrading() {
     <div ref={scroller} className="flex h-full min-h-0 flex-col overflow-auto" style={{ padding: "20px 24px 40px" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
         <h1 style={{ ...T.title, margin: 0, color: "var(--text-primary)" }}>Kalshi Trading</h1>
-        <Seg
-          label="sport"
-          value="nba"
-          options={[
-            { key: "nba", label: "NBA" },
-            { key: "nfl", label: "NFL", disabled: true, title: "later" },
-            { key: "props", label: "Props", disabled: true, title: "later" },
-          ]}
-        />
-        <DateStepper
-          date={date}
-          onDate={(d) => {
-            setDate(d);
-            dispatch({ type: "close" });
-          }}
-        />
-        <Seg
-          label="phase"
-          value={phase}
-          onChange={setPhase}
-          options={[
-            { key: "pregame", label: "Before tip" },
-            { key: "all", label: "Whole game" },
-          ]}
-        />
-        <Seg
-          label="source"
-          title={SOURCE_HELP[source]}
-          value={source}
-          onChange={setSource}
-          options={SOURCES.map((s) => ({ key: s.key, label: s.label }))}
-        />
+        {/* The Flow controls belong to the Flow tab; the desk has its own Demo / Live switch. */}
+        {tab === "flow" ? (
+          <>
+            <Seg
+              label="sport"
+              value="nba"
+              options={[
+                { key: "nba", label: "NBA" },
+                { key: "nfl", label: "NFL", disabled: true, title: "later" },
+                { key: "props", label: "Props", disabled: true, title: "later" },
+              ]}
+            />
+            <DateStepper
+              date={date}
+              onDate={(d) => {
+                setDate(d);
+                dispatch({ type: "close" });
+              }}
+            />
+            <Seg
+              label="phase"
+              value={phase}
+              onChange={setPhase}
+              options={[
+                { key: "pregame", label: "Before tip" },
+                { key: "all", label: "Whole game" },
+              ]}
+            />
+            <Seg
+              label="source"
+              title={SOURCE_HELP[source]}
+              value={source}
+              onChange={setSource}
+              options={SOURCES.map((s) => ({ key: s.key, label: s.label }))}
+            />
+          </>
+        ) : null}
         <div style={{ display: "flex", gap: 18, marginLeft: "auto" }} role="tablist" aria-label="view">
           <button type="button" role="tab" aria-selected={tab === "flow"} style={tabStyle(tab === "flow")} onClick={() => setTab("flow")}>
             Flow
@@ -429,7 +458,7 @@ export default function KalshiTrading() {
         <FlowTab date={date} phase={phase} source={source} sort={sort} selection={selection} dispatch={dispatch} setSort={setSort} />
       ) : (
         <div style={{ marginTop: 18 }}>
-          <PositionsTab />
+          <PositionsTab env={deskEnv} onEnv={setDeskEnv} />
         </div>
       )}
     </div>

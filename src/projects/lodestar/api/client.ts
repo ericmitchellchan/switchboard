@@ -1542,6 +1542,13 @@ export const api = {
     ),
   getNbaFlowGapBands: (): Promise<NbaFlowGapBands> =>
     getJson<NbaFlowGapBands>("/nba/flow/gap_bands", { signal: flowTimeout() }),
+  getComboDesk: (env: ComboDeskEnv): Promise<ComboDeskView> =>
+    getJson<ComboDeskView>(`/combos/desk?env=${env}`, { signal: flowTimeout() }),
+  // A 409 carries the reason in `detail` (getJson folds it into the Error text).
+  comboDeskKill: (env: ComboDeskEnv): Promise<ComboDeskKillResult> =>
+    getJson<ComboDeskKillResult>(`/combos/desk/kill?env=${env}`, { method: "POST", signal: flowTimeout() }),
+  comboDeskUnkill: (env: ComboDeskEnv): Promise<ComboDeskKillResult> =>
+    getJson<ComboDeskKillResult>(`/combos/desk/unkill?env=${env}`, { method: "POST", signal: flowTimeout() }),
   getNbaPbp: (ticker: string): Promise<NbaPbp> =>
     getJson<NbaPbp>(`/nba/pbp/${encodeURIComponent(ticker)}`),
   getTennisContext: (ticker: string): Promise<TennisMatchContext> =>
@@ -2074,6 +2081,118 @@ export interface NbaFlowGapBands {
   spread?: number[];
   total?: number[];
 }
+
+/** The combo desk's two Kalshi accounts. */
+export type ComboDeskEnv = "demo" | "live";
+
+/** One leg of a combo position. */
+export interface ComboDeskLeg {
+  market_ticker: string;
+  event_ticker: string;
+  side: string;
+}
+
+/** One combo position: the desk's ledger against what Kalshi reports. Money is
+ *  dollars; the *_ledger / *_kalshi fields are null on the side that lacks it. */
+export interface ComboDeskPosition {
+  market_ticker: string;
+  event_ticker: string;
+  legs: ComboDeskLeg[];
+  label: string;
+  side: "yes" | "no";
+  contracts_ledger: number | null;
+  cost_ledger: number | null;
+  price_ledger: number | null;
+  contracts_kalshi: number | null;
+  cost_kalshi: number | null;
+  fees_kalshi: number | null;
+  status: "open" | "settled" | "ledger_only" | "kalshi_only";
+  result: "yes" | "no" | null;
+  settled_time: string | null;
+  pnl_kalshi: number | null;
+  worst_case: number;
+  agree: boolean;
+  note: string | null;
+}
+
+/** An RFQ the desk has out. */
+export interface ComboDeskRequest {
+  rfq_id: string;
+  market_ticker: string;
+  created_ts: string;
+  target_cost: number | null;
+  contracts: number | null;
+  manual: boolean;
+  accepted_quote: string | null;
+  status: "open" | "accepted";
+}
+
+export interface ComboDeskFill {
+  ts: string;
+  ticker: string;
+  side: string;
+  contracts: number;
+  price: number;
+  cost: number;
+  fee: number | null;
+  in_ledger: boolean;
+}
+
+export interface ComboDeskSettlement {
+  ticker: string;
+  event_ticker: string;
+  result: string;
+  settled_time: string;
+  contracts: number;
+  cost: number;
+  revenue: number;
+  fee: number;
+  pnl: number;
+}
+
+/** Worst-case loss held against one cap, per game or per player. */
+export interface ComboDeskExposureRow {
+  key: string;
+  worst_case: number;
+  cap: number;
+}
+
+export interface ComboDeskExposure {
+  total_open: number;
+  by_game: ComboDeskExposureRow[];
+  by_player: ComboDeskExposureRow[];
+}
+
+/** GET /combos/desk?env=demo|live */
+export interface ComboDeskView {
+  env: ComboDeskEnv;
+  generated_at: string;
+  available: boolean;
+  reason: string | null;
+  kalshi_error: string | null;
+  balance: { dollars: number | null; portfolio_value_dollars: number | null; subaccount: number };
+  health: {
+    killed: boolean;
+    kill_reason: string;
+    pending: number;
+    unmatched: number;
+    unknown_fills: number;
+    errors: number;
+    failed_confirms: number;
+    ledger_events: number;
+    last_event_ts: string | null;
+  };
+  limits: { max_loss_per_quote: number; per_game: number; per_player: number; total_open: number; daily_loss: number };
+  exposure: ComboDeskExposure;
+  positions: ComboDeskPosition[];
+  requests: ComboDeskRequest[];
+  fills: ComboDeskFill[];
+  settlements: ComboDeskSettlement[];
+  pnl: { realized_ledger: number; realized_kalshi: number | null; fees_kalshi: number | null; by_day: Record<string, number> };
+}
+
+/** POST /combos/desk/kill and /unkill answer with the new state (shape not pinned). */
+export type ComboDeskKillResult = Record<string, unknown>;
 
 export interface NbaFlowGameQuery {
   game: string;
