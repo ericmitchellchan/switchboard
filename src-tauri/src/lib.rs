@@ -4,6 +4,7 @@ mod explorer;
 mod ipc_guard;
 mod jobs;
 mod mcp_health;
+mod paste_guard;
 mod user_findings;
 mod kb;
 mod power;
@@ -2412,6 +2413,39 @@ fn close_surface_window(app_handle: tauri::AppHandle, label: String) -> Result<(
     Ok(())
 }
 
+/// Give a Ctrl+V the hotkey caught back to the app in front (paste_guard.rs).
+/// Off the hotkey thread, in order: DROP the grab first — the plugin calls this
+/// handler holding its shortcut lock, and `unregister` takes that lock and
+/// round-trips to the main thread, so it can only run once the handler has
+/// returned — then re-send the keys, which Windows now delivers to the app in
+/// front instead of to us. The main window's next focus registers the grab
+/// again. Every forward is a log line naming the app, the receipt if the grab
+/// is ever seen stuck again.
+#[cfg(windows)]
+fn forward_paste(app: tauri::AppHandle, shortcut: Shortcut, pid: u32) {
+    std::thread::spawn(move || {
+        let name = paste_guard::process_name(pid).unwrap_or_else(|| "?".to_string());
+        if let Err(e) = app.global_shortcut().unregister(shortcut) {
+            // Not registered any more (a blur's debounced unregister got
+            // there first) is fine; anything else, the keys would come
+            // straight back to us, so stop here rather than loop.
+            if app.global_shortcut().is_registered(shortcut) {
+                log::warn!("Paste guard: could not release Ctrl+V for {} (pid {}): {}", name, pid, e);
+                return;
+            }
+        }
+        let steps = paste_guard::forward_keys(paste_guard::ctrl_held());
+        let sent = paste_guard::send_keys(&steps);
+        log::info!(
+            "Paste guard: Ctrl+V caught while {} (pid {}) was in front — grab released, forwarded ({} of {} keys sent)",
+            name,
+            pid,
+            sent,
+            steps.len()
+        );
+    });
+}
+
 /// PNG-encode a clipboard image off the hotkey thread and emit it as
 /// `clipboard-paste-image` `{ dataBase64, byteLength }`. The frontend stages it
 /// for the FOCUSED composer only (App.tsx); anywhere else it is dropped, as an
@@ -2499,8 +2533,19 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
+                .with_handler(|app, shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
+                        // THE PASTE GUARD (paste_guard.rs): a Ctrl+V caught
+                        // while ANOTHER app is in front was never ours — a
+                        // missed blur left the grab on. Hand it to that app.
+                        #[cfg(windows)]
+                        if let paste_guard::PasteTarget::Other(pid) = paste_guard::paste_target(
+                            paste_guard::foreground_pid(),
+                            std::process::id(),
+                        ) {
+                            forward_paste(app.clone(), *shortcut, pid);
+                            return;
+                        }
                         if let Ok(text) = app.clipboard().read_text() {
                             if !text.is_empty() {
                                 log::debug!("Clipboard paste triggered, content length={}", text.len());

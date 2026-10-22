@@ -53,4 +53,7 @@ windows-sys = { version = "0.59", features = [
   # CreateProcessW for the detached job supervisor (src/jobs.rs, SWIT-109) —
   # its signature names SECURITY_ATTRIBUTES, which lives behind this feature.
   "Win32_Security",
+  # GetAsyncKeyState + SendInput: the paste guard (src/paste_guard.rs) re-sends
+  # a Ctrl+V the global hotkey caught while another app was in front.
+  "Win32_UI_Input_KeyboardAndMouse",
 ] }
