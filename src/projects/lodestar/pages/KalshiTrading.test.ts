@@ -25,10 +25,10 @@ import type {
   NbaFlowTimelineRow,
 } from "../api/client";
 import { biggestSplits, selectionReducer, type FlowSource } from "../lib/kalshiFlow";
-import FlowBoard from "../components/trading/FlowBoard";
+import FlowBoard, { boardLegend } from "../components/trading/FlowBoard";
 import FlowGameDetail, { type FlowGameDetailProps } from "../components/trading/FlowGameDetail";
-import { FlowChartSvg } from "../components/trading/FlowShareChart";
-import { SplitRow } from "../components/trading/SplitBars";
+import { FlowChartSvg, readoutFor } from "../components/trading/FlowShareChart";
+import { SplitBar, SplitRow } from "../components/trading/SplitBars";
 import type { SharePoint } from "../lib/kalshiFlowSeries";
 import FlowSplits from "../components/trading/FlowSplits";
 import KalshiTrading, { loadFlowDetail } from "./KalshiTrading";
@@ -126,7 +126,7 @@ describe("the board", () => {
     expect(t).toContain("MIA");
     expect(t).toContain("101");
     expect(t).toContain("108");
-    expect(t).toContain("final · tip 7:30 PM");
+    expect(t).toContain("Final · tip 7:30 PM");
     for (const s of ["MIN", "MIA", "MIN +4.5", "MIA -4.5"]) expect(out).toContain(`data-side="${s}"`);
     expect(t).toContain("73%");
     expect(t).toContain("78%");
@@ -163,10 +163,10 @@ describe("the board", () => {
 
   it("an empty market folds to one line and is not a button", () => {
     const all = html(createElement(FlowBoard, boardProps()));
-    expect(text(all)).toContain("no bets recorded");
+    expect(text(all)).toContain("No bets recorded");
     expect(all).not.toContain('data-anchor="line:26OCT21MINMIA:total"');
     const pre = html(createElement(FlowBoard, boardProps({ phase: "pregame" })));
-    expect(text(pre)).toContain("no bets before the tip");
+    expect(text(pre)).toContain("No bets before the tip");
   });
 
   it("gives every number its meaning for a screen reader, and nests no interactive role", () => {
@@ -182,9 +182,9 @@ describe("the board", () => {
   });
 
   it("shows the outage chip only above 0.2", () => {
-    expect(html(createElement(FlowBoard, boardProps()))).not.toContain("handle incomplete (capture outage)");
+    expect(html(createElement(FlowBoard, boardProps()))).not.toContain("Handle incomplete (capture outage)");
     const high = html(createElement(FlowBoard, boardProps({ games: [{ ...GAME, price_zero_share: 0.35 }] })));
-    expect(high).toContain("handle incomplete (capture outage)");
+    expect(high).toContain("Handle incomplete (capture outage)");
   });
 
   it("clicking a row, or a cell, reports the game and the line; the cell does not also open the row", () => {
@@ -233,7 +233,7 @@ describe("the board", () => {
     it("Both draws the plain average, says so, and draws no ticks", () => {
       const out = withBooks("both");
       expect(out).toContain('data-drawn="avg"');
-      expect(text(out)).toContain("avg of Kalshi + DK");
+      expect(text(out)).toContain("Avg of Kalshi + DK");
       expect(out).not.toContain("data-tick=");
       // MIN bets (73 + 40) / 2 = 56.5, money (22 + 9) / 2 = 15.5; MIA bets 43.5, money 84.5
       const t = text(out);
@@ -258,7 +258,7 @@ describe("the board", () => {
     const t = text(out);
     expect(out).toContain('data-drawn="dk"');
     expect(t).toContain("DraftKings only");
-    expect(t).toContain("no dollar figures");
+    expect(t).toContain("No dollar figures");
     expect(t).toContain("40%");
     expect(t).toContain("91%");
     expect(t).not.toMatch(/\d¢/); // no price: DraftKings has none
@@ -326,7 +326,7 @@ describe("biggest splits", () => {
     expect(t).toContain("MIN @ MIA");
     expect(t).toContain("+51 pts · $18.2k · 412 bets");
     expect(out).toContain('data-tick="'); // DraftKings' share on the featured side's own scale
-    expect(t).toMatch(/won|lost/);
+    expect(t).toMatch(/Won|Lost/);
   });
 
   it("DraftKings mode ranks DraftKings shares with no dollar gate and labels it so", () => {
@@ -353,7 +353,7 @@ describe("biggest splits", () => {
 
   it("an empty strip folds to one line, and a click opens the game on that line", () => {
     expect(text(html(createElement(FlowSplits, { entries: [], source: "kalshi", phase: "all", onOpen: () => {} })))).toContain(
-      "no line has money ahead of its bets yet",
+      "No line has money ahead of its bets yet",
     );
     const onOpen = vi.fn();
     const tree = expand(FlowSplits({ entries, source: "kalshi", phase: "all", onOpen }));
@@ -494,7 +494,7 @@ describe("game detail", () => {
     expect(t).toContain("MIN @ MIA");
     expect(t).toContain("final 101–108");
     expect(t).toContain("tip Wed 7:30 PM ET");
-    expect(t).toContain("handle incomplete (capture outage)");
+    expect(t).toContain("Handle incomplete (capture outage)");
     for (const h of ["Money vs bets over time", "When the money came in", "Who bet what size", "$1k+ bets"]) expect(t).toContain(h);
     expect(t).toContain("Moneyline");
     expect(t).toContain("Spread");
@@ -517,8 +517,8 @@ describe("game detail", () => {
     const out = detail();
     expect(text(out)).toContain("DraftKings 45% bets · 30% money"); // MIN +2.5 against Kalshi's MIN +4.5
     expect(text(out)).toContain("DraftKings 55% bets · 70% money");
-    expect(detail({ book: undefined })).toContain("no DraftKings split");
-    expect(text(detail({ book: undefined }))).toContain("no DraftKings split");
+    expect(detail({ book: undefined })).toContain("No DraftKings split");
+    expect(text(detail({ book: undefined }))).toContain("No DraftKings split");
   });
 
   it("a wide gap that holds without the big bets reads as broad money, against last season", () => {
@@ -633,7 +633,7 @@ describe("game detail", () => {
       bookSeries: series,
     });
     const t = text(out);
-    expect(t).toContain("no Kalshi bets on this line");
+    expect(t).toContain("No Kalshi bets on this line");
     expect(t).not.toContain("so there is no dollar figure"); // no narration: one short line
     expect(out).not.toContain('data-seg="totals"'); // no totals view without Kalshi dollars
     expect(t).toContain("40% of bets · DraftKings");
@@ -642,7 +642,7 @@ describe("game detail", () => {
     expect(t).not.toContain("Who bet what size");
     expect(t).not.toContain("Gap ");
     expect(t).toContain("DK money on MIN"); // the legend is the DraftKings one
-    expect(t).not.toContain("gap without $1k+ bets");
+    expect(t).not.toContain("Gap without $1k+ bets");
     expect(out).not.toContain('data-rail="big-bets"');
     expect(out).toContain('data-series="dk-money"');
   });
@@ -650,7 +650,7 @@ describe("game detail", () => {
   it("only the main rung says who won: another rung hides the result", () => {
     const main = detail();
     expect(text(main)).toContain("Result: MIN +4.5");
-    expect(text(main)).toMatch(/MIN \+4\.5 won/);
+    expect(text(main)).toMatch(/MIN \+4\.5 Won/);
     const other = detail({ detail: detailOf({ rung: "MIA6", rung_label: "MIA -5.5" }), selection: { game: GAME.game, line: "spread", rung: "MIA6" } });
     expect(text(other)).not.toContain("Result:");
     expect(text(other)).not.toMatch(/won/);
@@ -673,7 +673,7 @@ describe("game detail", () => {
     const out = text(detail({ game: noTip, detail: detailOf({ tip_utc: null }) }));
     expect(out).toContain("tip time unknown");
     expect(out).not.toContain("tip unknown");
-    expect(out.match(/tip time unknown/g)!.length).toBe(2); // the head and the when-table
+    expect(out.match(/tip time unknown/gi)!.length).toBe(2); // the head and the when-table
     const board = text(html(createElement(FlowBoard, boardProps({ games: [noTip] }))));
     expect(board).toContain("tip time unknown");
     expect(board).not.toContain("tip tip");
@@ -691,16 +691,16 @@ describe("game detail", () => {
     // the last bet was long before the six-hour window
     const stale = detailOf({ timeline: timeline(["MIN +4.5", "MIA -4.5"]).slice(0, 10) }); // ends ~21:15Z; tip 23:30Z
     const out = detail({ detail: { ...stale, tip_utc: "2026-10-22T20:00:00Z" }, range: "6h", game: { ...GAME, tip_utc: "2026-10-22T20:00:00Z" } });
-    expect(text(out)).toContain("no bets in this range");
+    expect(text(out)).toContain("No bets in this range");
     expect(out).not.toContain("<svg");
   });
 
   it("totals mode draws cumulative dollars per side and no gap strip", () => {
     const out = detail({ mode: "totals" });
     expect(out).toContain('data-chart="totals"');
-    expect(text(out)).toContain("bets, dashed (right scale)");
-    expect(text(out)).not.toContain("gap: money share minus bet share");
-    expect(text(detail())).toContain("gap: money share minus bet share");
+    expect(text(out)).toContain("Bets, dashed (right scale)");
+    expect(text(out)).not.toContain("Gap: money share minus bet share");
+    expect(text(detail())).toContain("Gap: money share minus bet share");
   });
 
   it("shows the rung the answer is for, even when it is not the one asked for", () => {
@@ -723,7 +723,7 @@ describe("game detail", () => {
     const out = detail({ selection: { game: GAME.game, line: "total", rung: null }, detail: null, previous: null });
     expect(text(out)).toContain("Spread");
     expect(out).not.toContain("<select");
-    expect(text(out)).toContain("loading game flow");
+    expect(text(out)).toContain("Loading game flow");
   });
 
   it("orders the sides away-first from the game code when the slate row is not there", () => {
@@ -819,7 +819,7 @@ describe("the chart on its own", () => {
         bigBets: [], dk: [], showPrice: false, bands: null, tipMs: t0 + 60 * 60_000, bucketMin: 15, width: 900,
       }),
     );
-    const ys = ["money 51%", "bets 50%"].map((label) => {
+    const ys = ["Money 51%", "Bets 50%"].map((label) => {
       const m = new RegExp(`<text x="([\\d.]+)" y="([\\d.]+)"[^>]*>${label}</text>`).exec(svg);
       expect(m).not.toBeNull();
       expect(Number(m![1])).toBeGreaterThan(900 - 86); // right of the plot
@@ -837,6 +837,211 @@ describe("the chart on its own", () => {
     );
     expect(svg).toContain("Nothing to draw yet");
     expect(svg).not.toContain("data-anchor=");
+  });
+});
+
+describe("reading the board (SWIT-135)", () => {
+  const board = (source: FlowSource) => html(createElement(FlowBoard, boardProps({ books: BOOKS, source })));
+
+  it("one legend line under the column heads says what the bar and the white tick are, per source", () => {
+    expect(boardLegend("kalshi")).toBe("Bar: share of Kalshi bets (faded) and money (solid), left side from the left \u00b7 white tick: DraftKings' share");
+    expect(boardLegend("dk")).toBe("Bar: DraftKings' shares \u00b7 white tick: Kalshi's share");
+    // the average draws no tick (a tick is only ever the OTHER source), so the line does not promise one
+    expect(boardLegend("both")).toBe("Bar: average of Kalshi and DraftKings");
+    for (const src of ["kalshi", "dk", "both"] as const) {
+      const out = board(src);
+      expect(out.match(/data-board-legend/g)).toHaveLength(1);
+      expect(text(out)).toContain(boardLegend(src).replace(/'/g, "&#x27;"));
+    }
+  });
+
+  it("each bar carries a tooltip with both sources' numbers", () => {
+    const k = board("kalshi");
+    expect(k).toContain('title="Kalshi 73% / 27% \u00b7 DraftKings 40% / 60%"'); // MIN's bets
+    expect(k).toContain('title="Kalshi 22% / 78% \u00b7 DraftKings 9% / 91%"'); // MIN's money
+    const d = board("dk");
+    expect(d).toContain('title="DraftKings 40% / 60% \u00b7 Kalshi 73% / 27%"');
+    // the average has no tick: one source named, no second half
+    expect(board("both")).toContain('title="Average of Kalshi and DraftKings 57% / 43%"');
+    // a lone source says only itself
+    expect(html(createElement(FlowBoard, boardProps({ books: null })))).toContain('title="Kalshi 73% / 27%"');
+    expect(html(createElement(SplitBar, { a: 61, tick: 58, title: "Kalshi 61% / 39% \u00b7 DraftKings 58% / 42%" }))).toContain(
+      'title="Kalshi 61% / 39% \u00b7 DraftKings 58% / 42%"',
+    );
+  });
+
+  it("the two sides are divided by a 3px gap, not a stray 2px line", () => {
+    const out = html(createElement(SplitBar, { a: 40 }));
+    expect(out).toContain("gap:3px");
+    expect(out).not.toContain("gap:2px");
+  });
+
+  it("labels are sentence case: sort options, column heads, bar rows, status words", () => {
+    const out = board("kalshi");
+    const t = text(out);
+    expect(t).toContain("Sort Tip Handle Gap");
+    expect(t).toContain("Moneyline Spread Total");
+    expect(t).toContain("Bets 73%");
+    expect(t).toContain("Money 22%");
+    expect(out).not.toContain("text-transform:uppercase");
+    expect(out).toContain('data-seg="tip"');
+    const live = text(html(createElement(FlowBoard, boardProps({ games: [{ ...GAME, status: "live" }] }))));
+    expect(live).toContain("Live · tip 7:30 PM");
+    const sched = text(html(createElement(FlowBoard, boardProps({ games: [{ ...GAME, status: "scheduled" }] }))));
+    expect(sched).toContain("Tip 7:30 PM");
+  });
+
+  it("the three markets sit in columns: a faint rule left of the second and third, and roomier rows", () => {
+    const out = board("kalshi");
+    // two column heads and two cells carry the rule (the first market has none)
+    expect(out.match(/border-left:1px solid var\(--border\)/g)).toHaveLength(4);
+    expect(out).toContain("padding-left:14px");
+    expect(out).toContain("padding:18px 12px");
+    expect(out).toContain("column-gap:36px");
+    // the click target and the pin anchors are unchanged
+    expect(out).toContain('data-anchor="game:26OCT21MINMIA"');
+    expect(out).toContain('data-anchor="line:26OCT21MINMIA:spread"');
+  });
+
+  it("the biggest-splits strip is roomier: 32px between entries, 20px above and 30px below", () => {
+    const out = html(createElement(FlowSplits, { entries: biggestSplits([GAME], BOOKS, "kalshi"), source: "kalshi", phase: "all", onOpen: () => {} }));
+    expect(out).toContain("gap:32px");
+    expect(out).toContain("margin:20px 0 30px");
+    expect(text(out)).toContain("Money share minus bet share");
+  });
+});
+
+describe("the chart cursor (SWIT-135)", () => {
+  const t0 = Date.parse("2026-10-21T10:00:00Z");
+  const MIN15 = 15 * 60_000;
+  const pt = (k: number, gap: number): SharePoint => ({ t: t0 + k * MIN15, ha: 1_200, hb: 800, na: 20, nb: 20, mA: 50 + gap, bA: 50, gap, exGap: gap, px: 72 });
+  const pts = [pt(1, 4), pt(2, 7), pt(3, -3), pt(4, 12)];
+  const base = {
+    mode: "share" as const, points: pts, window: { t0, t1: t0 + 4 * MIN15 }, a: "MIN +4.5", b: "MIA -4.5", bigBets: [],
+    dk: [{ t: t0 + 2 * MIN15 - 60_000, money: 58, bets: 47 }], showPrice: true, bands: BANDS.all, tipMs: t0 + 4 * MIN15, bucketMin: 15, width: 900,
+  };
+  const svg = (o: Record<string, unknown> = {}) => html(createElement(FlowChartSvg, { ...base, ...o } as never));
+
+  it("lists, in the legend's order, the time, money, bets, gap, price and DraftKings", () => {
+    const r = readoutFor({ mode: "share", q: pts[1], a: "MIN +4.5", b: "MIA -4.5", showPrice: true, dk: base.dk[0], day: false });
+    expect(r.title).toBe("6:30 AM");
+    expect(r.rows.map((x) => [x.label, x.value])).toEqual([
+      ["Money MIN +4.5", "57%"],
+      ["Bets MIN +4.5", "50%"],
+      ["Gap", "+7"],
+      ["Price", "72\u00a2"],
+      ["DraftKings money", "58%"],
+    ]);
+    // no price when the price line is off, no DraftKings when no snapshot sits in the bucket
+    const bare = readoutFor({ mode: "share", q: pts[2], a: "MIN +4.5", b: "MIA -4.5", showPrice: false, dk: null, day: true });
+    expect(bare.title).toBe("Wed 6:45 AM");
+    expect(bare.rows.map((x) => x.label)).toEqual(["Money MIN +4.5", "Bets MIN +4.5", "Gap"]);
+    expect(bare.rows[2].value).toBe("-3");
+  });
+
+  it("totals mode lists each side's cumulative dollars and bets", () => {
+    const r = readoutFor({ mode: "totals", q: pts[0], a: "MIN +4.5", b: "MIA -4.5", showPrice: true, dk: null, day: false });
+    expect(r.rows.map((x) => [x.label, x.value])).toEqual([
+      ["MIN +4.5 money", "$1.2k"],
+      ["MIN +4.5 bets", "20"],
+      ["MIA -4.5 money", "$800"],
+      ["MIA -4.5 bets", "20"],
+    ]);
+  });
+
+  it("draws nothing until the cursor is placed, then a hairline, a dot per series and the readout", () => {
+    expect(svg()).not.toContain("data-crosshair");
+    expect(svg({ cursorT: 12345 })).not.toContain("data-crosshair"); // not a plotted point: nothing
+    const on = svg({ cursorT: pts[1].t });
+    expect(on).toContain(`data-crosshair="${pts[1].t}"`);
+    expect(on).toContain("data-readout");
+    const t = text(on);
+    for (const w of ["6:30 AM", "Money MIN +4.5 57%", "Bets MIN +4.5 50%", "Gap +7", "Price 72", "DraftKings money 58%"]) expect(t).toContain(w);
+    // the layer lets clicks through and sits after (above) the pin columns
+    const g = on.slice(on.indexOf("data-crosshair"));
+    expect(g).toContain('pointer-events="none"');
+    expect(on.indexOf('data-anchor="pt:')).toBeLessThan(on.indexOf("data-crosshair"));
+    // 1px hairline in dim ink
+    expect(on).toMatch(/<line[^>]*stroke="var\(--text-dim\)"[^>]*stroke-width="1"/);
+  });
+
+  it("totals mode puts a dot on all four series and no gap row", () => {
+    const on = svg({ mode: "totals", cursorT: pts[0].t });
+    expect((on.slice(on.indexOf("data-crosshair")).match(/<circle[^>]*r="(3|3\.5)"/g) ?? [])).toHaveLength(4);
+    expect(text(on)).toContain("MIN +4.5 money $1.2k");
+    expect(text(on)).not.toContain("Gap +");
+  });
+
+  it("flips to the left of the cursor near the right edge", () => {
+    const panelX = (o: Record<string, unknown>) => {
+      const out = svg(o);
+      const cx = Number(/<g data-crosshair[^>]*><line x1="([\d.]+)"/.exec(out)![1]);
+      const px = Number(/<rect x="([\d.]+)"[^>]*rx="4"/.exec(out)![1]);
+      return { cx, px };
+    };
+    const early = panelX({ cursorT: pts[0].t });
+    expect(early.px).toBeGreaterThan(early.cx);
+    const late = panelX({ cursorT: pts[3].t });
+    expect(late.px).toBeLessThan(late.cx);
+  });
+
+  it("the chart is focusable with a label that says the readout is there; without a handler it is a plain image", () => {
+    const live = svg({ onCursor: () => {} });
+    expect(live).toContain('tabindex="0"');
+    expect(live).toMatch(/aria-label="[^"]*arrow keys[^"]*readout/);
+    const plain = svg();
+    expect(plain).not.toContain("tabindex");
+    expect(plain).not.toContain("arrow keys");
+    // nothing to draw: no readout promised
+    expect(svg({ points: [], dk: [], onCursor: () => {} })).not.toContain("arrow keys");
+  });
+
+  it("the arrow keys step the cursor one point and Escape hides it", () => {
+    const calls: (number | null)[] = [];
+    const tree = FlowChartSvg({ ...base, cursorT: pts[1].t, onCursor: (t: number | null) => calls.push(t) } as never);
+    const onKeyDown = (tree as ReactElement<Record<string, unknown>>).props.onKeyDown as (e: { key: string; preventDefault(): void }) => void;
+    const key = (k: string) => onKeyDown({ key: k, preventDefault: () => {} });
+    key("ArrowRight");
+    key("ArrowLeft");
+    key("Escape");
+    key("a");
+    expect(calls).toEqual([pts[2].t, pts[0].t, null]);
+    // from nothing: Left lands on the last point, Right on the first; the ends hold
+    const none: (number | null)[] = [];
+    const fresh = FlowChartSvg({ ...base, cursorT: null, onCursor: (t: number | null) => none.push(t) } as never);
+    const k2 = (fresh as ReactElement<Record<string, unknown>>).props.onKeyDown as (e: { key: string; preventDefault(): void }) => void;
+    k2({ key: "ArrowLeft", preventDefault: () => {} });
+    k2({ key: "ArrowRight", preventDefault: () => {} });
+    expect(none).toEqual([pts[3].t, pts[0].t]);
+    const end: (number | null)[] = [];
+    const last = FlowChartSvg({ ...base, cursorT: pts[3].t, onCursor: (t: number | null) => end.push(t) } as never);
+    ((last as ReactElement<Record<string, unknown>>).props.onKeyDown as (e: { key: string; preventDefault(): void }) => void)({ key: "ArrowRight", preventDefault: () => {} });
+    expect(end).toEqual([pts[3].t]);
+  });
+
+  it("a pointer over the plot snaps to the nearest point; the gutter and leaving hide it; a touch lift keeps it", () => {
+    const calls: (number | null)[] = [];
+    const tree = FlowChartSvg({ ...base, onCursor: (t: number | null) => calls.push(t) } as never) as ReactElement<Record<string, unknown>>;
+    const move = tree.props.onPointerMove as (e: unknown) => void;
+    // plot runs 52..814 over four 15-minute steps; point k sits at 52 + k/4 * 762 (the window opens at t0)
+    const at = (clientX: number) => ({ clientX, currentTarget: { getBoundingClientRect: () => ({ left: 0, width: 900 }) } });
+    move(at(52 + 0.5 * 762 + 10)); // just right of point 2
+    move(at(52 + 0.25 * 762 - 20)); // just left of point 1
+    move(at(10)); // the left gutter: hidden
+    move(at(880)); // the right gutter: hidden
+    expect(calls).toEqual([pts[1].t, pts[0].t, null, null]);
+    // the same pointer on a page scaled to half width reads the same point
+    const scaled = (clientX: number) => ({ clientX, currentTarget: { getBoundingClientRect: () => ({ left: 0, width: 450 }) } });
+    calls.length = 0;
+    move(scaled((52 + 0.5 * 762 + 10) / 2));
+    expect(calls).toEqual([pts[1].t]);
+    const leave = tree.props.onPointerLeave as (e: { pointerType: string }) => void;
+    calls.length = 0;
+    leave({ pointerType: "mouse" });
+    leave({ pointerType: "touch" });
+    expect(calls).toEqual([null]);
+    (tree.props.onPointerDown as (e: unknown) => void)(at(52 + 0.75 * 762 + 5));
+    expect(calls).toEqual([null, pts[2].t]);
   });
 });
 
@@ -862,6 +1067,6 @@ describe("the page", () => {
     expect(out).toMatch(/aria-pressed="true"[^>]*data-seg="kalshi"/);
     expect(out).toMatch(/aria-pressed="true"[^>]*data-seg="pregame"/);
     // the Flow tab loads before it draws
-    expect(t).toContain("loading NBA flow");
+    expect(t).toContain("Loading NBA flow");
   });
 });

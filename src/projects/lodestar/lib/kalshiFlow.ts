@@ -37,7 +37,7 @@ export const LINE_LABEL: Readonly<Record<NbaFlowLineKey, string>> = {
 
 /** Above this share of zero-priced trades the handle is understated. */
 export const OUTAGE_SHARE = 0.2;
-export const OUTAGE_CHIP = "handle incomplete (capture outage)";
+export const OUTAGE_CHIP = "Handle incomplete (capture outage)";
 
 /** A side leans when its share of money beats its share of bets by this many points. */
 export const LEAN_POINTS = 10;
@@ -371,7 +371,7 @@ export function buildCell(
   const note =
     dkMismatch ??
     (drawn === "avg"
-      ? "avg of Kalshi + DK"
+      ? "Avg of Kalshi + DK"
       : source === "both" || drawn !== asked
         ? drawn === "kalshi"
           ? "Kalshi only"

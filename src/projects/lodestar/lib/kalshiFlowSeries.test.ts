@@ -4,11 +4,13 @@ import { describe, it, expect } from "vitest";
 import type { NbaFlowBookSeries, NbaFlowTimelineRow } from "../api/client";
 import {
   MIN_BETS_TO_PLOT,
+  bookInBucket,
   bookPoints,
   bookWindow,
   buildSharePoints,
   chartWindow,
   gapAxisMax,
+  nearestIndex,
   pointsIn,
   ticksNeedDay,
   timeTicks,
@@ -195,5 +197,42 @@ describe("DraftKings snapshots", () => {
     expect(bookWindow(p, TIP)).toEqual({ t0: p[0].t - 15 * MIN, t1: TIP });
     expect(bookWindow(p, Date.parse("2026-10-21T16:30:00Z"))!.t1).toBe(p[1].t + 15 * MIN);
     expect(bookWindow([], TIP)).toBeNull();
+  });
+});
+
+describe("the chart cursor's point picking", () => {
+  const xs = [100, 140, 180, 400];
+
+  it("picks the plotted point nearest the pointer", () => {
+    expect(nearestIndex(xs, 100)).toBe(0);
+    expect(nearestIndex(xs, 118)).toBe(0);
+    expect(nearestIndex(xs, 122)).toBe(1);
+    expect(nearestIndex(xs, 300)).toBe(3);
+    expect(nearestIndex(xs, 250)).toBe(2); // 70 from 180, 150 from 400
+  });
+
+  it("clamps to the ends and sends a tie to the earlier point", () => {
+    expect(nearestIndex(xs, -50)).toBe(0);
+    expect(nearestIndex(xs, 9_999)).toBe(3);
+    expect(nearestIndex(xs, 120)).toBe(0); // exactly between 100 and 140
+  });
+
+  it("says -1 for nothing to pick or a pointer that is not a number", () => {
+    expect(nearestIndex([], 10)).toBe(-1);
+    expect(nearestIndex(xs, NaN)).toBe(-1);
+  });
+
+  it("finds DraftKings' latest snapshot inside a bucket, and nothing outside it", () => {
+    const dk = [
+      { t: 1_000, money: 40, bets: 50 },
+      { t: 1_800, money: 44, bets: 51 },
+      { t: 3_000, money: 48, bets: 52 },
+    ];
+    expect(bookInBucket(dk, 2_000, 1_000)?.money).toBe(44); // (1000, 2000]: the 1800 snapshot, not the one AT 1000
+    expect(bookInBucket(dk, 1_000, 1_000)?.money).toBe(40); // closed at its end
+    expect(bookInBucket(dk, 900, 1_000)).toBeNull();
+    expect(bookInBucket(dk, 3_000, 1_000)?.money).toBe(48);
+    expect(bookInBucket(dk, 2_500, 400)).toBeNull();
+    expect(bookInBucket([], 2_000, 1_000)).toBeNull();
   });
 });

@@ -107,7 +107,7 @@ function RetryButton({ onClick }: { onClick: () => void }) {
       onClick={onClick}
       style={{ ...T.bodySm, background: "transparent", border: 0, padding: 0, marginLeft: 8, cursor: "pointer", color: "var(--accent)" }}
     >
-      retry
+      Retry
     </button>
   );
 }
@@ -255,7 +255,7 @@ function FlowTab({ date, phase, source, sort, selection, dispatch, setSort }: Fl
     <div>
       {books && books.games.length === 0 && source !== "kalshi" ? (
         <div style={{ ...T.bodySm, color: "var(--text-dim)", marginTop: 14 }}>
-          no DraftKings splits recorded for this day - showing Kalshi only
+          No DraftKings splits recorded for this day - showing Kalshi only
         </div>
       ) : null}
       {booksError && !books ? (
@@ -270,10 +270,10 @@ function FlowTab({ date, phase, source, sort, selection, dispatch, setSort }: Fl
           <RetryButton onClick={again} />
         </div>
       ) : slate == null ? (
-        <div className="p-6"><Spinner label="loading NBA flow…" /></div>
+        <div className="p-6"><Spinner label="Loading NBA flow…" /></div>
       ) : slate.games.length === 0 ? (
         <div style={{ ...T.bodySm, color: "var(--text-dim)", marginTop: 14 }}>
-          no NBA games on tape for {slate.date}
+          No NBA games on tape for {slate.date}
         </div>
       ) : (
         <>
@@ -373,7 +373,7 @@ function DateStepper({ date, onDate }: { date: string; onDate: (d: string) => vo
       </button>
       {date !== today ? (
         <button type="button" style={{ ...T.bodySm, background: "transparent", border: 0, padding: 0, cursor: "pointer", color: "var(--accent)" }} onClick={() => onDate(today)}>
-          today
+          Today
         </button>
       ) : null}
     </div>

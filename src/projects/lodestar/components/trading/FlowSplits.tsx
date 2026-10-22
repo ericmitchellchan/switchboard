@@ -26,7 +26,7 @@ export function splitsMeta(source: FlowSource, phase: NbaFlowPhase): string {
     source === "dk"
       ? "DraftKings shares, no dollar gate"
       : `Kalshi lines with ${fmtMoney(SPLITS_MIN_HANDLE)}+ · ${source === "both" ? "avg of Kalshi + DK" : "Kalshi"}`;
-  return `money share minus bet share · ${what} · ${phase === "pregame" ? "before tip" : "whole game"}`;
+  return `Money share minus bet share · ${what} · ${phase === "pregame" ? "before tip" : "whole game"}`;
 }
 
 function Entry({ e, onOpen }: { e: SplitEntry; onOpen: (g: NbaFlowGame, line: NbaFlowLineKey) => void }) {
@@ -34,7 +34,7 @@ function Entry({ e, onOpen }: { e: SplitEntry; onOpen: (g: NbaFlowGame, line: Nb
   const tone = side === cell.a ? "a" : "b";
   // a tick is stored as the LEFT side's share; the strip draws the featured side's
   const shareOf = (leftShare: number) => (tone === "a" ? leftShare : 100 - leftShare);
-  const res = cell.result ? (cell.result === side.side ? "won" : cell.result === "push" ? "push" : "lost") : null;
+  const res = cell.result ? (cell.result === side.side ? "Won" : cell.result === "push" ? "Push" : "Lost") : null;
   const foot =
     cell.bets != null && cell.handle != null
       ? `+${Math.round(e.gap)} pts · ${fmtMoney(cell.handle)} · ${fmtBets(cell.bets)}`
@@ -69,13 +69,13 @@ function Entry({ e, onOpen }: { e: SplitEntry; onOpen: (g: NbaFlowGame, line: Nb
           ) : null}
         </span>
         {res ? (
-          <span style={{ ...T.label, fontWeight: 400, letterSpacing: "normal", color: res === "won" ? "var(--up)" : "var(--text-dim)" }}>
+          <span style={{ ...T.label, fontWeight: 400, letterSpacing: "normal", color: res === "Won" ? "var(--up)" : "var(--text-dim)" }}>
             {res}
           </span>
         ) : null}
       </div>
-      <ShareRow label="bets" pct={side.betsPct} tone={tone} faded tick={side.tickBetsPct != null ? shareOf(side.tickBetsPct) : null} />
-      <ShareRow label="money" pct={side.moneyPct} tone={tone} tick={side.tickMoneyPct != null ? shareOf(side.tickMoneyPct) : null} />
+      <ShareRow label="Bets" pct={side.betsPct} tone={tone} faded tick={side.tickBetsPct != null ? shareOf(side.tickBetsPct) : null} />
+      <ShareRow label="Money" pct={side.moneyPct} tone={tone} tick={side.tickMoneyPct != null ? shareOf(side.tickMoneyPct) : null} />
       <div style={{ ...T.label, fontWeight: 400, letterSpacing: "normal", color: "var(--text-dim)", marginTop: 5 }}>{foot}</div>
     </div>
   );
@@ -93,7 +93,7 @@ export default function FlowSplits({
   onOpen: (g: NbaFlowGame, line: NbaFlowLineKey) => void;
 }) {
   return (
-    <section aria-label="biggest splits" style={{ margin: "18px 0 26px" }}>
+    <section aria-label="biggest splits" style={{ margin: "20px 0 30px" }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
         <h3 style={{ ...T.heading, margin: 0, color: "var(--text-primary)" }}>Biggest splits</h3>
         <span style={{ ...T.label, fontWeight: 400, letterSpacing: "normal", color: "var(--text-dim)" }}>
@@ -102,10 +102,10 @@ export default function FlowSplits({
       </div>
       {entries.length === 0 ? (
         <div style={{ ...T.bodySm, color: "var(--text-faint)", marginTop: 10 }}>
-          no line has money ahead of its bets yet
+          No line has money ahead of its bets yet
         </div>
       ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0,1fr))", gap: 28, marginTop: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0,1fr))", gap: 32, marginTop: 14 }}>
           {entries.map((e) => (
             <Entry key={`${e.game.game}:${e.line}`} e={e} onOpen={onOpen} />
           ))}

@@ -111,9 +111,9 @@ export function buildSharePoints(
 export type ChartRange = "6h" | "pre" | "all";
 
 export const RANGE_LABEL: Readonly<Record<ChartRange, string>> = {
-  "6h": "last 6h",
-  pre: "all before tip",
-  all: "whole game",
+  "6h": "Last 6h",
+  pre: "All before tip",
+  all: "Whole game",
 };
 
 export interface ChartWindow {
@@ -146,6 +146,25 @@ export function chartWindow(
 /** The points in view. */
 export function pointsIn(points: readonly SharePoint[], w: ChartWindow): SharePoint[] {
   return points.filter((p) => p.t >= w.t0 && p.t <= w.t1);
+}
+
+/**
+ * The index of the value in `xs` (ascending x positions) closest to `x`: the
+ * point the chart's cursor snaps to. A tie goes to the earlier point; -1 when
+ * there is nothing to pick.
+ */
+export function nearestIndex(xs: readonly number[], x: number): number {
+  if (xs.length === 0 || !Number.isFinite(x)) return -1;
+  let best = 0;
+  let bestD = Math.abs(xs[0] - x);
+  for (let i = 1; i < xs.length; i++) {
+    const d = Math.abs(xs[i] - x);
+    if (d < bestD) {
+      best = i;
+      bestD = d;
+    }
+  }
+  return best;
 }
 
 /** Tick times for an axis over [t0, t1]: every 12h, 3h, 1h or 30 min by span. */
@@ -205,4 +224,11 @@ export function bookWindow(points: readonly BookPoint[], tipMs: number): ChartWi
   const pad = BUCKET_MIN * 60_000;
   const last = points[points.length - 1].t;
   return { t0: points[0].t - pad, t1: Number.isFinite(tipMs) && tipMs > last ? tipMs : last + pad };
+}
+
+/** DraftKings' latest snapshot inside one bucket, (end - bucketMs, end], or null. */
+export function bookInBucket(points: readonly BookPoint[], end: number, bucketMs: number): BookPoint | null {
+  let hit: BookPoint | null = null;
+  for (const p of points) if (p.t > end - bucketMs && p.t <= end && (!hit || p.t >= hit.t)) hit = p;
+  return hit;
 }

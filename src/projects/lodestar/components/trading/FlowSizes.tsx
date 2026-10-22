@@ -26,7 +26,7 @@ export default function FlowSizes({ rows, a, b }: { rows: readonly SizeMixRow[];
       style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) 70px minmax(0,1fr)", rowGap: 8, columnGap: 10, alignItems: "center" }}
     >
       <span role="columnheader" style={{ ...CELL, textAlign: "right", color: "var(--text-dim)" }}>{shortSide(a)}</span>
-      <span role="columnheader" style={{ ...CELL, textAlign: "center", color: "var(--text-dim)" }}>bet size</span>
+      <span role="columnheader" style={{ ...CELL, textAlign: "center", color: "var(--text-dim)" }}>Bet size</span>
       <span role="columnheader" style={{ ...CELL, color: "var(--text-dim)" }}>{shortSide(b)}</span>
       {rows.map((r) => (
         <div key={r.bucket} role="row" data-size-bucket={r.bucket} style={{ display: "contents" }}>

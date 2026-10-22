@@ -25,7 +25,7 @@ import {
 } from "../../lib/kalshiFlow";
 import { T } from "../../../../lib/typeScale";
 import { SIDE_INK } from "./flowInk";
-import { SplitRow } from "./SplitBars";
+import { SplitRow, splitTitle } from "./SplitBars";
 
 export interface MarketCellProps {
   game: NbaFlowGame;
@@ -86,14 +86,14 @@ export default function MarketCell({ game, lineKey, cell, active, pregame, onLin
   if (!cell) {
     return (
       <div data-line={lineKey} style={{ ...T.bodySm, color: "var(--text-faint)" }}>
-        {pregame ? "no bets before the tip" : "no bets recorded"}
+        {pregame ? "No bets before the tip" : "No bets recorded"}
       </div>
     );
   }
   const open = () => onLine(game, lineKey);
   const quiet = [dkLine(cell) ?? kalshiLine(cell), cell.note, cell.dkLine ? `DK line ${cell.dkLine}` : null].filter(Boolean);
   const foot =
-    cell.bets != null && cell.handle != null ? `${fmtBets(cell.bets)} · ${fmtMoney(cell.handle)}` : "no dollar figures";
+    cell.bets != null && cell.handle != null ? `${fmtBets(cell.bets)} · ${fmtMoney(cell.handle)}` : "No dollar figures";
   return (
     // SWITCHBOARD: `data-anchor` makes the cell pinnable (surfaces/anchors.ts).
     <div
@@ -128,14 +128,14 @@ export default function MarketCell({ game, lineKey, cell, active, pregame, onLin
         <SideLabel s={cell.a} tone="a" />
         <SideLabel s={cell.b} tone="b" flip />
       </div>
-      <SplitRow label="bets" a={cell.a.betsPct} faded tick={cell.a.tickBetsPct} />
-      <SplitRow label="money" a={cell.a.moneyPct} tick={cell.a.tickMoneyPct} />
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 6 }}>
+      <SplitRow label="Bets" a={cell.a.betsPct} faded tick={cell.a.tickBetsPct} title={splitTitle(cell, "bets")} />
+      <SplitRow label="Money" a={cell.a.moneyPct} tick={cell.a.tickMoneyPct} title={splitTitle(cell, "money")} />
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10 }}>
         <span style={{ ...T.label, fontWeight: 400, letterSpacing: "normal", color: "var(--text-dim)" }}>{foot}</span>
         <LeanChip cell={cell} />
       </div>
       {quiet.length > 0 ? (
-        <div style={{ ...T.label, fontWeight: 400, letterSpacing: "normal", color: "var(--text-dim)", marginTop: 2 }}>
+        <div style={{ ...T.label, fontWeight: 400, letterSpacing: "normal", color: "var(--text-dim)", marginTop: 4 }}>
           {quiet.join(" · ")}
         </div>
       ) : null}

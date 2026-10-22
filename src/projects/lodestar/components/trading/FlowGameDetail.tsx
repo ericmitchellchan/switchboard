@@ -164,7 +164,7 @@ function Versus({
       <div style={{ ...T.heading, display: "flex", alignItems: "center", gap: 8, color: "var(--text-primary)" }}>
         <i aria-hidden style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: SIDE_INK[tone] }} />
         {name}
-        {won ? <span style={{ ...T.label, color: "var(--up)" }}>won</span> : null}
+        {won ? <span style={{ ...T.label, color: "var(--up)" }}>Won</span> : null}
       </div>
       {stats ? (
         <div style={{ display: "flex", flexWrap: "wrap", columnGap: 28, rowGap: 8, marginTop: 6 }}>
@@ -185,7 +185,7 @@ function Versus({
       <div style={{ ...QUIET, marginTop: 6 }} data-dk-line={tone}>
         {dk && dk.bets != null && dk.money != null
           ? `DraftKings ${fmtPct(dk.bets)} bets · ${fmtPct(dk.money)} money`
-          : (dkNote ?? "no DraftKings split")}
+          : (dkNote ?? "No DraftKings split")}
       </div>
     </div>
   );
@@ -233,8 +233,8 @@ function Legend({
         </>
       ) : mode === "share" ? (
         <>
-          <LegendItem swatch={line(SIDE_INK.a)}>{`money on ${shortSide(a)}`}</LegendItem>
-          <LegendItem swatch={line(SIDE_INK.a, { borderTopStyle: "dashed" })}>{`bets on ${shortSide(a)}`}</LegendItem>
+          <LegendItem swatch={line(SIDE_INK.a)}>{`Money on ${shortSide(a)}`}</LegendItem>
+          <LegendItem swatch={line(SIDE_INK.a, { borderTopStyle: "dashed" })}>{`Bets on ${shortSide(a)}`}</LegendItem>
           {has.dk ? <LegendItem swatch={line(SIDE_INK.a, { borderTopStyle: "dotted" })}>{`DK money on ${shortSide(a)}`}</LegendItem> : null}
           {has.price ? (
             <button
@@ -246,13 +246,13 @@ function Legend({
               <LegendItem swatch={line("var(--text-muted)", { borderTopWidth: 1 })}>{`${shortSide(a)} price (${price ? "on" : "off"})`}</LegendItem>
             </button>
           ) : null}
-          {has.exGap ? <LegendItem swatch={line("var(--text-primary)", { borderTopWidth: 1 })}>gap without $1k+ bets</LegendItem> : null}
+          {has.exGap ? <LegendItem swatch={line("var(--text-primary)", { borderTopWidth: 1 })}>Gap without $1k+ bets</LegendItem> : null}
         </>
       ) : (
         <>
           <LegendItem swatch={line(SIDE_INK.a)}>{`$ ${shortSide(a)}`}</LegendItem>
           <LegendItem swatch={line(SIDE_INK.b)}>{`$ ${shortSide(b)}`}</LegendItem>
-          <LegendItem swatch={line("var(--text-muted)", { borderTopStyle: "dashed" })}>bets, dashed (right scale)</LegendItem>
+          <LegendItem swatch={line("var(--text-muted)", { borderTopStyle: "dashed" })}>Bets, dashed (right scale)</LegendItem>
         </>
       )}
       {!dkOnly && has.big ? (
@@ -260,10 +260,10 @@ function Legend({
           $1k+ bet, size = $
         </LegendItem>
       ) : null}
-      <LegendItem swatch={<i aria-hidden style={{ display: "inline-block", flexShrink: 0, width: 1, height: 10, background: "var(--text-muted)" }} />}>tip</LegendItem>
+      <LegendItem swatch={<i aria-hidden style={{ display: "inline-block", flexShrink: 0, width: 1, height: 10, background: "var(--text-muted)" }} />}>Tip</LegendItem>
       {mode === "share" && zones ? (
         <span style={{ color: "var(--text-dim)" }}>
-          {`shaded = ordinary (last season's middle half, ±${zones.z1}) · dashed = widest fifth (±${zones.z2})`}
+          {`Shaded = ordinary (last season's middle half, ±${zones.z1}) · dashed = widest fifth (±${zones.z2})`}
         </span>
       ) : null}
     </div>
@@ -398,7 +398,7 @@ export default function FlowGameDetail(p: FlowGameDetailProps) {
         {LINE_KEYS.map(lineTab)}
         {rungs.length > 1 ? (
           <label style={{ ...T.bodySm, marginLeft: "auto", display: "flex", alignItems: "center", gap: 8, color: "var(--text-muted)" }}>
-            rung
+            Rung
             <select
               className={SELECT_CLASS}
               style={T.mono}
@@ -418,7 +418,7 @@ export default function FlowGameDetail(p: FlowGameDetailProps) {
 
       {!names ? (
         <div style={{ ...T.bodySm, color: "var(--text-faint)" }}>
-          {error && !detail ? fetchErrorText(error) : detail ? "no bets or splits recorded on this line" : <Spinner label="loading game flow…" />}
+          {error && !detail ? fetchErrorText(error) : detail ? "No bets or splits recorded on this line" : <Spinner label="Loading game flow…" />}
         </div>
       ) : (
         <>
@@ -438,7 +438,7 @@ export default function FlowGameDetail(p: FlowGameDetailProps) {
                 {result ? <span style={{ color: "var(--text-muted)" }}>{` Result: ${result}.`}</span> : null}
               </>
             ) : (
-              "no Kalshi bets on this line"
+              "No Kalshi bets on this line"
             )}
           </p>
 
@@ -449,8 +449,8 @@ export default function FlowGameDetail(p: FlowGameDetailProps) {
                 value={p.mode}
                 onChange={p.onMode}
                 options={[
-                  { key: "share", label: "share" },
-                  { key: "totals", label: "totals" },
+                  { key: "share", label: "Share" },
+                  { key: "totals", label: "Totals" },
                 ]}
               />
             ) : null}
@@ -490,13 +490,13 @@ export default function FlowGameDetail(p: FlowGameDetailProps) {
           ) : (
             <div style={{ ...T.bodySm, color: "var(--text-faint)" }}>
               {!detail && !error ? (
-                <Spinner label="loading game flow…" />
+                <Spinner label="Loading game flow…" />
               ) : error && !detail ? (
                 fetchErrorText(error)
               ) : win ? (
-                "no bets in this range"
+                "No bets in this range"
               ) : (
-                "fewer than 20 bets on this line so far - too few to chart a share"
+                "Fewer than 20 bets on this line so far - too few to chart a share"
               )}
             </div>
           )}

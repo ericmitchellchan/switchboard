@@ -20,11 +20,11 @@ export default function FlowBigBets({ bets, a }: { bets: readonly NbaFlowBigBet[
       <table aria-label="$1k+ bets" style={{ width: "100%", borderCollapse: "collapse" }}>
         <thead>
           <tr>
-            <th scope="col" style={th}>time (ET)</th>
-            <th scope="col" style={th}>side</th>
-            <th scope="col" style={{ ...th, textAlign: "right" }}>bet</th>
-            <th scope="col" style={{ ...th, textAlign: "right" }}>contracts</th>
-            <th scope="col" style={{ ...th, textAlign: "right" }}>price</th>
+            <th scope="col" style={th}>Time (ET)</th>
+            <th scope="col" style={th}>Side</th>
+            <th scope="col" style={{ ...th, textAlign: "right" }}>Bet</th>
+            <th scope="col" style={{ ...th, textAlign: "right" }}>Contracts</th>
+            <th scope="col" style={{ ...th, textAlign: "right" }}>Price</th>
           </tr>
         </thead>
         <tbody>

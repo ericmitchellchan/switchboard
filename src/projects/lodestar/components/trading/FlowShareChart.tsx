@@ -17,13 +17,22 @@
  *     line, right side below.
  * Each plotted point is a transparent column marked `pt:<iso>` so a pin lands
  * on a point. The width is measured with a ResizeObserver.
+ *
+ * The cursor (SWIT-135): moving across the plot snaps a crosshair to the
+ * nearest plotted point - a hairline through the share area and the gap
+ * strip, a dot on every drawn series, and a small readout of the numbers at
+ * that point. The arrow keys move it one point, a tap places it, Escape or
+ * leaving hides it. It is drawn with pointer-events none, above the pin
+ * columns, so a click still lands on its `pt:<iso>` column.
  */
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
 import type { NbaFlowBigBet } from "../../api/client";
 import { fmtCount, fmtEt, fmtGap, fmtMoney, fmtPct, parseIso, shortSide } from "../../lib/kalshiFlow";
 import {
+  bookInBucket,
   gapAxisMax,
+  nearestIndex,
   pointsIn,
   ticksNeedDay,
   timeTicks,
@@ -52,7 +61,65 @@ export interface FlowChartProps {
   tipMs: number;
   bucketMin: number;
   width: number;
+  /** The plotted point the cursor sits on (its `t`), or null / absent for none. */
+  cursorT?: number | null;
+  /** Reports where the cursor moved (null: hidden). Absent: the chart is not interactive. */
+  onCursor?: (t: number | null) => void;
 }
+
+/** One line of the readout: the series name, its value, and the ink of its dot. */
+export interface ReadoutRow {
+  label: string;
+  value: string;
+  ink?: string;
+}
+
+export interface Readout {
+  title: string;
+  rows: ReadoutRow[];
+}
+
+/**
+ * What the readout says at one point, in the legend's order: share mode lists
+ * the left side's money and bet share, the gap, the price when it is drawn and
+ * DraftKings' money share when a snapshot falls in the bucket; totals mode the
+ * cumulative dollars and bets of each side.
+ */
+export function readoutFor(o: {
+  mode: ChartMode;
+  q: SharePoint;
+  a: string;
+  b: string;
+  showPrice: boolean;
+  dk: BookPoint | null;
+  day: boolean;
+}): Readout {
+  const { q, a, b } = o;
+  const title = fmtEt(q.t, o.day);
+  if (o.mode === "totals") {
+    return {
+      title,
+      rows: (["a", "b"] as const).flatMap((k) => {
+        const name = shortSide(k === "a" ? a : b);
+        return [
+          { label: `${name} money`, value: fmtMoney(k === "a" ? q.ha : q.hb), ink: SIDE_INK[k] },
+          { label: `${name} bets`, value: fmtCount(k === "a" ? q.na : q.nb), ink: SIDE_INK[k] },
+        ];
+      }),
+    };
+  }
+  const rows: ReadoutRow[] = [
+    { label: `Money ${shortSide(a)}`, value: fmtPct(q.mA), ink: SIDE_INK.a },
+    { label: `Bets ${shortSide(a)}`, value: fmtPct(q.bA), ink: SIDE_INK.a },
+    { label: "Gap", value: fmtGap(q.gap) },
+  ];
+  if (o.showPrice && q.px != null) rows.push({ label: "Price", value: `${Math.round(q.px)}¢`, ink: "var(--text-muted)" });
+  if (o.dk) rows.push({ label: "DraftKings money", value: fmtPct(o.dk.money), ink: SIDE_INK.a });
+  return { title, rows };
+}
+
+/** Width of one character of the 11px mono label, for sizing the readout. */
+const CHAR_W = 6.6;
 
 const PAD = { l: 52, r: 86 } as const;
 const TOP = 10;
@@ -79,6 +146,10 @@ export function chartLabel(points: readonly SharePoint[], a: string, dk: readonl
 /** The chart at a given width. Pure of hooks so a test can render it directly. */
 export function FlowChartSvg(p: FlowChartProps) {
   const { mode, window: w, a, b, bigBets, dk, showPrice, bands, tipMs, width: W } = p;
+  // geometry the cursor reuses, set by whichever mode draws
+  let yGapOf: ((v: number) => number) | null = null;
+  let yHOf: ((v: number) => number) | null = null;
+  let yNOf: ((v: number) => number) | null = null;
   const share = mode === "share";
   const bucketMs = p.bucketMin * 60_000;
   const vis = pointsIn(p.points, w);
@@ -189,10 +260,10 @@ export function FlowChartSvg(p: FlowChartProps) {
       }
       parts.push(
         <text key="lm" x={plotR + 6} y={ym} style={{ ...label, fill: "var(--text-primary)" }}>
-          {`money ${fmtPct(last.mA)}`}
+          {`Money ${fmtPct(last.mA)}`}
         </text>,
         <text key="lbt" x={plotR + 6} y={yb} style={{ ...label, fill: "var(--text-secondary)" }}>
-          {`bets ${fmtPct(last.bA)}`}
+          {`Bets ${fmtPct(last.bA)}`}
         </text>,
       );
     }
@@ -203,9 +274,10 @@ export function FlowChartSvg(p: FlowChartProps) {
       const gMax = gapAxisMax(z2 ?? 20, vis.map((q) => q.gap));
       const gMid = gTop + GAP_H / 2;
       const yG = (v: number) => gMid - (v / gMax) * (GAP_H / 2 - 4);
+      yGapOf = yG;
       parts.push(
         <text key="gh" x={0} y={gTop - 10} style={{ ...label, fill: "var(--text-muted)" }}>
-          gap: money share minus bet share, in points
+          Gap: money share minus bet share, in points
         </text>,
       );
       if (z1 != null && z2 != null) {
@@ -272,6 +344,8 @@ export function FlowChartSvg(p: FlowChartProps) {
     const yH = (v: number) => TOP + SHARE_H - (v / maxH) * SHARE_H;
     const yN = (v: number) => TOP + SHARE_H - (v / maxN) * SHARE_H;
     const bottom = TOP + SHARE_H;
+    yHOf = yH;
+    yNOf = yN;
     body = (
       <>
         <text x={PAD.l - 6} y={yH(maxH) + 4} textAnchor="end" style={label}>{fmtMoney(maxH)}</text>
@@ -306,8 +380,103 @@ export function FlowChartSvg(p: FlowChartProps) {
     return [{ z, t, k, r }];
   });
 
+  // the cursor: the plotted point it sits on, and the picking handlers
+  const ci = p.cursorT != null ? vis.findIndex((q) => q.t === p.cursorT) : -1;
+  const live = !!p.onCursor && vis.length > 0;
+  const pointAt = (e: PointerEvent<SVGSVGElement>): number | null => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const sx = r.width > 0 ? ((e.clientX - r.left) * W) / r.width : e.clientX - r.left;
+    if (sx < PAD.l - 8 || sx > plotR + 8) return null;
+    const i = nearestIndex(vis.map((q) => x(q.t)), sx);
+    return i < 0 ? null : vis[i].t;
+  };
+  const onKey = (e: KeyboardEvent<SVGSVGElement>) => {
+    if (!p.onCursor) return;
+    if (e.key === "Escape") {
+      p.onCursor(null);
+      return;
+    }
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    const step = e.key === "ArrowLeft" ? -1 : 1;
+    const next = ci < 0 ? (step < 0 ? vis.length - 1 : 0) : Math.max(0, Math.min(vis.length - 1, ci + step));
+    p.onCursor(vis[next].t);
+  };
+  const baseLabel = chartLabel(p.points, a, dk);
+
+  let cross: ReactNode = null;
+  if (ci >= 0) {
+    const q = vis[ci];
+    const cx = x(q.t);
+    const lineBottom = share && hasGap ? gTop + gapH : TOP + SHARE_H;
+    const dkHit = share ? bookInBucket(dkIn, q.t, bucketMs) : null;
+    const rd = readoutFor({ mode, q, a, b, showPrice, dk: dkHit, day });
+    const dot = (key: string, px: number, py: number, ink: string, r = 3.5) => (
+      <circle key={key} cx={px} cy={py} r={r} fill={ink} stroke="var(--bg-secondary)" strokeWidth={1.5} />
+    );
+    const dots: ReactNode[] = [];
+    if (share) {
+      dots.push(dot("m", cx, yPct(q.mA), SIDE_INK.a), dot("b", cx, yPct(q.bA), SIDE_INK.a, 3));
+      if (showPrice && q.px != null) dots.push(dot("px", cx, yPct(q.px), "var(--text-muted)", 3));
+      if (dkHit) dots.push(dot("dk", x(dkHit.t), yPct(dkHit.money), SIDE_INK.a, 3));
+      if (yGapOf) dots.push(dot("g", cx, yGapOf(q.gap), q.gap >= 0 ? SIDE_INK.a : SIDE_INK.b, 3));
+    } else if (yHOf && yNOf) {
+      for (const k of ["a", "b"] as const) {
+        dots.push(dot(`h${k}`, cx, yHOf(k === "a" ? q.ha : q.hb), SIDE_INK[k]), dot(`n${k}`, cx, yNOf(k === "a" ? q.na : q.nb), SIDE_INK[k], 3));
+      }
+    }
+    const labelW = Math.max(0, ...rd.rows.map((r) => r.label.length));
+    const valueW = Math.max(0, ...rd.rows.map((r) => r.value.length));
+    const pw = Math.ceil(Math.max(rd.title.length, labelW + 2 + valueW) * CHAR_W) + 36;
+    const ph = 15 + 4 + 16 * rd.rows.length + 7;
+    let px0 = cx + 12;
+    if (px0 + pw > W - 4) px0 = cx - 12 - pw;
+    px0 = Math.max(2, px0);
+    const py0 = TOP + 4;
+    cross = (
+      <g data-crosshair={q.t} pointerEvents="none">
+        <line x1={cx} x2={cx} y1={TOP} y2={lineBottom} stroke="var(--text-dim)" strokeWidth={1} />
+        {dots}
+        <g data-readout>
+          <rect x={px0} y={py0} width={pw} height={ph} rx={4} fill="var(--bg-secondary)" stroke="var(--border)" strokeWidth={1} />
+          <text x={px0 + 10} y={py0 + 15} style={{ ...label, fill: "var(--text-muted)" }}>
+            {rd.title}
+          </text>
+          {rd.rows.map((r, i) => {
+            const y = py0 + 15 + 4 + 16 * (i + 1);
+            return (
+              <g key={r.label}>
+                {r.ink ? <circle cx={px0 + 14} cy={y - 4} r={2.5} fill={r.ink} /> : null}
+                <text x={px0 + 22} y={y} style={{ ...label, fill: "var(--text-secondary)" }}>
+                  {r.label}
+                </text>
+                <text x={px0 + pw - 10} y={y} textAnchor="end" style={{ ...label, fill: "var(--text-primary)" }}>
+                  {r.value}
+                </text>
+              </g>
+            );
+          })}
+        </g>
+      </g>
+    );
+  }
+
   return (
-    <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label={chartLabel(p.points, a, dk)} data-chart={mode}>
+    <svg
+      width={W}
+      height={H}
+      viewBox={`0 0 ${W} ${H}`}
+      role="img"
+      aria-label={live ? `${baseLabel} Move across it, or use the left and right arrow keys, for a readout of the numbers at each point.` : baseLabel}
+      data-chart={mode}
+      tabIndex={live ? 0 : undefined}
+      style={live ? { touchAction: "pan-y" } : undefined}
+      onPointerMove={live ? (e) => p.onCursor?.(pointAt(e)) : undefined}
+      onPointerDown={live ? (e) => p.onCursor?.(pointAt(e)) : undefined}
+      onPointerLeave={live ? (e) => (e.pointerType === "touch" ? undefined : p.onCursor?.(null)) : undefined}
+      onKeyDown={live ? onKey : undefined}
+      onBlur={live ? () => p.onCursor?.(null) : undefined}
+    >
       {/* The pin columns come FIRST, under everything, and the drawing lets clicks
           through (pointer-events none) so a click lands on its column - while the
           rail and DraftKings dots, which carry tooltips, take their own hover. */}
@@ -324,9 +493,7 @@ export function FlowChartSvg(p: FlowChartProps) {
             fill="transparent"
             data-anchor={`pt:${iso}`}
             data-anchor-label={`${fmtEt(q.t, true)} ET · money ${fmtPct(q.mA)} · bets ${fmtPct(q.bA)}`}
-          >
-            <title>{`${fmtEt(q.t, true)} ET · money ${fmtPct(q.mA)} · bets ${fmtPct(q.bA)} · gap ${fmtGap(q.gap)}`}</title>
-          </rect>
+          />
         );
       })}
       <g pointerEvents="none">
@@ -343,7 +510,7 @@ export function FlowChartSvg(p: FlowChartProps) {
         {tipX !== null ? (
           <g>
             <line x1={tipX} x2={tipX} y1={TOP} y2={axisBottom} stroke="var(--text-muted)" />
-            <text x={tipX - 4} y={TOP + 10} textAnchor="end" style={{ ...label, fill: "var(--text-muted)" }}>tip</text>
+            <text x={tipX - 4} y={TOP + 10} textAnchor="end" style={{ ...label, fill: "var(--text-muted)" }}>Tip</text>
           </g>
         ) : null}
       </g>
@@ -357,6 +524,7 @@ export function FlowChartSvg(p: FlowChartProps) {
           ))}
         </g>
       ) : null}
+      {cross}
     </svg>
   );
 }
@@ -382,6 +550,7 @@ const BIG_FLOOR = 1000;
 export default function FlowShareChart(props: Omit<FlowChartProps, "width">) {
   const box = useRef<HTMLDivElement>(null);
   const [w, setW] = useState(960);
+  const [cursorT, setCursorT] = useState<number | null>(null);
   useEffect(() => {
     const el = box.current;
     if (!el) return;
@@ -397,7 +566,7 @@ export default function FlowShareChart(props: Omit<FlowChartProps, "width">) {
   }, []);
   return (
     <div ref={box} style={{ width: "100%", minWidth: 0 }}>
-      <FlowChartSvg {...props} width={Math.max(480, w)} />
+      <FlowChartSvg {...props} width={Math.max(480, w)} cursorT={cursorT} onCursor={setCursorT} />
     </div>
   );
 }

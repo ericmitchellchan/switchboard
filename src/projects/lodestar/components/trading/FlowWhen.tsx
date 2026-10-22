@@ -12,10 +12,10 @@ import { HAIRLINE } from "./flowInk";
 
 export default function FlowWhen({ rows, left, tipKnown = true }: { rows: readonly WhenRow[]; left: string; tipKnown?: boolean }) {
   if (!tipKnown) {
-    return <div style={{ ...T.bodySm, color: "var(--text-faint)" }}>tip time unknown</div>;
+    return <div style={{ ...T.bodySm, color: "var(--text-faint)" }}>Tip time unknown</div>;
   }
   if (rows.length === 0) {
-    return <div style={{ ...T.bodySm, color: "var(--text-faint)" }}>no bets on tape for this line</div>;
+    return <div style={{ ...T.bodySm, color: "var(--text-faint)" }}>No bets on tape for this line</div>;
   }
   const th = { ...T.label, fontWeight: 400, letterSpacing: "normal", color: "var(--text-dim)", textAlign: "right", padding: "0 0 6px", borderBottom: HAIRLINE } as const;
   const td = { ...T.mono, color: "var(--text-secondary)", textAlign: "right", padding: "6px 0", borderBottom: "1px solid var(--bg-active)" } as const;
@@ -23,9 +23,9 @@ export default function FlowWhen({ rows, left, tipKnown = true }: { rows: readon
     <table aria-label="bets by how far ahead of the tip they came in" style={{ width: "100%", maxWidth: 760, borderCollapse: "collapse" }}>
       <thead>
         <tr>
-          <th scope="col" style={{ ...th, textAlign: "left" }}>came in</th>
-          <th scope="col" style={th}>bets</th>
-          <th scope="col" style={th}>handle</th>
+          <th scope="col" style={{ ...th, textAlign: "left" }}>Came in</th>
+          <th scope="col" style={th}>Bets</th>
+          <th scope="col" style={th}>Handle</th>
           <th scope="col" style={th}>{`${shortSide(left)} share of bets`}</th>
           <th scope="col" style={th}>{`${shortSide(left)} share of money`}</th>
         </tr>

@@ -274,7 +274,7 @@ describe("the market cell and the source switch", () => {
     expect(c.b.gap).toBeCloseTo((78 + 91) / 2 - (27 + 60) / 2);
     expect(c.tickSource).toBeNull();
     expect(c.a.tickBetsPct).toBeNull();
-    expect(c.note).toBe("avg of Kalshi + DK");
+    expect(c.note).toBe("Avg of Kalshi + DK");
     // DraftKings' own shares stay on the side for the detail
     expect(c.a.dkMoneyPct).toBe(9);
   });
