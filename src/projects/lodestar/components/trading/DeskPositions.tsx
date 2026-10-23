@@ -21,12 +21,14 @@ import {
   gameLabel,
   healthWord,
   legLabel,
+  legText,
   openCount,
   pnlTone,
   positionRows,
   riskText,
   settledPnl,
   tickerTail,
+  totalsLine,
   type ExposureBar,
   type PositionRow,
 } from "../../lib/comboDesk";
@@ -54,7 +56,7 @@ const QUIET: CSSProperties = { ...T.label, fontWeight: 400, letterSpacing: "norm
 const AMBER: CSSProperties = { ...T.bodySm, color: "var(--tone-amber)" };
 const INK = { up: "var(--up)", dn: "var(--dn)" } as const;
 
-const POS_COLS = "minmax(0,2.2fr) 84px 64px 72px 72px 120px 64px";
+const POS_COLS = "minmax(0,1.6fr) minmax(0,1.2fr) 84px 64px 72px 92px 120px 64px";
 const FILL_COLS = "92px minmax(0,1fr) 40px 150px 72px 110px";
 const REQ_COLS = "92px minmax(0,1fr) 80px 80px 70px";
 const SETTLE_COLS = "92px minmax(0,1fr) 50px 80px";
@@ -104,9 +106,15 @@ function PositionLine({ r }: { r: PositionRow }) {
   const wordInk = s.kind === "won" ? INK.up : s.kind === "lost" ? INK.dn : s.kind === "open" ? "var(--text-dim)" : "var(--tone-amber)";
   return (
     <div style={row(POS_COLS)} data-position={r.key}>
-      <div style={{ minWidth: 0 }}>
-        <div style={{ ...T.body, color: "var(--text-primary)" }}>{r.legs.join(" + ")}</div>
-        <div style={{ ...T.bodySm, color: "var(--text-muted)" }}>{r.held}</div>
+      <div style={{ minWidth: 0 }} title={r.held} data-cell="fading">
+        {r.fading.map((l, i) => (
+          <div key={`${l.label}${i}`} title={l.title ?? undefined} style={{ ...T.body, color: "var(--text-primary)" }}>
+            {l.label}
+          </div>
+        ))}
+      </div>
+      <div style={{ minWidth: 0, ...T.body, color: r.lock.kind === "leg" ? "var(--text-secondary)" : "var(--text-dim)" }} title={r.lock.title ?? undefined} data-cell="lock">
+        {r.lock.text}
       </div>
       <div>
         <div style={MONO}>{r.contracts}</div>
@@ -117,7 +125,9 @@ function PositionLine({ r }: { r: PositionRow }) {
         <div style={MONO}>{r.cost}</div>
         {r.costKalshi ? <div style={QUIET}>Kalshi {r.costKalshi}</div> : null}
       </div>
-      <div style={MONO}>{r.worst}</div>
+      <div style={{ ...T.mono, color: r.profitTone ? INK[r.profitTone] : "var(--text-primary)" }} data-cell="profit">
+        {r.profit}
+      </div>
       <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
         <span style={{ ...T.bodySm, color: wordInk }}>{s.word}</span>
         {s.pnl ? <span style={{ ...T.mono, color: s.pnlTone ? INK[s.pnlTone] : "var(--text-primary)" }}>{s.pnl}</span> : null}
@@ -259,12 +269,13 @@ export default function DeskPositions({ view, error, env, onEnv, onKill, onUnkil
   const pnl = settledPnl(view);
   const pnlInk = pnlTone(pnl);
   const rows = positionRows(view);
+  const total = totalsLine(view);
   const games = exposureBars(view.exposure.by_game, gameLabel);
   const players = exposureBars(view.exposure.by_player, exposurePlayerLabel);
   const openReqs = view.requests.filter((r) => r.status === "open");
   const labelFor = (ticker: string): string => {
     const p = view.positions.find((x) => x.market_ticker === ticker);
-    return p ? (p.legs.length ? p.legs.map((l) => legLabel(l.market_ticker)).join(" + ") : legLabel(ticker)) : tickerTail(ticker);
+    return p ? (p.legs.length ? p.legs.map(legText).join(" + ") : legLabel(ticker)) : tickerTail(ticker);
   };
   const fills = [...view.fills].sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
 
@@ -288,10 +299,15 @@ export default function DeskPositions({ view, error, env, onEnv, onKill, onUnkil
       <SectionHead title="Positions" meta="ledger vs Kalshi" />
       {rows.length ? (
         <>
-          <HeadRow cols={POS_COLS} labels={["combo", "contracts", "price", "cost", "worst case", "result", ""]} />
+          <HeadRow cols={POS_COLS} labels={["fading", "lock", "contracts", "paid", "cost", "profit if win", "result", ""]} />
           {rows.map((r) => (
             <PositionLine key={r.key} r={r} />
           ))}
+          {total ? (
+            <div data-totals style={{ ...T.mono, color: "var(--text-secondary)", padding: "8px 0" }}>
+              {total}
+            </div>
+          ) : null}
         </>
       ) : (
         <Empty>no positions</Empty>

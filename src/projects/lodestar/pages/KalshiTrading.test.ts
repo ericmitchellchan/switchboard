@@ -1046,7 +1046,7 @@ describe("the chart cursor (SWIT-135)", () => {
 });
 
 describe("the page", () => {
-  it("draws the top bar: title, sport with NFL and Props disabled, date, phase, source, and the two tabs", () => {
+  it("draws the top bar: title, sport with NFL and Props disabled, date, phase, source, and the three tabs", () => {
     const out = html(createElement(KalshiTrading));
     const t = text(out);
     expect(t).toContain("Kalshi Trading");
@@ -1058,6 +1058,10 @@ describe("the page", () => {
     for (const s of ["Kalshi", "DraftKings", "Both"]) expect(t).toContain(s);
     expect(t).toContain("Flow");
     expect(t).toContain("Positions");
+    expect(t).toContain("Portfolio");
+    // Flow, Positions and Portfolio, in that order, Flow selected
+    expect(out.match(/role="tab"/g)).toHaveLength(3);
+    expect(out).toMatch(/role="tab"[^>]*aria-selected="true"[^>]*>Flow<[^]*>Positions<[^]*>Portfolio</);
     // no narration under the bar: the source's meaning is the switch's hover text
     expect(t).not.toContain("white ticks mark");
     expect(out).toContain("white ticks mark DraftKings");

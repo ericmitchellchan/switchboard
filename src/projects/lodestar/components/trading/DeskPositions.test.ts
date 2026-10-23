@@ -102,8 +102,12 @@ describe("DeskPositions", () => {
     for (const w of ["balance", "at risk", "open positions", "settled P&amp;L", "fees", "health"]) expect(t).toContain(w);
     expect(t).toContain("$157 / $200");
     expect(t).toContain("1 pending");
-    expect(t).toContain("ATL J.Johnson 20+ + ORL P.Banchero 25+");
-    expect(t).toContain("NO wins if either misses");
+    expect(t).toContain("ATL J.Johnson 20+");
+    expect(t).toContain("ORL P.Banchero 25+");
+    // the hover text on the fading cell still says what the NO side needs
+    expect(out).toContain('title="NO wins if either misses"');
+    for (const w of ["fading", "lock", "contracts", "paid", "cost", "profit if win", "result"]) expect(t).toContain(w);
+    expect(t).not.toContain("cost worst case");
     expect(out).toMatch(/aria-pressed="true"[^>]*data-seg="demo"/);
     expect(out).toContain('data-seg="live"');
   });
@@ -183,5 +187,107 @@ describe("DeskPositions", () => {
     expect(text(out)).toContain("daily loss limit");
     expect(out).toContain('data-action="unkill"');
     expect(out).not.toContain('data-action="kill"');
+  });
+});
+
+// -- fading and lock (SWIT-139) ---------------------------------------------------
+
+const JOHNSON = "KXNBAPTS-26OCT21ATLORL-ATLJJOHNSON1-20";
+const BANCHERO = "KXNBAPTS-26OCT21ATLORL-ORLPBANCHERO5-25";
+const leg = (market_ticker: string, o: Partial<ComboDeskPosition["legs"][number]> = {}) => ({ market_ticker, event_ticker: "KXNBAPTS-26OCT21ATLORL", side: "yes", ...o });
+
+/** One open ticket, 30 contracts for $12, paying $30 if the NO wins. */
+const ticket = (o: Partial<ComboDeskPosition>): ComboDeskPosition => ({ ...OPEN, payout_if_no_wins: 30, ...o });
+/** The text inside the `<div data-cell="name">`, found by counting nested divs. */
+const cell = (out: string, name: string): string => {
+  const at = out.indexOf(`data-cell="${name}"`);
+  if (at < 0) return "";
+  const start = out.indexOf(">", at) + 1;
+  let depth = 1;
+  const re = /<(\/?)div\b/g;
+  re.lastIndex = start;
+  for (let m = re.exec(out); m; m = re.exec(out)) {
+    depth += m[1] ? -1 : 1;
+    if (depth === 0) return text(out.slice(start, m.index));
+  }
+  return "";
+};
+const only = (p: ComboDeskPosition, extra: Partial<ComboDeskView> = {}) => renderToStaticMarkup(createElement(DeskPositions, props({ view: { ...VIEW, positions: [p], ...extra } })) as ReactElement);
+
+describe("DeskPositions: fading, lock and profit", () => {
+  it("with a lock, the lock leg goes in the Lock column and the other leg is the one being faded", () => {
+    const out = only(
+      ticket({
+        legs: [leg(JOHNSON, { label: "ATL J.Johnson 20+", mid: 0.95, lock: true }), leg(BANCHERO, { label: "ORL P.Banchero 25+", mid: 0.62, lock: false })],
+        lock_leg: JOHNSON,
+        fading_legs: [BANCHERO],
+      }),
+    );
+    expect(cell(out, "fading")).toBe(" ORL P.Banchero 25+ ");
+    expect(cell(out, "lock")).toBe("ATL J.Johnson 20+");
+    // the YES mid rides on each leg's hover text
+    expect(out).toContain('title="mid 62c"');
+    expect(out).toContain('title="mid 95c"');
+  });
+
+  it("the lock is found from the legs' own flag when lock_leg is absent", () => {
+    const out = only(ticket({ legs: [leg(JOHNSON, { lock: false }), leg(BANCHERO, { lock: true })] }));
+    expect(cell(out, "fading")).toBe(" ATL J.Johnson 20+ ");
+    expect(cell(out, "lock")).toBe("ORL P.Banchero 25+");
+  });
+
+  it("with two real legs both are faded and the Lock column reads 'either misses', dim", () => {
+    const out = only(
+      ticket({
+        legs: [leg(JOHNSON, { lock: false }), leg(BANCHERO, { lock: false })],
+        lock_leg: null,
+        fading_legs: [JOHNSON, BANCHERO],
+      }),
+    );
+    expect(cell(out, "fading")).toBe(" ATL J.Johnson 20+ ORL P.Banchero 25+ ");
+    expect(cell(out, "lock")).toBe("either misses");
+    expect(out).toMatch(/data-cell="lock"[^>]*var\(--text-dim\)|var\(--text-dim\)[^>]*data-cell="lock"/);
+  });
+
+  it("an unknown lock lists every leg as faded and says the lock is not known, never 'either misses'", () => {
+    const out = only(ticket({ legs: [leg(JOHNSON, { lock: null, mid: null }), leg(BANCHERO, { lock: null })], lock_leg: null }));
+    expect(cell(out, "fading")).toBe(" ATL J.Johnson 20+ ORL P.Banchero 25+ ");
+    expect(cell(out, "lock")).toBe("not known");
+    expect(out).not.toContain("either misses</div>");
+  });
+
+  it("uses the backend's leg label when it sends one", () => {
+    const out = only(ticket({ legs: [leg(JOHNSON, { label: "Jalen Johnson 20+ pts" }), leg(BANCHERO)] }));
+    expect(text(out)).toContain("Jalen Johnson 20+ pts");
+  });
+
+  it("profit if win is the backend's net figure, signed, in the up colour; unknown reads a dash", () => {
+    const out = only(ticket({}));
+    expect(cell(out, "profit")).toBe("+$30");
+    expect(out).toMatch(/data-cell="profit"/);
+    expect(out).toMatch(/color:var\(--up\)[^>]*data-cell="profit"|data-cell="profit"[^>]*color:var\(--up\)/);
+    expect(cell(only(ticket({ payout_if_no_wins: null })), "profit")).toBe("-");
+    expect(cell(only(OPEN), "profit")).toBe("-");
+  });
+
+  it("a total line under the rows, from the desk's totals", () => {
+    const totals = { n_open: 2, cost: 36, payout: 90, max_profit: 54, max_loss: 36 };
+    const out = only(ticket({}), { totals });
+    expect(out).toContain("data-totals");
+    expect(text(out)).toContain("2 open · cost $36 · pays $90 if every NO wins · max profit +$54 · max loss -$36");
+    // no totals from an older backend: no line, and nothing breaks
+    expect(only(ticket({}))).not.toContain("data-totals");
+    // a null in a total reads a dash, not a guess
+    expect(text(only(ticket({}), { totals: { ...totals, payout: null, max_loss: null } }))).toContain("pays - if every NO wins · max profit +$54 · max loss -");
+  });
+
+  it("the result column keeps its word and its realized pnl; the agree column its check or 'differs'", () => {
+    const t = text(only(ticket({ status: "settled", result: "no", pnl_kalshi: 18 })));
+    expect(t).toContain("won");
+    expect(t).toContain("+$18");
+    const out = only(ticket({ agree: false, note: "ledger only" }));
+    expect(text(out)).toContain("differs");
+    expect(out).toContain('title="ledger only"');
+    expect(only(ticket({}))).toContain('aria-label="ledger and Kalshi agree"');
   });
 });

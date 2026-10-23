@@ -1544,6 +1544,8 @@ export const api = {
     getJson<NbaFlowGapBands>("/nba/flow/gap_bands", { signal: flowTimeout() }),
   getComboDesk: (env: ComboDeskEnv): Promise<ComboDeskView> =>
     getJson<ComboDeskView>(`/combos/desk?env=${env}`, { signal: flowTimeout() }),
+  getComboPortfolio: (env: ComboDeskEnv): Promise<ComboPortfolio> =>
+    getJson<ComboPortfolio>(`/combos/portfolio?env=${env}`, { signal: flowTimeout() }),
   // A 409 carries the reason in `detail` (getJson folds it into the Error text).
   comboDeskKill: (env: ComboDeskEnv): Promise<ComboDeskKillResult> =>
     getJson<ComboDeskKillResult>(`/combos/desk/kill?env=${env}`, { method: "POST", signal: flowTimeout() }),
@@ -2090,6 +2092,12 @@ export interface ComboDeskLeg {
   market_ticker: string;
   event_ticker: string;
   side: string;
+  /** A readable name for the leg ("ATL J.Johnson 20+"); the page spells the ticker when absent. */
+  label?: string;
+  /** The leg's YES mid, dollars 0..1, or null when there is no quote. */
+  mid?: number | null;
+  /** true: the 90-97c leg that only makes this a combo; false: a real leg; null: not known. */
+  lock?: boolean | null;
 }
 
 /** One combo position: the desk's ledger against what Kalshi reports. Money is
@@ -2113,6 +2121,21 @@ export interface ComboDeskPosition {
   worst_case: number;
   agree: boolean;
   note: string | null;
+  /** Tickers of the legs the ticket rides on (all the legs when there is no lock). */
+  fading_legs?: string[];
+  /** Ticker of the lock leg, or null when there is none / it is not known. */
+  lock_leg?: string | null;
+  /** What the position pays, dollars, if every NO wins (cost not taken out). */
+  payout_if_no_wins?: number | null;
+}
+
+/** The open book in five numbers (dollars). */
+export interface ComboDeskTotals {
+  n_open: number | null;
+  cost: number | null;
+  payout: number | null;
+  max_profit: number | null;
+  max_loss: number | null;
 }
 
 /** An RFQ the desk has out. */
@@ -2189,6 +2212,38 @@ export interface ComboDeskView {
   fills: ComboDeskFill[];
   settlements: ComboDeskSettlement[];
   pnl: { realized_ledger: number; realized_kalshi: number | null; fees_kalshi: number | null; by_day: Record<string, number> };
+  totals?: ComboDeskTotals;
+}
+
+export type ComboPortfolioDayFigure = number | { day?: string | null; realized?: number | null; pnl?: number | null } | null;
+
+/** GET /combos/portfolio?env=demo|live - the desk's money over time. Every number may be null. */
+export interface ComboPortfolio {
+  env: ComboDeskEnv;
+  /** Cash and portfolio value, dollars, at each sample. */
+  balance_series: { ts: string; cash: number | null; portfolio_value: number | null }[];
+  /** Realized P&L by settlement day (ET, "YYYY-MM-DD"); `cumulative` runs to that day. */
+  pnl_by_day: {
+    day: string;
+    realized: number | null;
+    cumulative: number | null;
+    n_settled: number | null;
+    wins: number | null;
+    losses: number | null;
+  }[];
+  open_cost_by_day: { day: string; cost: number | null }[];
+  by_strategy: { tag: string | null; n: number | null; wins: number | null; losses: number | null; pnl: number | null }[];
+  figures: {
+    balance: number | null;
+    realized_to_date: number | null;
+    open_cost: number | null;
+    /** A number, or an object naming the day with its P&L (the backend's shape is not pinned). */
+    best_day: ComboPortfolioDayFigure;
+    worst_day: ComboPortfolioDayFigure;
+    nights_traded: number | null;
+    /** Won tickets over settled tickets: 0..1 (a value over 1 is read as a percent). */
+    win_rate: number | null;
+  };
 }
 
 /** POST /combos/desk/kill and /unkill answer with the new state (shape not pinned). */

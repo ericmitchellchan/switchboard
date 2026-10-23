@@ -7,7 +7,7 @@
  * drawn in cents. Times are drawn in Eastern, the desk's clock.
  */
 
-import type { ComboDeskPosition, ComboDeskView } from "../api/client";
+import type { ComboDeskLeg, ComboDeskPosition, ComboDeskView } from "../api/client";
 
 // -- tickers ------------------------------------------------------------------
 
@@ -152,10 +152,29 @@ export function openCount(view: ComboDeskView): number {
 
 export type RowStatusKind = "open" | "won" | "lost" | "ledger_only" | "kalshi_only";
 
+/** One leg as the board draws it: its name, and a hover line (the YES mid) when there is one. */
+export interface LegLine {
+  label: string;
+  title: string | null;
+}
+
+/** The Lock column: a named lock leg, "either misses" when there is none, or unknown. */
+export interface LockCell {
+  kind: "leg" | "none" | "unknown" | "yes";
+  text: string;
+  title: string | null;
+}
+
 export interface PositionRow {
   key: string;
   /** One readable label per leg. */
   legs: string[];
+  /** The legs the ticket rides on, one line each (all of them when the lock is not known). */
+  fading: LegLine[];
+  lock: LockCell;
+  /** Profit if the NO side wins: payout less cost, signed; "-" when the payout is not known. */
+  profit: string;
+  profitTone: "up" | "dn" | null;
   /** What the held side needs: "NO wins if either misses". */
   held: string;
   contracts: string;
@@ -190,15 +209,73 @@ function statusOf(p: ComboDeskPosition): PositionRow["status"] {
   return { kind: won ? "won" : "lost", word: won ? "won" : "lost", pnl: p.pnl_kalshi != null ? fmtSigned(p.pnl_kalshi) : null, pnlTone: pnlTone(p.pnl_kalshi) };
 }
 
+/** A leg's name: the backend's label, else the ticker spelled out. */
+export function legText(leg: Pick<ComboDeskLeg, "market_ticker" | "label">): string {
+  return leg.label?.trim() ? leg.label.trim() : legLabel(leg.market_ticker);
+}
+
+const legLine = (leg: ComboDeskLeg): LegLine => ({
+  label: legText(leg),
+  title: leg.mid != null && Number.isFinite(leg.mid) ? `mid ${fmtCents(leg.mid)}` : null,
+});
+
+/**
+ * Which leg the ticket rides on and which leg is only the lock. Both legs are
+ * YES overs and the desk holds NO, so the ticket pays when ANY leg misses; a
+ * lock (a 90-97c leg) only makes it a combo, and the ticket then rides on the
+ * other leg - the one being faded. With two real legs both are faded and
+ * either miss pays. The lock is known from `lock_leg` / `fading_legs`, else
+ * from the legs' own `lock` flag; when none of those says, it is unknown and
+ * every leg is listed as faded.
+ */
+export function fadingAndLock(p: ComboDeskPosition): { fading: LegLine[]; lock: LockCell } {
+  const legs = p.legs.length ? p.legs : [{ market_ticker: p.market_ticker, event_ticker: p.event_ticker, side: "yes" }];
+  const all = legs.map(legLine);
+  if (p.side === "yes") {
+    return { fading: all, lock: { kind: "yes", text: legs.length > 1 ? "every leg must hit" : "", title: null } };
+  }
+  const flagged = legs.filter((l) => l.lock === true);
+  const lockTicker = p.lock_leg ?? (flagged.length === 1 ? flagged[0].market_ticker : null);
+  const lockLeg = lockTicker ? legs.find((l) => l.market_ticker === lockTicker) : undefined;
+  if (lockTicker && legs.length > 1) {
+    const rest = legs.filter((l) => l.market_ticker !== lockTicker);
+    const fading = p.fading_legs?.length ? legs.filter((l) => p.fading_legs?.includes(l.market_ticker)) : rest;
+    return {
+      fading: (fading.length ? fading : rest).map(legLine),
+      lock: { kind: "leg", text: lockLeg ? legText(lockLeg) : legLabel(lockTicker), title: lockLeg ? legLine(lockLeg).title : null },
+    };
+  }
+  // no lock: known when the backend says every leg is a real one (false), or lists the faded legs as all of them
+  const known = p.lock_leg === null && (p.fading_legs?.length === legs.length || legs.every((l) => l.lock === false));
+  if (known && legs.length > 1) {
+    return { fading: all, lock: { kind: "none", text: legs.length === 2 ? "either misses" : "any misses", title: null } };
+  }
+  return { fading: all, lock: { kind: "unknown", text: legs.length > 1 ? "not known" : "", title: null } };
+}
+
+/** Profit if the NO side wins: the payout less what was paid; null when either is not known. */
+export function profitIfWin(p: ComboDeskPosition): number | null {
+  const cost = p.cost_ledger ?? p.cost_kalshi;
+  const payout = p.payout_if_no_wins;
+  return payout != null && Number.isFinite(payout) && cost != null ? payout - cost : null;
+}
+
 export function positionRows(view: ComboDeskView): PositionRow[] {
   return view.positions.map((p) => {
     const legTickers = p.legs.length ? p.legs.map((l) => l.market_ticker) : [p.market_ticker];
+    const legNames = p.legs.length ? p.legs.map(legText) : [legLabel(p.market_ticker)];
     const contracts = p.contracts_ledger ?? p.contracts_kalshi;
     const cost = p.cost_ledger ?? p.cost_kalshi;
     const price = p.price_ledger ?? (cost != null && contracts ? cost / contracts : null);
+    const profit = profitIfWin(p);
+    const { fading, lock } = fadingAndLock(p);
     return {
       key: p.market_ticker,
-      legs: legTickers.map(legLabel),
+      legs: legNames,
+      fading,
+      lock,
+      profit: profit == null ? "-" : fmtSigned(profit),
+      profitTone: pnlTone(profit),
       held: heldText(p.side, legTickers.length),
       contracts: fmtContracts(contracts),
       contractsKalshi: !p.agree && differs(p.contracts_ledger, p.contracts_kalshi, 0.005) ? fmtContracts(p.contracts_kalshi) : null,
@@ -211,6 +288,23 @@ export function positionRows(view: ComboDeskView): PositionRow[] {
       note: p.note,
     };
   });
+}
+
+/**
+ * The line under the positions: "3 open · cost $36 · pays $90 if every NO wins
+ * · max profit +$54 · max loss -$36". Null when the desk sent no totals.
+ */
+export function totalsLine(view: ComboDeskView): string | null {
+  const t = view.totals;
+  if (!t) return null;
+  const maxLoss = t.max_loss == null || !Number.isFinite(t.max_loss) ? null : -Math.abs(t.max_loss);
+  return [
+    `${t.n_open == null ? "-" : t.n_open} open`,
+    `cost ${fmtUsd(t.cost)}`,
+    `pays ${fmtUsd(t.payout)} if every NO wins`,
+    `max profit ${fmtSigned(t.max_profit)}`,
+    `max loss ${fmtSigned(maxLoss)}`,
+  ].join(" · ");
 }
 
 // -- exposure -----------------------------------------------------------------

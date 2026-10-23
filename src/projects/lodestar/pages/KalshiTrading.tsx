@@ -1,6 +1,6 @@
 /**
- * Kalshi Trading (SWIT-130 betting flow; SWIT-129 positions, later) - the first
- * piece of a trading area. Two tabs:
+ * Kalshi Trading (SWIT-130 betting flow; SWIT-129 positions; SWIT-139 portfolio) -
+ * the first piece of a trading area. Three tabs:
  *
  *   Flow       NBA betting trends as a BOARD: one row per game, three market
  *              cells across, bets bar over money bar, the "Biggest splits"
@@ -12,9 +12,12 @@
  *   Positions  The combo desk (SWIT-129): the ledger against Kalshi, the
  *              exposure against each cap, requests, fills, settlements and
  *              the kill switch, for the Demo or the Live account.
+ *   Portfolio  The desk's money over time (SWIT-139): cash balance and
+ *              cumulative realized P&L on one chart, daily P&L bars, and the
+ *              by-strategy table, for the same Demo or Live account.
  *
  * Reads GET /nba/flow/games, /game, /books, /books/game and /gap_bands, and
- * /combos/desk (30 s) on the Lodestar backend. Pin anchors: game:<game> a game row, line:<game>:<line> a
+ * /combos/desk (30 s) and /combos/portfolio (60 s) on the Lodestar backend. Pin anchors: game:<game> a game row, line:<game>:<line> a
  * market cell, detail:<game>:<line> the open detail, pt:<iso> a point on its
  * chart. An investigation tool: it lays numbers out and never says to bet.
  *
@@ -28,6 +31,7 @@ import {
   api,
   type ComboDeskEnv,
   type ComboDeskView,
+  type ComboPortfolio,
   type NbaFlowBookSeries,
   type NbaFlowBooks,
   type NbaFlowGameDetail,
@@ -35,6 +39,7 @@ import {
   type NbaFlowPhase,
 } from "../api/client";
 import Chip from "../components/trading/Chip";
+import DeskPortfolio from "../components/trading/DeskPortfolio";
 import DeskPositions, { type KillState } from "../components/trading/DeskPositions";
 import FlowBoard from "../components/trading/FlowBoard";
 import FlowGameDetail from "../components/trading/FlowGameDetail";
@@ -76,8 +81,10 @@ const BOOT_POLL_MS = 3_000;
 const BANDS_POLL_MS = 3_600_000;
 /** The combo desk's refresh cadence. */
 const DESK_POLL_MS = 30_000;
+/** The portfolio moves with settlements and balance samples, not ticks. */
+const PORTFOLIO_POLL_MS = 60_000;
 
-type Tab = "flow" | "positions";
+type Tab = "flow" | "positions" | "portfolio";
 
 /** One detail poll: the answer, tied to the request that asked for it. */
 interface DetailPoll {
@@ -348,6 +355,22 @@ function PositionsTab({ env, onEnv }: { env: ComboDeskEnv; onEnv: (e: ComboDeskE
   );
 }
 
+/** The Portfolio tab: polls the desk's money over time for the account on screen. */
+function PortfolioTab({ env, onEnv }: { env: ComboDeskEnv; onEnv: (e: ComboDeskEnv) => void }) {
+  const { data, error } = usePoll<ComboPortfolio>(
+    () => api.getComboPortfolio(env),
+    PORTFOLIO_POLL_MS,
+    env,
+    "combo-portfolio",
+    { bootIntervalMs: BOOT_POLL_MS },
+  );
+  // The last answer for THIS account, held across a refresh and drawn only for the account on screen.
+  const lastRef = useRef<ComboPortfolio | null>(null);
+  if (data && data.env === env) lastRef.current = data;
+  const portfolio = data && data.env === env ? data : lastRef.current?.env === env ? lastRef.current : null;
+  return <DeskPortfolio portfolio={portfolio} error={error} env={env} onEnv={onEnv} />;
+}
+
 /** The date stepper: back a day, the day, forward a day, and a way home. */
 function DateStepper({ date, onDate }: { date: string; onDate: (d: string) => void }) {
   const today = todayEt();
@@ -382,7 +405,7 @@ function DateStepper({ date, onDate }: { date: string; onDate: (d: string) => vo
 
 export default function KalshiTrading() {
   const [tab, setTab] = useState<Tab>("flow");
-  // The desk's account lives here too, so Flow -> Positions -> Flow keeps it.
+  // The desk's account lives here too, so Flow -> Positions -> Portfolio keeps it.
   const [deskEnv, setDeskEnv] = useState<ComboDeskEnv>("demo");
   // Lifted so Flow -> Positions -> Flow keeps the day, the phase, the source and the open game.
   const [date, setDate] = useState(() => todayEt());
@@ -452,13 +475,16 @@ export default function KalshiTrading() {
           <button type="button" role="tab" aria-selected={tab === "positions"} style={tabStyle(tab === "positions")} onClick={() => setTab("positions")}>
             Positions
           </button>
+          <button type="button" role="tab" aria-selected={tab === "portfolio"} style={tabStyle(tab === "portfolio")} onClick={() => setTab("portfolio")}>
+            Portfolio
+          </button>
         </div>
       </div>
       {tab === "flow" ? (
         <FlowTab date={date} phase={phase} source={source} sort={sort} selection={selection} dispatch={dispatch} setSort={setSort} />
       ) : (
         <div style={{ marginTop: 18 }}>
-          <PositionsTab env={deskEnv} onEnv={setDeskEnv} />
+          {tab === "positions" ? <PositionsTab env={deskEnv} onEnv={setDeskEnv} /> : <PortfolioTab env={deskEnv} onEnv={setDeskEnv} />}
         </div>
       )}
     </div>
