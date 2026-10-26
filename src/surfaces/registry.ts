@@ -72,8 +72,14 @@ export type SurfaceBackend = {
   health: string;
   /** How the backend is STARTED, for the "not running" card. Read as prose
    *  by a person ("`pnpm backend` in the lodestar repo"), never executed —
-   *  Switchboard reads output and starts nothing (localhost-preview rule). */
+   *  the shell never runs text from this table. */
   hint: string;
+  /** SWIT-154: the host STARTS the backend when its probe misses (Eric,
+   *  2026-10-25 — opening the page should be enough). What runs is Rust's
+   *  (surface_backend.rs `STARTERS`, keyed by project), never this table's,
+   *  so a project needs an entry there too; without one the ask is refused
+   *  and the card says so. */
+  autoStart?: boolean;
 };
 
 export type ProjectSurfaces = {
@@ -89,7 +95,8 @@ export const SURFACES: Readonly<Record<string, ProjectSurfaces>> = {
     backend: {
       url: "http://127.0.0.1:8799",
       health: "/health",
-      hint: "`pnpm backend` (or `pnpm dev`) in the lodestar repo starts it on :8799",
+      hint: "Switchboard starts it with `pnpm backend` in the lodestar repo (the API on :8799, after the :5433 data container)",
+      autoStart: true,
     },
     pages: [
       {

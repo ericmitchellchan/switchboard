@@ -9,6 +9,7 @@ mod user_findings;
 mod kb;
 mod power;
 mod pty;
+mod surface_backend;
 
 use config::{load_config, Config};
 use discovery::ClaudeDiscovery;
@@ -2773,6 +2774,7 @@ fn app_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         user_findings::remove_thread_finding,
         jobs::take_jobs_inbox,
         jobs::job_start,
+        surface_backend::surface_backend_start,
         jobs::job_stop,
         jobs::job_stop_id,
         jobs::jobs_snapshot,

@@ -126,7 +126,7 @@ fn parse_registry(json: &str) -> Result<Vec<ProjectInfo>, String> {
     Ok(out)
 }
 
-fn load_registry() -> Result<Vec<ProjectInfo>, String> {
+pub(crate) fn load_registry() -> Result<Vec<ProjectInfo>, String> {
     let kb_root = crate::kb::resolve_kb_root()?;
     let path = kb_root.join("registry.json");
     let text =

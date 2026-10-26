@@ -13,11 +13,15 @@
 //      beside it never notices. (ScreenErrorBoundary does this per screen;
 //      this does it per PAGE, because a panel strip can hold several and one
 //      bad chart must not take the doc next to it.)
-//   2. THE BACKEND CARD. The page needs its backend; the shell does not start
-//      servers (the localhost-preview rule). So the host probes the backend's
-//      health while the surface is ACTIVE and, after two consecutive misses,
-//      swaps the page for a card that names the project, the URL and the
-//      start HINT — prose, never a command it runs. Two misses, not one: a
+//   2. THE BACKEND CARD. The page needs its backend. The host probes the
+//      backend's health while the surface is ACTIVE and, after two
+//      consecutive misses, swaps the page for a card that names the project,
+//      the URL and the start HINT (prose). SWIT-154 (Eric, 2026-10-25): a
+//      backend marked `autoStart` is STARTED once the card would show (two
+//      misses, never one blip) — Rust holds
+//      the command, the host names only the project (backendStart.ts paces
+//      the asks) — and the card reads "starting…" until it answers, or says
+//      the start did not take and where its log is. Two misses, not one: a
 //      restarting backend is briefly unreachable and a card that flashed on
 //      every reload would be worse than the blank it replaces. Recovery is
 //      automatic on the next successful probe — and it REMOUNTS the page:
@@ -39,7 +43,9 @@
 import { Component, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ErrorInfo, ReactNode } from "react";
 import { componentFor, findSurface, surfaceBackend, surfaceLabel, surfaceWindowLabel } from "./registry";
-import { notify, openSurfaceWindow } from "../lib/ipc";
+import { notify, openSurfaceWindow, surfaceBackendStart } from "../lib/ipc";
+import { forgetAsk, noteAskFailed, noteAsked, pendingAskAt, shouldAskStart, viewAfterMiss } from "./backendStart";
+import type { BackendView } from "./backendStart";
 import type { SurfaceArtifact, SurfaceBackend } from "./registry";
 import { SurfaceAnchorContext, composeAnchorProviders, domAnchorProvider } from "./anchors";
 import type { SurfaceAnchorProvider, SurfaceAnchorRegistry } from "./anchors";
@@ -103,7 +109,7 @@ export function SurfaceHost({
 }) {
   const page = findSurface(artifact.project, artifact.page);
   const backend = surfaceBackend(artifact.project);
-  const health = useBackendHealth(backend, active);
+  const { health, start } = useBackendHealth(artifact.project, backend, active);
   const anchors = useSurfaceAnchors();
 
   // Pins (3b). Every hook runs before the early returns below (hook order);
@@ -196,8 +202,8 @@ export function SurfaceHost({
     );
   }
 
-  if (backend && health === "down") {
-    return <BackendCard project={artifact.project} backend={backend} />;
+  if (backend && (health === "down" || health === "starting")) {
+    return <BackendCard project={artifact.project} backend={backend} starting={health === "starting"} start={start} />;
   }
 
   const Page = componentFor(page);
@@ -351,7 +357,8 @@ function useSurfaceAnchors(): {
 
 // ── Backend probe ────────────────────────────────────────────────────────────
 
-type Health = "unknown" | "up" | "down";
+/** What the last start ask said: the log it writes to, or why it was refused. */
+type StartNote = { log: string } | { error: string } | null;
 
 /** Polls `<url><health>` while active. Starts OPTIMISTIC ("unknown" renders
  *  the page): the page's own loading state is the right first paint, and the
@@ -359,9 +366,15 @@ type Health = "unknown" | "up" | "down";
  *  twice. Any 2xx is "up"; a rejection or non-2xx is a miss. Plain fetch —
  *  the backend sends CORS headers for the webview's origins (that is the
  *  Lodestar-side half of SWIT-30), so unlike the iframe-era `no-cors` probe
- *  this one can actually read the status. */
-function useBackendHealth(backend: SurfaceBackend | null, active: boolean): Health {
-  const [health, setHealth] = useState<Health>("unknown");
+ *  this one can actually read the status. An `autoStart` backend is asked
+ *  for on a miss (SWIT-154), paced per project by backendStart.ts. */
+function useBackendHealth(
+  project: string,
+  backend: SurfaceBackend | null,
+  active: boolean
+): { health: BackendView; start: StartNote } {
+  const [health, setHealth] = useState<BackendView>("unknown");
+  const [start, setStart] = useState<StartNote>(null);
 
   useEffect(() => {
     if (!backend || !active) return;
@@ -369,10 +382,34 @@ function useBackendHealth(backend: SurfaceBackend | null, active: boolean): Heal
     let misses = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
+    const ask = () => {
+      const now = Date.now();
+      if (!backend.autoStart || !shouldAskStart(project, now)) return;
+      noteAsked(project, now);
+      surfaceBackendStart(project)
+        .then((r) => {
+          if (!cancelled) setStart({ log: r.log });
+        })
+        .catch((e) => {
+          log.warn(`surface backend start (${project}) refused: ${e}`);
+          // Nothing is starting: the card says "down" with the reason now.
+          noteAskFailed(project);
+          if (!cancelled) {
+            setStart({ error: String(e) });
+            setHealth("down");
+          }
+        });
+    };
+
     const probe = async () => {
       let ok = false;
       try {
-        const res = await fetch(`${backend.url}${backend.health}`, { cache: "no-store" });
+        // A timeout: a backend mid-reload can hold the socket and never
+        // answer, and a probe that hangs never counts as a miss.
+        const res = await fetch(`${backend.url}${backend.health}`, {
+          cache: "no-store",
+          signal: AbortSignal.timeout(SURFACE_HEALTH_POLL_MS - 500),
+        });
         ok = res.ok;
       } catch {
         ok = false;
@@ -380,10 +417,16 @@ function useBackendHealth(backend: SurfaceBackend | null, active: boolean): Heal
       if (cancelled) return;
       if (ok) {
         misses = 0;
+        // The start (anyone's) worked: a later outage asks afresh, and its
+        // card never shows this one's log or error.
+        forgetAsk(project);
+        setStart(null);
         setHealth("up");
       } else {
         misses += 1;
-        if (misses >= SURFACE_HEALTH_MISSES) setHealth("down");
+        if (misses >= SURFACE_HEALTH_MISSES) ask();
+        const view = viewAfterMiss(misses, SURFACE_HEALTH_MISSES, pendingAskAt(project), Date.now());
+        if (view) setHealth(view);
       }
       timer = setTimeout(probe, SURFACE_HEALTH_POLL_MS);
     };
@@ -393,23 +436,46 @@ function useBackendHealth(backend: SurfaceBackend | null, active: boolean): Heal
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [backend, active]);
+  }, [project, backend, active]);
 
-  return health;
+  return { health, start };
 }
 
-function BackendCard({ project, backend }: { project: string; backend: SurfaceBackend }) {
+function BackendCard({
+  project,
+  backend,
+  starting,
+  start,
+}: {
+  project: string;
+  backend: SurfaceBackend;
+  starting: boolean;
+  start: StartNote;
+}) {
+  const refused = start && "error" in start ? start.error : null;
+  const logPath = start && "log" in start ? start.log : null;
   return (
     <div style={NOTE_STYLE}>
       <span style={{ color: "var(--text-secondary)" }}>
-        {project}'s backend is not answering
+        {starting ? `starting ${project}'s backend…` : `${project}'s backend is not answering`}
       </span>
       <span>{backend.url}</span>
-      {/* The hint is PROSE for a person — Switchboard never starts servers,
-          so it names the command without dressing it up as a button. */}
+      {!starting && refused && (
+        <span style={{ color: "var(--text-muted)", maxWidth: 420, wordBreak: "break-word" }}>
+          could not start it: {refused}
+        </span>
+      )}
+      {!starting && logPath && (
+        <span style={{ color: "var(--text-muted)", maxWidth: 420, wordBreak: "break-all" }}>
+          it did not come up — its output: {logPath}
+        </span>
+      )}
+      {/* The hint is PROSE for a person: what runs is Rust's, never this text. */}
       <span style={{ color: "var(--text-faint)", maxWidth: 360 }}>{backend.hint}</span>
       <span style={{ color: "var(--text-faint)" }}>
-        this view resumes by itself once it answers
+        {backend.autoStart && !starting
+          ? "tries again every 2 min; this view resumes by itself once it answers"
+          : "this view resumes by itself once it answers"}
       </span>
     </div>
   );

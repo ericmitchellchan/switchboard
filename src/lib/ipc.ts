@@ -333,6 +333,12 @@ export async function jobStart(threadId: string, name: string, command: string, 
   return invoke("job_start", { threadId, name, command, cwd });
 }
 
+/** Start a surface's backend (SWIT-154). The command is Rust's, never ours:
+ *  this names the PROJECT only. Rejects with a sentence. */
+export async function surfaceBackendStart(project: string): Promise<{ outcome: "started" | "running"; log: string }> {
+  return JSON.parse(await invoke<string>("surface_backend_start", { project }));
+}
+
 /** Stop the thread's running job of that name (the agent's `stop`). */
 export async function jobStop(threadId: string, name: string): Promise<void> {
   return invoke("job_stop", { threadId, name });
