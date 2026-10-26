@@ -253,11 +253,13 @@ export function fadingAndLock(p: ComboDeskPosition): { fading: LegLine[]; lock: 
   return { fading: all, lock: { kind: "unknown", text: legs.length > 1 ? "not known" : "", title: null } };
 }
 
-/** Profit if the NO side wins: the payout less what was paid; null when either is not known. */
+/** Profit if the NO side wins: the backend's `payout_if_no_wins`, which is
+ *  already NET (contracts - cost - fee, combo_desk/view.py) — subtracting the
+ *  cost again here understated every row by its cost (0.25.0). Null when not
+ *  known. */
 export function profitIfWin(p: ComboDeskPosition): number | null {
-  const cost = p.cost_ledger ?? p.cost_kalshi;
   const payout = p.payout_if_no_wins;
-  return payout != null && Number.isFinite(payout) && cost != null ? payout - cost : null;
+  return payout != null && Number.isFinite(payout) ? payout : null;
 }
 
 export function positionRows(view: ComboDeskView): PositionRow[] {

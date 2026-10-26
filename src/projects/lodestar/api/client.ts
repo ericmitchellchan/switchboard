@@ -2125,7 +2125,8 @@ export interface ComboDeskPosition {
   fading_legs?: string[];
   /** Ticker of the lock leg, or null when there is none / it is not known. */
   lock_leg?: string | null;
-  /** What the position pays, dollars, if every NO wins (cost not taken out). */
+  /** What the position NETS, dollars, if the NO wins: contracts - cost - fee
+   *  (combo_desk/view.py) — already the profit; do not take the cost out again. */
   payout_if_no_wins?: number | null;
 }
 
